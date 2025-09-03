@@ -6,7 +6,7 @@ use anyhow::Result;
 use egui::{Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, RichText, Sense, TextStyle, Visuals};
 use egui_extras::TableBuilder;
 use crate::audio::AudioEngine;
-use crate::wave::{build_minmax, decode_wav_mono, prepare_for_speed, prepare_for_pitchshift, prepare_for_timestretch, process_pitchshift_offline, process_timestretch_offline};
+use crate::wave::{build_minmax, decode_wav_mono, prepare_for_speed, process_pitchshift_offline, process_timestretch_offline};
 use walkdir::WalkDir;
 
 pub struct EditorTab {
@@ -20,12 +20,13 @@ pub struct FileMeta {
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
+    pub duration_secs: Option<f32>,
     pub rms_db: Option<f32>,
     pub thumb: Vec<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SortKey { File, Folder, Channels, SampleRate, Bits, Level }
+enum SortKey { File, Folder, Length, Channels, SampleRate, Bits, Level }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortDir { Asc, Desc, None }
 
@@ -406,18 +407,20 @@ impl eframe::App for WavesPreviewer {
                     .resizable(true)
                     .sense(egui::Sense::click())
                     .cell_layout(egui::Layout::left_to_right(Align::Center))
-                    .column(egui_extras::Column::auto().at_least(240.0)) // File
-                    .column(egui_extras::Column::remainder())             // Folder
-            .column(egui_extras::Column::initial(60.0))           // Ch
-            .column(egui_extras::Column::initial(90.0))           // SampleRate
-            .column(egui_extras::Column::initial(70.0))           // Bits
-            .column(egui_extras::Column::initial(110.0))          // Level
-            .column(egui_extras::Column::initial(180.0))          // Wave
+                    .column(egui_extras::Column::initial(200.0).resizable(true))     // File (resizable)
+                    .column(egui_extras::Column::initial(250.0).resizable(true))     // Folder (resizable)
+                    .column(egui_extras::Column::initial(60.0).resizable(true))      // Length (resizable)
+                    .column(egui_extras::Column::initial(40.0).resizable(true))      // Ch (resizable)
+                    .column(egui_extras::Column::initial(70.0).resizable(true))      // SampleRate (resizable)
+                    .column(egui_extras::Column::initial(50.0).resizable(true))      // Bits (resizable)
+                    .column(egui_extras::Column::initial(90.0).resizable(true))      // Level (resizable)
+                    .column(egui_extras::Column::initial(150.0).resizable(true))     // Wave (resizable)
                     .min_scrolled_height((avail_h - header_h).max(0.0));
 
                 table.header(header_h, |mut header| {
                     header.col(|ui| { sort_changed |= sortable_header(ui, "File", &mut self.sort_key, &mut self.sort_dir, SortKey::File, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Folder", &mut self.sort_key, &mut self.sort_dir, SortKey::Folder, true); });
+                    header.col(|ui| { sort_changed |= sortable_header(ui, "Length", &mut self.sort_key, &mut self.sort_dir, SortKey::Length, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Ch", &mut self.sort_key, &mut self.sort_dir, SortKey::Channels, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "SR", &mut self.sort_key, &mut self.sort_dir, SortKey::SampleRate, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Bits", &mut self.sort_key, &mut self.sort_dir, SortKey::Bits, true); });
@@ -444,51 +447,71 @@ impl eframe::App for WavesPreviewer {
                             if !self.meta.contains_key(path) {
                                 if let Ok(reader) = hound::WavReader::open(path) {
                                     let spec = reader.spec();
-                                    self.meta.insert(path.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, rms_db: None, thumb: Vec::new() });
+                                    self.meta.insert(path.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, duration_secs: None, rms_db: None, thumb: Vec::new() });
                                 }
                             }
                             let meta = self.meta.get(path);
 
-                            // col 0: File (button-like)
+                            // col 0: File (clickable label with clipping)
                             row.col(|ui| {
-                                let resp = ui
-                                    .add(egui::Button::new(RichText::new(name).size(text_height*1.05)))
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked() {
-                                    // Select the row and open editor tab
-                                    self.selected = Some(row_idx); self.scroll_to_selected = true;
-                                    to_open = Some(path.clone());
-                                }
-                            });
-                            // col 1: Folder (button-like)
-                            row.col(|ui| {
-                                let resp = ui
-                                    .add(egui::Button::new(RichText::new(parent).monospace().size(text_height*1.0)))
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked() {
-                                    // Select the row and open folder in system file browser
-                                    self.selected = Some(row_idx); self.scroll_to_selected = true;
-                                    if let Some(dir) = path.parent() {
-                                        let _ = open_in_file_explorer(dir);
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    let resp = ui.add(
+                                        egui::Label::new(RichText::new(name).size(text_height * 1.05))
+                                            .sense(Sense::click())
+                                            .truncate(true)
+                                    ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if resp.clicked() {
+                                        // Select the row and open editor tab
+                                        self.selected = Some(row_idx); self.scroll_to_selected = true;
+                                        to_open = Some(path.clone());
                                     }
-                                }
+                                    if resp.hovered() {
+                                        resp.on_hover_text(name);
+                                    }
+                                });
                             });
-                            // col 2: Channels
+                            // col 1: Folder (clickable label with clipping)
+                            row.col(|ui| {
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    let resp = ui.add(
+                                        egui::Label::new(RichText::new(parent).monospace().size(text_height * 1.0))
+                                            .sense(Sense::click())
+                                            .truncate(true)
+                                    ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if resp.clicked() {
+                                        // Select the row and open folder in system file browser
+                                        self.selected = Some(row_idx); self.scroll_to_selected = true;
+                                        if let Some(dir) = path.parent() {
+                                            let _ = open_in_file_explorer(dir);
+                                        }
+                                    }
+                                    if resp.hovered() {
+                                        resp.on_hover_text(parent);
+                                    }
+                                });
+                            });
+                            // col 2: Length (mm:ss)
+                            row.col(|ui| {
+                                let secs = meta.and_then(|m| m.duration_secs).unwrap_or(f32::NAN);
+                                let text = if secs.is_finite() { format_duration(secs) } else { "...".into() };
+                                ui.label(RichText::new(text).monospace());
+                            });
+                            // col 3: Channels
                             row.col(|ui| {
                                 let ch = meta.map(|m| m.channels).unwrap_or(0);
                                 ui.label(RichText::new(format!("{}", ch)).monospace());
                             });
-                            // col 3: Sample rate
+                            // col 4: Sample rate
                             row.col(|ui| {
                                 let sr = meta.map(|m| m.sample_rate).unwrap_or(0);
                                 ui.label(RichText::new(format!("{}", sr)).monospace());
                             });
-                            // col 4: Bits per sample
+                            // col 5: Bits per sample
                             row.col(|ui| {
                                 let bits = meta.map(|m| m.bits_per_sample).unwrap_or(0);
                                 ui.label(RichText::new(format!("{}", bits)).monospace());
                             });
-                            // col 5: Level (painted background + label)
+                            // col 6: Level (painted background + label)
                             row.col(|ui| {
                                 let (rect2, _resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover());
                                 if let Some(m) = meta { if let Some(db) = m.rms_db { ui.painter().rect_filled(rect2, 4.0, db_to_color(db)); } }
@@ -496,7 +519,7 @@ impl eframe::App for WavesPreviewer {
                                 let fid = TextStyle::Monospace.resolve(ui.style());
                                 ui.painter().text(rect2.center(), egui::Align2::CENTER_CENTER, text, fid, Color32::WHITE);
                             });
-                            // col 6: Wave thumbnail
+                            // col 7: Wave thumbnail
                             row.col(|ui| {
                                 let desired_w = ui.available_width().max(80.0);
                                 let thumb_h = (desired_w * 0.22).clamp(text_height * 1.2, text_height * 4.0);
@@ -524,6 +547,7 @@ impl eframe::App for WavesPreviewer {
                             // filler row to extend frame
                             row.col(|_ui| {});
                             row.col(|_ui| {});
+                            row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Length
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Ch
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // SR
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Bits
@@ -586,6 +610,7 @@ fn spawn_meta_worker(paths: Vec<PathBuf>) -> std::sync::mpsc::Receiver<(PathBuf,
                     channels: spec.channels,
                     sample_rate: spec.sample_rate,
                     bits_per_sample: spec.bits_per_sample,
+                    duration_secs: None,
                     rms_db: None,
                     thumb: Vec::new(),
                 }));
@@ -601,7 +626,8 @@ fn spawn_meta_worker(paths: Vec<PathBuf>) -> std::sync::mpsc::Receiver<(PathBuf,
                 build_minmax(&mut thumb, &mono, 128);
                 // attempt to reuse spec (optional)
                 let (ch, sr, bits) = if let Ok(reader2) = hound::WavReader::open(&p) { let s = reader2.spec(); (s.channels, s.sample_rate, s.bits_per_sample) } else { (0,0,0) };
-                let _ = tx.send((p, FileMeta{ channels: ch, sample_rate: sr, bits_per_sample: bits, rms_db: Some(rms_db), thumb }));
+                let length_secs = if sr > 0 { mono.len() as f32 / sr as f32 } else { f32::NAN };
+                let _ = tx.send((p, FileMeta{ channels: ch, sample_rate: sr, bits_per_sample: bits, duration_secs: Some(length_secs), rms_db: Some(rms_db), thumb }));
             }
         }
     });
@@ -726,6 +752,8 @@ impl WavesPreviewer {
                         let sb = b.parent().and_then(|p| p.to_str()).unwrap_or("");
                         sa.cmp(sb)
                     }
+                    SortKey::Length => num_order(self.meta.get(a).and_then(|m| m.duration_secs).unwrap_or(0.0),
+                                                 self.meta.get(b).and_then(|m| m.duration_secs).unwrap_or(0.0)),
                     SortKey::Channels => num_order(self.meta.get(a).map(|m| m.channels as f32).unwrap_or(0.0),
                                                    self.meta.get(b).map(|m| m.channels as f32).unwrap_or(0.0)),
                     SortKey::SampleRate => num_order(self.meta.get(a).map(|m| m.sample_rate as f32).unwrap_or(0.0),
@@ -746,6 +774,14 @@ impl WavesPreviewer {
 
 fn num_order(a: f32, b: f32) -> std::cmp::Ordering {
     a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+fn format_duration(secs: f32) -> String {
+    let s = if secs.is_finite() && secs >= 0.0 { secs } else { 0.0 };
+    let total = s.round() as u64;
+    let m = total / 60;
+    let s = total % 60;
+    format!("{}:{:02}", m, s)
 }
 
 impl WavesPreviewer {

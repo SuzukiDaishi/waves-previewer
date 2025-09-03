@@ -7,6 +7,7 @@
 - `src/app.rs`
   - egui アプリ本体。タブUI、リスト表示、エディタ表示、ショートカット、非同期メタ情報の受信などを担当。
   - リストは `egui_extras::TableBuilder` を直接使用し、内部スクロール（vscroll）＋仮想化（`TableBody::rows`）で可視行のみを描画。
+  - 列のリサイズ機能（`.resizable(true)`）、長いテキストの自動切り詰め（`.truncate(true)`）、ホバーツールチップ対応。
   - `min_scrolled_height(...)` を用い、テーブルのボディが残り高さを使い切る（下端まで枠が伸びる）。
   - 行全体のクリックを受け取るため、`TableBuilder.sense(Sense::click())` と `row.response()` を使用（セルごとに `interact` は不要）。
 - `src/audio.rs`
@@ -84,13 +85,17 @@
 - `prepare_for_playback()`：上記をまとめて呼び、再生準備＋波形作成。
 
 ## app
-- リスト: `egui_extras::TableBuilder`（内部スクロール）。`min_scrolled_height` で最下部まで枠を延ばし、`TableBody::rows` で仮想化。列はリサイズ可能。Wave 列は幅に応じてサムネ高さを比例拡大（1フレーム遅延で行高反映）。
+- リスト: `egui_extras::TableBuilder`（内部スクロール）。`min_scrolled_height` で最下部まで枠を延ばし、`TableBody::rows` で仮想化。
+  - 列構成: File | Folder | Length | Ch | SR | Bits | Level(dBFS) | Wave
+  - 全列がリサイズ可能（`.resizable(true)`）で初期幅を最適化済み
+  - 長いテキスト（ファイル名・フォルダパス）は `.truncate(true)` で自動切り詰め、ホバーで全文表示
+  - Wave 列は幅に応じてサムネ高さを比例拡大（1フレーム遅延で行高反映）
 - エディタ: 横幅に比例して縦も拡大（`wave_h = width * 0.35` を余白に収まる範囲で使用）。
 - 色分け: サムネは振幅（max(|min|,|max|)）を青→赤のグラデーションへ。dBFS 列は dB 値で着色。
 - ショートカット: Space（再生/停止）、L（ループトグル。エディタ時）、↑/↓（選択）、Enter（タブを開く）。
-- 検索/ソート: 検索バーで部分一致フィルタ。ソートは昇順→降順→元順をトグル。元順復帰のため `original_files` を保持。
+- 検索/ソート: 検索バーで部分一致フィルタ。ソートは昇順→降順→元順をトグル（Length列は秒数順）。元順復帰のため `original_files` を保持。
 - スクロール: 選択行は `row.response().scroll_to_me()` で常に可視範囲へ。
- - 上部バー: Mode はセグメント切替（Speed/Pitch/Stretch）。値はコンパクトな DragValue（Speed/Stretch: 0.25–4.0, Pitch: -12–+12）。高さ・間隔を統一し横幅を節約。
+- 上部バー: Mode はセグメント切替（Speed/Pitch/Stretch）。値はコンパクトな DragValue（Speed/Stretch: 0.25–4.0, Pitch: -12–+12）。高さ・間隔を統一し横幅を節約。
 
 ## パフォーマンス設計（大規模リスト）
 - リストは仮想化（可視範囲のみ）で O(可視行) の描画に抑制。

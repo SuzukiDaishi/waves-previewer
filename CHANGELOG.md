@@ -4,6 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### UI Improvements (Latest)
+- **Table Layout Fixes**: Fixed text overflow and header collision issues
+  - Added Length column (mm:ss format) with proper sorting by duration in seconds
+  - Made all columns resizable with optimized initial widths
+  - Long text (file names, folder paths) now truncates with "..." and shows full text on hover
+  - Improved cell layout to prevent text from appearing behind headers
+
+### Core Features
 - Refactor into modules: `audio`, `wave`, `app`, minimal `main`.
 - Add seamless loop playback (no gap) with loop toggle (button + `L`).
 - Replace global volume with dB slider (-80..+6 dB), internally converted to linear gain.
