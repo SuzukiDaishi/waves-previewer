@@ -5,6 +5,26 @@ All notable changes in this repository (hand-written).
 ## Unreleased (current)
 
 ### UI Improvements (Latest)
+- "Choose" メニューを2項目に整理し操作を明確化:
+  - "Folder...": フォルダを選択して一覧を置き換え（rootに設定して再走査）
+  - "Files...": 複数ファイルを選択して一覧を置き換え（rootはクリア）
+- ドラッグ&ドロップでファイル/フォルダ追加に対応（WAVのみ、重複は自動スキップ）。追加時は検索/ソートを保ちつつメタを非同期再計算。
+- 縦スクロールバーを常に右端に配置: テーブルに非表示の余白列（Column::remainder）を追加して右端まで広げるように変更。Wave列の表示位置は従来どおり維持。
+- **Enhanced Keyboard Controls**: Added more intuitive keyboard shortcuts
+  - **Ctrl+W**: Close active editor tab (with automatic audio stop)
+  - Maintains existing shortcuts (Space for play/pause, L for loop toggle, arrow keys for navigation)
+- **Improved Mouse Interaction**: Better click and double-click behavior
+  - **Single-click**: All text columns (File/Folder/Length/Ch/SR/Bits/Level/Wave) now selectable for easier navigation
+  - **Double-click on File name**: Opens file in editor tab (was single-click before)
+  - **Double-click on Folder**: Opens folder in system file browser with the WAV file pre-selected
+  - **Single-click on row background**: Selects row and loads audio (unchanged)
+- **Tab Navigation Audio Control**: Enhanced audio control for better user experience
+  - Switching between tabs (List ⇔ Editor) now automatically stops audio playback
+  - Closing editor tabs with the "x" button also stops audio playback
+  - Prevents confusion from audio continuing when user switches context
+- **Playback Behavior**: List view now always disables loop playback for better audio previewing
+  - List display: Always plays once and stops (optimal for quick audio preview)
+  - Editor tabs: Loop toggle available via L key (for detailed editing work)
 - **Table Layout Fixes**: Fixed text overflow and header collision issues
   - Added Length column (mm:ss format) with proper sorting by duration in seconds
   - Made all columns resizable with optimized initial widths

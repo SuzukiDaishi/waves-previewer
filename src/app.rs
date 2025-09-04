@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -109,6 +109,8 @@ impl WavesPreviewer {
         cc.egui_ctx.set_style(style);
 
         let audio = AudioEngine::new()?;
+        // 初期状態（リスト表示）ではループを無効にする
+        audio.set_loop_enabled(false);
         Ok(Self {
             audio,
             root: None,
@@ -158,6 +160,9 @@ impl WavesPreviewer {
     }
 
     fn open_or_activate_tab(&mut self, path: &Path) {
+        // タブを開く/アクティブ化する時に音声を停止
+        self.audio.stop();
+        
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
             self.active_tab = Some(idx); return;
         }
@@ -179,6 +184,69 @@ impl WavesPreviewer {
                 self.spawn_heavy_processing(path);
             }
         }
+    }
+
+    // Merge helper: add a folder recursively (WAV only)
+    fn add_folder_merge(&mut self, dir: &Path) -> usize {
+        let mut added = 0usize;
+        let mut existing: HashSet<PathBuf> = self.all_files.iter().cloned().collect();
+        for entry in WalkDir::new(dir).follow_links(false) {
+            if let Ok(e) = entry {
+                if e.file_type().is_file() {
+                    let p = e.into_path();
+                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                        if ext.eq_ignore_ascii_case("wav") {
+                            if existing.insert(p.clone()) { self.all_files.push(p); added += 1; }
+                        }
+                    }
+                }
+            }
+        }
+        self.all_files.sort();
+        added
+    }
+
+    // Merge helper: add explicit files (WAV only)
+    fn add_files_merge(&mut self, paths: &[PathBuf]) -> usize {
+        let mut added = 0usize;
+        let mut existing: HashSet<PathBuf> = self.all_files.iter().cloned().collect();
+        for p in paths {
+            if p.is_file() {
+                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                    if ext.eq_ignore_ascii_case("wav") {
+                        if existing.insert(p.clone()) { self.all_files.push(p.clone()); added += 1; }
+                    }
+                }
+            } else if p.is_dir() {
+                added += self.add_folder_merge(p.as_path());
+            }
+        }
+        self.all_files.sort();
+        added
+    }
+
+    fn after_add_refresh(&mut self) {
+        self.apply_filter_from_search();
+        self.apply_sort();
+        if !self.all_files.is_empty() { self.meta_rx = Some(spawn_meta_worker(self.all_files.clone())); }
+    }
+
+    // Replace current list with explicit files (WAV only). Root is cleared.
+    fn replace_with_files(&mut self, paths: &[PathBuf]) {
+        self.root = None;
+        self.files.clear();
+        self.all_files.clear();
+        let mut set: HashSet<PathBuf> = HashSet::new();
+        for p in paths {
+            if p.is_file() {
+                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                    if ext.eq_ignore_ascii_case("wav") {
+                        if set.insert(p.clone()) { self.all_files.push(p.clone()); }
+                    }
+                }
+            }
+        }
+        self.all_files.sort();
     }
 }
 
@@ -209,6 +277,26 @@ impl eframe::App for WavesPreviewer {
 
         // Shortcuts
         if ctx.input(|i| i.key_pressed(Key::Space)) { self.audio.toggle_play(); }
+        
+        // Ctrl+W でアクティブタブを閉じる
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::W)) {
+            if let Some(active_idx) = self.active_tab {
+                self.audio.stop();
+                self.tabs.remove(active_idx);
+                // 閉じたタブの後にタブがあれば次のタブ、なければ前のタブをアクティブに
+                if !self.tabs.is_empty() {
+                    let new_active = if active_idx < self.tabs.len() { 
+                        active_idx 
+                    } else { 
+                        self.tabs.len() - 1 
+                    };
+                    self.active_tab = Some(new_active);
+                } else {
+                    self.active_tab = None;
+                }
+            }
+        }
+        
         if let Some(tab_idx) = self.active_tab {
             if ctx.input(|i| i.key_pressed(Key::L)) {
                 let tab = &mut self.tabs[tab_idx];
@@ -228,6 +316,8 @@ impl eframe::App for WavesPreviewer {
                     if let Some(i) = self.selected {
                         let p_owned = self.files.get(i).cloned();
                         if let Some(p) = p_owned.as_ref() {
+                            // リスト表示時は常にループを無効にする
+                            self.audio.set_loop_enabled(false);
                             match self.mode {
                                 RateMode::Speed => { let _ = prepare_for_speed(p, &self.audio, &mut Vec::new(), self.playback_rate); self.audio.set_rate(self.playback_rate); }
                                 _ => { self.audio.set_rate(1.0); self.spawn_heavy_processing(p); }
@@ -242,12 +332,38 @@ impl eframe::App for WavesPreviewer {
         let rms = self.audio.shared.meter_rms.load(std::sync::atomic::Ordering::Relaxed).max(1e-9);
         self.meter_db = 20.0 * rms.log10();
 
+        // Drag & drop: add files/folders
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            let mut files: Vec<PathBuf> = Vec::new();
+            let mut dirs: Vec<PathBuf> = Vec::new();
+            for f in dropped {
+                if let Some(p) = f.path.clone() {
+                    if p.is_dir() { dirs.push(p); } else { files.push(p); }
+                }
+            }
+            let mut added = 0usize;
+            if !files.is_empty() { added += self.add_files_merge(&files); }
+            for d in dirs { added += self.add_folder_merge(&d); }
+            if added > 0 { self.after_add_refresh(); }
+        }
+
         // Top controls (wrap for small width)
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Choose Folder").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() { self.root = Some(dir); self.rescan(); }
-                }
+                ui.menu_button("Choose", |ui| {
+                    if ui.button("Folder...").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() { self.root = Some(dir); self.rescan(); }
+                        ui.close_menu();
+                    }
+                    if ui.button("Files...").clicked() {
+                        if let Some(files) = rfd::FileDialog::new().add_filter("WAV", &["wav"]).pick_files() {
+                            self.replace_with_files(&files);
+                            self.after_add_refresh();
+                        }
+                        ui.close_menu();
+                    }
+                });
                 // Files total + loading indicator
                 let total_vis = self.files.len();
                 let total_all = self.all_files.len();
@@ -341,14 +457,29 @@ impl eframe::App for WavesPreviewer {
             ui.horizontal_wrapped(|ui| {
                 let is_list = self.active_tab.is_none();
                 let list_label = if is_list { RichText::new("[List]").strong() } else { RichText::new("List") };
-                if ui.selectable_label(is_list, list_label).clicked() { self.active_tab = None; }
+                if ui.selectable_label(is_list, list_label).clicked() { 
+                    self.active_tab = None; 
+                    // タブ切り替え時に音声を停止
+                    self.audio.stop();
+                    // リスト表示時は常にループを無効にする
+                    self.audio.set_loop_enabled(false);
+                }
                 let mut to_close: Option<usize> = None;
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let active = self.active_tab == Some(i);
                     let text = if active { RichText::new(format!("[{}]", tab.display_name)).strong() } else { RichText::new(tab.display_name.clone()) };
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(active, text).clicked() { self.active_tab = Some(i); activate_path = Some(tab.path.clone()); }
-                        if ui.button("x").on_hover_text("Close").clicked() { to_close = Some(i); }
+                        if ui.selectable_label(active, text).clicked() { 
+                            self.active_tab = Some(i); 
+                            activate_path = Some(tab.path.clone()); 
+                            // タブ切り替え時に音声を停止
+                            self.audio.stop();
+                        }
+                        if ui.button("x").on_hover_text("Close").clicked() { 
+                            to_close = Some(i); 
+                            // タブ閉じる時に音声を停止
+                            self.audio.stop();
+                        }
                     });
                 }
                 if let Some(i) = to_close { self.tabs.remove(i); match self.active_tab { Some(ai) if ai==i => self.active_tab=None, Some(ai) if ai>i => self.active_tab=Some(ai-1), _=>{} } }
@@ -401,6 +532,8 @@ impl eframe::App for WavesPreviewer {
                 let header_h = text_height * 1.6; let row_h = self.wave_row_h.max(text_height * 1.3);
                 let avail_h = ui.available_height();
                 // Build table directly; size the scrolled body to fill remaining height
+                // Also expand to full width so the scroll bar is at the right edge
+                ui.set_min_width(ui.available_width());
                 let mut sort_changed = false;
                 let table = TableBuilder::new(ui)
                     .striped(true)
@@ -415,6 +548,7 @@ impl eframe::App for WavesPreviewer {
                     .column(egui_extras::Column::initial(50.0).resizable(true))      // Bits (resizable)
                     .column(egui_extras::Column::initial(90.0).resizable(true))      // Level (resizable)
                     .column(egui_extras::Column::initial(150.0).resizable(true))     // Wave (resizable)
+                    .column(egui_extras::Column::remainder())                        // Spacer (fills remainder)
                     .min_scrolled_height((avail_h - header_h).max(0.0));
 
                 table.header(header_h, |mut header| {
@@ -426,6 +560,7 @@ impl eframe::App for WavesPreviewer {
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Bits", &mut self.sort_key, &mut self.sort_dir, SortKey::Bits, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Level (dBFS)", &mut self.sort_key, &mut self.sort_dir, SortKey::Level, false); });
                     header.col(|ui| { ui.label(RichText::new("Wave").strong()); });
+                    header.col(|_ui| { /* spacer */ });
                 }).body(|body| {
                     let data_len = self.files.len();
                     // Ensure the table body fills the remaining height
@@ -460,11 +595,20 @@ impl eframe::App for WavesPreviewer {
                                             .sense(Sense::click())
                                             .truncate(true)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked() {
-                                        // Select the row and open editor tab
-                                        self.selected = Some(row_idx); self.scroll_to_selected = true;
+                                    
+                                    // シングルクリック: 行選択
+                                    if resp.clicked() && !resp.double_clicked() {
+                                        self.selected = Some(row_idx); 
+                                        self.scroll_to_selected = true;
+                                    }
+                                    
+                                    // ダブルクリック: エディタタブで開く
+                                    if resp.double_clicked() {
+                                        self.selected = Some(row_idx); 
+                                        self.scroll_to_selected = true;
                                         to_open = Some(path.clone());
                                     }
+                                    
                                     if resp.hovered() {
                                         resp.on_hover_text(name);
                                     }
@@ -478,65 +622,114 @@ impl eframe::App for WavesPreviewer {
                                             .sense(Sense::click())
                                             .truncate(true)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked() {
-                                        // Select the row and open folder in system file browser
-                                        self.selected = Some(row_idx); self.scroll_to_selected = true;
-                                        if let Some(dir) = path.parent() {
-                                            let _ = open_in_file_explorer(dir);
-                                        }
+                                    
+                                    // シングルクリック: 行選択
+                                    if resp.clicked() && !resp.double_clicked() {
+                                        self.selected = Some(row_idx); 
+                                        self.scroll_to_selected = true;
                                     }
+                                    
+                                    // ダブルクリック: システムのファイルブラウザでフォルダを開く（WAVファイルを選択状態で）
+                                    if resp.double_clicked() {
+                                        self.selected = Some(row_idx); 
+                                        self.scroll_to_selected = true;
+                                        // ファイルを選択状態でフォルダを開く
+                                        let _ = open_folder_with_file_selected(path);
+                                    }
+                                    
                                     if resp.hovered() {
                                         resp.on_hover_text(parent);
                                     }
                                 });
                             });
-                            // col 2: Length (mm:ss)
+                            // col 2: Length (mm:ss) - clickable
                             row.col(|ui| {
                                 let secs = meta.and_then(|m| m.duration_secs).unwrap_or(f32::NAN);
                                 let text = if secs.is_finite() { format_duration(secs) } else { "...".into() };
-                                ui.label(RichText::new(text).monospace());
+                                let resp = ui.add(
+                                    egui::Label::new(RichText::new(text).monospace())
+                                        .sense(Sense::click())
+                                ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked() {
+                                    self.selected = Some(row_idx); 
+                                    self.scroll_to_selected = true;
+                                }
                             });
-                            // col 3: Channels
+                            // col 3: Channels - clickable
                             row.col(|ui| {
                                 let ch = meta.map(|m| m.channels).unwrap_or(0);
-                                ui.label(RichText::new(format!("{}", ch)).monospace());
+                                let resp = ui.add(
+                                    egui::Label::new(RichText::new(format!("{}", ch)).monospace())
+                                        .sense(Sense::click())
+                                ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked() {
+                                    self.selected = Some(row_idx); 
+                                    self.scroll_to_selected = true;
+                                }
                             });
-                            // col 4: Sample rate
+                            // col 4: Sample rate - clickable
                             row.col(|ui| {
                                 let sr = meta.map(|m| m.sample_rate).unwrap_or(0);
-                                ui.label(RichText::new(format!("{}", sr)).monospace());
+                                let resp = ui.add(
+                                    egui::Label::new(RichText::new(format!("{}", sr)).monospace())
+                                        .sense(Sense::click())
+                                ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked() {
+                                    self.selected = Some(row_idx); 
+                                    self.scroll_to_selected = true;
+                                }
                             });
-                            // col 5: Bits per sample
+                            // col 5: Bits per sample - clickable
                             row.col(|ui| {
                                 let bits = meta.map(|m| m.bits_per_sample).unwrap_or(0);
-                                ui.label(RichText::new(format!("{}", bits)).monospace());
+                                let resp = ui.add(
+                                    egui::Label::new(RichText::new(format!("{}", bits)).monospace())
+                                        .sense(Sense::click())
+                                ).on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked() {
+                                    self.selected = Some(row_idx); 
+                                    self.scroll_to_selected = true;
+                                }
                             });
-                            // col 6: Level (painted background + label)
+                            // col 6: Level (painted background + label) - clickable
                             row.col(|ui| {
-                                let (rect2, _resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover());
+                                let (rect2, resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::click());
                                 if let Some(m) = meta { if let Some(db) = m.rms_db { ui.painter().rect_filled(rect2, 4.0, db_to_color(db)); } }
                                 let text = meta.and_then(|m| m.rms_db).map(|db| format!("{:.1}", db)).unwrap_or_else(|| "...".into());
                                 let fid = TextStyle::Monospace.resolve(ui.style());
                                 ui.painter().text(rect2.center(), egui::Align2::CENTER_CENTER, text, fid, Color32::WHITE);
+                                if resp2.clicked() {
+                                    self.selected = Some(row_idx); 
+                                    self.scroll_to_selected = true;
+                                }
                             });
-                            // col 7: Wave thumbnail
+                            // col 7: Wave thumbnail - clickable
                             row.col(|ui| {
                                 let desired_w = ui.available_width().max(80.0);
                                 let thumb_h = (desired_w * 0.22).clamp(text_height * 1.2, text_height * 4.0);
-                                let (rect, painter) = ui.allocate_painter(egui::vec2(desired_w, thumb_h), Sense::hover());
+                                let (rect, painter) = ui.allocate_painter(egui::vec2(desired_w, thumb_h), Sense::click());
                                 if row_idx == 0 { self.wave_row_h = thumb_h; }
                                 if let Some(m) = meta { let w = rect.rect.width(); let h = rect.rect.height(); let n = m.thumb.len().max(1) as f32; for (idx, &(mn, mx)) in m.thumb.iter().enumerate() {
                                         let x = rect.rect.left() + (idx as f32 / n) * w; let y0 = rect.rect.center().y - mx * (h*0.45); let y1 = rect.rect.center().y - mn * (h*0.45);
                                         let a = (mn.abs().max(mx.abs())).clamp(0.0,1.0);
                                         let col = amp_to_color(a);
                                         painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col)); } }
+                                if rect.clicked() {
+                                    self.selected = Some(row_idx); 
+                                    self.scroll_to_selected = true;
+                                }
                             });
+                            // col 8: Spacer (fills remainder so scrollbar stays at right edge)
+                            row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); });
 
                             // Row-level click handling (background/any non-interactive area)
                             let resp = row.response();
                             if resp.clicked() {
-                                self.selected = Some(row_idx); self.scroll_to_selected = true;
+                                self.selected = Some(row_idx); 
+                                self.scroll_to_selected = true;
                                 let p_owned = path.clone();
+                                // リスト表示時は常にループを無効にする
+                                self.audio.set_loop_enabled(false);
                                 match self.mode {
                                     RateMode::Speed => { let _ = prepare_for_speed(&p_owned, &self.audio, &mut Vec::new(), self.playback_rate); self.audio.set_rate(self.playback_rate); }
                                     _ => { self.audio.set_rate(1.0); self.spawn_heavy_processing(&p_owned); }
@@ -553,6 +746,7 @@ impl eframe::App for WavesPreviewer {
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Bits
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Level
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Wave
+                            row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Spacer
                         }
                     });
                 });
@@ -685,6 +879,32 @@ fn open_in_file_explorer(path: &Path) -> std::io::Result<()> {
     {
         use std::process::Command;
         Command::new("xdg-open").arg(path).spawn()?;
+        Ok(())
+    }
+}
+
+fn open_folder_with_file_selected(file_path: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        // Windows: /select パラメータでファイルを選択状態でフォルダを開く
+        Command::new("explorer").arg("/select,").arg(file_path).spawn()?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        // macOS: -R フラグでFinderでファイルを選択状態で開く
+        Command::new("open").arg("-R").arg(file_path).spawn()?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use std::process::Command;
+        // Linux: ファイルマネージャーでフォルダを開く (ファイル選択は一般的にサポートされていない)
+        if let Some(parent) = file_path.parent() {
+            Command::new("xdg-open").arg(parent).spawn()?;
+        }
         Ok(())
     }
 }
@@ -825,7 +1045,3 @@ impl WavesPreviewer {
         self.processing = Some(ProcessingState { msg: match mode { RateMode::PitchShift => "Pitch-shifting...".to_string(), RateMode::TimeStretch => "Time-stretching...".to_string(), RateMode::Speed => "Processing...".to_string() }, path: path_buf, rx });
     }
 }
-
-
-
-
