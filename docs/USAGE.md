@@ -16,9 +16,11 @@ Notes
 - Only `.wav` is supported at the moment. Other formats will come with `symphonia`.
 - Duplicates are skipped automatically.
 
+For details of the upcoming editor features (multichannel, dB grid, seek, zoom), see `docs/EDITOR_SPEC.md`.
+
 ## Drag & Drop
 
-- Dropping files or folders onto the window adds them to the list.
+- Dropping files or folders onto the window adds them to the list (WAV only).
 - Folders are scanned recursively; only `.wav` files are added.
 - Existing entries are de‑duplicated.
 - Search and sort are preserved; metadata (RMS/thumbnail) is refreshed asynchronously.

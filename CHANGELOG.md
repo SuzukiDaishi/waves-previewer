@@ -5,6 +5,8 @@ All notable changes in this repository (hand-written).
 ## Unreleased (current)
 
 ### UI Improvements (Latest)
+- Split `src/app.rs` into submodules: `src/app/{types,helpers,meta,logic}.rs` for clearer responsibilities.
+- Documented upcoming Editor 2.0 spec (multichannel lanes, dB grid, mouse seek, time zoom). See `docs/EDITOR_SPEC.md`.
 - "Choose" メニューを2項目に整理し操作を明確化:
   - "Folder...": フォルダを選択して一覧を置き換え（rootに設定して再走査）
   - "Files...": 複数ファイルを選択して一覧を置き換え（rootはクリア）
@@ -30,6 +32,10 @@ All notable changes in this repository (hand-written).
   - Made all columns resizable with optimized initial widths
   - Long text (file names, folder paths) now truncates with "..." and shows full text on hover
   - Improved cell layout to prevent text from appearing behind headers
+
+### Editor View
+- Implemented mouse seek/scrub and time zoom/pan interactions
+  - Click/drag to seek; Ctrl+Wheel to zoom; Shift+Wheel (or horizontal wheel) to pan.
 
 ### Core Features
 - Refactor into modules: `audio`, `wave`, `app`, minimal `main`.
@@ -72,3 +78,4 @@ All notable changes in this repository (hand-written).
 ## 0.1.0 (initial)
 
 - Basic egui app with WAV decoding (hound), CPAL output, min/max waveform, RMS meter.
+- Docs: Added editing roadmap (planned) to README/UX/EDITOR_SPEC

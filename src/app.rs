@@ -6,29 +6,16 @@ use anyhow::Result;
 use egui::{Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, RichText, Sense, TextStyle, Visuals};
 use egui_extras::TableBuilder;
 use crate::audio::AudioEngine;
-use crate::wave::{build_minmax, decode_wav_mono, prepare_for_speed, process_pitchshift_offline, process_timestretch_offline};
+use crate::wave::{build_minmax, decode_wav_mono, decode_wav_multi, prepare_for_speed, process_pitchshift_offline, process_timestretch_offline, resample_linear};
 use walkdir::WalkDir;
 
-pub struct EditorTab {
-    pub path: PathBuf,
-    pub display_name: String,
-    pub waveform_minmax: Vec<(f32, f32)>,
-    pub loop_enabled: bool,
-}
+mod types;
+mod helpers;
+mod meta;
+mod logic;
+use self::{types::*, helpers::*, meta::spawn_meta_worker};
 
-pub struct FileMeta {
-    pub channels: u16,
-    pub sample_rate: u32,
-    pub bits_per_sample: u16,
-    pub duration_secs: Option<f32>,
-    pub rms_db: Option<f32>,
-    pub thumb: Vec<(f32, f32)>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SortKey { File, Folder, Length, Channels, SampleRate, Bits, Level }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SortDir { Asc, Desc, None }
+// moved to types.rs
 
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
@@ -62,20 +49,7 @@ pub struct WavesPreviewer {
     processing: Option<ProcessingState>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RateMode { Speed, PitchShift, TimeStretch }
-
-struct ProcessingState {
-    msg: String,
-    path: PathBuf,
-    rx: std::sync::mpsc::Receiver<ProcessingResult>,
-}
-
-struct ProcessingResult {
-    path: PathBuf,
-    samples: Vec<f32>,
-    waveform: Vec<(f32, f32)>,
-}
+// moved to types.rs
 
 impl WavesPreviewer {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
@@ -136,118 +110,6 @@ impl WavesPreviewer {
         })
     }
 
-    pub fn rescan(&mut self) {
-        self.files.clear();
-        self.all_files.clear();
-        if let Some(root) = &self.root {
-            for entry in WalkDir::new(root).follow_links(false) {
-                if let Ok(e) = entry {
-                    if e.file_type().is_file() {
-                        if let Some(ext) = e.path().extension().and_then(|s| s.to_str()) {
-                            if ext.eq_ignore_ascii_case("wav") { self.all_files.push(e.into_path()); }
-                        }
-                    }
-                }
-            }
-            self.all_files.sort();
-        }
-        // apply search filter and initialize files/original order
-        self.apply_filter_from_search();
-        self.meta.clear();
-        if !self.all_files.is_empty() { self.meta_rx = Some(spawn_meta_worker(self.all_files.clone())); }
-        // keep selection mapped to same path after rescan (best-effort)
-        self.apply_sort();
-    }
-
-    fn open_or_activate_tab(&mut self, path: &Path) {
-        // タブを開く/アクティブ化する時に音声を停止
-        self.audio.stop();
-        
-        if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
-            self.active_tab = Some(idx); return;
-        }
-        match self.mode {
-            RateMode::Speed => {
-                let mut wf = Vec::new();
-                if let Err(e) = prepare_for_speed(path, &self.audio, &mut wf, self.playback_rate) { eprintln!("load error: {e:?}") }
-                self.audio.set_rate(self.playback_rate);
-                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("(invalid)").to_string();
-                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: wf, loop_enabled: false });
-                self.active_tab = Some(self.tabs.len() - 1);
-            }
-            _ => {
-                // Heavy: create tab immediately with empty waveform, then spawn processing
-                self.audio.set_rate(1.0);
-                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("(invalid)").to_string();
-                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: Vec::new(), loop_enabled: false });
-                self.active_tab = Some(self.tabs.len() - 1);
-                self.spawn_heavy_processing(path);
-            }
-        }
-    }
-
-    // Merge helper: add a folder recursively (WAV only)
-    fn add_folder_merge(&mut self, dir: &Path) -> usize {
-        let mut added = 0usize;
-        let mut existing: HashSet<PathBuf> = self.all_files.iter().cloned().collect();
-        for entry in WalkDir::new(dir).follow_links(false) {
-            if let Ok(e) = entry {
-                if e.file_type().is_file() {
-                    let p = e.into_path();
-                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                        if ext.eq_ignore_ascii_case("wav") {
-                            if existing.insert(p.clone()) { self.all_files.push(p); added += 1; }
-                        }
-                    }
-                }
-            }
-        }
-        self.all_files.sort();
-        added
-    }
-
-    // Merge helper: add explicit files (WAV only)
-    fn add_files_merge(&mut self, paths: &[PathBuf]) -> usize {
-        let mut added = 0usize;
-        let mut existing: HashSet<PathBuf> = self.all_files.iter().cloned().collect();
-        for p in paths {
-            if p.is_file() {
-                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    if ext.eq_ignore_ascii_case("wav") {
-                        if existing.insert(p.clone()) { self.all_files.push(p.clone()); added += 1; }
-                    }
-                }
-            } else if p.is_dir() {
-                added += self.add_folder_merge(p.as_path());
-            }
-        }
-        self.all_files.sort();
-        added
-    }
-
-    fn after_add_refresh(&mut self) {
-        self.apply_filter_from_search();
-        self.apply_sort();
-        if !self.all_files.is_empty() { self.meta_rx = Some(spawn_meta_worker(self.all_files.clone())); }
-    }
-
-    // Replace current list with explicit files (WAV only). Root is cleared.
-    fn replace_with_files(&mut self, paths: &[PathBuf]) {
-        self.root = None;
-        self.files.clear();
-        self.all_files.clear();
-        let mut set: HashSet<PathBuf> = HashSet::new();
-        for p in paths {
-            if p.is_file() {
-                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    if ext.eq_ignore_ascii_case("wav") {
-                        if set.insert(p.clone()) { self.all_files.push(p.clone()); }
-                    }
-                }
-            }
-        }
-        self.all_files.sort();
-    }
 }
 
 impl eframe::App for WavesPreviewer {
@@ -502,28 +364,120 @@ impl eframe::App for WavesPreviewer {
                 ui.separator();
 
                 let avail = ui.available_size();
-                // make waveform taller as width grows, respecting remaining height
-                let wave_h = (avail.x * 0.35).clamp(180.0, avail.y);
-                let (rect, painter) = ui.allocate_painter(egui::vec2(avail.x, wave_h), Sense::hover());
-                let w = rect.rect.width().max(1.0); let h = rect.rect.height().max(1.0);
-                painter.rect_filled(rect.rect, 0.0, Color32::from_rgb(16,16,18));
-                for g in 1..5 { let y = rect.rect.top() + h*(g as f32)/5.0; painter.line_segment([egui::pos2(rect.rect.left(), y), egui::pos2(rect.rect.right(), y)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50))); }
-                if !tab.waveform_minmax.is_empty() {
-                    let n = tab.waveform_minmax.len() as f32;
-                    for (idx, &(mn, mx)) in tab.waveform_minmax.iter().enumerate() {
-                        let x = rect.rect.left() + (idx as f32 / n) * w;
-                        let y0 = rect.rect.center().y - mx * (h*0.48);
-                        let y1 = rect.rect.center().y - mn * (h*0.48);
-                        let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
-                        let col = amp_to_color(amp);
-                        painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col));
+                // allocate editor canvas
+                let canvas_h = (avail.x * 0.35).clamp(180.0, avail.y);
+                let (resp, painter) = ui.allocate_painter(egui::vec2(avail.x, canvas_h), Sense::click_and_drag());
+                let rect = resp.rect;
+                let w = rect.width().max(1.0); let h = rect.height().max(1.0);
+                painter.rect_filled(rect, 0.0, Color32::from_rgb(16,16,18));
+
+                // Layout parameters
+                let gutter_w = 44.0;
+                let wave_left = rect.left() + gutter_w;
+                let wave_w = (w - gutter_w).max(1.0);
+                let ch_n = tab.ch_samples.len().max(1);
+                let lane_h = h / ch_n as f32;
+
+                // Initialize zoom to fit if unset
+                if tab.samples_len > 0 && tab.samples_per_px <= 0.0 {
+                    tab.samples_per_px = (tab.samples_len as f32 / wave_w).max(1.0);
+                    tab.view_offset = 0;
+                }
+
+                // Handle interactions (seek, zoom, pan)
+                if resp.hovered() {
+                    // Zoom with Ctrl + wheel (use hovered pos over this widget)
+                    let wheel = ui.input(|i| i.raw_scroll_delta);
+                    let scroll_y = wheel.y;
+                    let modifiers = ui.input(|i| i.modifiers);
+                    let pointer_pos = resp.hover_pos();
+                    if modifiers.ctrl && scroll_y.abs() > 0.0 && tab.samples_len > 0 {
+                        let factor = if scroll_y > 0.0 { 0.9 } else { 1.1 };
+                        let old_spp = tab.samples_per_px.max(0.0001);
+                        let cursor_x = pointer_pos.map(|p| p.x).unwrap_or(wave_left + wave_w * 0.5).clamp(wave_left, wave_left + wave_w);
+                        let t = ((cursor_x - wave_left) / wave_w).clamp(0.0, 1.0);
+                        let vis = (wave_w * old_spp).ceil() as usize;
+                        let anchor = tab.view_offset.saturating_add((t * vis as f32) as usize).min(tab.samples_len);
+                        tab.samples_per_px = (old_spp * factor).clamp(0.1, 64.0);
+                        let vis2 = (wave_w * tab.samples_per_px).ceil() as usize;
+                        let left = anchor.saturating_sub((t * vis2 as f32) as usize);
+                        let max_left = tab.samples_len.saturating_sub(vis2);
+                        tab.view_offset = left.min(max_left);
+                    }
+                    // Pan with Shift + wheel
+                    // Prefer horizontal wheel for pan if available; fall back to vertical
+                    let scroll_for_pan = if wheel.x.abs() > 0.0 { wheel.x } else { wheel.y };
+                    if modifiers.shift && scroll_for_pan.abs() > 0.0 && tab.samples_len > 0 {
+                        let delta_px = -scroll_for_pan.signum() * 60.0; // a page step
+                        let delta = (delta_px * tab.samples_per_px) as isize;
+                        let mut off = tab.view_offset as isize + delta;
+                        let vis = (wave_w * tab.samples_per_px).ceil() as usize;
+                        let max_left = tab.samples_len.saturating_sub(vis);
+                        if off < 0 { off = 0; }
+                        if off as usize > max_left { off = max_left as isize; }
+                        tab.view_offset = off as usize;
                     }
                 }
-                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
-                    let len = buf.len().max(1);
-                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(len);
-                    let x = rect.rect.left() + (pos as f32 / len as f32) * w;
-                    painter.line_segment([egui::pos2(x, rect.rect.top()), egui::pos2(x, rect.rect.bottom())], egui::Stroke::new(2.0, Color32::from_rgb(70,140,255)));
+                // Seek by click/drag (primary button)
+                if resp.clicked() || resp.dragged() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let x = pos.x.clamp(wave_left, wave_left + wave_w);
+                        let t = ((x - wave_left) / wave_w).clamp(0.0, 1.0);
+                        let vis = (wave_w * tab.samples_per_px.max(0.0001)).ceil() as usize;
+                        let seek = tab.view_offset.saturating_add((t * vis as f32) as usize).min(tab.samples_len);
+                        self.audio.seek_to_sample(seek);
+                    }
+                }
+
+                // Draw per-channel lanes with dB grid and playhead
+                for (ci, ch) in tab.ch_samples.iter().enumerate() {
+                    let lane_top = rect.top() + lane_h * ci as f32;
+                    let lane_rect = egui::Rect::from_min_size(egui::pos2(wave_left, lane_top), egui::vec2(wave_w, lane_h));
+                    // dB lines: -6, -12 dBFS and center line (0 amp)
+                    let dbs = [-6.0f32, -12.0f32];
+                    // center
+                    painter.line_segment([egui::pos2(lane_rect.left(), lane_rect.center().y), egui::pos2(lane_rect.right(), lane_rect.center().y)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                    for &db in &dbs {
+                        let a = db_to_amp(db).clamp(0.0, 1.0);
+                        let y0 = lane_rect.center().y - a * (lane_rect.height()*0.48);
+                        let y1 = lane_rect.center().y + a * (lane_rect.height()*0.48);
+                        painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                        painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                        // labels on the left gutter
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), fid, Color32::GRAY);
+                    }
+
+                    // visible range
+                    let spp = tab.samples_per_px.max(0.0001);
+                    let vis = (wave_w * spp).ceil() as usize;
+                    let start = tab.view_offset.min(tab.samples_len);
+                    let end = (start + vis).min(tab.samples_len);
+                    let bins = wave_w as usize;
+                    if bins > 0 && end > start {
+                        let mut tmp = Vec::new();
+                        build_minmax(&mut tmp, &ch[start..end], bins);
+                        let n = tmp.len().max(1) as f32;
+                        for (idx, &(mn, mx)) in tmp.iter().enumerate() {
+                            let x = lane_rect.left() + (idx as f32 / n) * wave_w;
+                            let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                            let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                            let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
+                            let col = amp_to_color(amp);
+                            painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col));
+                        }
+                    }
+                }
+
+                // Shared playhead across lanes
+                if tab.samples_len > 0 {
+                    if let Some(buf) = self.audio.shared.samples.load().as_ref() {
+                        let len = buf.len().max(1);
+                        let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(len);
+                        let spp = tab.samples_per_px.max(0.0001);
+                        let x = wave_left + ((pos.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w);
+                        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0, Color32::from_rgb(70,140,255)));
+                    }
                 }
             } else {
                 // List view
@@ -790,258 +744,5 @@ impl eframe::App for WavesPreviewer {
             });
         }
         ctx.request_repaint_after(Duration::from_millis(16));
-    }
-}
-
-fn spawn_meta_worker(paths: Vec<PathBuf>) -> std::sync::mpsc::Receiver<(PathBuf, FileMeta)> {
-    use std::sync::mpsc; let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for p in paths {
-            // Stage 1: quick header-only metadata
-            if let Ok(reader) = hound::WavReader::open(&p) {
-                let spec = reader.spec();
-                let _ = tx.send((p.clone(), FileMeta{
-                    channels: spec.channels,
-                    sample_rate: spec.sample_rate,
-                    bits_per_sample: spec.bits_per_sample,
-                    duration_secs: None,
-                    rms_db: None,
-                    thumb: Vec::new(),
-                }));
-            }
-            // Stage 2: decode for RMS and thumbnail
-            if let Ok((mono, _sr)) = decode_wav_mono(&p) {
-                let mut sum_sq = 0.0f64;
-                for &v in &mono { sum_sq += (v as f64)*(v as f64); }
-                let n = mono.len().max(1) as f64;
-                let rms = (sum_sq/n).sqrt() as f32;
-                let rms_db = if rms>0.0 { 20.0*rms.log10() } else { -120.0 };
-                let mut thumb = Vec::new();
-                build_minmax(&mut thumb, &mono, 128);
-                // attempt to reuse spec (optional)
-                let (ch, sr, bits) = if let Ok(reader2) = hound::WavReader::open(&p) { let s = reader2.spec(); (s.channels, s.sample_rate, s.bits_per_sample) } else { (0,0,0) };
-                let length_secs = if sr > 0 { mono.len() as f32 / sr as f32 } else { f32::NAN };
-                let _ = tx.send((p, FileMeta{ channels: ch, sample_rate: sr, bits_per_sample: bits, duration_secs: Some(length_secs), rms_db: Some(rms_db), thumb }));
-            }
-        }
-    });
-    rx
-}
-
-fn db_to_amp(db: f32) -> f32 { if db <= -80.0 { 0.0 } else { (10.0f32).powf(db/20.0) } }
-
-fn db_to_color(db: f32) -> Color32 {
-    // Expanded palette for clearer perception across ranges.
-    // Control points: (dBFS, Color)
-    let pts: &[(f32, Color32)] = &[
-        (-80.0, Color32::from_rgb(10, 10, 12)),   // near silence
-        (-60.0, Color32::from_rgb(20, 50, 110)),  // deep blue
-        (-40.0, Color32::from_rgb(40, 100, 180)), // blue
-        (-25.0, Color32::from_rgb(80, 200, 255)), // cyan/teal
-        (-12.0, Color32::from_rgb(220, 220, 60)), // yellow
-        (0.0,   Color32::from_rgb(255, 150, 60)), // orange
-        (6.0,   Color32::from_rgb(255, 70, 70)),  // red (near 0 dBFS+)
-    ];
-    let x = db.clamp(pts.first().unwrap().0, pts.last().unwrap().0);
-    // find segment
-    for w in pts.windows(2) {
-        let (x0, c0) = w[0];
-        let (x1, c1) = w[1];
-        if x >= x0 && x <= x1 {
-            let t = if (x1 - x0).abs() < f32::EPSILON { 0.0 } else { (x - x0) / (x1 - x0) };
-            return lerp_color(c0, c1, t);
-        }
-    }
-    pts.last().unwrap().1
-}
-
-fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 { let t = t.clamp(0.0,1.0); let r = (a.r() as f32 + (b.r() as f32 - a.r() as f32)*t) as u8; let g = (a.g() as f32 + (b.g() as f32 - a.g() as f32)*t) as u8; let bl = (a.b() as f32 + (b.b() as f32 - a.b() as f32)*t) as u8; Color32::from_rgb(r,g,bl) }
-
-fn amp_to_color(a: f32) -> Color32 {
-    let t = a.clamp(0.0, 1.0).powf(0.6); // emphasize loud parts
-    lerp_color(Color32::from_rgb(80,200,255), Color32::from_rgb(255,70,70), t)
-}
-
-fn open_in_file_explorer(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        Command::new("explorer").arg(path).spawn()?;
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        Command::new("open").arg(path).spawn()?;
-        Ok(())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        use std::process::Command;
-        Command::new("xdg-open").arg(path).spawn()?;
-        Ok(())
-    }
-}
-
-fn open_folder_with_file_selected(file_path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        // Windows: /select パラメータでファイルを選択状態でフォルダを開く
-        Command::new("explorer").arg("/select,").arg(file_path).spawn()?;
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        // macOS: -R フラグでFinderでファイルを選択状態で開く
-        Command::new("open").arg("-R").arg(file_path).spawn()?;
-        Ok(())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        use std::process::Command;
-        // Linux: ファイルマネージャーでフォルダを開く (ファイル選択は一般的にサポートされていない)
-        if let Some(parent) = file_path.parent() {
-            Command::new("xdg-open").arg(parent).spawn()?;
-        }
-        Ok(())
-    }
-}
-
-fn sortable_header(
-    ui: &mut egui::Ui,
-    label: &str,
-    sort_key: &mut SortKey,
-    sort_dir: &mut SortDir,
-    key: SortKey,
-    default_asc: bool,
-) -> bool {
-    let is_active = *sort_key == key && *sort_dir != SortDir::None;
-    let arrow = if is_active { match *sort_dir { SortDir::Asc => " ▲", SortDir::Desc => " ▼", SortDir::None => "" } } else { "" };
-    let btn = egui::Button::new(RichText::new(format!("{}{}", label, arrow)).strong());
-    let clicked = ui.add(btn).clicked();
-    if clicked {
-        if *sort_key != key {
-            *sort_key = key;
-            *sort_dir = if default_asc { SortDir::Asc } else { SortDir::Desc };
-        } else {
-            *sort_dir = match *sort_dir { SortDir::Asc => SortDir::Desc, SortDir::Desc => SortDir::None, SortDir::None => if default_asc { SortDir::Asc } else { SortDir::Desc } };
-        }
-        return true;
-    }
-    false
-}
-
-impl WavesPreviewer {
-    fn apply_filter_from_search(&mut self) {
-        // Preserve selection path if possible
-        let selected_path: Option<PathBuf> = self.selected.and_then(|i| self.files.get(i).cloned());
-        if self.search_query.trim().is_empty() {
-            self.files = self.all_files.clone();
-        } else {
-            let q = self.search_query.to_lowercase();
-            self.files = self.all_files.iter().filter(|p| {
-                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-                let parent = p.parent().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-                name.contains(&q) || parent.contains(&q)
-            }).cloned().collect();
-        }
-        self.original_files = self.files.clone();
-        // restore selected index
-        self.selected = selected_path.and_then(|p| self.files.iter().position(|x| *x == p));
-    }
-    fn apply_sort(&mut self) {
-        if self.files.is_empty() { return; }
-        let selected_path: Option<PathBuf> = self.selected.and_then(|i| self.files.get(i).cloned());
-        let key = self.sort_key;
-        let dir = self.sort_dir;
-        if dir == SortDir::None {
-            self.files = self.original_files.clone();
-        } else {
-            self.files.sort_by(|a, b| {
-                use std::cmp::Ordering;
-                let ord = match key {
-                    SortKey::File => {
-                        let sa = a.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                        let sb = b.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                        sa.cmp(sb)
-                    }
-                    SortKey::Folder => {
-                        let sa = a.parent().and_then(|p| p.to_str()).unwrap_or("");
-                        let sb = b.parent().and_then(|p| p.to_str()).unwrap_or("");
-                        sa.cmp(sb)
-                    }
-                    SortKey::Length => num_order(self.meta.get(a).and_then(|m| m.duration_secs).unwrap_or(0.0),
-                                                 self.meta.get(b).and_then(|m| m.duration_secs).unwrap_or(0.0)),
-                    SortKey::Channels => num_order(self.meta.get(a).map(|m| m.channels as f32).unwrap_or(0.0),
-                                                   self.meta.get(b).map(|m| m.channels as f32).unwrap_or(0.0)),
-                    SortKey::SampleRate => num_order(self.meta.get(a).map(|m| m.sample_rate as f32).unwrap_or(0.0),
-                                                     self.meta.get(b).map(|m| m.sample_rate as f32).unwrap_or(0.0)),
-                    SortKey::Bits => num_order(self.meta.get(a).map(|m| m.bits_per_sample as f32).unwrap_or(0.0),
-                                               self.meta.get(b).map(|m| m.bits_per_sample as f32).unwrap_or(0.0)),
-                    SortKey::Level => num_order(self.meta.get(a).and_then(|m| m.rms_db).unwrap_or(f32::NEG_INFINITY),
-                                                self.meta.get(b).and_then(|m| m.rms_db).unwrap_or(f32::NEG_INFINITY)),
-                };
-                match dir { SortDir::Asc => ord, SortDir::Desc => ord.reverse(), SortDir::None => Ordering::Equal }
-            });
-        }
-
-        // restore selection to the same path if possible
-        self.selected = selected_path.and_then(|p| self.files.iter().position(|x| *x == p));
-    }
-}
-
-fn num_order(a: f32, b: f32) -> std::cmp::Ordering {
-    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
-}
-
-fn format_duration(secs: f32) -> String {
-    let s = if secs.is_finite() && secs >= 0.0 { secs } else { 0.0 };
-    let total = s.round() as u64;
-    let m = total / 60;
-    let s = total % 60;
-    format!("{}:{:02}", m, s)
-}
-
-impl WavesPreviewer {
-    fn current_path_for_rebuild(&self) -> Option<PathBuf> {
-        if let Some(i) = self.active_tab { return self.tabs.get(i).map(|t| t.path.clone()); }
-        if let Some(i) = self.selected { return self.files.get(i).cloned(); }
-        None
-    }
-
-    fn rebuild_current_buffer_with_mode(&mut self) {
-        if let Some(p) = self.current_path_for_rebuild() {
-            match self.mode {
-                RateMode::Speed => { let _ = prepare_for_speed(&p, &self.audio, &mut Vec::new(), self.playback_rate); self.audio.set_rate(self.playback_rate); }
-                _ => { self.audio.set_rate(1.0); self.spawn_heavy_processing(&p); }
-            }
-        }
-    }
-
-    fn spawn_heavy_processing(&mut self, path: &Path) {
-        use std::sync::mpsc;
-        let (tx, rx) = mpsc::channel::<ProcessingResult>();
-        let path_buf = path.to_path_buf();
-        let mode = self.mode;
-        let rate = self.playback_rate;
-        let sem = self.pitch_semitones;
-        let out_sr = self.audio.shared.out_sample_rate;
-        let path_for_thread = path_buf.clone();
-        std::thread::spawn(move || {
-            // heavy decode and process
-            if let Ok((mono, in_sr)) = decode_wav_mono(&path_for_thread) {
-                let samples = match mode {
-                    RateMode::PitchShift => process_pitchshift_offline(&mono, in_sr, out_sr, sem),
-                    RateMode::TimeStretch => process_timestretch_offline(&mono, in_sr, out_sr, rate),
-                    RateMode::Speed => mono, // not used
-                };
-                let mut waveform = Vec::new();
-                build_minmax(&mut waveform, &samples, 2048);
-                let _ = tx.send(ProcessingResult { path: path_for_thread.clone(), samples, waveform });
-            }
-        });
-        self.processing = Some(ProcessingState { msg: match mode { RateMode::PitchShift => "Pitch-shifting...".to_string(), RateMode::TimeStretch => "Time-stretching...".to_string(), RateMode::Speed => "Processing...".to_string() }, path: path_buf, rx });
     }
 }

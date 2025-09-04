@@ -20,8 +20,8 @@
   - 入力中の自動上書きを避け、確定値のみ反映。全コントロールの高さを統一し、横幅占有を最小化。
 - クリック動作:
   - 行背景: 選択（同時に音声ロード）。
-  - ファイル名セル: エディタタブで開く（同時に選択）。
-  - フォルダセル: OS のファイルブラウザで開く（同時に選択）。
+  - ファイル名セル（ダブルクリック）: エディタタブで開く（同時に選択）。
+  - フォルダセル（ダブルクリック）: OS のファイルブラウザで、そのWAVを選択状態で開く（同時に選択）。
 - ↑/↓：選択移動、Enter：タブを開く。
 
 ## エディタ
@@ -29,6 +29,19 @@
 - グリッドは 5 分割の水平線、波形は縦棒(min/max)で高速描画。
 - ループ：ボタンまたは L キーで On/Off（現状は全範囲）。Pitch/Stretch の処理後は出力レイテンシ/flush を考慮して末尾欠けを防止し、継ぎ目の引っかかりを低減。
 - プレイヘッドは 60fps 目安で更新（`request_repaint_after(16ms)`）。
+
+## 編集 UI（計画）
+- 目的: 非破壊編集をエディタタブ内で行えるようにする。
+- レイアウト案:
+  - トップバー直下に編集タブ（例: Waveform / Spectrogram / Mel / WORLD）。
+  - その下に編集コントロール（トリム、ループマーカー、フェード、クロスフェード等）。
+  - さらに下に可視化ペインを縦に積む（波形、スペクトログラム、メルスペクトログラム、WORLD: F0/包絡）。
+  - すべて同じ時間軸とプレイヘッドを共有。ズーム/シークは同期。
+- 初期スコープ:
+  - 波形: トリム、フェード、クロスフェード、ループマーカー（ループ境界クロスフェード）。
+  - スペクトログラム: 選択ノイズ除去、周波数方向ワープ。
+  - メル: 閲覧のみ。
+  - WORLD: F0 サンプルレベル編集、包絡ワープ。
 
 ## ローディング / 重い処理の扱い
 - PitchShift/TimeStretch はファイルサイズやパラメータにより時間がかかるため、処理中は画面全体にカバー（半透明）＋スピナーを表示して入力をブロック。
@@ -42,3 +55,39 @@
 ## フォント
 - Windows では Meiryo / Yu Gothic / MS Gothic を動的読み込み（なければデフォルト）。
 - 非 UTF-8 が混入した場合は ASCII 表示へフォールバック。
+# UX / チェックインメモ
+
+## Editor 2.0 — Multichannel/Zoom/Seek (spec)
+
+This section documents the planned UX for the editor view update. Goals: read‑at‑a‑glance waveform per channel, intuitive seek/zoom, and minimal clutter.
+
+- Layout: multi‑channel stacked view
+  - Each channel is rendered as its own lane stacked vertically.
+  - Time axis is shared; one common playhead/seek bar across all channels.
+  - Left side keeps a fixed narrow gutter for dB grid labels.
+
+- dB grid (lightweight)
+  - Per channel, draw 2–3 horizontal reference lines (e.g., 0 dBFS, −6 dB, −12 dB).
+  - Labels are small, muted color; lines are subtle to avoid overpowering the waveform.
+
+- Seek interactions (mouse)
+  - Click in the waveform area to jump (seek) to that time; play state is preserved.
+  - Click‑and‑drag horizontally to scrub; the playhead follows the cursor.
+  - The single playhead (vertical line) is shared across channels.
+
+- Time zoom + pan
+  - Ctrl + Mouse Wheel: zoom in/out centered at the cursor position.
+  - Shift + Mouse Wheel: horizontal scroll (pan).
+  - Right‑drag or Middle‑drag: horizontal pan (fallback; optional but recommended).
+  - Double‑click: toggle between “fit whole” and “restore last zoom”.
+
+- Visual details
+  - Waveform color uses existing amplitude‑based palette; per‑channel lanes share the style.
+  - Playhead is drawn on top (2px, accent color) across all lanes.
+  - Channel labels (CH1/CH2/…) may be shown left in small text; future work can map to L/R names where known.
+
+- Performance notes
+  - On initial implementation, min/max bins for the visible range are computed per frame per channel (bins ≈ panel width).
+  - If needed, introduce simple caches (by zoom scale and range) or prebuilt multi‑scale min/max (mip‑style).
+
+This UX keeps editing fast on large lists, while making per‑file inspection substantially clearer and more precise.

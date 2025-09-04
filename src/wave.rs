@@ -26,6 +26,33 @@ pub fn decode_wav_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
     Ok((mono, in_sr))
 }
 
+pub fn decode_wav_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
+    let mut reader = hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
+    let spec = reader.spec();
+    let ch = spec.channels.max(1) as usize;
+    let in_sr = spec.sample_rate;
+    let mut chans: Vec<Vec<f32>> = vec![Vec::new(); ch];
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for (i, s) in reader.samples::<f32>().enumerate() {
+                let v = s?;
+                let ci = i % ch;
+                chans[ci].push(v);
+            }
+        }
+        hound::SampleFormat::Int => {
+            let max_abs = match spec.bits_per_sample { 8 => 127.0, 16 => 32767.0, 24 => 8_388_607.0, 32 => 2_147_483_647.0, b => ((1u64 << (b - 1)) - 1) as f64 as f32 };
+            for (i, s) in reader.samples::<i32>().enumerate() {
+                let v_i = s?;
+                let v = (v_i as f32) / max_abs;
+                let ci = i % ch;
+                chans[ci].push(v);
+            }
+        }
+    }
+    Ok((chans, in_sr))
+}
+
 pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
     if in_sr == out_sr || mono.is_empty() { return mono.to_vec(); }
     let ratio = out_sr as f32 / in_sr as f32;

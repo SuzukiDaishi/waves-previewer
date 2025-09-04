@@ -194,4 +194,14 @@ impl AudioEngine {
     pub fn set_rate(&self, rate: f32) {
         self.shared.rate.store(rate.clamp(0.25, 4.0), std::sync::atomic::Ordering::Relaxed);
     }
+
+    pub fn seek_to_sample(&self, pos: usize) {
+        // Clamp to buffer length if present
+        if let Some(buf) = self.shared.samples.load().as_ref() {
+            let len = buf.len();
+            let p = pos.min(len);
+            self.shared.play_pos.store(p, std::sync::atomic::Ordering::Relaxed);
+            self.shared.play_pos_f.store(p as f32, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }

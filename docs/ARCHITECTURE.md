@@ -4,8 +4,12 @@
 
 - `src/main.rs`
   - 最小のエントリポイント。`app::WavesPreviewer` を起動するだけ。
-- `src/app.rs`
-  - egui アプリ本体。タブUI、リスト表示、エディタ表示、ショートカット、非同期メタ情報の受信などを担当。
+- `src/app/`
+  - `app.rs`: egui アプリ本体。タブUI、リスト表示、エディタ表示、ショートカット、非同期メタ情報の受信などを担当。
+  - `types.rs`: App 内部の共有型（`EditorTab`/`FileMeta`/`RateMode`/`SortKey` など）。
+  - `helpers.rs`: dB/色変換、ヘッダソート、フォーマット、OS 連携ヘルパ。
+  - `meta.rs`: メタ情報生成のバックグラウンドワーカー（RMS/サムネ）。
+  - `logic.rs`: 走査/検索/ソート/D&D マージ/重処理スレッド起動などの非 UI ロジック。
   - リストは `egui_extras::TableBuilder` を直接使用し、内部スクロール（vscroll）＋仮想化（`TableBody::rows`）で可視行のみを描画。
   - 列のリサイズ機能（`.resizable(true)`）、長いテキストの自動切り詰め（`.truncate(true)`）、ホバーツールチップ対応。
   - `min_scrolled_height(...)` を用い、テーブルのボディが残り高さを使い切る（下端まで枠が伸びる）。
@@ -25,6 +29,12 @@
 4) UI は別途、モノ元データから min/max 波形を作成してエディタに描画
 5) コールバック内で短時間 RMS を計算→UI に dBFS 表示。再生速度は `rate` に応じて小数ステップで進める
 6) PitchShift/TimeStretch の場合は別スレッドで処理→完了通知を受けて再生バッファと波形を差し替え（UI は処理中オーバーレイを表示）
+
+## エディタのインタラクション（実装済み）
+- クリック/ドラッグでシーク（スクラブ）。再生状態は維持。
+- Ctrl + マウスホイールで時間ズーム（カーソル位置を固定点として再中心化）。
+- Shift + ホイール（または横ホイール）で水平パン。
+  - 備考: ズーム/パンは現状試験実装で、環境により挙動が不安定な場合があります（詳細は `docs/KNOWN_ISSUES.md`）。
 
 ## スレッドと共有状態
 
@@ -61,7 +71,7 @@
 
 ---
 
-## Heavy Processing（Pitch/Pace）
+## Heavy Processing（Pitch/Stretch）
 
 - `app` 側で重い処理専用のワーカー（std::thread）を起動し、`mpsc::channel` で結果（処理済み samples と waveform）を受信。
 - UI は `processing` ステートが Some の間、全画面カバー（前景レイヤ）で入力をブロックし、スピナー＋メッセージを表示。
