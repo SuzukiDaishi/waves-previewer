@@ -5,9 +5,29 @@ use walkdir::WalkDir;
 
 use super::helpers::num_order;
 use super::meta::spawn_meta_worker;
-use super::types::{EditorTab, FileMeta, ProcessingResult, ProcessingState, RateMode, SortDir, SortKey};
+use super::types::{EditorTab, ProcessingResult, ProcessingState, RateMode, SortDir, SortKey};
 
 impl super::WavesPreviewer {
+    /// Select a row and load audio buffer accordingly.
+    /// Used when any cell in the row is clicked so Space can play immediately.
+    pub(super) fn select_and_load(&mut self, row_idx: usize) {
+        if row_idx >= self.files.len() { return; }
+        self.selected = Some(row_idx);
+        self.scroll_to_selected = true;
+        let p_owned = self.files[row_idx].clone();
+        // リスト表示時は常にループを無効にする
+        self.audio.set_loop_enabled(false);
+        match self.mode {
+            RateMode::Speed => {
+                let _ = crate::wave::prepare_for_speed(&p_owned, &self.audio, &mut Vec::new(), self.playback_rate);
+                self.audio.set_rate(self.playback_rate);
+            }
+            _ => {
+                self.audio.set_rate(1.0);
+                self.spawn_heavy_processing(&p_owned);
+            }
+        }
+    }
     pub fn rescan(&mut self) {
         self.files.clear();
         self.all_files.clear();
@@ -226,4 +246,3 @@ impl super::WavesPreviewer {
         self.processing = Some(ProcessingState { msg: match mode { RateMode::PitchShift => "Pitch-shifting...".to_string(), RateMode::TimeStretch => "Time-stretching...".to_string(), RateMode::Speed => "Processing...".to_string() }, path: path_buf, rx });
     }
 }
-

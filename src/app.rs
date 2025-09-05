@@ -1,19 +1,19 @@
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 use egui::{Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, RichText, Sense, TextStyle, Visuals};
 use egui_extras::TableBuilder;
 use crate::audio::AudioEngine;
-use crate::wave::{build_minmax, decode_wav_mono, decode_wav_multi, prepare_for_speed, process_pitchshift_offline, process_timestretch_offline, resample_linear};
-use walkdir::WalkDir;
+use crate::wave::{build_minmax, prepare_for_speed};
+// use walkdir::WalkDir; // unused here (used in logic.rs)
 
 mod types;
 mod helpers;
 mod meta;
 mod logic;
-use self::{types::*, helpers::*, meta::spawn_meta_worker};
+use self::{types::*, helpers::*};
 
 // moved to types.rs
 
@@ -385,14 +385,37 @@ impl eframe::App for WavesPreviewer {
                 }
 
                 // Handle interactions (seek, zoom, pan)
-                if resp.hovered() {
+                // Detect hover using pointer position against our canvas rect (robust across senses)
+                let pointer_over_canvas = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| rect.contains(p));
+                if pointer_over_canvas {
                     // Zoom with Ctrl + wheel (use hovered pos over this widget)
-                    let wheel = ui.input(|i| i.raw_scroll_delta);
+                    // Combine raw wheel delta with low-level events as a fallback (covers trackpads/pinch, some platforms).
+                    let wheel_raw = ui.input(|i| i.raw_scroll_delta);
+                    let mut wheel = wheel_raw;
+                    let mut pinch_zoom_factor: f32 = 1.0;
+                    let events = ctx.input(|i| i.events.clone());
+                    for ev in events {
+                        match ev {
+                            egui::Event::Scroll(delta) => { wheel += delta; }
+                            egui::Event::Zoom(z) => { pinch_zoom_factor *= z; }
+                            _ => {}
+                        }
+                    }
                     let scroll_y = wheel.y;
                     let modifiers = ui.input(|i| i.modifiers);
                     let pointer_pos = resp.hover_pos();
-                    if modifiers.ctrl && scroll_y.abs() > 0.0 && tab.samples_len > 0 {
-                        let factor = if scroll_y > 0.0 { 0.9 } else { 1.1 };
+                    // Debug trace (dev builds): log incoming deltas and modifiers when over canvas
+                    #[cfg(debug_assertions)]
+                    if wheel_raw != egui::Vec2::ZERO || pinch_zoom_factor != 1.0 {
+                        eprintln!(
+                            "wheel_raw=({:.2},{:.2}) wheel_total=({:.2},{:.2}) ctrl={} shift={} pinch={:.3}",
+                            wheel_raw.x, wheel_raw.y, wheel.x, wheel.y, modifiers.ctrl, modifiers.shift, pinch_zoom_factor
+                        );
+                    }
+                    // Trigger zoom on: Ctrl+wheel OR pinch zoom events
+                    if ((modifiers.ctrl && scroll_y.abs() > 0.0) || (pinch_zoom_factor != 1.0)) && tab.samples_len > 0 {
+                        let factor = if pinch_zoom_factor != 1.0 { pinch_zoom_factor } else if scroll_y > 0.0 { 0.9 } else { 1.1 };
+                        let factor = factor.clamp(0.2, 5.0);
                         let old_spp = tab.samples_per_px.max(0.0001);
                         let cursor_x = pointer_pos.map(|p| p.x).unwrap_or(wave_left + wave_w * 0.5).clamp(wave_left, wave_left + wave_w);
                         let t = ((cursor_x - wave_left) / wave_w).clamp(0.0, 1.0);
@@ -529,17 +552,19 @@ impl eframe::App for WavesPreviewer {
                         row.set_selected(is_selected);
 
                         if is_data {
-                            let path = &self.files[row_idx];
-                            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("(invalid)");
-                            let parent = path.parent().and_then(|p| p.to_str()).unwrap_or("");
+                            let path_owned = self.files[row_idx].clone();
+                            let name = path_owned.file_name().and_then(|s| s.to_str()).unwrap_or("(invalid)");
+                            let parent = path_owned.parent().and_then(|p| p.to_str()).unwrap_or("");
+                            let mut clicked_to_load = false;
+                            let mut clicked_to_select = false;
                             // Ensure quick header meta is present when row is shown
-                            if !self.meta.contains_key(path) {
-                                if let Ok(reader) = hound::WavReader::open(path) {
+                            if !self.meta.contains_key(&path_owned) {
+                                if let Ok(reader) = hound::WavReader::open(&path_owned) {
                                     let spec = reader.spec();
-                                    self.meta.insert(path.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, duration_secs: None, rms_db: None, thumb: Vec::new() });
+                                    self.meta.insert(path_owned.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, duration_secs: None, rms_db: None, thumb: Vec::new() });
                                 }
                             }
-                            let meta = self.meta.get(path);
+                            let meta = self.meta.get(&path_owned);
 
                             // col 0: File (clickable label with clipping)
                             row.col(|ui| {
@@ -550,18 +575,11 @@ impl eframe::App for WavesPreviewer {
                                             .truncate(true)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     
-                                    // シングルクリック: 行選択
-                                    if resp.clicked() && !resp.double_clicked() {
-                                        self.selected = Some(row_idx); 
-                                        self.scroll_to_selected = true;
-                                    }
+                                    // シングルクリック: 行選択 + 音声ロード（後段で一括処理）
+                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
                                     
                                     // ダブルクリック: エディタタブで開く
-                                    if resp.double_clicked() {
-                                        self.selected = Some(row_idx); 
-                                        self.scroll_to_selected = true;
-                                        to_open = Some(path.clone());
-                                    }
+                                    if resp.double_clicked() { clicked_to_select = true; to_open = Some(path_owned.clone()); }
                                     
                                     if resp.hovered() {
                                         resp.on_hover_text(name);
@@ -577,19 +595,11 @@ impl eframe::App for WavesPreviewer {
                                             .truncate(true)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     
-                                    // シングルクリック: 行選択
-                                    if resp.clicked() && !resp.double_clicked() {
-                                        self.selected = Some(row_idx); 
-                                        self.scroll_to_selected = true;
-                                    }
+                                    // シングルクリック: 行選択 + 音声ロード
+                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
                                     
                                     // ダブルクリック: システムのファイルブラウザでフォルダを開く（WAVファイルを選択状態で）
-                                    if resp.double_clicked() {
-                                        self.selected = Some(row_idx); 
-                                        self.scroll_to_selected = true;
-                                        // ファイルを選択状態でフォルダを開く
-                                        let _ = open_folder_with_file_selected(path);
-                                    }
+                                    if resp.double_clicked() { clicked_to_select = true; let _ = open_folder_with_file_selected(&path_owned); }
                                     
                                     if resp.hovered() {
                                         resp.on_hover_text(parent);
@@ -604,10 +614,7 @@ impl eframe::App for WavesPreviewer {
                                     egui::Label::new(RichText::new(text).monospace())
                                         .sense(Sense::click())
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked() {
-                                    self.selected = Some(row_idx); 
-                                    self.scroll_to_selected = true;
-                                }
+                                if resp.clicked() { clicked_to_load = true; }
                             });
                             // col 3: Channels - clickable
                             row.col(|ui| {
@@ -616,10 +623,7 @@ impl eframe::App for WavesPreviewer {
                                     egui::Label::new(RichText::new(format!("{}", ch)).monospace())
                                         .sense(Sense::click())
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked() {
-                                    self.selected = Some(row_idx); 
-                                    self.scroll_to_selected = true;
-                                }
+                                if resp.clicked() { clicked_to_load = true; }
                             });
                             // col 4: Sample rate - clickable
                             row.col(|ui| {
@@ -628,10 +632,7 @@ impl eframe::App for WavesPreviewer {
                                     egui::Label::new(RichText::new(format!("{}", sr)).monospace())
                                         .sense(Sense::click())
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked() {
-                                    self.selected = Some(row_idx); 
-                                    self.scroll_to_selected = true;
-                                }
+                                if resp.clicked() { clicked_to_load = true; }
                             });
                             // col 5: Bits per sample - clickable
                             row.col(|ui| {
@@ -640,10 +641,7 @@ impl eframe::App for WavesPreviewer {
                                     egui::Label::new(RichText::new(format!("{}", bits)).monospace())
                                         .sense(Sense::click())
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked() {
-                                    self.selected = Some(row_idx); 
-                                    self.scroll_to_selected = true;
-                                }
+                                if resp.clicked() { clicked_to_load = true; }
                             });
                             // col 6: Level (painted background + label) - clickable
                             row.col(|ui| {
@@ -652,10 +650,7 @@ impl eframe::App for WavesPreviewer {
                                 let text = meta.and_then(|m| m.rms_db).map(|db| format!("{:.1}", db)).unwrap_or_else(|| "...".into());
                                 let fid = TextStyle::Monospace.resolve(ui.style());
                                 ui.painter().text(rect2.center(), egui::Align2::CENTER_CENTER, text, fid, Color32::WHITE);
-                                if resp2.clicked() {
-                                    self.selected = Some(row_idx); 
-                                    self.scroll_to_selected = true;
-                                }
+                                if resp2.clicked() { clicked_to_load = true; }
                             });
                             // col 7: Wave thumbnail - clickable
                             row.col(|ui| {
@@ -668,28 +663,17 @@ impl eframe::App for WavesPreviewer {
                                         let a = (mn.abs().max(mx.abs())).clamp(0.0,1.0);
                                         let col = amp_to_color(a);
                                         painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col)); } }
-                                if rect.clicked() {
-                                    self.selected = Some(row_idx); 
-                                    self.scroll_to_selected = true;
-                                }
+                                if rect.clicked() { clicked_to_load = true; }
                             });
                             // col 8: Spacer (fills remainder so scrollbar stays at right edge)
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); });
 
                             // Row-level click handling (background/any non-interactive area)
                             let resp = row.response();
-                            if resp.clicked() {
-                                self.selected = Some(row_idx); 
-                                self.scroll_to_selected = true;
-                                let p_owned = path.clone();
-                                // リスト表示時は常にループを無効にする
-                                self.audio.set_loop_enabled(false);
-                                match self.mode {
-                                    RateMode::Speed => { let _ = prepare_for_speed(&p_owned, &self.audio, &mut Vec::new(), self.playback_rate); self.audio.set_rate(self.playback_rate); }
-                                    _ => { self.audio.set_rate(1.0); self.spawn_heavy_processing(&p_owned); }
-                                }
-                            }
+                            if resp.clicked() { clicked_to_load = true; }
                             if is_selected && self.scroll_to_selected { resp.scroll_to_me(Some(Align::Center)); }
+                            if clicked_to_load { self.select_and_load(row_idx); }
+                            else if clicked_to_select { self.selected = Some(row_idx); self.scroll_to_selected = true; }
                         } else {
                             // filler row to extend frame
                             row.col(|_ui| {});

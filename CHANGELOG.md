@@ -5,6 +5,10 @@ All notable changes in this repository (hand-written).
 ## Unreleased (current)
 
 ### UI Improvements (Latest)
+- Editor zoom/pan reliability: fixed cases where Ctrl+Wheel zoom didn't fire on some environments.
+  - Hover detection now uses canvas-rect hit test instead of `Response::hovered`.
+  - Wheel input combines `raw_scroll_delta` with low-level `Event::Scroll` and pinch `Event::Zoom`.
+  - Added optional debug trace in dev builds to log incoming deltas.
 - Split `src/app.rs` into submodules: `src/app/{types,helpers,meta,logic}.rs` for clearer responsibilities.
 - Documented upcoming Editor 2.0 spec (multichannel lanes, dB grid, mouse seek, time zoom). See `docs/EDITOR_SPEC.md`.
 - "Choose" メニューを2項目に整理し操作を明確化:
