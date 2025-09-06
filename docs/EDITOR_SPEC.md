@@ -40,9 +40,10 @@ This document captures the agreed UX and the technical outline for the upcoming 
 
 - Split viewport into a fixed left gutter for dB labels and a right area for channel lanes.
 - For each lane:
-  - Build bins for the visible subrange only: `bins = width_px` over `[view_offset .. view_offset + visible]`.
+  - For time rendering, switch by zoom level (`spp = samples_per_px`):
+    - `spp >= 1.0` (overview/normal): build `bins = width_px` over `[view_offset .. view_offset+visible]` and draw min/max vertical strokes per pixel column.
+    - `spp < 1.0` (fine zoom): draw per‑sample polyline connecting adjacent samples; when `pixels_per_sample >= 6`, also draw stems from the centerline to each sample for clarity.
   - Convert dB values to amplitude by `amp = 10^(dB/20)` to place horizontal grid lines.
-  - Draw min/max vertical strokes per x column with amplitude‑based colors (existing palette).
 - Playhead
   - `x = (play_pos - view_offset) / samples_per_px`; draw as a 2px line across all lanes.
 

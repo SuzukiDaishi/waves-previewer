@@ -80,6 +80,19 @@ pub fn format_duration(secs: f32) -> String {
     format!("{}:{:02}", m, s)
 }
 
+// Compact time string with tenths when useful, e.g. 0:01.2, 1:23.4, 12:34.5
+pub fn format_time_s(secs: f32) -> String {
+    if !secs.is_finite() || secs < 0.0 { return "0:00.0".to_string(); }
+    let m = (secs / 60.0).floor() as u64;
+    let s = secs - (m as f32) * 60.0;
+    if m < 100 { // typical range
+        format!("{}:{:04.1}", m, s)
+    } else {
+        // fallback: no decimals for very long
+        format!("{}:{:02}", m, s.floor() as u64)
+    }
+}
+
 pub fn open_in_file_explorer(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -126,4 +139,3 @@ pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::R
         Ok(())
     }
 }
-

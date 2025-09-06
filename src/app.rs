@@ -360,6 +360,28 @@ impl eframe::App for WavesPreviewer {
                         // full-buffer loop
                         if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
                     }
+                    ui.separator();
+                    // Zoom HUD (time-first). Shows visible time span and scale near sample level.
+                    let sr = self.audio.shared.out_sample_rate.max(1);
+                    let spp_hud = if tab.samples_per_px > 0.0 { tab.samples_per_px } else { 1.0 };
+                    let width_px = ui.available_width().max(1.0);
+                    let view_samples = (width_px * spp_hud).ceil() as usize;
+                    let view_secs = view_samples as f32 / sr as f32;
+                    let zoom_text = if view_secs < 1.0 {
+                        format!("View: {:.0} ms", view_secs * 1000.0)
+                    } else if view_secs < 60.0 {
+                        format!("View: {:.2} s", view_secs)
+                    } else {
+                        let total = view_secs.round() as u64; let m = total/60; let s = total%60; format!("View: {}:{:02}", m, s)
+                    };
+                    let pps = 1.0 / spp_hud;
+                    let detail = if pps >= 1.0 { format!("({:.1} px/samp)", pps) } else { format!("({:.2} samp/px)", spp_hud) };
+                    ui.label(RichText::new(format!("{zoom_text}  {detail}")).weak().monospace());
+                    ui.separator();
+                    // Time HUD: play position / total length
+                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed) as f32 / sr as f32;
+                    let len = (tab.samples_len as f32 / sr as f32).max(0.0);
+                    ui.label(RichText::new(format!("Pos: {} / {}", crate::app::helpers::format_time_s(pos), crate::app::helpers::format_time_s(len))).monospace());
                 });
                 ui.separator();
 
@@ -378,10 +400,46 @@ impl eframe::App for WavesPreviewer {
                 let ch_n = tab.ch_samples.len().max(1);
                 let lane_h = h / ch_n as f32;
 
-                // Initialize zoom to fit if unset
+                // Initialize zoom to fit if unset (show whole file)
                 if tab.samples_len > 0 && tab.samples_per_px <= 0.0 {
-                    tab.samples_per_px = (tab.samples_len as f32 / wave_w).max(1.0);
+                    let fit_spp = (tab.samples_len as f32 / wave_w.max(1.0)).max(0.01);
+                    tab.samples_per_px = fit_spp;
                     tab.view_offset = 0;
+                }
+
+                // Time ruler (ticks + labels) across all lanes
+                {
+                    let spp = tab.samples_per_px.max(0.0001);
+                    let vis = (wave_w * spp).ceil() as usize;
+                    let start = tab.view_offset.min(tab.samples_len);
+                    let end = (start + vis).min(tab.samples_len);
+                    if end > start {
+                        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                        let t0 = start as f32 / sr;
+                        let t1 = end as f32 / sr;
+                        let px_per_sec = (1.0 / spp) * sr;
+                        let min_px = 90.0;
+                        let steps: [f32; 15] = [0.01,0.02,0.05,0.1,0.2,0.5,1.0,2.0,5.0,10.0,15.0,30.0,60.0,120.0,300.0];
+                        let mut step = steps[steps.len()-1];
+                        for s in steps { if px_per_sec * s >= min_px { step = s; break; } }
+                        let start_tick = (t0 / step).floor() * step;
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        let grid_col = Color32::from_rgb(38,38,44);
+                        let label_col = Color32::GRAY;
+                        let mut t = start_tick;
+                        while t <= t1 + step*0.5 {
+                            let s_idx = (t * sr).round() as isize;
+                            let rel = (s_idx.max(start as isize) - start as isize) as f32;
+                            let x = wave_left + (rel / spp).clamp(0.0, wave_w);
+                            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.0, grid_col));
+                            // Label near top; avoid overcrowding by skipping when too dense
+                            if px_per_sec * step >= 70.0 {
+                                let label = crate::app::helpers::format_time_s(t);
+                                painter.text(egui::pos2(x + 2.0, rect.top() + 2.0), egui::Align2::LEFT_TOP, label, fid.clone(), label_col);
+                            }
+                            t += step;
+                        }
+                    }
                 }
 
                 // Handle interactions (seek, zoom, pan)
@@ -412,23 +470,26 @@ impl eframe::App for WavesPreviewer {
                             wheel_raw.x, wheel_raw.y, wheel.x, wheel.y, modifiers.ctrl, modifiers.shift, pinch_zoom_factor
                         );
                     }
-                    // Trigger zoom on: Ctrl+wheel OR pinch zoom events
-                    if ((modifiers.ctrl && scroll_y.abs() > 0.0) || (pinch_zoom_factor != 1.0)) && tab.samples_len > 0 {
-                        let factor = if pinch_zoom_factor != 1.0 { pinch_zoom_factor } else if scroll_y > 0.0 { 0.9 } else { 1.1 };
+                    // Zoom: plain wheel (unless Shift is held for pan) or pinch zoom
+                    if (((scroll_y.abs() > 0.0) && !modifiers.shift) || (pinch_zoom_factor != 1.0)) && tab.samples_len > 0 {
+                        // Wheel up = zoom in
+                        let factor = if pinch_zoom_factor != 1.0 { pinch_zoom_factor } else if scroll_y < 0.0 { 0.9 } else { 1.1 };
                         let factor = factor.clamp(0.2, 5.0);
                         let old_spp = tab.samples_per_px.max(0.0001);
                         let cursor_x = pointer_pos.map(|p| p.x).unwrap_or(wave_left + wave_w * 0.5).clamp(wave_left, wave_left + wave_w);
                         let t = ((cursor_x - wave_left) / wave_w).clamp(0.0, 1.0);
                         let vis = (wave_w * old_spp).ceil() as usize;
                         let anchor = tab.view_offset.saturating_add((t * vis as f32) as usize).min(tab.samples_len);
-                        tab.samples_per_px = (old_spp * factor).clamp(0.1, 64.0);
+                        // Dynamic clamp: allow full zoom-out to "fit whole"
+                        let min_spp = 0.01; // 100 px per sample
+                        let max_spp_fit = (tab.samples_len as f32 / wave_w.max(1.0)).max(min_spp);
+                        tab.samples_per_px = (old_spp * factor).clamp(min_spp, max_spp_fit);
                         let vis2 = (wave_w * tab.samples_per_px).ceil() as usize;
                         let left = anchor.saturating_sub((t * vis2 as f32) as usize);
                         let max_left = tab.samples_len.saturating_sub(vis2);
                         tab.view_offset = left.min(max_left);
                     }
-                    // Pan with Shift + wheel
-                    // Prefer horizontal wheel for pan if available; fall back to vertical
+                    // Pan with Shift + wheel (prefer horizontal wheel if available)
                     let scroll_for_pan = if wheel.x.abs() > 0.0 { wheel.x } else { wheel.y };
                     if modifiers.shift && scroll_for_pan.abs() > 0.0 && tab.samples_len > 0 {
                         let delta_px = -scroll_for_pan.signum() * 60.0; // a page step
@@ -440,9 +501,30 @@ impl eframe::App for WavesPreviewer {
                         if off as usize > max_left { off = max_left as isize; }
                         tab.view_offset = off as usize;
                     }
+                    // Pan with Middle / Right drag, or Alt + Left drag (DAW-like)
+                    let (left_down, mid_down, right_down, alt_mod) = ui.input(|i| (
+                        i.pointer.button_down(egui::PointerButton::Primary),
+                        i.pointer.button_down(egui::PointerButton::Middle),
+                        i.pointer.button_down(egui::PointerButton::Secondary),
+                        i.modifiers.alt,
+                    ));
+                    let alt_left_pan = alt_mod && left_down;
+                    if (mid_down || right_down || alt_left_pan) && tab.samples_len > 0 {
+                        let dx = ui.input(|i| i.pointer.delta().x);
+                        if dx.abs() > 0.0 {
+                            let delta = (-dx * tab.samples_per_px) as isize;
+                            let mut off = tab.view_offset as isize + delta;
+                            let vis = (wave_w * tab.samples_per_px).ceil() as usize;
+                            let max_left = tab.samples_len.saturating_sub(vis);
+                            if off < 0 { off = 0; }
+                            if off as usize > max_left { off = max_left as isize; }
+                            tab.view_offset = off as usize;
+                        }
+                    }
                 }
-                // Seek by click/drag (primary button)
-                if resp.clicked() || resp.dragged() {
+                // Seek by primary click/drag only (Left button), unless Alt is held (Alt+LeftDrag = pan)
+                let alt_now = ui.input(|i| i.modifiers.alt);
+                if !alt_now && (resp.clicked_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Primary)) {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let x = pos.x.clamp(wave_left, wave_left + wave_w);
                         let t = ((x - wave_left) / wave_w).clamp(0.0, 1.0);
@@ -473,21 +555,66 @@ impl eframe::App for WavesPreviewer {
 
                     // visible range
                     let spp = tab.samples_per_px.max(0.0001);
-                    let vis = (wave_w * spp).ceil() as usize;
+                    let vis = (wave_w * spp).ceil() as usize; // samples in view
                     let start = tab.view_offset.min(tab.samples_len);
                     let end = (start + vis).min(tab.samples_len);
-                    let bins = wave_w as usize;
-                    if bins > 0 && end > start {
-                        let mut tmp = Vec::new();
-                        build_minmax(&mut tmp, &ch[start..end], bins);
-                        let n = tmp.len().max(1) as f32;
-                        for (idx, &(mn, mx)) in tmp.iter().enumerate() {
-                            let x = lane_rect.left() + (idx as f32 / n) * wave_w;
-                            let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
-                            let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
-                            let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
-                            let col = amp_to_color(amp);
-                            painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col));
+                    let visible_len = end.saturating_sub(start);
+                    if visible_len > 0 {
+                        // Two rendering paths depending on zoom level:
+                        // - Aggregated min/max bins for spp >= 1.0 (>= 1 sample per pixel)
+                        // - Direct per-sample polyline/stem for spp < 1.0 (< 1 sample per pixel)
+                        if spp >= 1.0 {
+                            let bins = wave_w as usize; // one bin per pixel
+                            if bins > 0 {
+                                let mut tmp = Vec::new();
+                                build_minmax(&mut tmp, &ch[start..end], bins);
+                                let n = tmp.len().max(1) as f32;
+                                for (idx, &(mn, mx)) in tmp.iter().enumerate() {
+                                    let x = lane_rect.left() + (idx as f32 / n) * wave_w;
+                                    let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                                    let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                    let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
+                                    let col = amp_to_color(amp);
+                                    painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col));
+                                }
+                            }
+                        } else {
+                            // Fine zoom: draw per-sample. When there are fewer samples than pixels,
+                            // distribute samples evenly across the available width and connect them.
+                            let scale_y = lane_rect.height() * 0.48;
+                            if visible_len == 1 {
+                                let sx = lane_rect.left() + wave_w * 0.5;
+                                let v = ch[start];
+                                let sy = lane_rect.center().y - v * scale_y;
+                                let col = amp_to_color(v.abs().clamp(0.0, 1.0));
+                                painter.circle_filled(egui::pos2(sx, sy), 2.0, col);
+                            } else {
+                                let denom = (visible_len - 1) as f32;
+                                let mut last: Option<(f32, f32, egui::Color32)> = None;
+                                for (i, &v) in ch[start..end].iter().enumerate() {
+                                    let t = (i as f32) / denom;
+                                    let sx = lane_rect.left() + t * wave_w;
+                                    let sy = lane_rect.center().y - v * scale_y;
+                                    let col = amp_to_color(v.abs().clamp(0.0, 1.0));
+                                    if let Some((px, py, pc)) = last {
+                                        // Use previous color to avoid color flicker between segments
+                                        painter.line_segment([egui::pos2(px, py), egui::pos2(sx, sy)], egui::Stroke::new(1.0, pc));
+                                    }
+                                    last = Some((sx, sy, col));
+                                }
+                                // Optionally draw stems for clarity when pixels-per-sample is large
+                                let pps = 1.0 / spp; // pixels per sample
+                                if pps >= 6.0 {
+                                    for (i, &v) in ch[start..end].iter().enumerate() {
+                                        let t = (i as f32) / denom;
+                                        let sx = lane_rect.left() + t * wave_w;
+                                        let sy = lane_rect.center().y - v * scale_y;
+                                        let base = lane_rect.center().y;
+                                        let col = amp_to_color(v.abs().clamp(0.0, 1.0));
+                                        painter.line_segment([egui::pos2(sx, base), egui::pos2(sx, sy)], egui::Stroke::new(1.0, col));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -500,6 +627,13 @@ impl eframe::App for WavesPreviewer {
                         let spp = tab.samples_per_px.max(0.0001);
                         let x = wave_left + ((pos.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w);
                         painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0, Color32::from_rgb(70,140,255)));
+                        // Playhead time label
+                        let sr_f = self.audio.shared.out_sample_rate.max(1) as f32;
+                        let pos_time = (pos as f32) / sr_f;
+                        let label = crate::app::helpers::format_time_s(pos_time);
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        let text_pos = egui::pos2(x + 6.0, rect.top() + 2.0);
+                        painter.text(text_pos, egui::Align2::LEFT_TOP, label, fid, Color32::from_rgb(180, 200, 220));
                     }
                 }
             } else {
