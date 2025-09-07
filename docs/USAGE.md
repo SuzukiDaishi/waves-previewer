@@ -18,6 +18,27 @@ Notes
 
 For details of the upcoming editor features (multichannel, dB grid, seek, zoom), see `docs/EDITOR_SPEC.md`.
 
+## Top Menu: "Export"
+
+- Save Selected (Ctrl+S)
+  - Apply pending Gain (dB) to selected files and save.
+  - Output mode (Overwrite / New File) follows Settings.
+- Apply Gains (new files)
+  - Create new WAV files next to the sources for all files with pending Gain edits.
+  - File name format: `<name> (gain+X.YdB).wav`.
+- Clear All Gains
+  - Discard all pending Gain edits.
+- Settings…
+  - Save Mode: Overwrite / New File
+  - Destination Folder (for New File): choose or use source folder
+  - Name Template: tokens `{name}`, `{gain}`, `{gain:+0.0}`, `{gain:+.1}`
+  - On Conflict: Rename / Overwrite / Skip
+  - Overwrite: create `.wav.bak` backup (optional)
+
+Notes
+- The list shows an "Unsaved Gains: N" counter in the top bar.
+- Rows with pending Gain display a trailing " •" marker after the file name.
+
 ## Drag & Drop
 
 - Dropping files or folders onto the window adds them to the list (WAV only).
@@ -34,6 +55,7 @@ For details of the upcoming editor features (multichannel, dB grid, seek, zoom),
 
 - Space: Play/Pause
 - L: Toggle Loop (editor tab)
+- Ctrl+S: Save Selected (apply Gain)
 - Arrow Up/Down: Move selection in list
 - Enter: Open selected file in editor tab
 

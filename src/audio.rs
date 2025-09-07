@@ -8,6 +8,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 pub struct SharedAudio {
     pub samples: ArcSwapOption<Vec<f32>>,        // mono samples in [-1, 1]
     pub vol: AtomicF32,                          // 0.0..1.0 linear gain
+    pub file_gain: AtomicF32,                    // per-file gain factor (can be > 1.0)
     pub playing: std::sync::atomic::AtomicBool,
     pub play_pos: std::sync::atomic::AtomicUsize,
     pub play_pos_f: AtomicF32,                   // fractional position for rate control
@@ -38,6 +39,7 @@ impl AudioEngine {
         let shared = Arc::new(SharedAudio {
             samples: ArcSwapOption::from(None),
             vol: AtomicF32::new(1.0),
+            file_gain: AtomicF32::new(1.0),
             playing: std::sync::atomic::AtomicBool::new(false),
             play_pos: std::sync::atomic::AtomicUsize::new(0),
             play_pos_f: AtomicF32::new(0.0),
@@ -74,7 +76,8 @@ impl AudioEngine {
                 let mut n = 0usize;
                 let maybe_samples = shared.samples.load();
                 let playing = shared.playing.load(std::sync::atomic::Ordering::Relaxed);
-                let vol = shared.vol.load(std::sync::atomic::Ordering::Relaxed);
+                let vol = shared.vol.load(std::sync::atomic::Ordering::Relaxed)
+                    * shared.file_gain.load(std::sync::atomic::Ordering::Relaxed);
                 let rate = shared.rate.load(std::sync::atomic::Ordering::Relaxed).clamp(0.25, 4.0);
                 let looping = shared.loop_enabled.load(std::sync::atomic::Ordering::Relaxed);
                 let loop_start = shared.loop_start.load(std::sync::atomic::Ordering::Relaxed);
@@ -158,6 +161,12 @@ impl AudioEngine {
 
     pub fn set_volume(&self, v: f32) {
         self.shared.vol.store(v.clamp(0.0, 1.0), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn set_file_gain(&self, g: f32) {
+        // allow >1.0 (up to, say, 16x = +24dB). Clamp to a reasonable upper bound.
+        let g = g.clamp(0.0, 16.0);
+        self.shared.file_gain.store(g, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn toggle_play(&self) {

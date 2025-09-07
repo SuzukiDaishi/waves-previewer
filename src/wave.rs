@@ -163,3 +163,56 @@ pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: 
     }
     out
 }
+
+// Export: apply gain to source WAV and write to a new file (preserve channels & sample_rate).
+pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    let (mut chans, in_sr) = decode_wav_multi(src)?;
+    let g = 10.0f32.powf(gain_db / 20.0);
+    for c in chans.iter_mut() { for v in c.iter_mut() { *v = (*v * g).clamp(-1.0, 1.0); } }
+    // Try to preserve original bit depth and format if possible
+    let spec = hound::WavReader::open(src)?.spec();
+    let mut writer = hound::WavWriter::create(dst, hound::WavSpec{
+        channels: spec.channels,
+        sample_rate: in_sr,
+        bits_per_sample: spec.bits_per_sample,
+        sample_format: spec.sample_format,
+    })?;
+    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            for i in 0..frames { for ch in 0..(spec.channels as usize) { let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0); writer.write_sample::<f32>(s)?; } }
+        }
+        hound::SampleFormat::Int => {
+            let max_abs = match spec.bits_per_sample { 8 => 127.0, 16 => 32767.0, 24 => 8_388_607.0, 32 => 2_147_483_647.0, b => ((1u64 << (b - 1)) - 1) as f64 as f32 };
+            for i in 0..frames {
+                for ch in 0..(spec.channels as usize) {
+                    let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
+                    let v = (s * max_abs).round().clamp(-(max_abs), max_abs) as i32;
+                    writer.write_sample::<i32>(v)?;
+                }
+            }
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+
+// Overwrite: apply gain and replace the source file safely with optional .bak
+pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> {
+    use std::fs;
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join("._wvp_tmp.wav");
+    if tmp.exists() { let _ = fs::remove_file(&tmp); }
+    export_gain_wav(src, &tmp, gain_db)?;
+    if backup {
+        // backup as "<original>.wav.bak"
+        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup.wav");
+        let bak = src.with_file_name(format!("{}.bak", fname));
+        let _ = fs::remove_file(&bak);
+        let _ = fs::copy(src, &bak);
+    }
+    let _ = fs::remove_file(src);
+    fs::rename(&tmp, src)?;
+    Ok(())
+}

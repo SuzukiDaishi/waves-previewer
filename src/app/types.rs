@@ -18,8 +18,11 @@ pub struct EditorTab {
     pub samples_len: usize,        // length in samples
     pub view_offset: usize,        // first visible sample index
     pub samples_per_px: f32,       // time zoom: samples per pixel
+    pub dirty: bool,               // unsaved edits exist
+    pub ops: Vec<EditOp>,          // non-destructive operations (skeleton)
 }
 
+#[derive(Clone)]
 pub struct FileMeta {
     pub channels: u16,
     pub sample_rate: u32,
@@ -41,3 +44,39 @@ pub struct ProcessingResult {
     pub waveform: Vec<(f32, f32)>,
 }
 
+// --- Editing skeleton ---
+
+pub enum EditOp {
+    GainDb(f32),
+    Trim { start: usize, end: usize },
+    FadeIn { samples: usize },
+    FadeOut { samples: usize },
+}
+
+pub struct ExportState {
+    pub msg: String,
+    pub rx: std::sync::mpsc::Receiver<ExportResult>,
+}
+
+pub struct ExportResult {
+    pub ok: usize,
+    pub failed: usize,
+    pub success_paths: Vec<PathBuf>,
+    pub failed_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SaveMode { Overwrite, NewFile }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConflictPolicy { Rename, Overwrite, Skip }
+
+#[derive(Clone)]
+pub struct ExportConfig {
+    pub first_prompt: bool,
+    pub save_mode: SaveMode,
+    pub dest_folder: Option<PathBuf>,
+    pub name_template: String, // tokens: {name}, {gain:+0.0}
+    pub conflict: ConflictPolicy,
+    pub backup_bak: bool,
+}

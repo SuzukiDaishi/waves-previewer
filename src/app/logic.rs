@@ -8,6 +8,28 @@ use super::meta::spawn_meta_worker;
 use super::types::{EditorTab, ProcessingResult, ProcessingState, RateMode, SortDir, SortKey};
 
 impl super::WavesPreviewer {
+    // multi-select aware selection update for list clicks (moved from app.rs)
+    pub(super) fn update_selection_on_click(&mut self, row_idx: usize, mods: egui::Modifiers) {
+        let len = self.files.len();
+        if row_idx >= len { return; }
+        if mods.shift {
+            let anchor = self.select_anchor.or(self.selected).unwrap_or(row_idx);
+            let (a,b) = if anchor <= row_idx { (anchor, row_idx) } else { (row_idx, anchor) };
+            self.selected_multi.clear();
+            for i in a..=b { self.selected_multi.insert(i); }
+            self.selected = Some(row_idx);
+            self.select_anchor = Some(anchor);
+        } else if mods.ctrl || mods.command {
+            if self.selected_multi.contains(&row_idx) { self.selected_multi.remove(&row_idx); } else { self.selected_multi.insert(row_idx); }
+            self.selected = Some(row_idx);
+            if self.select_anchor.is_none() { self.select_anchor = Some(row_idx); }
+        } else {
+            self.selected_multi.clear();
+            self.selected_multi.insert(row_idx);
+            self.selected = Some(row_idx);
+            self.select_anchor = Some(row_idx);
+        }
+    }
     /// Select a row and load audio buffer accordingly.
     /// Used when any cell in the row is clicked so Space can play immediately.
     pub(super) fn select_and_load(&mut self, row_idx: usize) {
@@ -15,6 +37,8 @@ impl super::WavesPreviewer {
         self.selected = Some(row_idx);
         self.scroll_to_selected = true;
         let p_owned = self.files[row_idx].clone();
+        // record as current playing target
+        self.playing_path = Some(p_owned.clone());
         // リスト表示時は常にループを無効にする
         self.audio.set_loop_enabled(false);
         match self.mode {
@@ -27,6 +51,8 @@ impl super::WavesPreviewer {
                 self.spawn_heavy_processing(&p_owned);
             }
         }
+        // apply effective volume including per-file gain
+        self.apply_effective_volume();
     }
     pub fn rescan(&mut self) {
         self.files.clear();
@@ -68,8 +94,9 @@ impl super::WavesPreviewer {
                 let (mut chs, in_sr) = match crate::wave::decode_wav_multi(path) { Ok(v) => v, Err(_) => (Vec::new(), self.audio.shared.out_sample_rate) };
                 if in_sr != self.audio.shared.out_sample_rate { for c in chs.iter_mut() { *c = crate::wave::resample_linear(c, in_sr, self.audio.shared.out_sample_rate); } }
                 let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: wf, loop_enabled: false, ch_samples: chs, samples_len, view_offset: 0, samples_per_px: 0.0 });
+                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: wf, loop_enabled: false, ch_samples: chs, samples_len, view_offset: 0, samples_per_px: 0.0, dirty: false, ops: Vec::new() });
                 self.active_tab = Some(self.tabs.len() - 1);
+                self.playing_path = Some(path.to_path_buf());
             }
             _ => {
                 // Heavy: create tab immediately with empty waveform, then spawn processing
@@ -78,9 +105,10 @@ impl super::WavesPreviewer {
                 let (mut chs, in_sr) = match crate::wave::decode_wav_multi(path) { Ok(v) => v, Err(_) => (Vec::new(), self.audio.shared.out_sample_rate) };
                 if in_sr != self.audio.shared.out_sample_rate { for c in chs.iter_mut() { *c = crate::wave::resample_linear(c, in_sr, self.audio.shared.out_sample_rate); } }
                 let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: Vec::new(), loop_enabled: false, ch_samples: chs, samples_len, view_offset: 0, samples_per_px: 0.0 });
+                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: Vec::new(), loop_enabled: false, ch_samples: chs, samples_len, view_offset: 0, samples_per_px: 0.0, dirty: false, ops: Vec::new() });
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.spawn_heavy_processing(path);
+                self.playing_path = Some(path.to_path_buf());
             }
         }
     }

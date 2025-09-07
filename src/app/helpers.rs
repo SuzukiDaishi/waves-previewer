@@ -139,3 +139,27 @@ pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::R
         Ok(())
     }
 }
+
+
+// Sanitize a filename component for Windows: replace forbidden chars
+// For simplicity, we replace <>:"/\|?* with '_' and trim trailing dots/spaces.
+// Also avoid reserved names like CON, PRN, AUX, NUL, COM1..COM9, LPT1..LPT9 by appending '_'.
+pub fn sanitize_filename_component(name: &str) -> String {
+    // Replace forbidden characters using a raw string
+    let forbidden: &str = r#"<>:"/\|?*"#;
+    let mut s: String = name
+        .chars()
+        .map(|c| if forbidden.contains(c) { '_' } else { c })
+        .collect();
+    // Trim trailing dots/spaces
+    while s.ends_with('.') || s.ends_with(' ') { s.pop(); }
+    if s.is_empty() { s = "untitled".to_string(); }
+    // Avoid reserved names
+    let upper = s.to_ascii_uppercase();
+    const RESERVED: &[&str] = &[
+        "CON","PRN","AUX","NUL","COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9",
+        "LPT1","LPT2","LPT3","LPT4","LPT5","LPT6","LPT7","LPT8","LPT9",
+    ];
+    if RESERVED.contains(&upper.as_str()) { s.push('_'); }
+    s
+}

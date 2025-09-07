@@ -21,6 +21,18 @@
   - デコード/リサンプル/波形(min/max)作成。`prepare_for_playback` で「再生準備＋波形作成」を一括で実行。
   - PitchShift/TimeStretch では `signalsmith-stretch` を用いたオフライン処理を実施。出力レイテンシ（`output_latency()`）と `flush()` 分を考慮して末尾欠けを防止。
 
+## Export / Save（Gain 適用）
+
+- モデル
+  - リスト上で per-file の保留中ゲイン（`pending_gains: HashMap<PathBuf, f32>`）を保持。
+  - 上部バーに未保存件数（Unsaved Gains: N）を表示。ファイル名末尾に " •" を付与して視覚化。
+- 実装
+  - `Export` メニューから実行。`Save Selected (Ctrl+S)` は選択行に対して保存、`Apply Gains (new files)` は全保留を新規ファイルで一括出力。
+  - 書き出しは別スレッドで実行（`std::thread` + `mpsc`）。結果（成功/失敗と新規パス）を UI が受信。
+  - Overwrite 時は `overwrite_gain_wav()`、新規作成は `export_gain_wav()` を使用。元のビット深度/フォーマットを可能な限り保持。
+  - 設定（`ExportConfig`）: Save Mode（Overwrite/New File）、出力先、ファイル名テンプレート、衝突時の挙動（Rename/Overwrite/Skip）、`.wav.bak` バックアップ。
+  - 保存成功後は `pending_gains` を該当ファイルからクリアし、必要に応じて一覧へ追加/再スキャン。
+
 ## データフロー
 
 1) リストでファイル（行）をクリック
@@ -29,6 +41,11 @@
 4) UI は別途、モノ元データから min/max 波形を作成してエディタに描画
 5) コールバック内で短時間 RMS を計算→UI に dBFS 表示。再生速度は `rate` に応じて小数ステップで進める
 6) PitchShift/TimeStretch の場合は別スレッドで処理→完了通知を受けて再生バッファと波形を差し替え（UI は処理中オーバーレイを表示）
+
+7) Gain 保存フロー（Export）
+ - リストの Gain 列で per-file のゲイン（dB）を編集 → `pending_gains` に反映
+ - `Export` メニューから保存を起動（`Save Selected` または `Apply Gains (new files)`）
+ - バックグラウンドで WAV を書き出し（Overwrite/New File）。結果を UI が受信し、`pending_gains` をクリア／一覧を更新
 
 ## エディタのインタラクション（実装済み）
 - クリック/ドラッグでシーク（スクラブ）。再生状態は維持。

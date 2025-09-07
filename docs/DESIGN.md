@@ -29,7 +29,7 @@
   - 小幅時は横並びから折り返して2段表示（`horizontal_wrapped`）。
 
 - リスト画面（既定）
-  - 列: File | Folder | Length | Ch | SR | Bits | Level(dBFS) | Wave
+  - 列: File | Folder | Length | Ch | SR | Bits | Level(dBFS) | Gain(dB) | Wave
     - 全列でリサイズ可能、長いテキストは自動切り詰め（...）＋ホバーで全文表示
     - Length 列は時間（mm:ss）表示、ソート時は秒数で比較
   - 行クリック: 選択＋音声ロード（Space ですぐ再生可）
