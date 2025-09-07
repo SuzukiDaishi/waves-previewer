@@ -223,8 +223,16 @@ impl super::WavesPreviewer {
                                                      self.meta.get(b).map(|m| m.sample_rate as f32).unwrap_or(0.0)),
                     SortKey::Bits => num_order(self.meta.get(a).map(|m| m.bits_per_sample as f32).unwrap_or(0.0),
                                                self.meta.get(b).map(|m| m.bits_per_sample as f32).unwrap_or(0.0)),
-                    SortKey::Level => num_order(self.meta.get(a).and_then(|m| m.rms_db).unwrap_or(f32::NEG_INFINITY),
-                                                self.meta.get(b).and_then(|m| m.rms_db).unwrap_or(f32::NEG_INFINITY)),
+                    SortKey::Level => num_order(self.meta.get(a).and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
+                                                self.meta.get(b).and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY)),
+                    // LUFS sorting uses effective value: override if present, else base + gain
+                    SortKey::Lufs => {
+                        let ga = *self.pending_gains.get(a).unwrap_or(&0.0);
+                        let gb = *self.pending_gains.get(b).unwrap_or(&0.0);
+                        let va = if let Some(v) = self.lufs_override.get(a) { *v } else { self.meta.get(a).and_then(|m| m.lufs_i.map(|x| x + ga)).unwrap_or(f32::NEG_INFINITY) };
+                        let vb = if let Some(v) = self.lufs_override.get(b) { *v } else { self.meta.get(b).and_then(|m| m.lufs_i.map(|x| x + gb)).unwrap_or(f32::NEG_INFINITY) };
+                        num_order(va, vb)
+                    }
                 };
                 match dir { SortDir::Asc => ord, SortDir::Desc => ord.reverse(), SortDir::None => Ordering::Equal }
             });

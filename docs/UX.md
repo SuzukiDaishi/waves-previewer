@@ -11,8 +11,8 @@
 - 列はリサイズ可。Wave 列を広げると、サムネの縦サイズも幅に比例して大きくなる。
   - `thumb_h ≒ available_width * 0.22` を目安。
   - 行高は 1 フレーム遅延で更新（先頭行の計測値を `wave_row_h` に保存）。
-- dBFS 列は背景を値で着色。パレットを増やし、静音=黒 → 深青 → 青 → シアン/緑 → 黄 → 橙 → 赤 と段階的に変化。
-- 列: File | Folder | Length | Ch | SR | Bits | Level(dBFS) | Gain(dB) | Wave。
+- dBFS(Peak) と LUFS(I) は背景を値で着色（静音=黒 → 深青 → 青 → シアン/緑 → 黄 → 橙 → 赤）。
+- 列: File | Folder | Length | Ch | SR | Bits | dBFS (Peak) | LUFS (I) | Gain(dB) | Wave。
 - ヘッダクリックで並び替え（文字列はUTF順、数値は大小順）。同じヘッダを再クリックで「昇順→降順→元の順」の三段階トグル。
 - 上部バー: 総数表示（例: `Files: 123`／読み込み中は `⏳` 表示）、音量、Mode（Speed/Pitch/Stretch）セグメント、各モードの数値（小型ステッパ: DragValue）、検索バー、dBFS メータ、再生ボタン、未保存ゲイン件数（Unsaved Gains: N）。
   - Speed/Stretch: 0.25〜4.0 の倍率、2桁小数、`x` サフィックス。
@@ -96,3 +96,4 @@ This section documents the planned UX for the editor view update. Goals: read‑
   - If needed, introduce simple caches (by zoom scale and range) or prebuilt multi‑scale min/max (mip‑style).
 
 This UX keeps editing fast on large lists, while making per‑file inspection substantially clearer and more precise.
+- 波形表示は Volume の影響を受けません（常に 0 dB として描画）。Gain(dB) のみ視覚反映します。

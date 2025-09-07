@@ -55,6 +55,7 @@ Notes
 
 - Space: Play/Pause
 - L: Toggle Loop (editor tab)
+- Ctrl+A: Select all in list
 - Ctrl+S: Save Selected (apply Gain)
 - Arrow Up/Down: Move selection in list
 - Enter: Open selected file in editor tab

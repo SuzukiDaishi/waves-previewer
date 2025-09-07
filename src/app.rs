@@ -18,7 +18,7 @@ use self::{types::*, helpers::*};
 
 // moved to types.rs
 
-pub struct WavesPreviewer {
+    pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
     pub files: Vec<PathBuf>,
@@ -61,9 +61,15 @@ pub struct WavesPreviewer {
     export_cfg: ExportConfig,
     show_export_settings: bool,
     show_first_save_prompt: bool,
-    saving_sources: Vec<PathBuf>,
-    saving_mode: Option<SaveMode>,
-}
+        saving_sources: Vec<PathBuf>,
+        saving_mode: Option<SaveMode>,
+
+        // LUFS with Gain recompute support
+        lufs_override: HashMap<PathBuf, f32>,
+        lufs_recalc_deadline: HashMap<PathBuf, std::time::Instant>,
+        lufs_rx2: Option<std::sync::mpsc::Receiver<(PathBuf, f32)>>,
+        lufs_worker_busy: bool,
+    }
 
 impl WavesPreviewer {
     fn current_active_path(&self) -> Option<&PathBuf> {
@@ -186,9 +192,17 @@ impl WavesPreviewer {
                 let new = Self::clamp_gain_db(cur + delta_db);
                 if new == 0.0 { self.pending_gains.remove(&p); } else { self.pending_gains.insert(p.clone(), new); }
                 if self.playing_path.as_ref() == Some(&p) { affect_playing = true; }
+                // schedule LUFS recompute for each affected path
+                self.schedule_lufs_for_path(p.clone());
             }
         }
         if affect_playing { self.apply_effective_volume(); }
+    }
+
+    fn schedule_lufs_for_path(&mut self, path: PathBuf) {
+        use std::time::{Duration, Instant};
+        let dl = Instant::now() + Duration::from_millis(400);
+        self.lufs_recalc_deadline.insert(path, dl);
     }
 }
 // moved to types.rs
@@ -261,6 +275,11 @@ impl WavesPreviewer {
             saving_sources: Vec::new(),
             saving_mode: None,
 
+            lufs_override: HashMap::new(),
+            lufs_recalc_deadline: HashMap::new(),
+            lufs_rx2: None,
+            lufs_worker_busy: false,
+
         })
     }
 
@@ -282,7 +301,7 @@ impl eframe::App for WavesPreviewer {
             if let Ok(res) = state.rx.try_recv() {
                 eprintln!("save/export done: ok={}, failed={}", res.ok, res.failed);
                 if state.msg.starts_with("Saving") {
-                    for p in &self.saving_sources { self.pending_gains.remove(p); }
+                    for p in &self.saving_sources { self.pending_gains.remove(p); self.lufs_override.remove(p); }
                     match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                         SaveMode::Overwrite => {
                             if !self.saving_sources.is_empty() { self.meta_rx = Some(meta::spawn_meta_worker(self.saving_sources.clone())); }
@@ -301,6 +320,38 @@ impl eframe::App for WavesPreviewer {
                 }
                 self.export_state = None;
                 ctx.request_repaint();
+            }
+        }
+
+        // Drain LUFS (with gain) recompute results
+        let mut got_any = false;
+        if let Some(rx) = &self.lufs_rx2 {
+            while let Ok((p, v)) = rx.try_recv() { self.lufs_override.insert(p, v); got_any = true; }
+        }
+        if got_any { self.lufs_worker_busy = false; }
+
+        // Pump LUFS recompute worker (debounced)
+        if !self.lufs_worker_busy {
+            let now = std::time::Instant::now();
+            if let Some(path) = self.lufs_recalc_deadline.iter().find(|(_, dl)| **dl <= now).map(|(p, _)| p.clone()) {
+                self.lufs_recalc_deadline.remove(&path);
+                let g_db = *self.pending_gains.get(&path).unwrap_or(&0.0);
+                if g_db.abs() < 0.0001 { self.lufs_override.remove(&path); }
+                else {
+                    use std::sync::mpsc; let (tx, rx) = mpsc::channel();
+                    self.lufs_rx2 = Some(rx);
+                    self.lufs_worker_busy = true;
+                    std::thread::spawn(move || {
+                        let res = (|| -> anyhow::Result<f32> {
+                            let (mut chans, sr) = crate::wave::decode_wav_multi(&path)?;
+                            let gain = 10.0f32.powf(g_db/20.0);
+                            for ch in chans.iter_mut() { for v in ch.iter_mut() { *v *= gain; } }
+                            crate::wave::lufs_integrated_from_multi(&chans, sr)
+                        })();
+                        let val = match res { Ok(v) => v, Err(_) => f32::NEG_INFINITY };
+                        let _=tx.send((path, val));
+                    });
+                }
             }
         }
 
@@ -357,6 +408,15 @@ impl eframe::App for WavesPreviewer {
             let mut changed = false;
             let len = self.files.len();
             if len > 0 {
+                // Ctrl/Cmd + A: select all in list
+                if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::A)) {
+                    self.selected_multi.clear();
+                    for i in 0..len { self.selected_multi.insert(i); }
+                    self.selected = Some(0);
+                    self.select_anchor = Some(0);
+                    self.scroll_to_selected = true;
+                    changed = true;
+                }
                 // Up/Down: move selection; with Shift extend range from anchor
                 let mut moved: Option<usize> = None;
                 if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
@@ -807,6 +867,7 @@ impl eframe::App for WavesPreviewer {
                     .column(egui_extras::Column::initial(70.0).resizable(true))      // SampleRate (resizable)
                     .column(egui_extras::Column::initial(50.0).resizable(true))      // Bits (resizable)
                     .column(egui_extras::Column::initial(90.0).resizable(true))      // Level (original)
+                    .column(egui_extras::Column::initial(90.0).resizable(true))      // LUFS (Integrated)
                     .column(egui_extras::Column::initial(80.0).resizable(true))      // Gain (editable)
                     .column(egui_extras::Column::initial(150.0).resizable(true))     // Wave (resizable)
                     .column(egui_extras::Column::remainder())                        // Spacer (fills remainder)
@@ -819,7 +880,8 @@ impl eframe::App for WavesPreviewer {
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Ch", &mut self.sort_key, &mut self.sort_dir, SortKey::Channels, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "SR", &mut self.sort_key, &mut self.sort_dir, SortKey::SampleRate, true); });
                     header.col(|ui| { sort_changed |= sortable_header(ui, "Bits", &mut self.sort_key, &mut self.sort_dir, SortKey::Bits, true); });
-                    header.col(|ui| { sort_changed |= sortable_header(ui, "Level (dBFS)", &mut self.sort_key, &mut self.sort_dir, SortKey::Level, false); });
+                    header.col(|ui| { sort_changed |= sortable_header(ui, "dBFS (Peak)", &mut self.sort_key, &mut self.sort_dir, SortKey::Level, false); });
+                    header.col(|ui| { sort_changed |= sortable_header(ui, "LUFS (I)", &mut self.sort_key, &mut self.sort_dir, SortKey::Lufs, false); });
                     header.col(|ui| { ui.label(RichText::new("Gain (dB)").strong()); });
                     header.col(|ui| { ui.label(RichText::new("Wave").strong()); });
                     header.col(|_ui| { /* spacer */ });
@@ -846,7 +908,7 @@ impl eframe::App for WavesPreviewer {
                             if !self.meta.contains_key(&path_owned) {
                                 if let Ok(reader) = hound::WavReader::open(&path_owned) {
                                     let spec = reader.spec();
-                                    self.meta.insert(path_owned.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, duration_secs: None, rms_db: None, thumb: Vec::new() });
+                                    self.meta.insert(path_owned.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, duration_secs: None, rms_db: None, peak_db: None, lufs_i: None, thumb: Vec::new() });
                                 }
                             }
                             let meta = self.meta.get(&path_owned).cloned();
@@ -929,11 +991,11 @@ impl eframe::App for WavesPreviewer {
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if resp.clicked() { clicked_to_load = true; }
                             });
-                            // col 6: Level (dBFS) with Gain反映（Volumeは含めない）- clickable
+                            // col 6: dBFS (Peak) with Gain反映（Volumeは含めない）- clickable
                             row.col(|ui| {
                                 let (rect2, resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::click());
                                 let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
-                                let orig = meta.as_ref().and_then(|m| m.rms_db);
+                                let orig = meta.as_ref().and_then(|m| m.peak_db);
                                 let adj = orig.map(|db| db + gain_db);
                                 if let Some(db) = adj { ui.painter().rect_filled(rect2, 4.0, db_to_color(db)); }
                                 let text = adj.map(|db| format!("{:.1}", db)).unwrap_or_else(|| "...".into());
@@ -942,7 +1004,19 @@ impl eframe::App for WavesPreviewer {
                                 if resp2.clicked() { clicked_to_load = true; }
                                 // (optional tooltip removed to avoid borrow and unused warnings)
                             });
-                            // col 7: Gain (dB) editable
+                            // col 7: LUFS (Integrated) with background color (same palette as dBFS)
+                            row.col(|ui| {
+                                let base = meta.as_ref().and_then(|m| m.lufs_i);
+                                let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
+                                let eff = if let Some(v) = self.lufs_override.get(&path_owned) { Some(*v) } else { base.map(|v| v + gain_db) };
+                                let (rect2, resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::click());
+                                if let Some(db) = eff { ui.painter().rect_filled(rect2, 4.0, db_to_color(db)); }
+                                let text = eff.map(|v| format!("{:.1}", v)).unwrap_or_else(|| "...".into());
+                                let fid = TextStyle::Monospace.resolve(ui.style());
+                                ui.painter().text(rect2.center(), egui::Align2::CENTER_CENTER, text, fid, Color32::WHITE);
+                                if resp2.clicked() { clicked_to_load = true; }
+                            });
+                            // col 8: Gain (dB) editable
                             row.col(|ui| {
                                 let old = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
                                 let mut g = old;
@@ -963,9 +1037,11 @@ impl eframe::App for WavesPreviewer {
                                         if new == 0.0 { self.pending_gains.remove(&path_owned); } else { self.pending_gains.insert(path_owned.clone(), new); }
                                         if self.playing_path.as_ref() == Some(&path_owned) { self.apply_effective_volume(); }
                                     }
+                                    // schedule LUFS recompute (debounced)
+                                    self.schedule_lufs_for_path(path_owned.clone());
                                 }
                             });
-                            // col 8: Wave thumbnail - clickable
+                            // col 9: Wave thumbnail - clickable
                             row.col(|ui| {
                                 let desired_w = ui.available_width().max(80.0);
                                 let thumb_h = (desired_w * 0.22).clamp(text_height * 1.2, text_height * 4.0);
@@ -983,7 +1059,7 @@ impl eframe::App for WavesPreviewer {
                                         painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col)); } }
                                 if rect.clicked() { clicked_to_load = true; }
                             });
-                            // col 9: Spacer (fills remainder so scrollbar stays at right edge)
+                            // col 10: Spacer (fills remainder so scrollbar stays at right edge)
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); });
 
                             // Row-level click handling (background/any non-interactive area)
@@ -1006,6 +1082,7 @@ impl eframe::App for WavesPreviewer {
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // SR
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Bits
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Level
+                            row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // LUFS
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Gain
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Wave
                             row.col(|ui| { let _ = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::hover()); }); // Spacer

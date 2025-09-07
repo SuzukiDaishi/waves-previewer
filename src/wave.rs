@@ -216,3 +216,99 @@ pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> 
     fs::rename(&tmp, src)?;
     Ok(())
 }
+
+// ---- Loudness (LUFS) utilities ----
+
+// K-weighting biquad coefficients for fs=48kHz (BS.1770)
+const KW_B0_1: f32 = 1.5351249;
+const KW_B1_1: f32 = -2.6916962;
+const KW_B2_1: f32 = 1.1983929;
+const KW_A1_1: f32 = -1.6906593;
+const KW_A2_1: f32 = 0.73248076;
+
+const KW_B0_2: f32 = 1.0;
+const KW_B1_2: f32 = -2.0;
+const KW_B2_2: f32 = 1.0;
+const KW_A1_2: f32 = -1.9900475;
+const KW_A2_2: f32 = 0.99007225;
+
+const K_CONST: f32 = -0.691; // 997Hz calibration constant
+
+fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) {
+    let mut x1 = 0.0f32; let mut x2 = 0.0f32; let mut y1 = 0.0f32; let mut y2 = 0.0f32;
+    for n in 0..x.len() {
+        let xn = x[n];
+        let y = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x[n] = y;
+        x2 = x1; x1 = xn; y2 = y1; y1 = y;
+    }
+}
+
+fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
+    for ch in chans.iter_mut() {
+        biquad_inplace_f32(ch, KW_B0_1, KW_B1_1, KW_B2_1, KW_A1_1, KW_A2_1);
+        biquad_inplace_f32(ch, KW_B0_2, KW_B1_2, KW_B2_2, KW_A1_2, KW_A2_2);
+    }
+}
+
+fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
+    if in_sr == 48_000 { return (chans.to_vec(), in_sr); }
+    let mut out = Vec::with_capacity(chans.len());
+    for ch in chans {
+        out.push(resample_linear(ch, in_sr, 48_000));
+    }
+    (out, 48_000)
+}
+
+fn block_means_power(power: &[f32], win: usize, hop: usize) -> Vec<f64> {
+    if power.len() < win || win == 0 || hop == 0 { return Vec::new(); }
+    let mut cs = Vec::with_capacity(power.len() + 1);
+    cs.push(0.0f64);
+    let mut sum = 0.0f64;
+    for &v in power { sum += v as f64; cs.push(sum); }
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + win <= power.len() {
+        let s = cs[i + win] - cs[i];
+        out.push(s / (win as f64));
+        i += hop;
+    }
+    out
+}
+
+pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f32> {
+    if chans_in.is_empty() { anyhow::bail!("empty channels"); }
+    // Resample to 48k and copy
+    let (mut chans, sr) = ensure_sr_48k(chans_in, in_sr);
+    let _ = sr; // sr is 48k now
+    // K-weighting
+    k_weighting_apply_48k(&mut chans);
+    // Sum weighted power across channels (weights=1.0, LFE not identified here)
+    let n = chans[0].len();
+    let mut p_sum = vec![0.0f32; n];
+    for ch in &chans { for i in 0..n { let v = ch[i]; p_sum[i] += v * v; } }
+    // 400ms window with 100ms hop
+    let win = (0.400 * 48_000.0) as usize;
+    let hop = (0.100 * 48_000.0) as usize;
+    let means = block_means_power(&p_sum, win, hop);
+    if means.is_empty() { return Ok(f32::NEG_INFINITY); }
+    let blocks_lufs: Vec<f32> = means.iter().map(|&m| K_CONST + 10.0 * (m.max(1e-24)).log10() as f32).collect();
+    // Absolute gate -70 LUFS
+    let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > -70.0).collect();
+    if !sel.iter().any(|&b| b) { return Ok(f32::NEG_INFINITY); }
+    // Average of means after absolute gate
+    let mut num = 0usize; let mut acc = 0.0f64;
+    for (i, &ok) in sel.iter().enumerate() { if ok { acc += means[i]; num += 1; } }
+    let z_abs = if num>0 { acc / num as f64 } else { 0.0 };
+    if z_abs <= 0.0 { return Ok(f32::NEG_INFINITY); }
+    let l_abs = K_CONST + 10.0 * (z_abs.max(1e-24)).log10() as f32;
+    let thr = l_abs - 10.0;
+    for (i, l) in blocks_lufs.iter().enumerate() { sel[i] = sel[i] && (*l > thr); }
+    if !sel.iter().any(|&b| b) { return Ok(f32::NEG_INFINITY); }
+    let mut acc2 = 0.0f64; let mut n2 = 0usize;
+    for (i, &ok) in sel.iter().enumerate() { if ok { acc2 += means[i]; n2 += 1; } }
+    if n2 == 0 { return Ok(f32::NEG_INFINITY); }
+    let z_final = acc2 / n2 as f64;
+    let l = K_CONST + 10.0 * (z_final.max(1e-24)).log10() as f32;
+    Ok(l)
+}

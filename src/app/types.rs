@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum SortKey { File, Folder, Length, Channels, SampleRate, Bits, Level }
+pub enum SortKey { File, Folder, Length, Channels, SampleRate, Bits, Level, Lufs }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortDir { Asc, Desc, None }
@@ -29,6 +29,8 @@ pub struct FileMeta {
     pub bits_per_sample: u16,
     pub duration_secs: Option<f32>,
     pub rms_db: Option<f32>,
+    pub peak_db: Option<f32>,
+    pub lufs_i: Option<f32>,
     pub thumb: Vec<(f32, f32)>,
 }
 

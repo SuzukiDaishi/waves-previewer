@@ -25,6 +25,8 @@ impl crate::app::WavesPreviewer {
                     }
                     if ui.button("Clear All Gains").clicked() {
                         self.pending_gains.clear();
+                        self.lufs_override.clear();
+                        self.lufs_recalc_deadline.clear();
                         ui.close_menu();
                     }
                     ui.separator();
@@ -35,7 +37,7 @@ impl crate::app::WavesPreviewer {
                 let total_vis = self.files.len();
                 let total_all = self.all_files.len();
                 if total_all > 0 {
-                    let loading = self.meta.len() < total_all || self.meta.values().any(|m| m.rms_db.is_none() || m.thumb.is_empty());
+                    let loading = self.meta.len() < total_all || self.meta.values().any(|m| m.peak_db.is_none() || m.thumb.is_empty());
                     let label = if self.search_query.is_empty() {
                         if loading { format!("Files: {} ⏳", total_all) } else { format!("Files: {}", total_all) }
                     } else {
