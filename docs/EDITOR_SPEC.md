@@ -61,7 +61,7 @@ This document captures the agreed UX and the technical outline for the upcoming 
 
 ## Out of Scope (for this update)
 
-- Per‑channel solo/mute, gain envelopes, spectral views, AB loop UI, and edit operations remain future work.
+- Per-channel solo/mute, gain envelopes, spectral views, AB loop UI, and edit operations remain future work.
 
 ## Editing Roadmap (Planned)
 
@@ -94,3 +94,54 @@ Notes
 - Editing is planned to be non‑destructive; operations apply to a working buffer and can be previewed/rolled back.
 - Heavy operations (noise reduction, warps) will run on a background worker and update the preview when complete.
 - Further details will be specified in a dedicated editing document.
+
+---
+
+# Hierarchical Editing UI (Views → Tools)
+
+This section formalizes the editing UX requested after the initial spec. The editor
+is organized as a hierarchy: first choose the view (Waveform/Spectrogram/Mel/WORLD),
+then choose a tool specific to that view. All views share the same time axis,
+playhead and A/B loop markers. Switching the view automatically swaps the active
+toolbar and inspector while keeping time/loop context.
+
+Levels
+- Editor Tab (per file): playback, loop, zoom/pan, shared state lives here.
+- View (second level): Waveform | Spectrogram | Mel | WORLD (planned).
+- Tool (third level, view dependent): editing action that exposes its own overlay
+  and parameters in the Inspector.
+
+View → Tools (MVP and planned)
+- Waveform: Seek/Select, Loop Edit (A/B), Trim, Fade (in/out, curve), Gain,
+  Normalize (dBFS; LUFS later), Reverse, Silence (insert/mute), Pitch Shift,
+  Time Stretch.
+- Spectrogram: Seek/Select‑2D (rect first), Noise Reduction (attenuation within
+  selection), Spectral Attenuation, Repair/inpaint, Frequency‑axis warp.
+- Mel: View‑only in MVP; pitch contour editing later.
+- WORLD: F0 edit, spectral envelope warp (planned).
+
+Shared interactions
+- Space: Play/Pause. A/B: set markers. L: Loop toggle. Ctrl+Wheel: Zoom.
+- Shift+Wheel / Middle/Right drag: Pan. Double‑click: fit/restore.
+- Tools may require a selection; if none exists they use A–B, otherwise Whole.
+
+Shortcuts (proposal)
+- Views: 1=Waveform, 2=Spectrogram, 3=Mel, 4=WORLD
+- Tools: Q=Seek/Select, W=Loop Edit, E=Trim, R=Fade, T=Gain,
+  Y=Noise Reduce (Spec), Esc=Cancel tool
+
+State/Mapping Rules
+- Changing the View resets the active tool to Seek/Select for that view.
+- Time selection carries across views; Spectrogram may keep a 2D selection whose
+  time component is preserved when switching away.
+- A/B loop has priority when Loop is enabled. Zero‑cross snapping can be toggled
+  and applies to time edges (Waveform); spectral tools ignore it.
+
+Inspector
+- The right‑side inspector shows the active tool’s parameters and target range
+  (Selection / A–B / Whole) with Apply/Preview/Cancel controls.
+
+Background jobs
+- Heavy tools (Pitch/Stretch/NoiseReduce, etc.) execute on a worker thread.
+  The busy overlay blocks input and shows progress; parameter drags are debounced
+  (≈200 ms) and only the latest job runs.

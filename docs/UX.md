@@ -97,3 +97,12 @@ This section documents the planned UX for the editor view update. Goals: read‑
 
 This UX keeps editing fast on large lists, while making per‑file inspection substantially clearer and more precise.
 - 波形表示は Volume の影響を受けません（常に 0 dB として描画）。Gain(dB) のみ視覚反映します。
+---
+
+# Editing Hierarchy (View → Tool)
+
+- Choose View: Waveform / Spectrogram / Mel / WORLD (staged rollout).
+- Choose Tool: View‑specific editor (Loop Edit / Trim / Fade / Gain / Normalize / Noise Reduce …).
+- Shared: Playback, A/B markers, time axis, zoom/pan are common to all views. Switching view swaps the toolbar and inspector only.
+- Inspector: Right‑side panel with the active tool’s parameters and target range (Selection / A–B / Whole), and Apply / Preview / Cancel.
+- Shortcuts (proposal): 1=Wave, 2=Spec, 3=Mel, 4=World / Q=Seek, W=Loop, E=Trim, R=Fade, T=Gain, Y=NoiseReduce, Esc=Cancel.

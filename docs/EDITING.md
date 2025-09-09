@@ -86,4 +86,17 @@
 4. ループマーカー+A–B 書出し、ゼロクロススナップ
 5. SR/BitDepth 変換、dither（TPDF）、ストリーミング書出し
 6. Undo/Redo、ジョブキュー高度化、長尺最適化
+---
+
+# 編集UI（階層化）追補
+
+本アプリの編集は「View → Tool」の階層で操作します。ビューを切り替えると、ツールとインスペクタが自動的に入れ替わります。再生/ループ/A–B/時間軸はすべてのビューで共有されます。
+
+- View: Waveform / Spectrogram / Mel / WORLD（段階的に追加）
+- Tool（例）
+  - Waveform: Loop Edit, Trim, Fade, Gain, Normalize, Reverse, Silence, Pitch, Stretch
+  - Spectrogram: 矩形選択、Noise Reduce（初期）、Attenuate/Repair（拡張）
+  - Mel: 初期は閲覧のみ
+  - WORLD: F0/包絡編集（将来）
+- ショートカット（案）: 1=Wave, 2=Spec, 3=Mel, 4=World / Q=Seek, W=Loop, E=Trim, R=Fade, T=Gain, Y=NoiseReduce, Esc=Cancel
 

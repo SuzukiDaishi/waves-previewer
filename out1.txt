@@ -1,0 +1,500 @@
+﻿use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::Result;
+use egui::{Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, RichText, Sense, TextStyle, Visuals};
+use egui_extras::TableBuilder;
+use crate::audio::AudioEngine;
+use crate::wave::{build_minmax, prepare_for_speed};
+// use walkdir::WalkDir; // unused here (used in logic.rs)
+
+mod types;
+mod helpers;
+mod meta;
+mod logic;
+mod ui;
+use self::{types::*, helpers::*};
+
+// moved to types.rs
+
+    pub struct WavesPreviewer {
+    pub audio: AudioEngine,
+    pub root: Option<PathBuf>,
+    pub files: Vec<PathBuf>,
+    pub all_files: Vec<PathBuf>,
+    pub selected: Option<usize>,
+    pub volume_db: f32,
+    pub playback_rate: f32,
+    // unified numeric control via DragValue; no string normalization
+    pub pitch_semitones: f32,
+    pub meter_db: f32,
+    pub tabs: Vec<EditorTab>,
+    pub active_tab: Option<usize>,
+    pub meta: HashMap<PathBuf, FileMeta>,
+    pub meta_rx: Option<std::sync::mpsc::Receiver<(PathBuf, FileMeta)>>,
+    // dynamic row height for wave thumbnails (list view)
+    pub wave_row_h: f32,
+    // multi-selection (list view)
+    pub selected_multi: std::collections::BTreeSet<usize>,
+    pub select_anchor: Option<usize>,
+    // sorting
+    sort_key: SortKey,
+    sort_dir: SortDir,
+    // scroll behavior
+    scroll_to_selected: bool,
+    // original order snapshot for tri-state sort
+    original_files: Vec<PathBuf>,
+    // search
+    search_query: String,
+    // processing mode
+    mode: RateMode,
+    // heavy processing state (overlay)
+    processing: Option<ProcessingState>,
+    // per-file pending gain edits (dB)
+    pending_gains: HashMap<PathBuf, f32>,
+    // background export state (gains)
+    export_state: Option<ExportState>,
+    // currently loaded/playing file path (for effective volume calc)
+    playing_path: Option<PathBuf>,
+    // export/save settings (simple, in-memory)
+    export_cfg: ExportConfig,
+    show_export_settings: bool,
+    show_first_save_prompt: bool,
+        saving_sources: Vec<PathBuf>,
+        saving_mode: Option<SaveMode>,
+
+        // LUFS with Gain recompute support
+        lufs_override: HashMap<PathBuf, f32>,
+        lufs_recalc_deadline: HashMap<PathBuf, std::time::Instant>,
+        lufs_rx2: Option<std::sync::mpsc::Receiver<(PathBuf, f32)>>,
+        lufs_worker_busy: bool,
+        // leaving dirty editor confirmation
+        leave_intent: Option<LeaveIntent>,
+        show_leave_prompt: bool,
+        pending_activate_path: Option<PathBuf>,
+    }
+
+impl WavesPreviewer {
+    fn editor_selected_range(tab: &EditorTab) -> Option<(usize,usize)> {
+        if let Some(r) = tab.selection { if r.1 > r.0 { return Some(r); } }
+        if let Some(r) = tab.ab_loop { if r.1 != r.0 { let (a,b) = if r.0<=r.1 {(r.0,r.1)} else {(r.1,r.0)}; return Some((a,b)); } }
+        None
+    }
+    fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
+        let n = tab.samples_len;
+        if n == 0 { return Vec::new(); }
+        if tab.ch_samples.is_empty() { return vec![0.0; n]; }
+        let chn = tab.ch_samples.len() as f32;
+        let mut out = vec![0.0f32; n];
+        for ch in &tab.ch_samples { for i in 0..n { if let Some(&v)=ch.get(i) { out[i]+=v; } } }
+        for v in &mut out { *v /= chn; }
+        out
+    }
+    fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize,usize)) {
+        let (mono, ab, len) = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s,e) = range; if e<=s || e>tab.samples_len { return; }
+                for ch in tab.ch_samples.iter_mut() { let mut seg = ch[s..e].to_vec(); std::mem::swap(ch, &mut seg); ch.truncate(e-s); }
+                tab.samples_len = e - s;
+                tab.view_offset = 0; tab.selection = Some((0, tab.samples_len));
+                tab.ab_loop = None; tab.dirty = true;
+                (Self::editor_mixdown_mono(tab), tab.ab_loop, tab.samples_len)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some((a,b)) = ab { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_region(s,e); }
+        else { self.audio.set_loop_region(0, len); }
+    }
+    fn editor_apply_fade_range(&mut self, tab_idx: usize, range: (usize,usize), in_ms: f32, out_ms: f32) {
+        let (mono, ab, len) = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = range; if e<=s || e>tab.samples_len { return; }
+                let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                let in_samp = ((in_ms/1000.0)*sr).round() as usize;
+                let out_samp = ((out_ms/1000.0)*sr).round() as usize;
+                let in_len = in_samp.min(e.saturating_sub(s));
+                let out_len = out_samp.min(e.saturating_sub(s));
+                for ch in tab.ch_samples.iter_mut() { for i in 0..in_len { let t = (i as f32)/(in_len.max(1) as f32); ch[s+i] *= t; } }
+                for ch in tab.ch_samples.iter_mut() { for i in 0..out_len { let t = 1.0 - (i as f32)/(out_len.max(1) as f32); ch[e-1-i] *= t; } }
+                tab.dirty = true;
+                (Self::editor_mixdown_mono(tab), tab.ab_loop, tab.samples_len)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some((a,b)) = ab { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_region(s,e); }
+        else { self.audio.set_loop_region(0, len); }
+    }
+    fn current_active_path(&self) -> Option<&PathBuf> {
+        if let Some(i) = self.active_tab { return self.tabs.get(i).map(|t| &t.path); }
+        if let Some(i) = self.selected { return self.files.get(i); }
+        None
+    }
+    pub(super) fn apply_effective_volume(&self) {
+        // Global output volume (0..1)
+        let base = db_to_amp(self.volume_db);
+        self.audio.set_volume(base);
+        // Per-file gain (can be >1)
+        let path_opt = self.playing_path.as_ref().or_else(|| self.current_active_path());
+        let gain_db = if let Some(p) = path_opt { *self.pending_gains.get(p).unwrap_or(&0.0) } else { 0.0 };
+        let fg = db_to_amp(gain_db);
+        self.audio.set_file_gain(fg);
+    }
+    fn spawn_export_gains(&mut self, _overwrite: bool) {
+        use std::sync::mpsc;
+        let mut targets: Vec<(PathBuf, f32)> = Vec::new();
+        for p in &self.all_files { if let Some(db) = self.pending_gains.get(p) { if db.abs() > 0.0001 { targets.push((p.clone(), *db)); } } }
+        if targets.is_empty() { return; }
+        let (tx, rx) = mpsc::channel::<ExportResult>();
+        std::thread::spawn(move || {
+            let mut ok = 0usize; let mut failed = 0usize; let mut success_paths = Vec::new(); let mut failed_paths = Vec::new();
+            for (src, db) in targets {
+                let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                let dst = src.with_file_name(format!("{} (gain{:+.1}dB).wav", stem, db));
+                match crate::wave::export_gain_wav(&src, &dst, db) { Ok(_) => { ok += 1; success_paths.push(dst); }, Err(e) => { eprintln!("export failed {}: {e:?}", src.display()); failed += 1; failed_paths.push(src.clone()); } }
+            }
+            let _ = tx.send(ExportResult{ ok, failed, success_paths, failed_paths });
+        });
+        self.export_state = Some(ExportState{ msg: "Exporting gains".into(), rx });
+    }
+
+
+    fn trigger_save_selected(&mut self) {
+        if self.export_cfg.first_prompt { self.show_first_save_prompt = true; return; }
+        let mut set = self.selected_multi.clone();
+        if set.is_empty() { if let Some(i) = self.selected { set.insert(i); } }
+        self.spawn_save_selected(set);
+    }
+
+    fn spawn_save_selected(&mut self, indices: std::collections::BTreeSet<usize>) {
+        use std::sync::mpsc;
+        if indices.is_empty() { return; }
+        let mut items: Vec<(PathBuf, f32)> = Vec::new();
+        for i in indices { if let Some(p) = self.files.get(i) { if let Some(db) = self.pending_gains.get(p) { if db.abs()>0.0001 { items.push((p.clone(), *db)); } } } }
+        if items.is_empty() { return; }
+        let cfg = self.export_cfg.clone();
+        // remember sources for post-save cleanup + reload
+        self.saving_sources = items.iter().map(|(p,_)| p.clone()).collect();
+        self.saving_mode = Some(cfg.save_mode);
+        let (tx, rx) = mpsc::channel::<ExportResult>();
+        std::thread::spawn(move || {
+            let mut ok=0usize; let mut failed=0usize; let mut success_paths=Vec::new(); let mut failed_paths=Vec::new();
+            for (src, db) in items {
+                match cfg.save_mode {
+                    SaveMode::Overwrite => {
+                        match crate::wave::overwrite_gain_wav(&src, db, cfg.backup_bak) {
+                            Ok(()) => { ok+=1; success_paths.push(src.clone()); },
+                            Err(_)  => { failed+=1; failed_paths.push(src.clone()); }
+                        }
+                    }
+                    SaveMode::NewFile => {
+                        let parent = cfg.dest_folder.clone().unwrap_or_else(|| src.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf());
+                        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                        let mut name = cfg.name_template.clone();
+                        name = name.replace("{name}", stem);
+                        name = name.replace("{gain:+.1}", &format!("{:+.1}", db));
+                        name = name.replace("{gain:+0.0}", &format!("{:+.1}", db));
+                        name = name.replace("{gain}", &format!("{:+.1}", db));
+                        let name = crate::app::helpers::sanitize_filename_component(&name);
+                        let mut dst = parent.join(name);
+                        match dst.extension().and_then(|e| e.to_str()) { Some(ext) if ext.eq_ignore_ascii_case("wav") => {}, _ => { dst.set_extension("wav"); } }
+                        if dst.exists() {
+                            match cfg.conflict {
+                                ConflictPolicy::Overwrite => {}
+                                ConflictPolicy::Skip => { failed+=1; failed_paths.push(src.clone()); continue; }
+                                ConflictPolicy::Rename => {
+                                    let orig = dst.clone();
+                                    let mut idx=1u32; loop {
+                                        let stem2 = orig.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                                        let n = crate::app::helpers::sanitize_filename_component(&format!("{}_{:02}", stem2, idx));
+                                        dst = orig.with_file_name(n);
+                                        match dst.extension().and_then(|e| e.to_str()) { Some(ext) if ext.eq_ignore_ascii_case("wav") => {}, _ => { dst.set_extension("wav"); } }
+                                        if !dst.exists() { break; }
+                                        idx+=1; if idx>999 { break; }
+                                    }
+                                }
+                            }
+                        }
+                        match crate::wave::export_gain_wav(&src, &dst, db) {
+                            Ok(()) => { ok+=1; success_paths.push(dst.clone()); },
+                            Err(_)  => { failed+=1; failed_paths.push(src.clone()); }
+                        }
+                    }
+                }
+            }
+            let _=tx.send(ExportResult{ ok, failed, success_paths, failed_paths });
+        });
+        self.export_state = Some(ExportState{ msg: "Saving...".into(), rx });
+    }
+
+    // moved to logic.rs: update_selection_on_click
+
+    // --- Gain helpers ---
+    fn clamp_gain_db(val: f32) -> f32 {
+        let mut g = val.clamp(-24.0, 24.0);
+        if g.abs() < 0.001 { g = 0.0; }
+        g
+    }
+
+    fn adjust_gain_for_indices(&mut self, indices: &std::collections::BTreeSet<usize>, delta_db: f32) {
+        if indices.is_empty() { return; }
+        let mut affect_playing = false;
+        for &i in indices {
+            if let Some(p) = self.files.get(i).cloned() {
+                let cur = *self.pending_gains.get(&p).unwrap_or(&0.0);
+                let new = Self::clamp_gain_db(cur + delta_db);
+                if new == 0.0 { self.pending_gains.remove(&p); } else { self.pending_gains.insert(p.clone(), new); }
+                if self.playing_path.as_ref() == Some(&p) { affect_playing = true; }
+                // schedule LUFS recompute for each affected path
+                self.schedule_lufs_for_path(p.clone());
+            }
+        }
+        if affect_playing { self.apply_effective_volume(); }
+    }
+
+    fn schedule_lufs_for_path(&mut self, path: PathBuf) {
+        use std::time::{Duration, Instant};
+        let dl = Instant::now() + Duration::from_millis(400);
+        self.lufs_recalc_deadline.insert(path, dl);
+    }
+}
+// moved to types.rs
+
+impl WavesPreviewer {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
+        // Visuals (dark, chic) + fonts
+        let mut visuals = Visuals::dark();
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(20, 20, 23);
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(28, 28, 32);
+        // Remove hover brightening to avoid sluggish tracking effect
+        visuals.widgets.hovered = visuals.widgets.inactive.clone();
+        visuals.widgets.active = visuals.widgets.inactive.clone();
+        visuals.panel_fill = Color32::from_rgb(18, 18, 20);
+        cc.egui_ctx.set_visuals(visuals);
+        let mut fonts = FontDefinitions::default();
+        let candidates = [
+            "C:/Windows/Fonts/meiryo.ttc",
+            "C:/Windows/Fonts/YuGothM.ttc",
+            "C:/Windows/Fonts/msgothic.ttc",
+        ];
+        for p in candidates {
+            if let Ok(bytes) = std::fs::read(p) {
+                fonts.font_data.insert("jp".into(), FontData::from_owned(bytes));
+                fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "jp".into());
+                fonts.families.get_mut(&FontFamily::Monospace).unwrap().insert(0, "jp".into());
+                break;
+            }
+        }
+        cc.egui_ctx.set_fonts(fonts);
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.text_styles.insert(TextStyle::Body, FontId::proportional(16.0));
+        style.text_styles.insert(TextStyle::Monospace, FontId::monospace(14.0));
+        cc.egui_ctx.set_style(style);
+
+        let audio = AudioEngine::new()?;
+        // 初期状態（リスト表示�E�ではループを無効にする
+        audio.set_loop_enabled(false);
+        Ok(Self {
+            audio,
+            root: None,
+            files: Vec::new(),
+            all_files: Vec::new(),
+            selected: None,
+            volume_db: -12.0,
+            playback_rate: 1.0,
+            pitch_semitones: 0.0,
+            meter_db: -80.0,
+            tabs: Vec::new(),
+            active_tab: None,
+            meta: HashMap::new(),
+            meta_rx: None,
+            wave_row_h: 26.0,
+            selected_multi: std::collections::BTreeSet::new(),
+            select_anchor: None,
+            sort_key: SortKey::File,
+            sort_dir: SortDir::None,
+            scroll_to_selected: false,
+            original_files: Vec::new(),
+            search_query: String::new(),
+            mode: RateMode::Speed,
+            processing: None,
+            pending_gains: HashMap::new(),
+            export_state: None,
+            playing_path: None,
+
+            export_cfg: ExportConfig { first_prompt: true, save_mode: SaveMode::NewFile, dest_folder: None, name_template: "{name} (gain{gain:+.1}dB)".into(), conflict: ConflictPolicy::Rename, backup_bak: true },
+            show_export_settings: false,
+            show_first_save_prompt: false,
+            saving_sources: Vec::new(),
+            saving_mode: None,
+
+            lufs_override: HashMap::new(),
+            lufs_recalc_deadline: HashMap::new(),
+            lufs_rx2: None,
+            lufs_worker_busy: false,
+            leave_intent: None,
+            show_leave_prompt: false,
+            pending_activate_path: None,
+
+        })
+    }
+
+}
+
+impl eframe::App for WavesPreviewer {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Ensure effective volume (global vol x per-file gain) is always applied
+        self.apply_effective_volume();
+        // Drain metadata updates
+        if let Some(rx) = &self.meta_rx {
+            let mut resort = false;
+            while let Ok((p, m)) = rx.try_recv() { self.meta.insert(p, m); resort = true; }
+            if resort { self.apply_sort(); ctx.request_repaint(); }
+        }
+
+        // Drain export results
+        if let Some(state) = &self.export_state {
+            if let Ok(res) = state.rx.try_recv() {
+                eprintln!("save/export done: ok={}, failed={}", res.ok, res.failed);
+                if state.msg.starts_with("Saving") {
+                    for p in &self.saving_sources { self.pending_gains.remove(p); self.lufs_override.remove(p); }
+                    match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
+                        SaveMode::Overwrite => {
+                            if !self.saving_sources.is_empty() { self.meta_rx = Some(meta::spawn_meta_worker(self.saving_sources.clone())); }
+                            if let Some(path) = self.saving_sources.get(0).cloned() {
+                                if let Some(idx) = self.files.iter().position(|x| *x == path) { self.select_and_load(idx); }
+                            }
+                        }
+                        SaveMode::NewFile => {
+                            let mut added_any=false; let mut first_added=None;
+                            for p in &res.success_paths { if self.add_files_merge(&[p.clone()])>0 { if first_added.is_none(){ first_added=Some(p.clone()); } added_any=true; } }
+                            if added_any { self.after_add_refresh(); }
+                            if let Some(p) = first_added { if let Some(idx) = self.files.iter().position(|x| *x == p) { self.select_and_load(idx); } }
+                        }
+                    }
+                    self.saving_sources.clear(); self.saving_mode=None;
+                }
+                self.export_state = None;
+                ctx.request_repaint();
+            }
+        }
+
+        // Drain LUFS (with gain) recompute results
+        let mut got_any = false;
+        if let Some(rx) = &self.lufs_rx2 {
+            while let Ok((p, v)) = rx.try_recv() { self.lufs_override.insert(p, v); got_any = true; }
+        }
+        if got_any { self.lufs_worker_busy = false; }
+
+        // Pump LUFS recompute worker (debounced)
+        if !self.lufs_worker_busy {
+            let now = std::time::Instant::now();
+            if let Some(path) = self.lufs_recalc_deadline.iter().find(|(_, dl)| **dl <= now).map(|(p, _)| p.clone()) {
+                self.lufs_recalc_deadline.remove(&path);
+                let g_db = *self.pending_gains.get(&path).unwrap_or(&0.0);
+                if g_db.abs() < 0.0001 { self.lufs_override.remove(&path); }
+                else {
+                    use std::sync::mpsc; let (tx, rx) = mpsc::channel();
+                    self.lufs_rx2 = Some(rx);
+                    self.lufs_worker_busy = true;
+                    std::thread::spawn(move || {
+                        let res = (|| -> anyhow::Result<f32> {
+                            let (mut chans, sr) = crate::wave::decode_wav_multi(&path)?;
+                            let gain = 10.0f32.powf(g_db/20.0);
+                            for ch in chans.iter_mut() { for v in ch.iter_mut() { *v *= gain; } }
+                            crate::wave::lufs_integrated_from_multi(&chans, sr)
+                        })();
+                        let val = match res { Ok(v) => v, Err(_) => f32::NEG_INFINITY };
+                        let _=tx.send((path, val));
+                    });
+                }
+            }
+        }
+
+        // Drain heavy processing result
+        if let Some(state) = &self.processing {
+            if let Ok(res) = state.rx.try_recv() {
+                // Apply new buffer and waveform
+                self.audio.set_samples(std::sync::Arc::new(res.samples));
+                self.audio.stop();
+                if let Some(idx) = self.tabs.iter().position(|t| t.path == res.path) {
+                    if let Some(tab) = self.tabs.get_mut(idx) { tab.waveform_minmax = res.waveform; }
+                }
+                // update current playing path (for effective volume using pending gains)
+                self.playing_path = Some(res.path.clone());
+                // full-buffer loop region if needed
+                if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
+                self.processing = None;
+                ctx.request_repaint();
+            }
+        }
+
+        // Shortcuts
+        if ctx.input(|i| i.key_pressed(Key::Space)) { self.audio.toggle_play(); }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) { self.trigger_save_selected(); }
+        
+        // Ctrl+W でアクチE��ブタブを閉じめE        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::W)) {
+            if let Some(active_idx) = self.active_tab {
+                self.audio.stop();
+                self.tabs.remove(active_idx);
+                // 閉じたタブ�E後にタブがあれば次のタブ、なければ前�EタブをアクチE��ブに
+                if !self.tabs.is_empty() {
+                    let new_active = if active_idx < self.tabs.len() { 
+                        active_idx 
+                    } else { 
+                        self.tabs.len() - 1 
+                    };
+                    self.active_tab = Some(new_active);
+                } else {
+                    self.active_tab = None;
+                }
+            }
+        }
+        
+        if let Some(tab_idx) = self.active_tab {
+            // Loop toggle
+            if ctx.input(|i| i.key_pressed(Key::L)) {
+                let tab = &mut self.tabs[tab_idx];
+                tab.loop_enabled = !tab.loop_enabled;
+                self.audio.set_loop_enabled(tab.loop_enabled);
+                // Prefer A/B region when available
+                if let Some((a,b)) = tab.ab_loop { let (s,e) = if a<=b { (a,b) } else { (b,a) }; self.audio.set_loop_region(s,e); }
+                else if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
+            }
+            // A/B markers at current play position
+            let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+            if ctx.input(|i| i.key_pressed(Key::A)) {
+                let tab = &mut self.tabs[tab_idx];
+                let b = tab.ab_loop.map(|(_,b)| b);
+                tab.ab_loop = Some((pos_now, b.unwrap_or(pos_now)));
+                if tab.loop_enabled { let (s,e) = if let Some((a,b))=tab.ab_loop { if a<=b {(a,b)} else {(b,a)} } else {(0,0)}; self.audio.set_loop_region(s,e); }
+            }
+            if ctx.input(|i| i.key_pressed(Key::B)) {
+                let tab = &mut self.tabs[tab_idx];
+                let a = tab.ab_loop.map(|(a,_)| a);
+                tab.ab_loop = Some((a.unwrap_or(pos_now), pos_now));
+                if tab.loop_enabled { let (s,e) = if let Some((a,b))=tab.ab_loop { if a<=b {(a,b)} else {(b,a)} } else {(0,0)}; self.audio.set_loop_region(s,e); }
+            }
+            // Zero-cross snap toggle
+            if ctx.input(|i| i.key_pressed(Key::S)) { let tab = &mut self.tabs[tab_idx]; tab.snap_zero_cross = !tab.snap_zero_cross; }
+        }
+        if self.active_tab.is_none() {
+            let mut changed = false;
+            let len = self.files.len();
+            if len > 0 {
+                // Ctrl/Cmd + A: select all in list
+                if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::A)) {
+                    self.selected_multi.clear();
+                    for i in 0..len { self.selected_multi.insert(i); }
+                    self.selected = Some(0);
+                    self.select_anchor = Some(0);
+                    self.scroll_to_selected = true;
+                    changed = true;
+                }
+                // Up/Down: move selection; with Shift extend range from anchor
+                let mut moved: Option<usize> = None;
+                if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
+                    let cur = self.selected.unwrap_or(0);
+                    moved = Some((cur+1).min(len-1));

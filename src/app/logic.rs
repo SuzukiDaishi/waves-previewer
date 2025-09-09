@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+﻿use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -39,7 +39,7 @@ impl super::WavesPreviewer {
         let p_owned = self.files[row_idx].clone();
         // record as current playing target
         self.playing_path = Some(p_owned.clone());
-        // リスト表示時は常にループを無効にする
+        // 繝ｪ繧ｹ繝郁｡ｨ遉ｺ譎ゅ・蟶ｸ縺ｫ繝ｫ繝ｼ繝励ｒ辟｡蜉ｹ縺ｫ縺吶ｋ
         self.audio.set_loop_enabled(false);
         match self.mode {
             RateMode::Speed => {
@@ -78,7 +78,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn open_or_activate_tab(&mut self, path: &Path) {
-        // タブを開く/アクティブ化する時に音声を停止
+        // 繧ｿ繝悶ｒ髢九￥/繧｢繧ｯ繝・ぅ繝門喧縺吶ｋ譎ゅ↓髻ｳ螢ｰ繧貞●豁｢
         self.audio.stop();
 
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
@@ -94,7 +94,27 @@ impl super::WavesPreviewer {
                 let (mut chs, in_sr) = match crate::wave::decode_wav_multi(path) { Ok(v) => v, Err(_) => (Vec::new(), self.audio.shared.out_sample_rate) };
                 if in_sr != self.audio.shared.out_sample_rate { for c in chs.iter_mut() { *c = crate::wave::resample_linear(c, in_sr, self.audio.shared.out_sample_rate); } }
                 let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: wf, loop_enabled: false, ch_samples: chs, samples_len, view_offset: 0, samples_per_px: 0.0, dirty: false, ops: Vec::new() });
+                self.tabs.push(EditorTab {
+                    path: path.to_path_buf(),
+                    display_name: name,
+                    waveform_minmax: wf,
+                    loop_enabled: false,
+                    ch_samples: chs,
+                    samples_len,
+                    view_offset: 0,
+                    samples_per_px: 0.0,
+                    dirty: false,
+                    ops: Vec::new(),
+                    selection: None,
+                    ab_loop: None,
+                    view_mode: crate::app::types::ViewMode::Waveform,
+                    snap_zero_cross: true,
+                    drag_select_anchor: None,
+                    active_tool: crate::app::types::ToolKind::SeekSelect,
+                    tool_state: crate::app::types::ToolState{ fade_in_ms: 20.0, fade_out_ms: 20.0 },
+                    loop_mode: crate::app::types::LoopMode::Off,
+                    dragging_marker: None,
+                });
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.playing_path = Some(path.to_path_buf());
             }
@@ -105,7 +125,27 @@ impl super::WavesPreviewer {
                 let (mut chs, in_sr) = match crate::wave::decode_wav_multi(path) { Ok(v) => v, Err(_) => (Vec::new(), self.audio.shared.out_sample_rate) };
                 if in_sr != self.audio.shared.out_sample_rate { for c in chs.iter_mut() { *c = crate::wave::resample_linear(c, in_sr, self.audio.shared.out_sample_rate); } }
                 let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                self.tabs.push(EditorTab { path: path.to_path_buf(), display_name: name, waveform_minmax: Vec::new(), loop_enabled: false, ch_samples: chs, samples_len, view_offset: 0, samples_per_px: 0.0, dirty: false, ops: Vec::new() });
+                self.tabs.push(EditorTab {
+                    path: path.to_path_buf(),
+                    display_name: name,
+                    waveform_minmax: Vec::new(),
+                    loop_enabled: false,
+                    ch_samples: chs,
+                    samples_len,
+                    view_offset: 0,
+                    samples_per_px: 0.0,
+                    dirty: false,
+                    ops: Vec::new(),
+                    selection: None,
+                    ab_loop: None,
+                    view_mode: crate::app::types::ViewMode::Waveform,
+                    snap_zero_cross: true,
+                    drag_select_anchor: None,
+                    active_tool: crate::app::types::ToolKind::SeekSelect,
+                    tool_state: crate::app::types::ToolState{ fade_in_ms: 20.0, fade_out_ms: 20.0 },
+                    loop_mode: crate::app::types::LoopMode::Off,
+                    dragging_marker: None,
+                });
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.spawn_heavy_processing(path);
                 self.playing_path = Some(path.to_path_buf());
@@ -282,3 +322,7 @@ impl super::WavesPreviewer {
         self.processing = Some(ProcessingState { msg: match mode { RateMode::PitchShift => "Pitch-shifting...".to_string(), RateMode::TimeStretch => "Time-stretching...".to_string(), RateMode::Speed => "Processing...".to_string() }, path: path_buf, rx });
     }
 }
+
+
+
+

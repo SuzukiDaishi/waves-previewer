@@ -9,6 +9,42 @@ pub enum SortDir { Asc, Desc, None }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RateMode { Speed, PitchShift, TimeStretch }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Waveform,
+    Spectrogram,
+    Mel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToolKind {
+    SeekSelect,
+    LoopEdit,
+    Trim,
+    Fade,
+    Gain,
+    Normalize,
+}
+
+#[derive(Clone, Copy)]
+pub struct ToolState {
+    pub fade_in_ms: f32,
+    pub fade_out_ms: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopMode { Off, OnWhole, Marker }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MarkerKind { A, B }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LeaveIntent {
+    ToList,
+    ToTab(usize),
+    CloseTab(usize),
+}
+
 pub struct EditorTab {
     pub path: PathBuf,
     pub display_name: String,
@@ -20,6 +56,16 @@ pub struct EditorTab {
     pub samples_per_px: f32,       // time zoom: samples per pixel
     pub dirty: bool,               // unsaved edits exist
     pub ops: Vec<EditOp>,          // non-destructive operations (skeleton)
+    // --- Editing state (MVP) ---
+    pub selection: Option<(usize, usize)>,     // [start,end) in samples
+    pub ab_loop: Option<(usize, usize)>,       // A/B markers in samples
+    pub view_mode: ViewMode,                   // which visualization panel
+    pub snap_zero_cross: bool,                 // enable zero-cross snapping
+    pub drag_select_anchor: Option<usize>,     // transient during drag
+    pub active_tool: ToolKind,                 // current editing tool
+    pub tool_state: ToolState,                 // simple per-tool parameters
+    pub loop_mode: LoopMode,                   // Off / On (whole) / Marker
+    pub dragging_marker: Option<MarkerKind>,   // transient while dragging A/B
 }
 
 #[derive(Clone)]

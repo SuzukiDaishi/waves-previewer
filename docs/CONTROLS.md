@@ -57,3 +57,9 @@
   - Pitch/Stretch では処理時の出力レイテンシと残り出力（flush）を考慮して末尾欠けを防止。
 - Length 列は時間（mm:ss 形式）で表示、ソート時は秒数で比較。
 - 将来は範囲選択で `loop_start/end` を UI から変更予定。
+---
+
+# View/Tool Shortcuts (Hierarchical Editing)
+
+- Views: 1=Waveform, 2=Spectrogram, 3=Mel, 4=WORLD (planned)
+- Tools (contextual): Q=Seek/Select, W=Loop Edit, E=Trim, R=Fade, T=Gain, Y=Noise Reduce (Spec), Esc=Cancel tool

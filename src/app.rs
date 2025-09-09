@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -69,10 +69,86 @@ use self::{types::*, helpers::*};
         lufs_recalc_deadline: HashMap<PathBuf, std::time::Instant>,
         lufs_rx2: Option<std::sync::mpsc::Receiver<(PathBuf, f32)>>,
         lufs_worker_busy: bool,
+        // leaving dirty editor confirmation
+        leave_intent: Option<LeaveIntent>,
+        show_leave_prompt: bool,
+        pending_activate_path: Option<PathBuf>,
     }
 
 impl WavesPreviewer {
-    fn current_active_path(&self) -> Option<&PathBuf> {
+    fn editor_selected_range(tab: &EditorTab) -> Option<(usize,usize)> {
+        if let Some(r) = tab.selection { if r.1 > r.0 { return Some(r); } }
+        if let Some(r) = tab.ab_loop { if r.1 != r.0 { let (a,b) = if r.0<=r.1 {(r.0,r.1)} else {(r.1,r.0)}; return Some((a,b)); } }
+        None
+    }
+    fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
+        let n = tab.samples_len;
+        if n == 0 { return Vec::new(); }
+        if tab.ch_samples.is_empty() { return vec![0.0; n]; }
+        let chn = tab.ch_samples.len() as f32;
+        let mut out = vec![0.0f32; n];
+        for ch in &tab.ch_samples { for i in 0..n { if let Some(&v)=ch.get(i) { out[i]+=v; } } }
+        for v in &mut out { *v /= chn; }
+        out
+    }
+        fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize,usize)) {
+        let (mono, ab, len) = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s,e) = range; if e<=s || e>tab.samples_len { return; }
+                for ch in tab.ch_samples.iter_mut() { let mut seg = ch[s..e].to_vec(); std::mem::swap(ch, &mut seg); ch.truncate(e-s); }
+                tab.samples_len = e - s;
+                tab.view_offset = 0; tab.selection = Some((0, tab.samples_len));
+                tab.ab_loop = None; tab.dirty = true;
+                (Self::editor_mixdown_mono(tab), tab.ab_loop, tab.samples_len)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some((a,b)) = ab { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_region(s,e); }
+        else { self.audio.set_loop_region(0, len); }
+    }
+    fn editor_apply_fade_range(&mut self, tab_idx: usize, range: (usize,usize), in_ms: f32, out_ms: f32) {
+        let (mono, ab, len) = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = range; if e<=s || e>tab.samples_len { return; }
+                let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                let in_samp = ((in_ms/1000.0)*sr).round() as usize;
+                let out_samp = ((out_ms/1000.0)*sr).round() as usize;
+                let in_len = in_samp.min(e.saturating_sub(s));
+                let out_len = out_samp.min(e.saturating_sub(s));
+                for ch in tab.ch_samples.iter_mut() { for i in 0..in_len { let t = (i as f32)/(in_len.max(1) as f32); ch[s+i] *= t; } }
+                for ch in tab.ch_samples.iter_mut() { for i in 0..out_len { let t = 1.0 - (i as f32)/(out_len.max(1) as f32); ch[e-1-i] *= t; } }
+                tab.dirty = true;
+                (Self::editor_mixdown_mono(tab), tab.ab_loop, tab.samples_len)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some((a,b)) = ab { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_region(s,e); }
+        else { self.audio.set_loop_region(0, len); }
+    }
+    fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
+        match tab.loop_mode {
+            LoopMode::Off => { self.audio.set_loop_enabled(false); }
+            LoopMode::OnWhole => {
+                self.audio.set_loop_enabled(true);
+                if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
+            }
+            LoopMode::Marker => {
+                if let Some((a,b)) = tab.ab_loop { if a!=b { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); return; } }
+                self.audio.set_loop_enabled(false);
+            }
+        }
+    }
+    fn set_marker_sample(tab: &mut EditorTab, idx: usize) {
+        match tab.ab_loop {
+            None => tab.ab_loop = Some((idx, idx)),
+            Some((a,b)) => {
+                if a==b { tab.ab_loop = Some((a.min(idx), a.max(idx))); }
+                else { let da = a.abs_diff(idx); let db = b.abs_diff(idx); if da <= db { tab.ab_loop = Some((idx, b)); } else { tab.ab_loop = Some((a, idx)); } }
+            }
+        }
+    }fn current_active_path(&self) -> Option<&PathBuf> {
         if let Some(i) = self.active_tab { return self.tabs.get(i).map(|t| &t.path); }
         if let Some(i) = self.selected { return self.files.get(i); }
         None
@@ -239,7 +315,7 @@ impl WavesPreviewer {
         cc.egui_ctx.set_style(style);
 
         let audio = AudioEngine::new()?;
-        // 初期状態（リスト表示）ではループを無効にする
+        // 初期状態（リスト表示�E�ではループを無効にする
         audio.set_loop_enabled(false);
         Ok(Self {
             audio,
@@ -279,6 +355,9 @@ impl WavesPreviewer {
             lufs_recalc_deadline: HashMap::new(),
             lufs_rx2: None,
             lufs_worker_busy: false,
+            leave_intent: None,
+            show_leave_prompt: false,
+            pending_activate_path: None,
 
         })
     }
@@ -350,7 +429,7 @@ impl eframe::App for WavesPreviewer {
                         })();
                         let val = match res { Ok(v) => v, Err(_) => f32::NEG_INFINITY };
                         let _=tx.send((path, val));
-                    });
+                        });
                 }
             }
         }
@@ -377,12 +456,11 @@ impl eframe::App for WavesPreviewer {
         if ctx.input(|i| i.key_pressed(Key::Space)) { self.audio.toggle_play(); }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) { self.trigger_save_selected(); }
         
-        // Ctrl+W でアクティブタブを閉じる
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::W)) {
             if let Some(active_idx) = self.active_tab {
                 self.audio.stop();
                 self.tabs.remove(active_idx);
-                // 閉じたタブの後にタブがあれば次のタブ、なければ前のタブをアクティブに
+                // 閉じたタブ�E後にタブがあれば次のタブ、なければ前�EタブをアクチE��ブに
                 if !self.tabs.is_empty() {
                     let new_active = if active_idx < self.tabs.len() { 
                         active_idx 
@@ -396,135 +474,16 @@ impl eframe::App for WavesPreviewer {
             }
         }
         
-        if let Some(tab_idx) = self.active_tab {
-            if ctx.input(|i| i.key_pressed(Key::L)) {
-                let tab = &mut self.tabs[tab_idx];
-                tab.loop_enabled = !tab.loop_enabled;
-                self.audio.set_loop_enabled(tab.loop_enabled);
-                if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
-            }
-        }
-        if self.active_tab.is_none() {
-            let mut changed = false;
-            let len = self.files.len();
-            if len > 0 {
-                // Ctrl/Cmd + A: select all in list
-                if ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(Key::A)) {
-                    self.selected_multi.clear();
-                    for i in 0..len { self.selected_multi.insert(i); }
-                    self.selected = Some(0);
-                    self.select_anchor = Some(0);
-                    self.scroll_to_selected = true;
-                    changed = true;
-                }
-                // Up/Down: move selection; with Shift extend range from anchor
-                let mut moved: Option<usize> = None;
-                if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
-                    let cur = self.selected.unwrap_or(0);
-                    moved = Some((cur+1).min(len-1));
-                }
-                if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
-                    let cur = self.selected.unwrap_or(0);
-                    moved = Some(if cur>0 { cur-1 } else { 0 });
-                }
-                if let Some(new_idx) = moved {
-                    let mods = ctx.input(|i| i.modifiers);
-                    if mods.shift {
-                        let anchor = self.select_anchor.or(self.selected).unwrap_or(new_idx);
-                        let (a,b) = if anchor <= new_idx { (anchor, new_idx) } else { (new_idx, anchor) };
-                        self.selected_multi.clear();
-                        for i in a..=b { self.selected_multi.insert(i); }
-                        self.selected = Some(new_idx);
-                        self.select_anchor = Some(anchor);
-                    } else {
-                        self.selected_multi.clear();
-                        self.selected_multi.insert(new_idx);
-                        self.selected = Some(new_idx);
-                        self.select_anchor = Some(new_idx);
-                    }
-                    self.scroll_to_selected = true;
-                    changed = true;
-                }
-                // Left/Right: adjust Gain (dB) for all selected rows by ±0.5 dB (relative)
-                if ctx.input(|i| i.key_pressed(Key::ArrowRight)) {
-                    let delta = 0.5f32;
-                    if self.selected_multi.is_empty() {
-                        if let Some(sel) = self.selected { self.selected_multi.insert(sel); }
-                    }
-                    let indices = self.selected_multi.clone();
-                    self.adjust_gain_for_indices(&indices, delta);
-                }
-                if ctx.input(|i| i.key_pressed(Key::ArrowLeft)) {
-                    let delta = -0.5f32;
-                    if self.selected_multi.is_empty() {
-                        if let Some(sel) = self.selected { self.selected_multi.insert(sel); }
-                    }
-                    let indices = self.selected_multi.clone();
-                    self.adjust_gain_for_indices(&indices, delta);
-                }
-                if ctx.input(|i| i.key_pressed(Key::Enter)) { if let Some(i) = self.selected { let p_owned = self.files.get(i).cloned(); if let Some(p) = p_owned.as_ref() { self.open_or_activate_tab(p); } } }
-                if changed {
-                    if let Some(i) = self.selected {
-                        let p_owned = self.files.get(i).cloned();
-                        if let Some(p) = p_owned.as_ref() {
-                            // リスト表示時は常にループを無効にする
-                            self.audio.set_loop_enabled(false);
-                            // この時点で再生対象パスを更新しておく（ゲイン適用に使用）
-                            self.playing_path = Some(p.clone());
-                            match self.mode {
-                                RateMode::Speed => {
-                                    let _ = prepare_for_speed(p, &self.audio, &mut Vec::new(), self.playback_rate);
-                                    self.audio.set_rate(self.playback_rate);
-                                    // 新規ロード直後に実効音量（Volume×Gain）を反映
-                                    self.apply_effective_volume();
-                                }
-                                _ => {
-                                    self.audio.set_rate(1.0);
-                                    self.spawn_heavy_processing(p);
-                                    // 重処理完了前でも対象パスが決まっているのでゲインだけ先に反映
-                                    self.apply_effective_volume();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Meter
-        let rms = self.audio.shared.meter_rms.load(std::sync::atomic::Ordering::Relaxed).max(1e-9);
-        self.meter_db = 20.0 * rms.log10();
-
-        // Drag & drop: add files/folders
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if !dropped.is_empty() {
-            let mut files: Vec<PathBuf> = Vec::new();
-            let mut dirs: Vec<PathBuf> = Vec::new();
-            for f in dropped {
-                if let Some(p) = f.path.clone() {
-                    if p.is_dir() { dirs.push(p); } else { files.push(p); }
-                }
-            }
-            let mut added = 0usize;
-            if !files.is_empty() { added += self.add_files_merge(&files); }
-            for d in dirs { added += self.add_folder_merge(&d); }
-            if added > 0 { self.after_add_refresh(); }
-        }
-
-        // Top controls (wrap for small width)
+        // Top controls (always visible)
         self.ui_top_bar(ctx);
-
         let mut activate_path: Option<PathBuf> = None;
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Tabs
+        egui::CentralPanel::default().show(ctx, |ui| {            // Tabs
             ui.horizontal_wrapped(|ui| {
                 let is_list = self.active_tab.is_none();
                 let list_label = if is_list { RichText::new("[List]").strong() } else { RichText::new("List") };
-                if ui.selectable_label(is_list, list_label).clicked() { 
-                    self.active_tab = None; 
-                    // タブ切り替え時に音声を停止
+                if ui.selectable_label(is_list, list_label).clicked() {
+                    self.active_tab = None;
                     self.audio.stop();
-                    // リスト表示時は常にループを無効にする
                     self.audio.set_loop_enabled(false);
                 }
                 let mut to_close: Option<usize> = None;
@@ -532,85 +491,106 @@ impl eframe::App for WavesPreviewer {
                     let active = self.active_tab == Some(i);
                     let text = if active { RichText::new(format!("[{}]", tab.display_name)).strong() } else { RichText::new(tab.display_name.clone()) };
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(active, text).clicked() { 
-                            self.active_tab = Some(i); 
-                            activate_path = Some(tab.path.clone()); 
-                            // タブ切り替え時に音声を停止
+                        if ui.selectable_label(active, text).clicked() {
+                            self.active_tab = Some(i);
+                            activate_path = Some(tab.path.clone());
                             self.audio.stop();
                         }
-                        if ui.button("x").on_hover_text("Close").clicked() { 
-                            to_close = Some(i); 
-                            // タブ閉じる時に音声を停止
+                        if ui.button("x").on_hover_text("Close").clicked() {
+                            to_close = Some(i);
                             self.audio.stop();
                         }
                     });
                 }
-                if let Some(i) = to_close { self.tabs.remove(i); match self.active_tab { Some(ai) if ai==i => self.active_tab=None, Some(ai) if ai>i => self.active_tab=Some(ai-1), _=>{} } }
+                if let Some(i) = to_close {
+                    self.tabs.remove(i);
+                    match self.active_tab {
+                        Some(ai) if ai == i => self.active_tab = None,
+                        Some(ai) if ai > i => self.active_tab = Some(ai - 1),
+                        _ => {}
+                    }
+                }
             });
             ui.separator();
+        let mut apply_pending_loop = false;
+        if let Some(tab_idx) = self.active_tab {
+    let tab = &mut self.tabs[tab_idx];
+    ui.horizontal(|ui| {
+        let dirty_mark = if tab.dirty { " •" } else { "" };
+        ui.label(RichText::new(format!("{}{}", tab.path.display(), dirty_mark)).monospace());
+        ui.separator();
+        ui.label("Loop:");
+        for (m,label) in [ (LoopMode::Off, "Off"), (LoopMode::OnWhole, "On"), (LoopMode::Marker, "Marker") ] {
+            if ui.selectable_label(tab.loop_mode == m, label).clicked() {
+                tab.loop_mode = m;
+                apply_pending_loop = true;
+            }
+        }
+        ui.separator();
+        // A/B status and quick set
+        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+        let (a_time, b_time) = if let Some((a,b)) = tab.ab_loop { ((a as f32)/sr, (b as f32)/sr) } else { (0.0, 0.0) };
+        let ab_text = if tab.ab_loop.is_some() { format!("A: {}  B: {}", crate::app::helpers::format_time_s(a_time), crate::app::helpers::format_time_s(b_time)) } else { "A: --  B: --".to_string() };
+        ui.label(RichText::new(ab_text).monospace());
+        if ui.button("Set A").on_hover_text("Set A at playhead (A key)").clicked() {
+            let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+            let b = tab.ab_loop.map(|(_,b)| b).unwrap_or(pos_now);
+            tab.ab_loop = Some((pos_now, b));
+            if tab.loop_mode == LoopMode::Marker { let (s,e)= if pos_now<=b {(pos_now,b)} else {(b,pos_now)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); }
+        }
+        if ui.button("Set B").on_hover_text("Set B at playhead (B key)").clicked() {
+            let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+            let a = tab.ab_loop.map(|(a,_)| a).unwrap_or(pos_now);
+            tab.ab_loop = Some((a, pos_now));
+            if tab.loop_mode == LoopMode::Marker { let (s,e)= if a<=pos_now {(a,pos_now)} else {(pos_now,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); }
+        }
+        if ui.button("Clear A/B").clicked() { tab.ab_loop = None; apply_pending_loop = true; }
+        ui.separator();
+        // View mode toggles
+        for (vm, label) in [ (ViewMode::Waveform, "Wave"), (ViewMode::Spectrogram, "Spec"), (ViewMode::Mel, "Mel") ] {
+            if ui.selectable_label(tab.view_mode == vm, label).clicked() { tab.view_mode = vm; }
+        }
+        ui.separator();
+        // Time HUD: play position / total length
+        let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed) as f32 / sr as f32;
+        let len = (tab.samples_len as f32 / sr as f32).max(0.0);
+        ui.label(RichText::new(format!("Pos: {} / {}", crate::app::helpers::format_time_s(pos), crate::app::helpers::format_time_s(len))).monospace());
+    });
+    ui.separator();
 
-            if let Some(tab_idx) = self.active_tab {
-                // Editor view
-                let tab = &mut self.tabs[tab_idx];
+    let avail = ui.available_size();
+                // pending actions to perform after UI borrows end
+                let mut do_set_loop_from: Option<(usize,usize)> = None;
+                let mut do_trim: Option<(usize,usize)> = None;
+                let mut do_fade: Option<((usize,usize), f32, f32)> = None;
+                // Split canvas and inspector: right panel fixed width
+                let inspector_w = 260.0f32;
+                let canvas_w = (avail.x - inspector_w).max(100.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(tab.path.display().to_string()).monospace());
-                    ui.separator();
-                    if ui.selectable_label(tab.loop_enabled, if tab.loop_enabled { "Loop: On" } else { "Loop: Off" }).clicked() {
-                        tab.loop_enabled = !tab.loop_enabled;
-                        self.audio.set_loop_enabled(tab.loop_enabled);
-                        // full-buffer loop
-                        if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
-                    }
-                    ui.separator();
-                    // Zoom HUD (time-first). Shows visible time span and scale near sample level.
-                    let sr = self.audio.shared.out_sample_rate.max(1);
-                    let spp_hud = if tab.samples_per_px > 0.0 { tab.samples_per_px } else { 1.0 };
-                    let width_px = ui.available_width().max(1.0);
-                    let view_samples = (width_px * spp_hud).ceil() as usize;
-                    let view_secs = view_samples as f32 / sr as f32;
-                    let zoom_text = if view_secs < 1.0 {
-                        format!("View: {:.0} ms", view_secs * 1000.0)
-                    } else if view_secs < 60.0 {
-                        format!("View: {:.2} s", view_secs)
-                    } else {
-                        let total = view_secs.round() as u64; let m = total/60; let s = total%60; format!("View: {}:{:02}", m, s)
-                    };
-                    let pps = 1.0 / spp_hud;
-                    let detail = if pps >= 1.0 { format!("({:.1} px/samp)", pps) } else { format!("({:.2} samp/px)", spp_hud) };
-                    ui.label(RichText::new(format!("{zoom_text}  {detail}")).weak().monospace());
-                    ui.separator();
-                    // Time HUD: play position / total length
-                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed) as f32 / sr as f32;
-                    let len = (tab.samples_len as f32 / sr as f32).max(0.0);
-                    ui.label(RichText::new(format!("Pos: {} / {}", crate::app::helpers::format_time_s(pos), crate::app::helpers::format_time_s(len))).monospace());
-                });
-                ui.separator();
+                    // Canvas area
+                    ui.vertical(|ui| {
+                        let canvas_h = (canvas_w * 0.35).clamp(180.0, avail.y);
+                        let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
+                        let rect = resp.rect;
+                        let w = rect.width().max(1.0); let h = rect.height().max(1.0);
+                        painter.rect_filled(rect, 0.0, Color32::from_rgb(16,16,18));
+                        // Layout parameters
+                        let gutter_w = 44.0;
+                        let wave_left = rect.left() + gutter_w;
+                        let wave_w = (w - gutter_w).max(1.0);
+                        let ch_n = tab.ch_samples.len().max(1);
+                        let lane_h = h / ch_n as f32;
 
-                let avail = ui.available_size();
-                // allocate editor canvas
-                let canvas_h = (avail.x * 0.35).clamp(180.0, avail.y);
-                let (resp, painter) = ui.allocate_painter(egui::vec2(avail.x, canvas_h), Sense::click_and_drag());
-                let rect = resp.rect;
-                let w = rect.width().max(1.0); let h = rect.height().max(1.0);
-                painter.rect_filled(rect, 0.0, Color32::from_rgb(16,16,18));
+                        // Visual amplitude scale: assume Volume=0 dB for display; apply per-file Gain only
+                        let gain_db = *self.pending_gains.get(&tab.path).unwrap_or(&0.0);
+                        let scale = db_to_amp(gain_db);
 
-                // Layout parameters
-                let gutter_w = 44.0;
-                let wave_left = rect.left() + gutter_w;
-                let wave_w = (w - gutter_w).max(1.0);
-                let ch_n = tab.ch_samples.len().max(1);
-                let lane_h = h / ch_n as f32;
-
-                // Visual amplitude scale: assume Volume=0 dB for display; apply per-file Gain only
-                let gain_db = *self.pending_gains.get(&tab.path).unwrap_or(&0.0);
-                let scale = db_to_amp(gain_db);
-
-                // Initialize zoom to fit if unset (show whole file)
-                if tab.samples_len > 0 && tab.samples_per_px <= 0.0 {
-                    let fit_spp = (tab.samples_len as f32 / wave_w.max(1.0)).max(0.01);
-                    tab.samples_per_px = fit_spp;
-                    tab.view_offset = 0;
-                }
+                        // Initialize zoom to fit if unset (show whole file)
+                        if tab.samples_len > 0 && tab.samples_per_px <= 0.0 {
+                            let fit_spp = (tab.samples_len as f32 / wave_w.max(1.0)).max(0.01);
+                            tab.samples_per_px = fit_spp;
+                            tab.view_offset = 0;
+                        }
 
                 // Time ruler (ticks + labels) across all lanes
                 {
@@ -647,7 +627,7 @@ impl eframe::App for WavesPreviewer {
                     }
                 }
 
-                // Handle interactions (seek, zoom, pan)
+                // Handle interactions (seek, zoom, pan, selection)
                 // Detect hover using pointer position against our canvas rect (robust across senses)
                 let pointer_over_canvas = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| rect.contains(p));
                 if pointer_over_canvas {
@@ -727,15 +707,96 @@ impl eframe::App for WavesPreviewer {
                         }
                     }
                 }
-                // Seek by primary click/drag only (Left button), unless Alt is held (Alt+LeftDrag = pan)
+                // Selection vs Seek with primary button (Alt+LeftDrag = pan handled above)
                 let alt_now = ui.input(|i| i.modifiers.alt);
-                if !alt_now && (resp.clicked_by(egui::PointerButton::Primary) || resp.dragged_by(egui::PointerButton::Primary)) {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                        let t = ((x - wave_left) / wave_w).clamp(0.0, 1.0);
-                        let vis = (wave_w * tab.samples_per_px.max(0.0001)).ceil() as usize;
-                        let seek = tab.view_offset.saturating_add((t * vis as f32) as usize).min(tab.samples_len);
-                        self.audio.seek_to_sample(seek);
+                if !alt_now {
+                    // Dragging: create/update selection
+                    if resp.dragged_by(egui::PointerButton::Primary) {
+                        if tab.drag_select_anchor.is_none() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                let x = pos.x.clamp(wave_left, wave_left + wave_w);
+                                let spp = tab.samples_per_px.max(0.0001);
+                                let vis = (wave_w * spp).ceil() as usize;
+                                let s0 = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
+                                tab.drag_select_anchor = Some(s0);
+                            }
+                        }
+                        if let (Some(anchor), Some(pos)) = (tab.drag_select_anchor, resp.interact_pointer_pos()) {
+                            let x = pos.x.clamp(wave_left, wave_left + wave_w);
+                            let spp = tab.samples_per_px.max(0.0001);
+                            let vis = (wave_w * spp).ceil() as usize;
+                            let s1 = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
+                            let (a,b) = if anchor<=s1 { (anchor,s1) } else { (s1,anchor) };
+                            tab.selection = Some((a,b));
+                        }
+                    }
+                    // Drag release: finalize selection (optional zero-cross snap)
+                    if resp.drag_released() {
+                        if let (true, Some((mut a,mut b))) = (tab.snap_zero_cross, tab.selection) {
+                            if a < b && tab.samples_len > 2 {
+                                let mono = self.audio.shared.samples.load();
+                                if let Some(buf) = mono.as_ref() {
+                                    let find_zero = |mut idx: usize, dir: isize| -> usize {
+                                        let n = buf.len();
+                                        let mut i = idx as isize;
+                                        let step = if dir>=0 { 1 } else { -1 };
+                                        let mut last = buf[idx].clamp(-1.0,1.0);
+                                        for _ in 0..2048 { // limited search window
+                                            i += step;
+                                            if i <= 0 || i as usize >= n { break; }
+                                            let v = buf[i as usize].clamp(-1.0,1.0);
+                                            if last.signum() != v.signum() { return i.max(0) as usize; }
+                                            last = v;
+                                        }
+                                        idx
+                                    };
+                                    a = find_zero(a, -1);
+                                    b = find_zero(b.saturating_sub(1), 1);
+                                    if a < b { tab.selection = Some((a,b)); }
+                                }
+                            }
+                        }
+                        tab.drag_select_anchor = None;
+                    }
+                    // Click without drag: seek
+                    if resp.clicked_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let x = pos.x.clamp(wave_left, wave_left + wave_w);
+                            let spp = tab.samples_per_px.max(0.0001);
+                            let vis = (wave_w * spp).ceil() as usize;
+                            let seek = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
+                            self.audio.seek_to_sample(seek);
+                        }
+                    }
+                    // Double-click: select whole buffer
+                    if resp.double_clicked() {
+                        tab.selection = Some((0, tab.samples_len));
+                    }
+                }
+
+                // Draw selection overlay and AB markers (shared across lanes)
+                {
+                    // selection band
+                    if let Some((s,e)) = tab.selection {
+                        if e > s {
+                            let spp = tab.samples_per_px.max(0.0001);
+                            let x0 = wave_left + (((s.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
+                            let x1 = wave_left + (((e.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
+                            let sel_rect = egui::Rect::from_min_max(egui::pos2(x0.min(x1), rect.top()), egui::pos2(x0.max(x1), rect.bottom()));
+                            painter.rect_filled(sel_rect, 0.0, Color32::from_rgba_unmultiplied(80,120,200,60));
+                        }
+                    }
+                    // A/B markers and labels
+                    if let Some((a,b)) = tab.ab_loop {
+                        let spp = tab.samples_per_px.max(0.0001);
+                        let to_x = |samp: usize| wave_left + (((samp.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
+                        let ax = to_x(a); let bx = to_x(b);
+                        let st = egui::Stroke::new(2.0, Color32::from_rgb(60,160,255));
+                        painter.line_segment([egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())], st);
+                        painter.line_segment([egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())], st);
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        painter.text(egui::pos2(ax + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "A", fid.clone(), Color32::from_rgb(170,200,255));
+                        painter.text(egui::pos2(bx + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "B", fid, Color32::from_rgb(170,200,255));
                     }
                 }
 
@@ -845,6 +906,64 @@ impl eframe::App for WavesPreviewer {
                         painter.text(text_pos, egui::Align2::LEFT_TOP, label, fid, Color32::from_rgb(180, 200, 220));
                     }
                 }
+                    }); // end canvas UI
+
+                    // Inspector area (right)
+                    ui.vertical(|ui| {
+                        ui.set_width(inspector_w);
+                        ui.heading("Inspector");
+                        ui.separator();
+                        match tab.view_mode {
+                            ViewMode::Waveform => {
+                                ui.label(RichText::new(format!("Tool: {:?}", tab.active_tool)).strong());
+                                match tab.active_tool {
+                                    ToolKind::SeekSelect => {
+                                        if let Some((s,e)) = tab.selection { ui.label(format!("Selection: {}  E{} samp", s, e)); }
+                                        else { ui.label("Selection: (none)"); }
+                                    }
+                                    ToolKind::LoopEdit => {
+                                        let (a,b) = tab.ab_loop.unwrap_or((0,0));
+                                        ui.label(format!("A: {}  B: {} samp", a, b));
+                                        if ui.button("Use selection as loop").clicked() {
+                                            if let Some((s,e)) = Self::editor_selected_range(tab) { do_set_loop_from = Some((s,e)); }
+                                        }
+                                        if ui.button("Clear A/B").clicked() { do_set_loop_from = Some((0,0)); }
+                                    }
+                                    ToolKind::Trim => {
+                                        ui.label("Trim to Selection or A–B");
+                                        if ui.button("Trim Now").clicked() { if let Some((s,e)) = Self::editor_selected_range(tab) { do_trim = Some((s,e)); } }
+                                    }
+                                    ToolKind::Fade => {
+                                        let st = tab.tool_state;
+                                        let mut in_ms = st.fade_in_ms; let mut out_ms = st.fade_out_ms;
+                                        ui.label("Fade In (ms)"); ui.add(egui::DragValue::new(&mut in_ms).clamp_range(0.0..=10000.0).speed(5.0));
+                                        ui.label("Fade Out (ms)"); ui.add(egui::DragValue::new(&mut out_ms).clamp_range(0.0..=10000.0).speed(5.0));
+                                        // write back into tab state
+                                        tab.tool_state = ToolState{ fade_in_ms: in_ms, fade_out_ms: out_ms };
+                                        if ui.button("Apply Fade to Selection/A–B/Whole").clicked() {
+                                            let range = Self::editor_selected_range(tab).unwrap_or((0, tab.samples_len));
+                                            do_fade = Some((range, in_ms, out_ms));
+                                        }
+                                        if ui.button("Quick: Edge XFade (ms)").clicked() {
+                                            let range = Self::editor_selected_range(tab).unwrap_or((0, tab.samples_len));
+                                            let ms = in_ms.max(out_ms).max(5.0);
+                                            do_fade = Some((range, ms, ms));
+                                        }
+                                    }
+                                    ToolKind::Gain | ToolKind::Normalize => {
+                                        ui.label("Planned in next step.");
+                                    }
+                                }
+                            }
+                            _ => { ui.label("Tools for this view will appear here."); }
+                        }
+                    }); // end inspector
+                }); // end horizontal split
+
+                // perform pending actions after borrows end
+                if let Some((s,e)) = do_set_loop_from { if let Some(tab) = self.tabs.get_mut(tab_idx) { if s==0 && e==0 { tab.ab_loop=None; } else { tab.ab_loop=Some((s,e)); if tab.loop_enabled { self.audio.set_loop_region(s,e); } } } }
+                if let Some((s,e)) = do_trim { self.editor_apply_trim_range(tab_idx, (s,e)); }
+                if let Some(((s,e), in_ms, out_ms)) = do_fade { self.editor_apply_fade_range(tab_idx, (s,e), in_ms, out_ms); }
             } else {
                 // List view
                 let mut to_open: Option<PathBuf> = None;
@@ -923,10 +1042,9 @@ impl eframe::App for WavesPreviewer {
                                             .truncate(true)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     
-                                    // シングルクリック: 行選択 + 音声ロード（後段で一括処理）
-                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
+                                    // シングルクリチE��: 行選抁E+ 音声ロード（後段で一括処琁E��E                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
                                     
-                                    // ダブルクリック: エディタタブで開く
+                                    // ダブルクリチE��: エチE��タタブで開く
                                     if resp.double_clicked() { clicked_to_select = true; to_open = Some(path_owned.clone()); }
                                     
                                     if resp.hovered() {
@@ -943,11 +1061,9 @@ impl eframe::App for WavesPreviewer {
                                             .truncate(true)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     
-                                    // シングルクリック: 行選択 + 音声ロード
-                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
+                                    // シングルクリチE��: 行選抁E+ 音声ローチE                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
                                     
-                                    // ダブルクリック: システムのファイルブラウザでフォルダを開く（WAVファイルを選択状態で）
-                                    if resp.double_clicked() { clicked_to_select = true; let _ = open_folder_with_file_selected(&path_owned); }
+                                    // ダブルクリチE��: シスチE��のファイルブラウザでフォルダを開く！EAVファイルを選択状態で�E�E                                    if resp.double_clicked() { clicked_to_select = true; let _ = open_folder_with_file_selected(&path_owned); }
                                     
                                     if resp.hovered() {
                                         resp.on_hover_text(parent);
@@ -991,7 +1107,7 @@ impl eframe::App for WavesPreviewer {
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if resp.clicked() { clicked_to_load = true; }
                             });
-                            // col 6: dBFS (Peak) with Gain反映（Volumeは含めない）- clickable
+                            // col 6: dBFS (Peak) with Gain反映�E�Eolumeは含めなぁE��E clickable
                             row.col(|ui| {
                                 let (rect2, resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::click());
                                 let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
@@ -1095,6 +1211,9 @@ impl eframe::App for WavesPreviewer {
             }
         });
         // When switching tabs, ensure the active tab's audio is loaded and loop state applied.
+        if activate_path.is_none() {
+            if let Some(pending) = self.pending_activate_path.take() { activate_path = Some(pending); }
+        }
         if let Some(p) = activate_path {
             // Reload audio for the activated tab only; do not touch stored waveform
             match self.mode {
@@ -1132,6 +1251,30 @@ impl eframe::App for WavesPreviewer {
         }
         ctx.request_repaint_after(Duration::from_millis(16));
         
+        // Leave dirty editor confirmation
+        if self.show_leave_prompt {
+            egui::Window::new("Leave Editor?").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0,0.0)).show(ctx, |ui| {
+                ui.label("The waveform has been modified in memory. Leave this editor?");
+                ui.horizontal(|ui| {
+                    if ui.button("Leave").clicked() {
+                        match self.leave_intent.take() {
+                            Some(LeaveIntent::CloseTab(i)) => {
+                                if i < self.tabs.len() { self.tabs.remove(i); if let Some(ai)=self.active_tab { if ai==i { self.active_tab=None; } else if ai>i { self.active_tab=Some(ai-1); } } }
+                                self.audio.stop();
+                            }
+                            Some(LeaveIntent::ToTab(i)) => {
+                                if let Some(t) = self.tabs.get(i) { self.active_tab = Some(i); self.audio.stop(); self.pending_activate_path = Some(t.path.clone()); } self.rebuild_current_buffer_with_mode();
+                            }
+                            Some(LeaveIntent::ToList) => { self.active_tab=None; self.audio.stop(); self.audio.set_loop_enabled(false); }
+                            None => {}
+                        }
+                        self.show_leave_prompt = false;
+                    }
+                    if ui.button("Cancel").clicked() { self.leave_intent=None; self.show_leave_prompt=false; }
+                });
+            });
+        }
+        
         // First save prompt window
         if self.show_first_save_prompt {
             egui::Window::new("First Save Option").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0,0.0)).show(ctx, |ui| {
@@ -1158,3 +1301,14 @@ impl eframe::App for WavesPreviewer {
         self.ui_export_settings_window(ctx);
     }
 }
+
+
+
+
+
+
+
+
+
+
+
