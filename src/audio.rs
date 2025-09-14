@@ -18,6 +18,8 @@ pub struct SharedAudio {
     pub loop_enabled: std::sync::atomic::AtomicBool,
     pub loop_start: std::sync::atomic::AtomicUsize,
     pub loop_end: std::sync::atomic::AtomicUsize,
+    pub loop_xfade_samples: std::sync::atomic::AtomicUsize,
+    pub loop_xfade_shape: std::sync::atomic::AtomicU8, // 0=Linear,1=EqualPower
     pub rate: AtomicF32,                         // playback rate (0.25..4.0)
 }
 
@@ -49,6 +51,8 @@ impl AudioEngine {
             loop_enabled: std::sync::atomic::AtomicBool::new(false),
             loop_start: std::sync::atomic::AtomicUsize::new(0),
             loop_end: std::sync::atomic::AtomicUsize::new(0),
+            loop_xfade_samples: std::sync::atomic::AtomicUsize::new(0),
+            loop_xfade_shape: std::sync::atomic::AtomicU8::new(0),
             rate: AtomicF32::new(1.0),
         });
 
@@ -93,7 +97,6 @@ impl AudioEngine {
                         for frame in data.chunks_mut(channels) {
                             if pos >= len {
                                 if valid_loop {
-                                    pos = loop_start;
                                     pos_f = loop_start as f32;
                                 } else {
                                     shared.playing.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -102,14 +105,40 @@ impl AudioEngine {
                                 }
                             }
                             if valid_loop && pos >= loop_end {
-                                pos = loop_start;
                                 pos_f = loop_start as f32;
                             }
-                            // fractional linear interpolation
-                            let i0 = pos;
-                            let i1 = (i0 + 1).min(len.saturating_sub(1));
-                            let t = (pos_f - i0 as f32).clamp(0.0, 1.0);
-                            let s_lin = samples[i0] * (1.0 - t) + samples[i1] * t;
+                            // fractional sample accessor
+                            let sample_at = |pf: f32| -> f32 {
+                                let i0 = pf.floor() as usize;
+                                let i1 = (i0 + 1).min(len.saturating_sub(1));
+                                let t = (pf - i0 as f32).clamp(0.0, 1.0);
+                                samples[i0] * (1.0 - t) + samples[i1] * t
+                            };
+
+                            let mut s_lin = sample_at(pos_f);
+                            // Crossfade near loop end if enabled
+                            if valid_loop {
+                                let xfade = shared.loop_xfade_samples.load(std::sync::atomic::Ordering::Relaxed);
+                                if xfade > 0 {
+                                    let xfade_f = xfade as f32;
+                                    let rem = (loop_end as f32) - pos_f; // remaining until end
+                                    if rem >= 0.0 && rem <= xfade_f {
+                                        let head_pf = (loop_start as f32) + (xfade_f - rem).clamp(0.0, xfade_f);
+                                        let s_head = sample_at(head_pf);
+                                        let tcf = ((xfade_f - rem) / xfade_f).clamp(0.0, 1.0);
+                                        let shape = shared.loop_xfade_shape.load(std::sync::atomic::Ordering::Relaxed);
+                                        let (w_out, w_in) = match shape { // shapes based on amplitude weights
+                                            1 => {
+                                                // equal-power: cos/sin over [0, pi/2]
+                                                let a = core::f32::consts::FRAC_PI_2 * tcf;
+                                                (a.cos(), a.sin())
+                                            }
+                                            _ => (1.0 - tcf, tcf), // linear
+                                        };
+                                        s_lin = s_lin * w_out + s_head * w_in;
+                                    }
+                                }
+                            }
                             let s = s_lin * vol;
                             pos_f += rate;
                             pos = pos_f.floor() as usize;
@@ -198,6 +227,11 @@ impl AudioEngine {
     pub fn set_loop_region(&self, start: usize, end: usize) {
         self.shared.loop_start.store(start, std::sync::atomic::Ordering::Relaxed);
         self.shared.loop_end.store(end, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn set_loop_crossfade(&self, samples: usize, shape_linear_or_equal_power: u8) {
+        self.shared.loop_xfade_samples.store(samples, std::sync::atomic::Ordering::Relaxed);
+        self.shared.loop_xfade_shape.store(if shape_linear_or_equal_power > 0 { 1 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_rate(&self, rate: f32) {

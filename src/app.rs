@@ -73,13 +73,153 @@ use self::{types::*, helpers::*};
         leave_intent: Option<LeaveIntent>,
         show_leave_prompt: bool,
         pending_activate_path: Option<PathBuf>,
+        // Heavy preview worker for Pitch/Stretch (mono)
+        heavy_preview_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+        heavy_preview_tool: Option<ToolKind>,
+        // Heavy overlay worker (per-channel preview for Pitch/Stretch)
+        heavy_overlay_rx: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Vec<Vec<f32>>)>>,
     }
 
 impl WavesPreviewer {
+    fn preview_restore_audio_for_tab(&self, tab_idx: usize) {
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            // Rebuild mono from current destructive state
+            let mono = Self::editor_mixdown_mono(tab);
+            self.audio.set_samples(std::sync::Arc::new(mono));
+            // Reapply loop mode
+            self.apply_loop_mode_for_tab(tab);
+        }
+    }
+    fn set_preview_mono(&mut self, tab_idx: usize, tool: ToolKind, mono: Vec<f32>) {
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        if let Some(tab) = self.tabs.get_mut(tab_idx) { tab.preview_audio_tool = Some(tool); }
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn clear_preview_if_any(&mut self, tab_idx: usize) {
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            if tab.preview_audio_tool.is_some() {
+                drop(tab);
+                self.preview_restore_audio_for_tab(tab_idx);
+                if let Some(tabm) = self.tabs.get_mut(tab_idx) { tabm.preview_audio_tool = None; tabm.preview_overlay_ch = None; }
+            }
+        }
+        // also discard any in-flight heavy preview job
+        self.heavy_preview_rx = None;
+        self.heavy_preview_tool = None;
+    }
+    fn spawn_heavy_preview_owned(&mut self, mono: Vec<f32>, tool: ToolKind, param: f32) {
+        use std::sync::mpsc;
+        let sr = self.audio.shared.out_sample_rate;
+        // cancel previous job by dropping receiver
+        self.heavy_preview_rx = None; self.heavy_preview_tool = None;
+        let (tx, rx) = mpsc::channel::<Vec<f32>>();
+        std::thread::spawn(move || {
+            let out = match tool {
+                ToolKind::PitchShift => crate::wave::process_pitchshift_offline(&mono, sr, sr, param),
+                ToolKind::TimeStretch => crate::wave::process_timestretch_offline(&mono, sr, sr, param),
+                _ => mono,
+            };
+            let _ = tx.send(out);
+        });
+        self.heavy_preview_rx = Some(rx);
+        self.heavy_preview_tool = Some(tool);
+    }
+
+    // Spawn per-channel overlay generator (Pitch/Stretch) in a worker thread.
+    // Note: Call this ONLY after UI borrows end (see E0499 note) to avoid nested &mut self borrows.
+    fn spawn_heavy_overlay_for_tab(&mut self, tab_idx: usize, tool: ToolKind, param: f32) {
+        use std::sync::mpsc;
+        // Cancel previous overlay job by dropping receiver
+        self.heavy_overlay_rx = None;
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            let path = tab.path.clone();
+            let ch = tab.ch_samples.clone();
+            let sr = self.audio.shared.out_sample_rate;
+            let (tx, rx) = mpsc::channel::<(std::path::PathBuf, Vec<Vec<f32>>) >();
+            std::thread::spawn(move || {
+                let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
+                for chan in ch.iter() {
+                    let processed = match tool {
+                        ToolKind::PitchShift => crate::wave::process_pitchshift_offline(chan, sr, sr, param),
+                        ToolKind::TimeStretch => crate::wave::process_timestretch_offline(chan, sr, sr, param),
+                        _ => chan.clone(),
+                    };
+                    out.push(processed);
+                }
+                let _ = tx.send((path, out));
+            });
+            self.heavy_overlay_rx = Some(rx);
+        }
+    }
+    fn fade_weight(shape: crate::app::types::FadeShape, t: f32) -> f32 {
+        let x = t.clamp(0.0, 1.0);
+        match shape {
+            crate::app::types::FadeShape::Linear => x,
+            crate::app::types::FadeShape::EqualPower => (core::f32::consts::PI * x / 2.0).sin(),
+            crate::app::types::FadeShape::Cosine => (1.0 - (core::f32::consts::PI * (1.0 - x)).cos()) * 0.5,
+            crate::app::types::FadeShape::SCurve => x * x * (3.0 - 2.0 * x), // smootherstep-like
+            crate::app::types::FadeShape::Quadratic => x * x,
+            crate::app::types::FadeShape::Cubic => x * x * x,
+        }
+    }
+    fn editor_apply_fade_in_explicit(&mut self, tab_idx: usize, range: (usize,usize), shape: crate::app::types::FadeShape) {
+        let mono = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s,e) = range; if e<=s || e>tab.samples_len { return; }
+                let dur = (e - s).max(1) as f32;
+                for ch in tab.ch_samples.iter_mut() {
+                    for i in s..e {
+                        let t = (i - s) as f32 / dur;
+                        let w = Self::fade_weight(shape, t);
+                        ch[i] *= w;
+                    }
+                }
+                tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn editor_apply_fade_out_explicit(&mut self, tab_idx: usize, range: (usize,usize), shape: crate::app::types::FadeShape) {
+        let mono = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s,e) = range; if e<=s || e>tab.samples_len { return; }
+                let dur = (e - s).max(1) as f32;
+                for ch in tab.ch_samples.iter_mut() {
+                    for i in s..e {
+                        let t = (i - s) as f32 / dur;
+                        let w = 1.0 - Self::fade_weight(shape, t);
+                        ch[i] *= w;
+                    }
+                }
+                tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
     fn editor_selected_range(tab: &EditorTab) -> Option<(usize,usize)> {
         if let Some(r) = tab.selection { if r.1 > r.0 { return Some(r); } }
-        if let Some(r) = tab.ab_loop { if r.1 != r.0 { let (a,b) = if r.0<=r.1 {(r.0,r.1)} else {(r.1,r.0)}; return Some((a,b)); } }
         None
+    }
+    fn editor_apply_reverse_range(&mut self, tab_idx: usize, range: (usize,usize)) {
+        let mono = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = range; if e<=s || e>tab.samples_len { return; }
+                for ch in tab.ch_samples.iter_mut() { ch[s..e].reverse(); }
+                tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+        // ensure runtime crossfade is disabled after baking
+        self.audio.set_loop_crossfade(0, 0);
     }
     fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
         let n = tab.samples_len;
@@ -92,23 +232,56 @@ impl WavesPreviewer {
         out
     }
         fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize,usize)) {
-        let (mono, ab, len) = {
+        let mono = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s,e) = range; if e<=s || e>tab.samples_len { return; }
                 for ch in tab.ch_samples.iter_mut() { let mut seg = ch[s..e].to_vec(); std::mem::swap(ch, &mut seg); ch.truncate(e-s); }
                 tab.samples_len = e - s;
-                tab.view_offset = 0; tab.selection = Some((0, tab.samples_len));
-                tab.ab_loop = None; tab.dirty = true;
-                (Self::editor_mixdown_mono(tab), tab.ab_loop, tab.samples_len)
+                tab.view_offset = 0; tab.selection = None;
+                tab.loop_region = None; tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
             } else { return; }
         };
         self.audio.set_samples(std::sync::Arc::new(mono));
         self.audio.stop();
-        if let Some((a,b)) = ab { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_region(s,e); }
-        else { self.audio.set_loop_region(0, len); }
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn editor_apply_gain_range(&mut self, tab_idx: usize, range: (usize,usize), gain_db: f32) {
+        let mono = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = range; if e<=s || e>tab.samples_len { return; }
+                let g = db_to_amp(gain_db);
+                for ch in tab.ch_samples.iter_mut() { for i in s..e { ch[i] *= g; } }
+                tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn editor_apply_normalize_range(&mut self, tab_idx: usize, range: (usize,usize), target_db: f32) {
+        let mono = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = range; if e<=s || e>tab.samples_len { return; }
+                // Find peak in range
+                let mut peak = 0.0f32;
+                for ch in &tab.ch_samples { for &v in &ch[s..e] { peak = peak.max(v.abs()); } }
+                if peak > 0.0 {
+                    let target_amp = db_to_amp(target_db);
+                    let g = target_amp / peak;
+                    for ch in tab.ch_samples.iter_mut() { for i in s..e { ch[i] *= g; } }
+                }
+                tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
     }
     fn editor_apply_fade_range(&mut self, tab_idx: usize, range: (usize,usize), in_ms: f32, out_ms: f32) {
-        let (mono, ab, len) = {
+        let mono = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range; if e<=s || e>tab.samples_len { return; }
                 let sr = self.audio.shared.out_sample_rate.max(1) as f32;
@@ -119,33 +292,93 @@ impl WavesPreviewer {
                 for ch in tab.ch_samples.iter_mut() { for i in 0..in_len { let t = (i as f32)/(in_len.max(1) as f32); ch[s+i] *= t; } }
                 for ch in tab.ch_samples.iter_mut() { for i in 0..out_len { let t = 1.0 - (i as f32)/(out_len.max(1) as f32); ch[e-1-i] *= t; } }
                 tab.dirty = true;
-                (Self::editor_mixdown_mono(tab), tab.ab_loop, tab.samples_len)
+                Self::editor_mixdown_mono(tab)
             } else { return; }
         };
         self.audio.set_samples(std::sync::Arc::new(mono));
         self.audio.stop();
-        if let Some((a,b)) = ab { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_region(s,e); }
-        else { self.audio.set_loop_region(0, len); }
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn editor_apply_loop_xfade(&mut self, tab_idx: usize) {
+        let mono = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = match tab.loop_region { Some((a,b)) if b> a => (a,b), _ => { return; } };
+                let seg_len = e - s;
+                let n = tab.loop_xfade_samples.min(seg_len / 2).min(tab.samples_len);
+                if n == 0 { return; }
+                for ch in tab.ch_samples.iter_mut() {
+                    for i in 0..n {
+                        let t = i as f32 / (n as f32);
+                        let (w_out, w_in) = match tab.loop_xfade_shape {
+                            crate::app::types::LoopXfadeShape::EqualPower => {
+                                let a = core::f32::consts::FRAC_PI_2 * t; (a.cos(), a.sin())
+                            }
+                            crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
+                        };
+                        let head_idx = s + i;
+                        let tail_idx = e - n + i;
+                        let head = ch[head_idx];
+                        let tail = ch[tail_idx];
+                        let mixed = tail * w_out + head * w_in;
+                        ch[head_idx] = mixed;
+                        ch[tail_idx] = mixed;
+                    }
+                }
+                // After destructive apply, disable runtime crossfade
+                tab.loop_xfade_samples = 0;
+                tab.dirty = true;
+                Self::editor_mixdown_mono(tab)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn editor_delete_range_and_join(&mut self, tab_idx: usize, range: (usize,usize)) {
+        let (mono, loop_mode, lr, len) = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = range; if e<=s || e>tab.samples_len { return; }
+                let remove_len = e - s;
+                for ch in tab.ch_samples.iter_mut() { ch.drain(s..e); }
+                tab.samples_len = tab.samples_len.saturating_sub(remove_len);
+                // invalidate loop_region to avoid stale indices (simple, robust)
+                tab.loop_region = None;
+                tab.dirty = true;
+                (Self::editor_mixdown_mono(tab), tab.loop_mode, tab.loop_region, tab.samples_len)
+            } else { return; }
+        };
+        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.stop();
+        match loop_mode {
+            LoopMode::OnWhole => { self.audio.set_loop_enabled(true); self.audio.set_loop_region(0, len); }
+            LoopMode::Marker => { if let Some((a,b)) = lr { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); } else { self.audio.set_loop_enabled(false); } }
+            LoopMode::Off => { self.audio.set_loop_enabled(false); }
+        }
     }
     fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
         match tab.loop_mode {
             LoopMode::Off => { self.audio.set_loop_enabled(false); }
             LoopMode::OnWhole => {
                 self.audio.set_loop_enabled(true);
-                if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
+                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
+                    let len = buf.len();
+                    self.audio.set_loop_region(0, len);
+                    let cf = tab.loop_xfade_samples.min(len / 2);
+                    self.audio.set_loop_crossfade(cf, match tab.loop_xfade_shape { crate::app::types::LoopXfadeShape::Linear => 0, crate::app::types::LoopXfadeShape::EqualPower => 1 });
+                }
             }
             LoopMode::Marker => {
-                if let Some((a,b)) = tab.ab_loop { if a!=b { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); return; } }
+                if let Some((a,b)) = tab.loop_region { if a!=b { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); let cf = tab.loop_xfade_samples.min((e.saturating_sub(s)) / 2); self.audio.set_loop_crossfade(cf, match tab.loop_xfade_shape { crate::app::types::LoopXfadeShape::Linear => 0, crate::app::types::LoopXfadeShape::EqualPower => 1 }); return; } }
                 self.audio.set_loop_enabled(false);
             }
         }
     }
     fn set_marker_sample(tab: &mut EditorTab, idx: usize) {
-        match tab.ab_loop {
-            None => tab.ab_loop = Some((idx, idx)),
+        match tab.loop_region {
+            None => tab.loop_region = Some((idx, idx)),
             Some((a,b)) => {
-                if a==b { tab.ab_loop = Some((a.min(idx), a.max(idx))); }
-                else { let da = a.abs_diff(idx); let db = b.abs_diff(idx); if da <= db { tab.ab_loop = Some((idx, b)); } else { tab.ab_loop = Some((a, idx)); } }
+                if a==b { tab.loop_region = Some((a.min(idx), a.max(idx))); }
+                else { let da = a.abs_diff(idx); let db = b.abs_diff(idx); if da <= db { tab.loop_region = Some((idx, b)); } else { tab.loop_region = Some((a, idx)); } }
             }
         }
     }fn current_active_path(&self) -> Option<&PathBuf> {
@@ -358,6 +591,9 @@ impl WavesPreviewer {
             leave_intent: None,
             show_leave_prompt: false,
             pending_activate_path: None,
+            heavy_preview_rx: None,
+            heavy_preview_tool: None,
+            heavy_overlay_rx: None,
 
         })
     }
@@ -366,8 +602,30 @@ impl WavesPreviewer {
 
 impl eframe::App for WavesPreviewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Update meter from audio RMS (approximate dBFS)
+        {
+            let rms = self.audio.shared.meter_rms.load(std::sync::atomic::Ordering::Relaxed);
+            let db = if rms > 0.0 { 20.0 * rms.max(1e-8).log10() } else { -80.0 };
+            self.meter_db = db.clamp(-80.0, 6.0);
+        }
         // Ensure effective volume (global vol x per-file gain) is always applied
         self.apply_effective_volume();
+        // Drain heavy preview results
+        if let Some(rx) = &self.heavy_preview_rx {
+            if let Ok(mono) = rx.try_recv() {
+                if let Some(idx) = self.active_tab { if let Some(tool) = self.heavy_preview_tool { self.set_preview_mono(idx, tool, mono); } }
+                self.heavy_preview_rx = None; self.heavy_preview_tool = None;
+            }
+        }
+        // Drain heavy per-channel overlay results
+        if let Some(rx) = &self.heavy_overlay_rx {
+            if let Ok((p, overlay)) = rx.try_recv() {
+                if let Some(idx) = self.tabs.iter().position(|t| t.path == p) {
+                    if let Some(tab) = self.tabs.get_mut(idx) { tab.preview_overlay_ch = Some(overlay); }
+                }
+                self.heavy_overlay_rx = None;
+            }
+        }
         // Drain metadata updates
         if let Some(rx) = &self.meta_rx {
             let mut resort = false;
@@ -455,6 +713,40 @@ impl eframe::App for WavesPreviewer {
         // Shortcuts
         if ctx.input(|i| i.key_pressed(Key::Space)) { self.audio.toggle_play(); }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) { self.trigger_save_selected(); }
+        // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
+        if let Some(tab_idx) = self.active_tab {
+            // Loop Start/End at playhead
+            if ctx.input(|i| i.key_pressed(Key::K)) { // Set Loop Start
+                let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    let end = tab.loop_region.map(|(_,e)| e).unwrap_or(pos_now);
+                    let s = pos_now.min(end);
+                    let e = end.max(s);
+                    tab.loop_region = Some((s,e));
+                }
+            }
+            if ctx.input(|i| i.key_pressed(Key::P)) { // Set Loop End
+                let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    let start = tab.loop_region.map(|(s,_)| s).unwrap_or(pos_now);
+                    let s = start.min(pos_now);
+                    let e = pos_now.max(start);
+                    tab.loop_region = Some((s,e));
+                }
+            }
+            if ctx.input(|i| i.key_pressed(Key::L)) {
+                // Toggle loop mode without holding a mutable borrow across &self call
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.loop_mode = match tab.loop_mode { LoopMode::Off => LoopMode::OnWhole, _ => LoopMode::Off };
+                }
+                if let Some(tab_ro) = self.tabs.get(tab_idx) {
+                    self.apply_loop_mode_for_tab(tab_ro);
+                }
+            }
+            if ctx.input(|i| i.key_pressed(Key::S)) {
+                if let Some(tab) = self.tabs.get_mut(tab_idx) { tab.snap_zero_cross = !tab.snap_zero_cross; }
+            }
+        }
         
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::W)) {
             if let Some(active_idx) = self.active_tab {
@@ -476,27 +768,50 @@ impl eframe::App for WavesPreviewer {
         
         // Top controls (always visible)
         self.ui_top_bar(ctx);
+        // Drag & Drop: merge dropped files/folders into the list (WAV only)
+        {
+            let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
+            if !dropped.is_empty() {
+                let mut paths: Vec<std::path::PathBuf> = Vec::new();
+                for f in dropped {
+                    if let Some(p) = f.path { paths.push(p); }
+                }
+                if !paths.is_empty() {
+                    let added = self.add_files_merge(&paths);
+                    if added > 0 { self.after_add_refresh(); }
+                }
+            }
+        }
         let mut activate_path: Option<PathBuf> = None;
         egui::CentralPanel::default().show(ctx, |ui| {            // Tabs
             ui.horizontal_wrapped(|ui| {
                 let is_list = self.active_tab.is_none();
                 let list_label = if is_list { RichText::new("[List]").strong() } else { RichText::new("List") };
                 if ui.selectable_label(is_list, list_label).clicked() {
+                    if let Some(idx) = self.active_tab { self.clear_preview_if_any(idx); }
                     self.active_tab = None;
                     self.audio.stop();
                     self.audio.set_loop_enabled(false);
                 }
                 let mut to_close: Option<usize> = None;
-                for (i, tab) in self.tabs.iter().enumerate() {
+                let tabs_len = self.tabs.len();
+                for i in 0..tabs_len {
+                    // avoid holding immutable borrow over calls that mutate self inside closure
                     let active = self.active_tab == Some(i);
-                    let text = if active { RichText::new(format!("[{}]", tab.display_name)).strong() } else { RichText::new(tab.display_name.clone()) };
+                    let display = self.tabs[i].display_name.clone();
+                    let path_for_activate = self.tabs[i].path.clone();
+                    let text = if active { RichText::new(format!("[{}]", display)).strong() } else { RichText::new(display) };
                     ui.horizontal(|ui| {
                         if ui.selectable_label(active, text).clicked() {
+                            // Leaving previous tab: discard any un-applied preview
+                            if let Some(prev) = self.active_tab { if prev != i { self.clear_preview_if_any(prev); } }
+                            // mutate self safely here
                             self.active_tab = Some(i);
-                            activate_path = Some(tab.path.clone());
+                            activate_path = Some(path_for_activate.clone());
                             self.audio.stop();
                         }
                         if ui.button("x").on_hover_text("Close").clicked() {
+                            self.clear_preview_if_any(i);
                             to_close = Some(i);
                             self.audio.stop();
                         }
@@ -514,11 +829,16 @@ impl eframe::App for WavesPreviewer {
             ui.separator();
         let mut apply_pending_loop = false;
         if let Some(tab_idx) = self.active_tab {
-    let tab = &mut self.tabs[tab_idx];
+    // Pre-read audio values to avoid borrowing self while editing tab
+    let sr_ctx = self.audio.shared.out_sample_rate.max(1) as f32;
+    let pos_ctx_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+    let mut request_seek: Option<usize> = None;
     ui.horizontal(|ui| {
+        let tab = &mut self.tabs[tab_idx];
         let dirty_mark = if tab.dirty { " •" } else { "" };
         ui.label(RichText::new(format!("{}{}", tab.path.display(), dirty_mark)).monospace());
         ui.separator();
+        // Loop mode toggles (kept): Off / OnWhole / Marker
         ui.label("Loop:");
         for (m,label) in [ (LoopMode::Off, "Off"), (LoopMode::OnWhole, "On"), (LoopMode::Marker, "Marker") ] {
             if ui.selectable_label(tab.loop_mode == m, label).clicked() {
@@ -527,47 +847,58 @@ impl eframe::App for WavesPreviewer {
             }
         }
         ui.separator();
-        // A/B status and quick set
-        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
-        let (a_time, b_time) = if let Some((a,b)) = tab.ab_loop { ((a as f32)/sr, (b as f32)/sr) } else { (0.0, 0.0) };
-        let ab_text = if tab.ab_loop.is_some() { format!("A: {}  B: {}", crate::app::helpers::format_time_s(a_time), crate::app::helpers::format_time_s(b_time)) } else { "A: --  B: --".to_string() };
-        ui.label(RichText::new(ab_text).monospace());
-        if ui.button("Set A").on_hover_text("Set A at playhead (A key)").clicked() {
-            let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
-            let b = tab.ab_loop.map(|(_,b)| b).unwrap_or(pos_now);
-            tab.ab_loop = Some((pos_now, b));
-            if tab.loop_mode == LoopMode::Marker { let (s,e)= if pos_now<=b {(pos_now,b)} else {(b,pos_now)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); }
-        }
-        if ui.button("Set B").on_hover_text("Set B at playhead (B key)").clicked() {
-            let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
-            let a = tab.ab_loop.map(|(a,_)| a).unwrap_or(pos_now);
-            tab.ab_loop = Some((a, pos_now));
-            if tab.loop_mode == LoopMode::Marker { let (s,e)= if a<=pos_now {(a,pos_now)} else {(pos_now,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); }
-        }
-        if ui.button("Clear A/B").clicked() { tab.ab_loop = None; apply_pending_loop = true; }
-        ui.separator();
         // View mode toggles
         for (vm, label) in [ (ViewMode::Waveform, "Wave"), (ViewMode::Spectrogram, "Spec"), (ViewMode::Mel, "Mel") ] {
             if ui.selectable_label(tab.view_mode == vm, label).clicked() { tab.view_mode = vm; }
         }
         ui.separator();
-        // Time HUD: play position / total length
-        let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed) as f32 / sr as f32;
-        let len = (tab.samples_len as f32 / sr as f32).max(0.0);
-        ui.label(RichText::new(format!("Pos: {} / {}", crate::app::helpers::format_time_s(pos), crate::app::helpers::format_time_s(len))).monospace());
+        // Time HUD: play position (editable) / total length
+        let sr = sr_ctx; // restore local sample-rate alias after removing top-level Loop block
+        let mut pos_sec = pos_ctx_now as f32 / sr as f32;
+        let len_sec = (tab.samples_len as f32 / sr as f32).max(0.0);
+        ui.label("Pos:");
+        let pos_resp = ui.add(
+            egui::DragValue::new(&mut pos_sec)
+                .clamp_range(0.0..=len_sec)
+                .speed(0.05)
+                .fixed_decimals(2)
+        );
+        if pos_resp.changed() { let samp = (pos_sec.max(0.0) * sr) as usize; request_seek = Some(samp.min(tab.samples_len)); }
+        ui.label(RichText::new(format!(" / {}", crate::app::helpers::format_time_s(len_sec))).monospace());
     });
     ui.separator();
 
     let avail = ui.available_size();
                 // pending actions to perform after UI borrows end
                 let mut do_set_loop_from: Option<(usize,usize)> = None;
-                let mut do_trim: Option<(usize,usize)> = None;
-                let mut do_fade: Option<((usize,usize), f32, f32)> = None;
+                let mut do_trim: Option<(usize,usize)> = None; // keep-only (optional)
+                let do_fade: Option<((usize,usize), f32, f32)> = None; // legacy whole-file fade
+                let mut do_gain: Option<((usize,usize), f32)> = None;
+                let mut do_normalize: Option<((usize,usize), f32)> = None;
+                let mut do_reverse: Option<(usize,usize)> = None;
+                // let mut do_silence: Option<(usize,usize)> = None; // removed
+                let mut do_cutjoin: Option<(usize,usize)> = None;
+                let mut do_apply_xfade: bool = false;
+                let mut do_fade_in: Option<((usize,usize), crate::app::types::FadeShape)> = None;
+                let mut do_fade_out: Option<((usize,usize), crate::app::types::FadeShape)> = None;
+                // Snapshot busy state and prepare deferred overlay job.
+                // IMPORTANT: Do NOT call `self.*` (which takes &mut self) while holding `let tab = &mut self.tabs[...]`.
+                // That pattern triggers borrow checker error E0499. Defer such calls to after the UI closures.
+                let overlay_busy = self.heavy_overlay_rx.is_some();
+                let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
                 // Split canvas and inspector: right panel fixed width
-                let inspector_w = 260.0f32;
+                let inspector_w = 300.0f32;
                 let canvas_w = (avail.x - inspector_w).max(100.0);
                 ui.horizontal(|ui| {
+                    let tab = &mut self.tabs[tab_idx];
                     // Canvas area
+                    let mut need_restore_preview = false;
+                    // Accumulate non-destructive preview audio to audition.
+                    // Carry the tool kind to keep preview state consistent.
+                    let mut pending_preview: Option<(ToolKind, Vec<f32>)> = None;
+                    let mut pending_heavy_preview: Option<(ToolKind, Vec<f32>, f32)> = None;
+                    let mut pending_pitch_apply: Option<f32> = None;
+                    let mut pending_stretch_apply: Option<f32> = None;
                     ui.vertical(|ui| {
                         let canvas_h = (canvas_w * 0.35).clamp(180.0, avail.y);
                         let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
@@ -668,11 +999,22 @@ impl eframe::App for WavesPreviewer {
                         // Dynamic clamp: allow full zoom-out to "fit whole"
                         let min_spp = 0.01; // 100 px per sample
                         let max_spp_fit = (tab.samples_len as f32 / wave_w.max(1.0)).max(min_spp);
-                        tab.samples_per_px = (old_spp * factor).clamp(min_spp, max_spp_fit);
+                        let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
+                        tab.samples_per_px = new_spp;
                         let vis2 = (wave_w * tab.samples_per_px).ceil() as usize;
                         let left = anchor.saturating_sub((t * vis2 as f32) as usize);
                         let max_left = tab.samples_len.saturating_sub(vis2);
-                        tab.view_offset = left.min(max_left);
+                        let new_view = left.min(max_left);
+                        #[cfg(debug_assertions)]
+                        {
+                            let mode = if tab.samples_per_px >= 1.0 { "agg" } else { "line" };
+                            let fit_whole = (new_spp - max_spp_fit).abs() < 1e-6;
+                            eprintln!(
+                                "ZOOM change: spp {:.5} -> {:.5} ({mode}) factor {:.3} vis={} -> {} anchor={} new_view={} wave_w={:.1} fit_whole={}",
+                                old_spp, new_spp, factor, vis, vis2, anchor, new_view, wave_w, fit_whole
+                            );
+                        }
+                        tab.view_offset = new_view;
                     }
                     // Pan with Shift + wheel (prefer horizontal wheel if available)
                     let scroll_for_pan = if wheel.x.abs() > 0.0 { wheel.x } else { wheel.y };
@@ -710,84 +1052,23 @@ impl eframe::App for WavesPreviewer {
                 // Selection vs Seek with primary button (Alt+LeftDrag = pan handled above)
                 let alt_now = ui.input(|i| i.modifiers.alt);
                 if !alt_now {
-                    // Dragging: create/update selection
-                    if resp.dragged_by(egui::PointerButton::Primary) {
-                        if tab.drag_select_anchor.is_none() {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                                let spp = tab.samples_per_px.max(0.0001);
-                                let vis = (wave_w * spp).ceil() as usize;
-                                let s0 = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
-                                tab.drag_select_anchor = Some(s0);
-                            }
-                        }
-                        if let (Some(anchor), Some(pos)) = (tab.drag_select_anchor, resp.interact_pointer_pos()) {
-                            let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                            let spp = tab.samples_per_px.max(0.0001);
-                            let vis = (wave_w * spp).ceil() as usize;
-                            let s1 = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
-                            let (a,b) = if anchor<=s1 { (anchor,s1) } else { (s1,anchor) };
-                            tab.selection = Some((a,b));
-                        }
-                    }
-                    // Drag release: finalize selection (optional zero-cross snap)
-                    if resp.drag_released() {
-                        if let (true, Some((mut a,mut b))) = (tab.snap_zero_cross, tab.selection) {
-                            if a < b && tab.samples_len > 2 {
-                                let mono = self.audio.shared.samples.load();
-                                if let Some(buf) = mono.as_ref() {
-                                    let find_zero = |mut idx: usize, dir: isize| -> usize {
-                                        let n = buf.len();
-                                        let mut i = idx as isize;
-                                        let step = if dir>=0 { 1 } else { -1 };
-                                        let mut last = buf[idx].clamp(-1.0,1.0);
-                                        for _ in 0..2048 { // limited search window
-                                            i += step;
-                                            if i <= 0 || i as usize >= n { break; }
-                                            let v = buf[i as usize].clamp(-1.0,1.0);
-                                            if last.signum() != v.signum() { return i.max(0) as usize; }
-                                            last = v;
-                                        }
-                                        idx
-                                    };
-                                    a = find_zero(a, -1);
-                                    b = find_zero(b.saturating_sub(1), 1);
-                                    if a < b { tab.selection = Some((a,b)); }
-                                }
-                            }
-                        }
-                        tab.drag_select_anchor = None;
-                    }
-                    // Click without drag: seek
+                    // Primary interactions: click to seek (no range selection)
                     if resp.clicked_by(egui::PointerButton::Primary) {
                         if let Some(pos) = resp.interact_pointer_pos() {
                             let x = pos.x.clamp(wave_left, wave_left + wave_w);
                             let spp = tab.samples_per_px.max(0.0001);
                             let vis = (wave_w * spp).ceil() as usize;
-                            let seek = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
-                            self.audio.seek_to_sample(seek);
+                            let pos_samp = tab.view_offset.saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize).min(tab.samples_len);
+                            request_seek = Some(pos_samp);
                         }
-                    }
-                    // Double-click: select whole buffer
-                    if resp.double_clicked() {
-                        tab.selection = Some((0, tab.samples_len));
                     }
                 }
 
-                // Draw selection overlay and AB markers (shared across lanes)
+                // Draw loop region markers (shared across lanes)
                 {
-                    // selection band
-                    if let Some((s,e)) = tab.selection {
-                        if e > s {
-                            let spp = tab.samples_per_px.max(0.0001);
-                            let x0 = wave_left + (((s.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
-                            let x1 = wave_left + (((e.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
-                            let sel_rect = egui::Rect::from_min_max(egui::pos2(x0.min(x1), rect.top()), egui::pos2(x0.max(x1), rect.bottom()));
-                            painter.rect_filled(sel_rect, 0.0, Color32::from_rgba_unmultiplied(80,120,200,60));
-                        }
-                    }
-                    // A/B markers and labels
-                    if let Some((a,b)) = tab.ab_loop {
+                    // no selection band (range selection removed)
+                    // Loop region markers and labels (LoopEdit only)
+                    if tab.active_tool == ToolKind::LoopEdit { if let Some((a,b)) = tab.loop_region {
                         let spp = tab.samples_per_px.max(0.0001);
                         let to_x = |samp: usize| wave_left + (((samp.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
                         let ax = to_x(a); let bx = to_x(b);
@@ -795,9 +1076,70 @@ impl eframe::App for WavesPreviewer {
                         painter.line_segment([egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())], st);
                         painter.line_segment([egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())], st);
                         let fid = TextStyle::Monospace.resolve(ui.style());
-                        painter.text(egui::pos2(ax + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "A", fid.clone(), Color32::from_rgb(170,200,255));
-                        painter.text(egui::pos2(bx + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "B", fid, Color32::from_rgb(170,200,255));
-                    }
+                        painter.text(egui::pos2(ax + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "S", fid.clone(), Color32::from_rgb(170,200,255));
+                        painter.text(egui::pos2(bx + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "E", fid, Color32::from_rgb(170,200,255));
+
+                        // When LoopEdit is active, visualize crossfade spans and shapes + boundary fades
+                        if tab.active_tool == ToolKind::LoopEdit {
+                            let len = b.saturating_sub(a);
+                            let cf = tab.loop_xfade_samples.min(len / 2);
+                            if cf > 0 {
+                                let xs0 = to_x(a);
+                                let xs1 = to_x(a + cf);
+                                let xe0 = to_x(b.saturating_sub(cf));
+                                let xe1 = to_x(b);
+                                // shaded bands
+                                let col_in = Color32::from_rgba_unmultiplied(255, 180, 60, 40);
+                                let col_out = Color32::from_rgba_unmultiplied(60, 180, 255, 40);
+                                let r_in = egui::Rect::from_min_max(egui::pos2(xs0, rect.top()), egui::pos2(xs1, rect.bottom()));
+                                let r_out = egui::Rect::from_min_max(egui::pos2(xe0, rect.top()), egui::pos2(xe1, rect.bottom()));
+                                painter.rect_filled(r_in, 0.0, col_in);
+                                painter.rect_filled(r_out, 0.0, col_out);
+
+                                // draw shape curves (orange) for intuition
+                                let curve_col = Color32::from_rgb(255, 170, 60);
+                                let steps = 48;
+                                let mut last_in: Option<egui::Pos2> = None;
+                                let mut last_out: Option<egui::Pos2> = None;
+                                let h = rect.height();
+                                let y_of = |w: f32| rect.bottom() - w * h; // map weight to y
+                                for i in 0..=steps {
+                                    let t = (i as f32) / (steps as f32);
+                                    let (w_out, w_in) = match tab.loop_xfade_shape {
+                                        crate::app::types::LoopXfadeShape::EqualPower => {
+                                            let a = core::f32::consts::FRAC_PI_2 * t; (a.cos(), a.sin())
+                                        }
+                                        crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
+                                    };
+                                    // incoming (start side): left band
+                                    let x_in = egui::lerp(xs0..=xs1, t);
+                                    let p_in = egui::pos2(x_in, y_of(w_in));
+                                    if let Some(lp) = last_in { painter.line_segment([lp, p_in], egui::Stroke::new(2.0, curve_col)); }
+                                    last_in = Some(p_in);
+                                    // outgoing (end side): right band
+                                    let x_out = egui::lerp(xe0..=xe1, t);
+                                    let p_out = egui::pos2(x_out, y_of(w_out));
+                                    if let Some(lp) = last_out { painter.line_segment([lp, p_out], egui::Stroke::new(2.0, curve_col)); }
+                                    last_out = Some(p_out);
+                                }
+                            }
+                        }
+                    }}
+                    // Trim A/B markers (only in Trim tool)
+                    if tab.active_tool == ToolKind::Trim { if let Some((a,b)) = tab.trim_range { if b> a {
+                        let spp = tab.samples_per_px.max(0.0001);
+                        let to_x = |samp: usize| wave_left + (((samp.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
+                        let ax = to_x(a); let bx = to_x(b);
+                        let st = egui::Stroke::new(2.0, Color32::from_rgb(255,140,0));
+                        painter.line_segment([egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())], st);
+                        painter.line_segment([egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())], st);
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        painter.text(egui::pos2(ax + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "A", fid.clone(), Color32::from_rgb(255,200,150));
+                        painter.text(egui::pos2(bx + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "B", fid, Color32::from_rgb(255,200,150));
+                        // shaded band between A and B for clarity
+                        let r = egui::Rect::from_min_max(egui::pos2(ax, rect.top()), egui::pos2(bx, rect.bottom()));
+                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255,160,60,32));
+                    } }}
                 }
 
                 // Draw per-channel lanes with dB grid and playhead
@@ -831,22 +1173,95 @@ impl eframe::App for WavesPreviewer {
                         // - Direct per-sample polyline/stem for spp < 1.0 (< 1 sample per pixel)
                         if spp >= 1.0 {
                             let bins = wave_w as usize; // one bin per pixel
-                    if bins > 0 {
-                        let mut tmp = Vec::new();
-                        build_minmax(&mut tmp, &ch[start..end], bins);
-                        let n = tmp.len().max(1) as f32;
-                        for (idx, &(mn, mx)) in tmp.iter().enumerate() {
-                            let mn = (mn * scale).clamp(-1.0, 1.0);
-                            let mx = (mx * scale).clamp(-1.0, 1.0);
-                            let x = lane_rect.left() + (idx as f32 / n) * wave_w;
-                            let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
-                            let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
-                            let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
-                            let col = amp_to_color(amp);
-                            painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col));
-                        }
-                    }
-                } else {
+                            if bins > 0 {
+                                let mut tmp = Vec::new();
+                                build_minmax(&mut tmp, &ch[start..end], bins);
+                                let n = tmp.len().max(1) as f32;
+                                for (idx, &(mn, mx)) in tmp.iter().enumerate() {
+                                    let mn = (mn * scale).clamp(-1.0, 1.0);
+                                    let mx = (mx * scale).clamp(-1.0, 1.0);
+                                    let x = lane_rect.left() + (idx as f32 / n) * wave_w;
+                                    let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                                    let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                    let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
+                                    let col = amp_to_color(amp);
+                                    painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.0, col));
+                                }
+                            }
+                            // Aggregated mode: also draw overlay here so it shows at widest zoom
+                            if tab.active_tool != ToolKind::Trim && tab.preview_overlay_ch.is_some() {
+                                if let Some(overlay) = &tab.preview_overlay_ch {
+                                    let och: Option<&[f32]> = overlay.get(ci).map(|v| v.as_slice()).or_else(|| overlay.get(0).map(|v| v.as_slice()));
+                                    if let Some(buf) = och {
+                                        let lenb = buf.len();
+                                        let orig_total = tab.samples_len.max(1);
+                                        let ratio = (lenb as f32) / (orig_total as f32);
+                                        let startb = (((start as f32) * ratio).floor() as usize).min(lenb);
+                                        let mut endb = (((end as f32) * ratio).ceil() as usize).min(lenb);
+                                        if startb >= endb { endb = (startb + 1).min(lenb); }
+                                        let orig_vis = (end.saturating_sub(start)).max(1);
+                                        let over_vis = (endb.saturating_sub(startb)).max(1);
+                                        let r_w = (over_vis as f32) / (orig_vis as f32);
+                                        let ov_w = (wave_w * r_w).max(1.0);
+                                        #[cfg(debug_assertions)]
+                                        eprintln!("OVERLAY(agg) map: lenb={} startb={} endb={} over_vis={} ov_w_px={:.1}", lenb, startb, endb, over_vis, ov_w);
+                                        // Extract LoopEdit segments if any
+                                        let (seg1_opt, seg2_opt) = if tab.active_tool == ToolKind::LoopEdit {
+                                            if let Some((a, b)) = tab.loop_region {
+                                                let len = b.saturating_sub(a);
+                                                let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
+                                                if cf > 0 {
+                                                    let a0 = (((a as f32) * ratio).round() as usize).min(lenb);
+                                                    let a1 = (((a as f32 + cf as f32) * ratio).round() as usize).min(lenb);
+                                                    let b0 = (((b as f32 - cf as f32) * ratio).round() as usize).min(lenb);
+                                                    let b1 = (((b as f32) * ratio).round() as usize).min(lenb);
+                                                    let s1 = a0.max(startb); let e1 = a1.min(endb);
+                                                    let s2 = b0.max(startb); let e2 = b1.min(endb);
+                                                    (if s1 < e1 { Some((s1,e1)) } else { None }, if s2 < e2 { Some((s2,e2)) } else { None })
+                                                } else { (None, None) }
+                                            } else { (None, None) }
+                                        } else { (None, None) };
+                                        let mut draw_segment_poly_agg = |p0: usize, p1: usize| {
+                                            let seg_len = p1.saturating_sub(p0);
+                                            if seg_len == 0 { return; }
+                                            let seg_ratio = (seg_len as f32) / (over_vis as f32);
+                                            let seg_w = (ov_w * seg_ratio).max(1.0);
+                                            let seg_x0 = lane_rect.left() + ((p0 - startb) as f32 / over_vis as f32) * ov_w;
+                                            let count = seg_w.max(1.0) as usize;
+                                            let denom = (count.saturating_sub(1)).max(1) as f32;
+                                            let scale_y = lane_rect.height() * 0.48;
+                                            #[cfg(debug_assertions)]
+                                            eprintln!("OVERLAY(agg) seg: p0={} p1={} seg_len={} seg_w_px={:.1} count={}", p0, p1, seg_len, seg_w, count);
+                                            if count <= 2 {
+                                                let idx = p0;
+                                                let v = (buf[idx] * scale).clamp(-1.0, 1.0);
+                                                let sx = seg_x0 + (seg_w * 0.5);
+                                                let sy = lane_rect.center().y - v * scale_y;
+                                                let tick_h = (lane_rect.height() * 0.10).max(2.0);
+                                                painter.line_segment([egui::pos2(sx, sy - tick_h*0.5), egui::pos2(sx, sy + tick_h*0.5)], egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160)));
+                                                return;
+                                            }
+                                            let mut last: Option<egui::Pos2> = None;
+                                            for i in 0..count {
+                                                let t = (i as f32) / denom;
+                                                let idx = p0 + ((t * (seg_len as f32 - 1.0)).round() as usize).min(seg_len - 1);
+                                                let v = (buf[idx] * scale).clamp(-1.0, 1.0);
+                                                let sx = seg_x0 + t * seg_w;
+                                                let sy = lane_rect.center().y - v * scale_y;
+                                                let p = egui::pos2(sx, sy);
+                                                if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))); }
+                                                last = Some(p);
+                                            }
+                                        };
+                                        // Always draw full overlay across the visible range first
+                                        draw_segment_poly_agg(startb, endb);
+                                        // Then, if LoopEdit boundary segments are present, draw them again (on top) to emphasize
+                                        if let Some((s1,e1)) = seg1_opt { draw_segment_poly_agg(s1, e1); }
+                                        if let Some((s2,e2)) = seg2_opt { draw_segment_poly_agg(s2, e2); }
+                                    }
+                                }
+                            }
+                        } else {
                     // Fine zoom: draw per-sample. When there are fewer samples than pixels,
                     // distribute samples evenly across the available width and connect them.
                     let scale_y = lane_rect.height() * 0.48;
@@ -885,9 +1300,262 @@ impl eframe::App for WavesPreviewer {
                             }
                         }
                     }
+
+                    // Overlay preview aligned to this lane (if any), per-channel.
+                    // Skip Trim tool (Trim does not show green overlay by spec).
+                    // Draw whenever overlay data is present to avoid relying on preview_audio_tool state.
+                    #[cfg(debug_assertions)]
+                    {
+                        let mode = if spp >= 1.0 { "agg" } else { "line" };
+                        let has_ov = tab.preview_overlay_ch.is_some();
+                        eprintln!(
+                            "OVERLAY gate: mode={} has_overlay={} active={:?} spp={:.5} vis_len={} start={} end={} view_off={} len={}",
+                            mode, has_ov, tab.active_tool, spp, visible_len, start, end, tab.view_offset, tab.samples_len
+                        );
+                    }
+                    if tab.active_tool != ToolKind::Trim && tab.preview_overlay_ch.is_some() {
+                        if let Some(overlay) = &tab.preview_overlay_ch {
+                            // try channel match, fallback to first channel if overlay is mono
+                            let och: Option<&[f32]> = overlay.get(ci).map(|v| v.as_slice()).or_else(|| overlay.get(0).map(|v| v.as_slice()));
+                            if let Some(buf) = och {
+                                // Map original-visible [start,end) to overlay domain using length ratio.
+                                // This keeps overlays visible at any zoom, even when length differs (e.g. TimeStretch).
+                                let lenb = buf.len();
+                                let orig_total = tab.samples_len.max(1);
+                                let ratio = (lenb as f32) / (orig_total as f32);
+                                let orig_vis = visible_len.max(1);
+                                // Map visible window [start .. start+orig_vis) into overlay domain using total-length ratio
+                                // Align overlay start to original start using nearest sample to minimize off-by-one drift
+                                let startb = (((start as f32) * ratio).round() as usize).min(lenb);
+                                let mut endb = startb + (((orig_vis as f32) * ratio).ceil() as usize);
+                                if endb > lenb { endb = lenb; }
+                                if startb >= endb { endb = (startb + 1).min(lenb); }
+                                let over_vis = (endb.saturating_sub(startb)).max(1);
+                                let r_w = (over_vis as f32) / (orig_vis as f32);
+                                let ov_w = (wave_w * r_w).max(1.0);
+                                #[cfg(debug_assertions)]
+                                {
+                                    let mode = if spp >= 1.0 { "agg" } else { "line" };
+                                    eprintln!(
+                                        "OVERLAY map: mode={} lenb={} startb={} endb={} over_vis={} ov_w_px={:.1}",
+                                        mode, lenb, startb, endb, over_vis, ov_w
+                                    );
+                                }
+                                if startb < endb {
+                                    // Pre-compute LoopEdit highlight segments (mapped to overlay domain)
+                                    let (seg1_opt, seg2_opt) = if tab.active_tool == ToolKind::LoopEdit {
+                                        if let Some((a, b)) = tab.loop_region {
+                                            let len = b.saturating_sub(a);
+                                            let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
+                                            if cf > 0 {
+                                                let a0 = (((a as f32) * ratio).round() as usize).min(lenb);
+                                                let a1 = (((a as f32 + cf as f32) * ratio).round() as usize).min(lenb);
+                                                let b0 = (((b as f32 - cf as f32) * ratio).round() as usize).min(lenb);
+                                                let b1 = (((b as f32) * ratio).round() as usize).min(lenb);
+                                                let s1 = a0.max(startb); let e1 = a1.min(endb);
+                                                let s2 = b0.max(startb); let e2 = b1.min(endb);
+                                                (if s1 < e1 { Some((s1,e1)) } else { None }, if s2 < e2 { Some((s2,e2)) } else { None })
+                                            } else { (None, None) }
+                                        } else { (None, None) }
+                                    } else { (None, None) };
+
+                                    // helper: draw polyline for [p0,p1) within [startb,endb) mapped into [0..ov_w]
+                                    let mut draw_segment_poly = |p0: usize, p1: usize| {
+                                        let seg_len = p1.saturating_sub(p0);
+                                        if seg_len == 0 { return; }
+                                        let seg_ratio = (seg_len as f32) / (over_vis as f32);
+                                        let seg_w = (ov_w * seg_ratio).max(1.0);
+                                        let seg_x0 = lane_rect.left() + ((p0 - startb) as f32 / over_vis as f32) * ov_w;
+                                        let count = seg_w.max(1.0) as usize; // ~1 point per px
+                                        let denom = (count.saturating_sub(1)).max(1) as f32;
+                                        let scale_y = lane_rect.height() * 0.48;
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            let band = egui::Rect::from_min_max(egui::pos2(seg_x0, lane_rect.top()), egui::pos2(seg_x0 + seg_w, lane_rect.bottom()));
+                                            painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(110, 255, 200, 20));
+                                            eprintln!(
+                                                "OVERLAY seg: p0={} p1={} seg_len={} seg_w_px={:.1} count={}",
+                                                p0, p1, seg_len, seg_w, count
+                                            );
+                                        }
+                                        // Widest zoom: a very short segment can quantize to <=1px. Ensure something is drawn.
+                                        if count <= 2 {
+                                            let idx = p0; // head of segment as representative
+                                            let v = (buf[idx] * scale).clamp(-1.0, 1.0);
+                                            let sx = seg_x0 + (seg_w * 0.5);
+                                            let sy = lane_rect.center().y - v * scale_y;
+                                            // Draw a short tick so it remains visible
+                                            let tick_h = (lane_rect.height() * 0.10).max(2.0);
+                                            painter.line_segment(
+                                                [egui::pos2(sx, sy - tick_h*0.5), egui::pos2(sx, sy + tick_h*0.5)],
+                                                egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))
+                                            );
+                                            #[cfg(debug_assertions)]
+                                            eprintln!("OVERLAY seg: fallback_tick used at x={:.1}", sx);
+                                            return;
+                                        }
+                                        let mut last: Option<egui::Pos2> = None;
+                                        for i in 0..count {
+                                            let t = (i as f32) / denom;
+                                            let idx = p0 + ((t * (seg_len as f32 - 1.0)).round() as usize).min(seg_len - 1);
+                                            let v = (buf[idx] * scale).clamp(-1.0, 1.0);
+                                            let sx = seg_x0 + t * seg_w;
+                                            let sy = lane_rect.center().y - v * scale_y;
+                                            let p = egui::pos2(sx, sy);
+                                            if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))); }
+                                            last = Some(p);
+                                        }
+                                    };
+
+                                    if spp >= 1.0 {
+                                        // When overlay length matches original (ratio ~ 1), use EXACTLY the same binning as base
+                                        let ratio_approx_1 = (over_vis as i64 - orig_vis as i64).abs() <= 1;
+                                        if ratio_approx_1 {
+                                            let bins = wave_w as usize;
+                                            if bins > 0 {
+                                                let mut tmp = Vec::new();
+                                                build_minmax(&mut tmp, &buf[start..end], bins);
+                                                let n = tmp.len().max(1) as f32;
+                                                for (idx, &(mn, mx)) in tmp.iter().enumerate() {
+                                                    let mn = (mn * scale).clamp(-1.0, 1.0);
+                                                    let mx = (mx * scale).clamp(-1.0, 1.0);
+                                                    let x = lane_rect.left() + (idx as f32 / n) * wave_w;
+                                                    let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                                                    let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                                    painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.3, Color32::from_rgb(80, 240, 160)));
+                                                }
+                                            }
+                                        } else {
+                                            // Otherwise, lock to the SAME base px columns: map each base bin slice into overlay domain
+                                            let bins = wave_w as usize;
+                                            if bins > 0 {
+                                                let step_b = (orig_vis as f32) / (bins as f32);
+                                                let mut pos_b = 0.0f32;
+                                                // number of columns actually covered by overlay in px
+                                                let px_end = ((over_vis as f32 / orig_vis as f32) * bins as f32).round().clamp(1.0, bins as f32) as usize;
+                                                for px in 0..px_end {
+                                                    let i0 = start + pos_b.floor() as usize;
+                                                    pos_b += step_b;
+                                                    let mut i1 = start + pos_b.floor() as usize;
+                                                    if i1 <= i0 { i1 = i0 + 1; }
+                                                    // map base slice to overlay domain using linear mapping over visible window
+                                                    let o0 = startb + (((i0 - start) as f32 * over_vis as f32 / orig_vis as f32).round() as usize);
+                                                    let mut o1 = startb + (((i1 - start) as f32 * over_vis as f32 / orig_vis as f32).round() as usize);
+                                                    if o1 <= o0 { o1 = o0 + 1; }
+                                                    if o0 >= endb { break; }
+                                                    let o1 = o1.min(endb);
+                                                    if o1 <= o0 { continue; }
+                                                    let mut mn = f32::INFINITY; let mut mx = f32::NEG_INFINITY;
+                                                    for &v in &buf[o0..o1] { if v < mn { mn = v; } if v > mx { mx = v; } }
+                                                    if !mn.is_finite() || !mx.is_finite() { continue; }
+                                                    let mn = (mn * scale).clamp(-1.0, 1.0);
+                                                    let mx = (mx * scale).clamp(-1.0, 1.0);
+                                                    let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
+                                                    let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                                                    let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                                    painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.3, Color32::from_rgb(80, 240, 160)));
+                                                }
+                                            }
+                                        }
+                                        // Emphasize LoopEdit boundary subranges if present (thicker over the same px columns)
+                                        if let Some((s1,e1)) = seg1_opt {
+                                            let bins = wave_w as usize;
+                                            if bins > 0 {
+                                                let step_b = (orig_vis as f32) / (bins as f32);
+                                                let mut pos_b = 0.0f32;
+                                                let px_end = ((over_vis as f32 / orig_vis as f32) * bins as f32).round().clamp(1.0, bins as f32) as usize;
+                                                for px in 0..px_end {
+                                                    let i0 = start + pos_b.floor() as usize;
+                                                    pos_b += step_b;
+                                                    let mut i1 = start + pos_b.floor() as usize;
+                                                    if i1 <= i0 { i1 = i0 + 1; }
+                                                    let mut o0 = startb + (((i0 - start) as f32 * over_vis as f32 / orig_vis as f32).round() as usize);
+                                                    let mut o1 = startb + (((i1 - start) as f32 * over_vis as f32 / orig_vis as f32).round() as usize);
+                                                    if o1 <= o0 { o1 = o0 + 1; }
+                                                    o0 = o0.max(s1); o1 = o1.min(e1);
+                                                    if o1 <= o0 { continue; }
+                                                    let mut mn = f32::INFINITY; let mut mx = f32::NEG_INFINITY;
+                                                    for &v in &buf[o0..o1] { if v < mn { mn = v; } if v > mx { mx = v; } }
+                                                    if !mn.is_finite() || !mx.is_finite() { continue; }
+                                                    let mn = (mn * scale).clamp(-1.0, 1.0);
+                                                    let mx = (mx * scale).clamp(-1.0, 1.0);
+                                                    let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
+                                                    let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                                                    let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                                    painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6, Color32::from_rgb(80, 240, 160)));
+                                                }
+                                            }
+                                        }
+                                        if let Some((s2,e2)) = seg2_opt {
+                                            let bins = wave_w as usize;
+                                            if bins > 0 {
+                                                let step_b = (orig_vis as f32) / (bins as f32);
+                                                let mut pos_b = 0.0f32;
+                                                let px_end = ((over_vis as f32 / orig_vis as f32) * bins as f32).round().clamp(1.0, bins as f32) as usize;
+                                                for px in 0..px_end {
+                                                    let i0 = start + pos_b.floor() as usize;
+                                                    pos_b += step_b;
+                                                    let mut i1 = start + pos_b.floor() as usize;
+                                                    if i1 <= i0 { i1 = i0 + 1; }
+                                                    let mut o0 = startb + (((i0 - start) as f32 * over_vis as f32 / orig_vis as f32).round() as usize);
+                                                    let mut o1 = startb + (((i1 - start) as f32 * over_vis as f32 / orig_vis as f32).round() as usize);
+                                                    if o1 <= o0 { o1 = o0 + 1; }
+                                                    o0 = o0.max(s2); o1 = o1.min(e2);
+                                                    if o1 <= o0 { continue; }
+                                                    let mut mn = f32::INFINITY; let mut mx = f32::NEG_INFINITY;
+                                                    for &v in &buf[o0..o1] { if v < mn { mn = v; } if v > mx { mx = v; } }
+                                                    if !mn.is_finite() || !mx.is_finite() { continue; }
+                                                    let mn = (mn * scale).clamp(-1.0, 1.0);
+                                                    let mx = (mx * scale).clamp(-1.0, 1.0);
+                                                    let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
+                                                    let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
+                                                    let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                                    painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6, Color32::from_rgb(80, 240, 160)));
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let denom = (endb - startb - 1).max(1) as f32;
+                                        let scale_y = lane_rect.height() * 0.48;
+                                        #[cfg(debug_assertions)]
+                                        {
+                                            let x0 = lane_rect.left();
+                                            let x1 = x0 + ov_w;
+                                            let band = egui::Rect::from_min_max(egui::pos2(x0, lane_rect.top()), egui::pos2(x1, lane_rect.bottom()));
+                                            painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(80, 240, 160, 20));
+                                        }
+                                        let mut last: Option<egui::Pos2> = None;
+                                        for i in startb..endb {
+                                            let v = (buf[i] * scale).clamp(-1.0, 1.0);
+                                            let t = (i - startb) as f32 / denom;
+                                            let sx = lane_rect.left() + t * ov_w;
+                                            let sy = lane_rect.center().y - v * scale_y;
+                                            let p = egui::pos2(sx, sy);
+                                            if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.5, Color32::from_rgb(80, 240, 160))); }
+                                            last = Some(p);
+                                        }
+                                        // Add stems like the base waveform when zoomed in enough
+                                        let pps = 1.0 / spp; // pixels per sample
+                                        if pps >= 6.0 {
+                                            for i in startb..endb {
+                                                let v = (buf[i] * scale).clamp(-1.0, 1.0);
+                                                let t = (i - startb) as f32 / denom;
+                                                let sx = lane_rect.left() + t * ov_w;
+                                                let sy = lane_rect.center().y - v * scale_y;
+                                                let base = lane_rect.center().y;
+                                                painter.line_segment([egui::pos2(sx, base), egui::pos2(sx, sy)], egui::Stroke::new(1.0, Color32::from_rgb(80, 240, 160)));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                     }
                 }
+
+                // (Removed) global mono overlay to avoid double/triple drawing.
 
                 // Shared playhead across lanes
                 if tab.samples_len > 0 {
@@ -915,55 +1583,407 @@ impl eframe::App for WavesPreviewer {
                         ui.separator();
                         match tab.view_mode {
                             ViewMode::Waveform => {
+                                // Tool selector
+                                ui.label("Tool:");
+                                let mut tool = tab.active_tool;
+                                egui::ComboBox::from_label("")
+                                    .selected_text(format!("{:?}", tool))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut tool, ToolKind::LoopEdit, "Loop Edit");
+                                        ui.selectable_value(&mut tool, ToolKind::Trim, "Trim");
+                                        ui.selectable_value(&mut tool, ToolKind::Fade, "Fade");
+                                        ui.selectable_value(&mut tool, ToolKind::PitchShift, "PitchShift");
+                                        ui.selectable_value(&mut tool, ToolKind::TimeStretch, "TimeStretch");
+                                        ui.selectable_value(&mut tool, ToolKind::Gain, "Gain");
+                                        ui.selectable_value(&mut tool, ToolKind::Normalize, "Normalize");
+                                        ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
+                                    });
+                                if tool != tab.active_tool {
+                                    tab.active_tool_last = Some(tab.active_tool);
+                                    // Leaving a tool: if we had a runtime preview, restore original audio
+                                    if tab.preview_audio_tool.is_some() { need_restore_preview = true; tab.preview_audio_tool = None; }
+                                    tab.active_tool = tool;
+                                }
+                                ui.separator();
                                 ui.label(RichText::new(format!("Tool: {:?}", tab.active_tool)).strong());
                                 match tab.active_tool {
-                                    ToolKind::SeekSelect => {
-                                        if let Some((s,e)) = tab.selection { ui.label(format!("Selection: {}  E{} samp", s, e)); }
-                                        else { ui.label("Selection: (none)"); }
-                                    }
+                                    // Seek/Select removed: seeking is always available on the canvas
                                     ToolKind::LoopEdit => {
-                                        let (a,b) = tab.ab_loop.unwrap_or((0,0));
-                                        ui.label(format!("A: {}  B: {} samp", a, b));
-                                        if ui.button("Use selection as loop").clicked() {
-                                            if let Some((s,e)) = Self::editor_selected_range(tab) { do_set_loop_from = Some((s,e)); }
-                                        }
-                                        if ui.button("Clear A/B").clicked() { do_set_loop_from = Some((0,0)); }
+                                        // compact spacing for inspector controls
+                                        ui.scope(|ui| {
+                                            let s = ui.style_mut();
+                                            s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                            s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                            let (s0,e0) = tab.loop_region.unwrap_or((0,0));
+                                            ui.label("Loop (samples)");
+                                            let mut s_i = s0 as i64;
+                                            let mut e_i = e0 as i64;
+                                            let max_i = tab.samples_len as i64;
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Start:");
+                                                let chs = ui.add(egui::DragValue::new(&mut s_i).clamp_range(0..=max_i).speed(64.0)).changed();
+                                                ui.label("End:");
+                                                let che = ui.add(egui::DragValue::new(&mut e_i).clamp_range(0..=max_i).speed(64.0)).changed();
+                                                if chs || che {
+                                                    let mut s = s_i.clamp(0, max_i) as usize;
+                                                    let mut e = e_i.clamp(0, max_i) as usize;
+                                                    if e < s { std::mem::swap(&mut s, &mut e); }
+                                                    tab.loop_region = Some((s,e));
+                                                    apply_pending_loop = true;
+                                                }
+                                            });
+                                            // Crossfade controls (duration in ms + shape)
+                                            let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                                            let mut x_ms = (tab.loop_xfade_samples as f32 / sr) * 1000.0;
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Xfade (ms):");
+                                                if ui.add(egui::DragValue::new(&mut x_ms).clamp_range(0.0..=5000.0).speed(5.0).fixed_decimals(1)).changed() {
+                                                    let samp = ((x_ms / 1000.0) * sr).round().clamp(0.0, tab.samples_len as f32) as usize;
+                                                    tab.loop_xfade_samples = samp;
+                                                    apply_pending_loop = true;
+                                                }
+                                                ui.label("Shape:");
+                                                let mut shp = tab.loop_xfade_shape;
+                                                egui::ComboBox::from_id_source("xfade_shape").selected_text(match shp { crate::app::types::LoopXfadeShape::Linear => "Linear", crate::app::types::LoopXfadeShape::EqualPower => "Equal" }).show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut shp, crate::app::types::LoopXfadeShape::Linear, "Linear");
+                                                    ui.selectable_value(&mut shp, crate::app::types::LoopXfadeShape::EqualPower, "Equal");
+                                                });
+                                                if shp != tab.loop_xfade_shape { tab.loop_xfade_shape = shp; apply_pending_loop = true; }
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui.button("Set Start").on_hover_text("Set Start at playhead").clicked() {
+                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                    let end = tab.loop_region.map(|(_,e)| e).unwrap_or(pos);
+                                                    let (mut s, mut e) = (pos, end);
+                                                    if e < s { std::mem::swap(&mut s, &mut e); }
+                                                    tab.loop_region = Some((s,e));
+                                                    apply_pending_loop = true;
+                                                }
+                                                if ui.button("Set End").on_hover_text("Set End at playhead").clicked() {
+                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                    let start = tab.loop_region.map(|(s,_)| s).unwrap_or(pos);
+                                                    let (mut s, mut e) = (start, pos);
+                                                    if e < s { std::mem::swap(&mut s, &mut e); }
+                                                    tab.loop_region = Some((s,e));
+                                                    apply_pending_loop = true;
+                                                }
+                                                if ui.button("Clear").clicked() { do_set_loop_from = Some((0,0)); }
+                                            });
+
+                                            // Crossfade controls already above; add Apply button to destructively bake Xfade
+                                            ui.horizontal_wrapped(|ui| {
+                                                let len_ok = tab.loop_region.map(|(a,b)| b> a).unwrap_or(false);
+                                                let n = tab.loop_xfade_samples;
+                                                if ui.add_enabled(len_ok && n>0, egui::Button::new("Apply Xfade")).on_hover_text("Bake crossfade into data at loop boundary").clicked() {
+                                                    do_apply_xfade = true;
+                                                }
+                                            });
+
+                                            // Dynamic preview overlay for LoopEdit (non-destructive):
+                                            // Build a mono preview applying the current loop crossfade to the mixdown.
+                                            if let Some((a,b)) = tab.loop_region {
+                                                let len = b.saturating_sub(a);
+                                                let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
+                                                if cf > 0 {
+                                                    // Build per-channel overlay applying crossfade at boundaries
+                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                    let cf_f = cf.max(1) as f32;
+                                                    for ch in overlay.iter_mut() {
+                                                        for i in 0..cf {
+                                                            let head_idx = a.saturating_add(i);
+                                                            let tail_idx = b.saturating_sub(cf).saturating_add(i);
+                                                            if head_idx >= ch.len() || tail_idx >= ch.len() { break; }
+                                                            let t = (i as f32) / cf_f;
+                                                            let (w_out, w_in) = match tab.loop_xfade_shape {
+                                                                crate::app::types::LoopXfadeShape::EqualPower => {
+                                                                    let ang = core::f32::consts::FRAC_PI_2 * t; (ang.cos(), ang.sin())
+                                                                }
+                                                                crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
+                                                            };
+                                                            let head = ch[head_idx];
+                                                            let tail = ch[tail_idx];
+                                                            let m = tail * w_out + head * w_in;
+                                                            ch[head_idx] = m;
+                                                            ch[tail_idx] = m;
+                                                        }
+                                                    }
+                                                    tab.preview_overlay_ch = Some(overlay);
+                                                    tab.preview_audio_tool = Some(ToolKind::LoopEdit);
+                                                }
+                                            }
+                                        });
                                     }
+                                    
                                     ToolKind::Trim => {
-                                        ui.label("Trim to Selection or A–B");
-                                        if ui.button("Trim Now").clicked() { if let Some((s,e)) = Self::editor_selected_range(tab) { do_trim = Some((s,e)); } }
+                                        ui.scope(|ui| {
+                                            let s = ui.style_mut();
+                                            s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                            s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                            // Trim has its own A/B range (independent from loop)
+                                            let range_opt = tab.trim_range;
+                                            if let Some((smp,emp)) = range_opt { ui.label(format!("Trim A–B: {}..{} samp", smp, emp)); } else { ui.label("Trim A–B: (set below)"); }
+                                            // A/B setters from playhead
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui.button("Set A").on_hover_text("Set A at playhead").clicked() {
+                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                let new_r = match tab.trim_range { None => Some((pos, pos)), Some((_a,b)) => Some((pos.min(b), pos.max(b))) };
+                                                    tab.trim_range = new_r;
+                                                    if let Some((a,b)) = tab.trim_range { if b>a {
+                                                        // live preview: keep-only A–B
+                                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                                        mono = mono[a..b].to_vec();
+                                                    pending_preview = Some((ToolKind::Trim, mono));
+                                                    tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                    } }
+                                                }
+                                                if ui.button("Set B").on_hover_text("Set B at playhead").clicked() {
+                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                let new_r = match tab.trim_range { None => Some((pos, pos)), Some((a,_b)) => Some((a.min(pos), a.max(pos))) };
+                                                    tab.trim_range = new_r;
+                                                    if let Some((a,b)) = tab.trim_range { if b>a {
+                                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                                        mono = mono[a..b].to_vec();
+                                                    pending_preview = Some((ToolKind::Trim, mono));
+                                                    tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                    } }
+                                                }
+                                                if ui.button("Clear").clicked() { tab.trim_range = None; need_restore_preview = true; }
+                                            });
+                                            // Actions
+                                            ui.horizontal_wrapped(|ui| {
+                                            let dis = !range_opt.map(|(s,e)| e> s).unwrap_or(false);
+                                            let range = range_opt.unwrap_or((0,0));
+                                            if ui.add_enabled(!dis, egui::Button::new("Cut+Join")).clicked() { do_cutjoin = Some(range); }
+                                            if ui.add_enabled(!dis, egui::Button::new("Apply Keep A–B")).clicked() { do_trim = Some(range); tab.preview_audio_tool=None; }
+                                        });
+                                        });
                                     }
                                     ToolKind::Fade => {
-                                        let st = tab.tool_state;
-                                        let mut in_ms = st.fade_in_ms; let mut out_ms = st.fade_out_ms;
-                                        ui.label("Fade In (ms)"); ui.add(egui::DragValue::new(&mut in_ms).clamp_range(0.0..=10000.0).speed(5.0));
-                                        ui.label("Fade Out (ms)"); ui.add(egui::DragValue::new(&mut out_ms).clamp_range(0.0..=10000.0).speed(5.0));
-                                        // write back into tab state
-                                        tab.tool_state = ToolState{ fade_in_ms: in_ms, fade_out_ms: out_ms };
-                                        if ui.button("Apply Fade to Selection/A–B/Whole").clicked() {
-                                            let range = Self::editor_selected_range(tab).unwrap_or((0, tab.samples_len));
-                                            do_fade = Some((range, in_ms, out_ms));
-                                        }
-                                        if ui.button("Quick: Edge XFade (ms)").clicked() {
-                                            let range = Self::editor_selected_range(tab).unwrap_or((0, tab.samples_len));
-                                            let ms = in_ms.max(out_ms).max(5.0);
-                                            do_fade = Some((range, ms, ms));
-                                        }
+                                        // Simplified: duration (seconds) from start/end + Apply
+                                        ui.scope(|ui| {
+                                            let s = ui.style_mut();
+                                            s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                            s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                            let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                                            // Fade In
+                                            ui.label("Fade In");
+                                            ui.horizontal_wrapped(|ui| {
+                                                let mut secs = tab.tool_state.fade_in_ms / 1000.0;
+                                                ui.label("duration (s)");
+                                                let changed = ui.add(egui::DragValue::new(&mut secs).clamp_range(0.0..=600.0).speed(0.05).fixed_decimals(2)).changed();
+                                                if changed {
+                                                    tab.tool_state = ToolState{ fade_in_ms: (secs*1000.0).max(0.0), ..tab.tool_state };
+                                                    // Live preview (per-channel overlay) + mono audition
+                                                    let n = ((secs) * sr).round() as usize;
+                                                    // Build overlay per channel
+                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                    for ch in overlay.iter_mut() {
+                                                        let nn = n.min(ch.len());
+                                                        for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); ch[i] *= w; }
+                                                    }
+                                                    tab.preview_overlay_ch = Some(overlay.clone());
+                                                    // Mono audition
+                                                    let mut mono = Self::editor_mixdown_mono(tab);
+                                                    let nn = n.min(mono.len());
+                                                    for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); mono[i] *= w; }
+                                                    pending_preview = Some((ToolKind::Fade, mono));
+                                                    tab.preview_audio_tool = Some(ToolKind::Fade);
+                                                }
+                                                if ui.add_enabled(secs>0.0, egui::Button::new("Apply")).clicked() {
+                                                    let n = ((secs) * sr).round() as usize;
+                                                    do_fade_in = Some(((0, n.min(tab.samples_len)), tab.fade_in_shape));
+                                                    tab.preview_audio_tool = None; // will be rebuilt from destructive result below
+                                                    tab.preview_overlay_ch = None;
+                                                }
+                                            });
+                                            ui.separator();
+                                            // Fade Out
+                                            ui.label("Fade Out");
+                                            ui.horizontal_wrapped(|ui| {
+                                                let mut secs = tab.tool_state.fade_out_ms / 1000.0;
+                                                ui.label("duration (s)");
+                                                let changed = ui.add(egui::DragValue::new(&mut secs).clamp_range(0.0..=600.0).speed(0.05).fixed_decimals(2)).changed();
+                                                if changed {
+                                                    tab.tool_state = ToolState{ fade_out_ms: (secs*1000.0).max(0.0), ..tab.tool_state };
+                                                    let n = ((secs) * sr).round() as usize;
+                                                    // per-channel overlay
+                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                    for ch in overlay.iter_mut() {
+                                                        let len = ch.len(); let nn = n.min(len);
+                                                        for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = 1.0 - Self::fade_weight(tab.fade_out_shape, t); let idx = len - nn + i; ch[idx] *= w; }
+                                                    }
+                                                    tab.preview_overlay_ch = Some(overlay.clone());
+                                                    // mono audition
+                                                    let mut mono = Self::editor_mixdown_mono(tab);
+                                                    let len = mono.len(); let nn = n.min(len);
+                                                    for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = 1.0 - Self::fade_weight(tab.fade_out_shape, t); let idx = len - nn + i; mono[idx] *= w; }
+                                                    pending_preview = Some((ToolKind::Fade, mono));
+                                                    tab.preview_audio_tool = Some(ToolKind::Fade);
+                                                }
+                                                if ui.add_enabled(secs>0.0, egui::Button::new("Apply")).clicked() {
+                                                    let n = ((secs) * sr).round() as usize;
+                                                    do_fade_out = Some(((0, n.min(tab.samples_len)), tab.fade_out_shape));
+                                                    tab.preview_audio_tool = None;
+                                                    tab.preview_overlay_ch = None;
+                                                }
+                                            });
+                                        });
                                     }
-                                    ToolKind::Gain | ToolKind::Normalize => {
-                                        ui.label("Planned in next step.");
+                                    ToolKind::PitchShift => {
+                                        ui.scope(|ui| {
+                                            let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
+                                            let mut semi = tab.tool_state.pitch_semitones;
+                                            ui.label("Semitones");
+                                            let changed = ui.add(egui::DragValue::new(&mut semi).clamp_range(-12.0..=12.0).speed(0.1).fixed_decimals(2)).changed();
+                                            if changed {
+                                                tab.tool_state = ToolState{ pitch_semitones: semi, ..tab.tool_state };
+                                                let mono = Self::editor_mixdown_mono(tab);
+                                                pending_heavy_preview = Some((ToolKind::PitchShift, mono, semi));
+                                                // Defer overlay spawn to avoid nested &mut borrow
+                                                pending_overlay_job = Some((ToolKind::PitchShift, semi));
+                                                tab.preview_audio_tool = Some(ToolKind::PitchShift);
+                                            }
+                                            if overlay_busy { ui.add(egui::Spinner::new()); }
+                                            if ui.button("Apply").clicked() { pending_pitch_apply = Some(tab.tool_state.pitch_semitones); }
+                                        });
+                                    }
+                                    ToolKind::TimeStretch => {
+                                        ui.scope(|ui| {
+                                            let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
+                                            let mut rate = tab.tool_state.stretch_rate;
+                                            ui.label("Rate");
+                                            let changed = ui.add(egui::DragValue::new(&mut rate).clamp_range(0.25..=4.0).speed(0.02).fixed_decimals(2)).changed();
+                                            if changed {
+                                                tab.tool_state = ToolState{ stretch_rate: rate, ..tab.tool_state };
+                                                let mono = Self::editor_mixdown_mono(tab);
+                                                pending_heavy_preview = Some((ToolKind::TimeStretch, mono, rate));
+                                                // Defer overlay spawn to avoid nested &mut borrow
+                                                pending_overlay_job = Some((ToolKind::TimeStretch, rate));
+                                                tab.preview_audio_tool = Some(ToolKind::TimeStretch);
+                                            }
+                                            if overlay_busy { ui.add(egui::Spinner::new()); }
+                                            if ui.button("Apply").clicked() { pending_stretch_apply = Some(tab.tool_state.stretch_rate); }
+                                        });
+                                    }
+                                    ToolKind::Gain => {
+                                        let st = tab.tool_state;
+                                        let mut gain_db = st.gain_db;
+                                        ui.label("Gain (dB)"); ui.add(egui::DragValue::new(&mut gain_db).clamp_range(-24.0..=24.0).speed(0.1));
+                                        tab.tool_state = ToolState{ gain_db, ..tab.tool_state };
+                                        // live preview on change
+                                        if (gain_db - st.gain_db).abs() > 1e-6 {
+                                            let g = db_to_amp(gain_db);
+                                            // per-channel overlay
+                                            let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                            for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                            tab.preview_overlay_ch = Some(overlay);
+                                            // mono audition
+                                            let mut mono = Self::editor_mixdown_mono(tab);
+                                            for v in &mut mono { *v *= g; }
+                                            pending_preview = Some((ToolKind::Gain, mono));
+                                            tab.preview_audio_tool = Some(ToolKind::Gain);
+                                        }
+                                        if ui.button("Apply").clicked() { do_gain = Some(((0, tab.samples_len), gain_db)); tab.preview_audio_tool=None; tab.preview_overlay_ch=None; }
+                                    }
+                                    ToolKind::Normalize => {
+                                        let st = tab.tool_state;
+                                        let mut target_db = st.normalize_target_db;
+                                        ui.label("Target dBFS"); ui.add(egui::DragValue::new(&mut target_db).clamp_range(-24.0..=0.0).speed(0.1));
+                                        tab.tool_state = ToolState{ normalize_target_db: target_db, ..tab.tool_state };
+                                        // live preview: compute gain to reach target (based on current peak)
+                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                        if !mono.is_empty() {
+                                            let mut peak = 0.0f32; for &v in &mono { peak = peak.max(v.abs()); }
+                                            if peak > 0.0 {
+                                                let g = db_to_amp(target_db) / peak.max(1e-12);
+                                                // per-channel overlay
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                                tab.preview_overlay_ch = Some(overlay);
+                                                // mono audition
+                                                for v in &mut mono { *v *= g; }
+                                                pending_preview = Some((ToolKind::Normalize, mono));
+                                                tab.preview_audio_tool = Some(ToolKind::Normalize);
+                                            }
+                                        }
+                                        if ui.button("Apply").clicked() { do_normalize = Some(((0, tab.samples_len), target_db)); tab.preview_audio_tool=None; tab.preview_overlay_ch=None; }
+                                    }
+                                    ToolKind::Reverse => {
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui.button("Preview").clicked() {
+                                                // per-channel overlay
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                for ch in overlay.iter_mut() { ch.reverse(); }
+                                                tab.preview_overlay_ch = Some(overlay);
+                                                // mono audition
+                                                let mut mono = Self::editor_mixdown_mono(tab);
+                                                mono.reverse();
+                                                pending_preview = Some((ToolKind::Reverse, mono));
+                                                tab.preview_audio_tool = Some(ToolKind::Reverse);
+                                            }
+                                            if ui.button("Apply").clicked() { do_reverse = Some((0, tab.samples_len)); tab.preview_audio_tool=None; tab.preview_overlay_ch=None; }
+                                            if ui.button("Cancel").clicked() { need_restore_preview = true; }
+                                        });
                                     }
                                 }
+                                ui.separator();
+                                // Export Selection removed (range selection removed)
                             }
                             _ => { ui.label("Tools for this view will appear here."); }
                         }
                     }); // end inspector
+                    if let Some((tool, mono, p)) = pending_heavy_preview { self.spawn_heavy_preview_owned(mono, tool, p); }
+                    if let Some(semi) = pending_pitch_apply {
+                        let sr = self.audio.shared.out_sample_rate;
+                        let mono_out = {
+                            let tab = &mut self.tabs[tab_idx];
+                            for ch in tab.ch_samples.iter_mut() { let out = crate::wave::process_pitchshift_offline(&*ch, sr, sr, semi); *ch = out; }
+                            let new_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0); tab.samples_len = new_len; tab.dirty = true;
+                            Self::editor_mixdown_mono(tab)
+                        };
+                        self.clear_preview_if_any(tab_idx);
+                        self.audio.set_samples(std::sync::Arc::new(mono_out));
+                        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+                    }
+                    if let Some(rate) = pending_stretch_apply {
+                        let sr = self.audio.shared.out_sample_rate;
+                        let mono_out = {
+                            let tab = &mut self.tabs[tab_idx];
+                            for ch in tab.ch_samples.iter_mut() { let out = crate::wave::process_timestretch_offline(&*ch, sr, sr, rate); *ch = out; }
+                            let new_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0); tab.samples_len = new_len; tab.dirty = true;
+                            Self::editor_mixdown_mono(tab)
+                        };
+                        self.clear_preview_if_any(tab_idx);
+                        self.audio.set_samples(std::sync::Arc::new(mono_out));
+                        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+                    }
+                    if need_restore_preview { self.clear_preview_if_any(tab_idx); }
+                    if let Some(s) = request_seek { self.audio.seek_to_sample(s); }
+                    if let Some((tool_kind, mono)) = pending_preview { self.set_preview_mono(tab_idx, tool_kind, mono); }
                 }); // end horizontal split
 
                 // perform pending actions after borrows end
-                if let Some((s,e)) = do_set_loop_from { if let Some(tab) = self.tabs.get_mut(tab_idx) { if s==0 && e==0 { tab.ab_loop=None; } else { tab.ab_loop=Some((s,e)); if tab.loop_enabled { self.audio.set_loop_region(s,e); } } } }
+                // Defer starting heavy overlay until after UI to avoid nested &mut self borrow (E0499)
+                if let Some((tool, p)) = pending_overlay_job { self.spawn_heavy_overlay_for_tab(tab_idx, tool, p); }
+                if let Some((s,e)) = do_set_loop_from { if let Some(tab) = self.tabs.get_mut(tab_idx) { if s==0 && e==0 { tab.loop_region=None; } else { tab.loop_region=Some((s,e)); if tab.loop_mode==LoopMode::Marker { self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); } } } }
                 if let Some((s,e)) = do_trim { self.editor_apply_trim_range(tab_idx, (s,e)); }
                 if let Some(((s,e), in_ms, out_ms)) = do_fade { self.editor_apply_fade_range(tab_idx, (s,e), in_ms, out_ms); }
+                if let Some(((s,e), shp)) = do_fade_in { self.editor_apply_fade_in_explicit(tab_idx, (s,e), shp); }
+                if let Some(((mut s,mut e), shp)) = do_fade_out {
+                    // If range provided is (0, n) as length, anchor to end
+                    if let Some(tab) = self.tabs.get(tab_idx) {
+                        let len = tab.samples_len;
+                        if s == 0 { s = len.saturating_sub(e); e = len; }
+                    }
+                    self.editor_apply_fade_out_explicit(tab_idx, (s,e), shp);
+                }
+                if let Some(((s,e), gdb)) = do_gain { self.editor_apply_gain_range(tab_idx, (s,e), gdb); }
+                if let Some(((s,e), tdb)) = do_normalize { self.editor_apply_normalize_range(tab_idx, (s,e), tdb); }
+                if let Some((s,e)) = do_reverse { self.editor_apply_reverse_range(tab_idx, (s,e)); }
+                if let Some((_,_)) = do_cutjoin { if let Some(tab) = self.tabs.get_mut(tab_idx) { tab.trim_range = None; } }
+                if let Some((s,e)) = do_cutjoin { self.editor_delete_range_and_join(tab_idx, (s,e)); }
+                if do_apply_xfade { self.editor_apply_loop_xfade(tab_idx); }
+                if apply_pending_loop { if let Some(tab_ro) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab_ro); } }
             } else {
                 // List view
                 let mut to_open: Option<PathBuf> = None;
@@ -1220,7 +2240,7 @@ impl eframe::App for WavesPreviewer {
                 RateMode::Speed => { let _ = prepare_for_speed(&p, &self.audio, &mut Vec::new(), self.playback_rate); self.audio.set_rate(self.playback_rate); }
                 _ => { self.audio.set_rate(1.0); self.spawn_heavy_processing(&p); }
             }
-            if let Some(idx) = self.active_tab { if let Some(tab) = self.tabs.get(idx) { self.audio.set_loop_enabled(tab.loop_enabled); if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); } } }
+            if let Some(idx) = self.active_tab { if let Some(tab) = self.tabs.get(idx) { self.apply_loop_mode_for_tab(tab); } }
             // Update effective volume to include per-file gain for the activated tab
             self.apply_effective_volume();
         }
@@ -1228,7 +2248,7 @@ impl eframe::App for WavesPreviewer {
         self.scroll_to_selected = false;
 
         // Busy overlay (blocks input and shows loader)
-        if self.processing.is_some() || self.export_state.is_some() {
+        if self.processing.is_some() || self.export_state.is_some() || self.heavy_preview_rx.is_some() {
             use egui::{Id, LayerId, Order};
             let screen = ctx.screen_rect();
             // block input
@@ -1243,7 +2263,10 @@ impl eframe::App for WavesPreviewer {
                 egui::Frame::window(ui.style()).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add(egui::Spinner::new());
-                        let msg = if let Some(p) = &self.processing { p.msg.as_str() } else if let Some(st)=&self.export_state { st.msg.as_str() } else { "Working..." };
+                        let msg = if let Some(p) = &self.processing { p.msg.as_str() }
+                            else if let Some(st)=&self.export_state { st.msg.as_str() }
+                            else if let Some(t)=&self.heavy_preview_tool { match t { ToolKind::PitchShift => "Previewing PitchShift...", ToolKind::TimeStretch => "Previewing TimeStretch...", _ => "Previewing..." } }
+                            else { "Working..." };
                         ui.label(RichText::new(msg).strong());
                     });
                 });

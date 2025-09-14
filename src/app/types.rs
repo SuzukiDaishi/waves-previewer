@@ -18,18 +18,24 @@ pub enum ViewMode {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolKind {
-    SeekSelect,
     LoopEdit,
     Trim,
     Fade,
+    PitchShift,
+    TimeStretch,
     Gain,
     Normalize,
+    Reverse,
 }
 
 #[derive(Clone, Copy)]
 pub struct ToolState {
     pub fade_in_ms: f32,
     pub fade_out_ms: f32,
+    pub gain_db: f32,
+    pub normalize_target_db: f32,
+    pub pitch_semitones: f32,
+    pub stretch_rate: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -37,6 +43,12 @@ pub enum LoopMode { Off, OnWhole, Marker }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MarkerKind { A, B }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LoopXfadeShape { Linear, EqualPower }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FadeShape { Linear, EqualPower, Cosine, SCurve, Quadratic, Cubic }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LeaveIntent {
@@ -58,7 +70,19 @@ pub struct EditorTab {
     pub ops: Vec<EditOp>,          // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
     pub selection: Option<(usize, usize)>,     // [start,end) in samples
-    pub ab_loop: Option<(usize, usize)>,       // A/B markers in samples
+    // Deprecated: ab_loop (A/B) is no longer used as loop region; kept for transition
+    pub ab_loop: Option<(usize, usize)>,
+    // Playback loop region (independent from editing selection)
+    pub loop_region: Option<(usize, usize)>,
+    // Trim-specific A/B range (independent from loop)
+    pub trim_range: Option<(usize, usize)>,
+    pub loop_xfade_samples: usize,            // crossfade length in samples (device SR)
+    pub loop_xfade_shape: LoopXfadeShape,     // blend shape
+    // Fade tool ranges and shapes
+    pub fade_in_range: Option<(usize, usize)>,
+    pub fade_out_range: Option<(usize, usize)>,
+    pub fade_in_shape: FadeShape,
+    pub fade_out_shape: FadeShape,
     pub view_mode: ViewMode,                   // which visualization panel
     pub snap_zero_cross: bool,                 // enable zero-cross snapping
     pub drag_select_anchor: Option<usize>,     // transient during drag
@@ -66,6 +90,12 @@ pub struct EditorTab {
     pub tool_state: ToolState,                 // simple per-tool parameters
     pub loop_mode: LoopMode,                   // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>,   // transient while dragging A/B
+    // Preview audio state (non-destructive): which tool is driving runtime preview
+    pub preview_audio_tool: Option<ToolKind>,
+    pub active_tool_last: Option<ToolKind>,
+    pub preview_offset_samples: Option<usize>,
+    // Per-channel non-destructive preview overlay (green waveform)
+    pub preview_overlay_ch: Option<Vec<Vec<f32>>>,
 }
 
 #[derive(Clone)]

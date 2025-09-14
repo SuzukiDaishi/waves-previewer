@@ -88,6 +88,49 @@ pub fn build_minmax(out: &mut Vec<(f32, f32)>, samples: &[f32], bins: usize) {
     }
 }
 
+// Parse RIFF WAVE 'smpl' chunk and extract the first loop's start/end in samples (if present).
+pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
+    use std::fs;
+    let data = fs::read(path).ok()?;
+    if data.len() < 12 { return None; }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+    let mut pos = 12usize;
+    while pos + 8 <= data.len() {
+        let id = &data[pos..pos+4];
+        let size = u32::from_le_bytes([data[pos+4], data[pos+5], data[pos+6], data[pos+7]]) as usize;
+        let chunk_start = pos + 8;
+        let chunk_end = chunk_start.saturating_add(size).min(data.len());
+        if id == b"smpl" {
+            // smpl header is 9 u32 (36 bytes) before loops
+            if chunk_end.saturating_sub(chunk_start) < 36 { return None; }
+            let num_loops_off = chunk_start + 28;
+            if num_loops_off + 4 > data.len() { return None; }
+            let num_loops = u32::from_le_bytes([
+                data[num_loops_off], data[num_loops_off+1], data[num_loops_off+2], data[num_loops_off+3]
+            ]) as usize;
+            let loops_off = chunk_start + 36;
+            // each loop entry: 6 u32 = 24 bytes
+            if num_loops == 0 || loops_off + 24 > data.len() { return None; }
+            let start_off = loops_off + 8;  // start at +8 bytes in loop struct
+            let end_off = loops_off + 12;   // end at +12 bytes in loop struct
+            if end_off + 4 > data.len() { return None; }
+            let start = u32::from_le_bytes([
+                data[start_off], data[start_off+1], data[start_off+2], data[start_off+3]
+            ]);
+            let end = u32::from_le_bytes([
+                data[end_off], data[end_off+1], data[end_off+2], data[end_off+3]
+            ]);
+            if end > start { return Some((start, end)); }
+            else { return None; }
+        }
+        // chunks are word (2-byte) aligned
+        let advance = 8 + size + (size & 1);
+        if pos + advance <= pos { break; }
+        pos = pos.saturating_add(advance);
+    }
+    None
+}
+
 // High level helper used by UI when a file is clicked
 pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>) -> Result<()> {
     let (mono, in_sr) = decode_wav_mono(path)?;
@@ -191,6 +234,30 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
                     writer.write_sample::<i32>(v)?;
                 }
             }
+        }
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+// Export a selection from in-memory multi-channel samples (float32) to a WAV file.
+pub fn export_selection_wav(chans: &[Vec<f32>], sample_rate: u32, range: (usize,usize), dst: &Path) -> Result<()> {
+    let ch = chans.len() as u16;
+    let (mut s, mut e) = range;
+    if s > e { std::mem::swap(&mut s, &mut e); }
+    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    let s = s.min(frames);
+    let e = e.min(frames);
+    let mut writer = hound::WavWriter::create(dst, hound::WavSpec{
+        channels: ch,
+        sample_rate: sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    })?;
+    for i in s..e {
+        for ci in 0..(ch as usize) {
+            let v = chans.get(ci).and_then(|c| c.get(i)).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+            writer.write_sample::<f32>(v)?;
         }
     }
     writer.finalize()?;

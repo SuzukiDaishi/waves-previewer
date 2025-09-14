@@ -4,6 +4,26 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Editor Loop/Selection Rework (Breaking)
+- Removed range Selection and the Seek/Select tool. The canvas always seeks on click.
+- Introduced independent `loop_region` per editor tab. Loop playback uses:
+  - `Off` / `OnWhole` / `Marker` (Marker uses `loop_region`), toggled via `L`.
+  - Start/End can be edited as seconds in the top bar, and as samples in Inspector > LoopEdit.
+  - Added buttons to set Start/End from current playhead position.
+  - New: Loop crossfade. Configure duration (ms) and shape (Linear/EqualPower) in
+    LoopEdit. Playback blends end→start inside the last N samples for click‑free loops.
+- WAV `smpl` loop markers are now read on load and mapped into `loop_region` (SR conversion considered).
+- Inspector changes:
+  - LoopEdit shows Start/End (samples), Set Start/End @ Playhead, Clear Loop.
+  - Trim/Fade/Gain/Normalize/Reverse/Silence now apply to Whole only.
+  - Export Selection removed.
+- Keyboard changes:
+  - K = Set Loop Start @ playhead, P = Set Loop End @ playhead
+  - L = Loop Off ⇄ OnWhole toggle
+  - Removed A/B and I/O bindings (Selection removed)
+- Fixed pending action wiring: Reverse/Gain/Normalize/Silence are now correctly applied and update playback/loop state.
+- Play position can be edited numerically (seconds) from the top bar.
+
 ### UI Improvements (Latest)
 - Editor zoom/pan reliability: fixed cases where Ctrl+Wheel zoom didn't fire on some environments.
   - Hover detection now uses canvas-rect hit test instead of `Response::hovered`.
@@ -83,3 +103,8 @@ All notable changes in this repository (hand-written).
 
 - Basic egui app with WAV decoding (hound), CPAL output, min/max waveform, RMS meter.
 - Docs: Added editing roadmap (planned) to README/UX/EDITOR_SPEC
+- Dependency bumps (compat)
+  - cpal: 0.15 → 0.16 (no code changes required here)
+  - rfd: 0.14 → 0.15.4
+  - egui/eframe/egui_extras remain at 0.27 series intentionally for now to avoid
+    a large breaking migration to 0.32+. We will plan that upgrade separately.

@@ -107,15 +107,39 @@ impl super::WavesPreviewer {
                     ops: Vec::new(),
                     selection: None,
                     ab_loop: None,
+                    loop_region: None,
+                    trim_range: None,
+                    loop_xfade_samples: 0,
+                    loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
+                    fade_in_range: None,
+                    fade_out_range: None,
+                    fade_in_shape: crate::app::types::FadeShape::SCurve,
+                    fade_out_shape: crate::app::types::FadeShape::SCurve,
                     view_mode: crate::app::types::ViewMode::Waveform,
                     snap_zero_cross: true,
                     drag_select_anchor: None,
-                    active_tool: crate::app::types::ToolKind::SeekSelect,
-                    tool_state: crate::app::types::ToolState{ fade_in_ms: 20.0, fade_out_ms: 20.0 },
+                    active_tool: crate::app::types::ToolKind::LoopEdit,
+                    tool_state: crate::app::types::ToolState{ fade_in_ms: 20.0, fade_out_ms: 20.0, gain_db: 0.0, normalize_target_db: -6.0, pitch_semitones: 0.0, stretch_rate: 1.0 },
                     loop_mode: crate::app::types::LoopMode::Off,
                     dragging_marker: None,
+                    preview_audio_tool: None,
+                    active_tool_last: None,
+                    preview_offset_samples: None,
+                    preview_overlay_ch: None,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
+                // Load loop markers from WAV (smpl) if available into loop_region
+                if let Some(tab) = self.tabs.last_mut() {
+                    if let Some((ls, le)) = crate::wave::read_wav_loop_markers(path) {
+                        // Convert positions from source SR to device SR if needed
+                        let out_sr = self.audio.shared.out_sample_rate.max(1);
+                        let s = ((ls as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
+                        let e = ((le as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
+                        let s = (s as usize).min(tab.samples_len);
+                        let e = (e as usize).min(tab.samples_len);
+                        if e > s { tab.loop_region = Some((s,e)); }
+                    }
+                }
                 self.playing_path = Some(path.to_path_buf());
             }
             _ => {
@@ -138,15 +162,38 @@ impl super::WavesPreviewer {
                     ops: Vec::new(),
                     selection: None,
                     ab_loop: None,
+                    loop_region: None,
+                    trim_range: None,
+                    loop_xfade_samples: 0,
+                    loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
+                    fade_in_range: None,
+                    fade_out_range: None,
+                    fade_in_shape: crate::app::types::FadeShape::SCurve,
+                    fade_out_shape: crate::app::types::FadeShape::SCurve,
                     view_mode: crate::app::types::ViewMode::Waveform,
                     snap_zero_cross: true,
                     drag_select_anchor: None,
-                    active_tool: crate::app::types::ToolKind::SeekSelect,
-                    tool_state: crate::app::types::ToolState{ fade_in_ms: 20.0, fade_out_ms: 20.0 },
+                    active_tool: crate::app::types::ToolKind::LoopEdit,
+                    tool_state: crate::app::types::ToolState{ fade_in_ms: 20.0, fade_out_ms: 20.0, gain_db: 0.0, normalize_target_db: -6.0, pitch_semitones: 0.0, stretch_rate: 1.0 },
                     loop_mode: crate::app::types::LoopMode::Off,
                     dragging_marker: None,
+                    preview_audio_tool: None,
+                    active_tool_last: None,
+                    preview_offset_samples: None,
+                    preview_overlay_ch: None,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
+                // Load loop markers into loop_region if present
+                if let Some(tab) = self.tabs.last_mut() {
+                    if let Some((ls, le)) = crate::wave::read_wav_loop_markers(path) {
+                        let out_sr = self.audio.shared.out_sample_rate.max(1);
+                        let s = ((ls as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
+                        let e = ((le as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
+                        let s = (s as usize).min(tab.samples_len);
+                        let e = (e as usize).min(tab.samples_len);
+                        if e > s { tab.loop_region = Some((s,e)); }
+                    }
+                }
                 self.spawn_heavy_processing(path);
                 self.playing_path = Some(path.to_path_buf());
             }
@@ -322,7 +369,3 @@ impl super::WavesPreviewer {
         self.processing = Some(ProcessingState { msg: match mode { RateMode::PitchShift => "Pitch-shifting...".to_string(), RateMode::TimeStretch => "Time-stretching...".to_string(), RateMode::Speed => "Processing...".to_string() }, path: path_buf, rx });
     }
 }
-
-
-
-

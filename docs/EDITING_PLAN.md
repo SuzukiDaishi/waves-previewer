@@ -3,7 +3,8 @@
 This document captures the concrete plan for waveform editing in waves-previewer.
 It follows a hierarchical UX (View → Tool). First pick a View (Waveform /
 Spectrogram / Mel / WORLD), then pick a Tool for that view. All views share
-time/playhead/A–B markers. See docs/EDITOR_SPEC.md for canvas/interaction details.
+time/playhead and an independent Loop region. A/B markers and range Selection
+are no longer part of the MVP (updated).
 
 - Goals: instant preview, non-destructive ops, seamless loop, background heavy jobs.
 - References: Sound Forge (time selection, zero-cross, AB loop), iZotope RX (spectral
@@ -12,33 +13,33 @@ time/playhead/A–B markers. See docs/EDITOR_SPEC.md for canvas/interaction deta
 Hierarchy overview
 - View selector (Wave/Spec/Mel/WORLD) right under the editor toolbar.
 - Tool selector (contextual) appears next to it; contents change with the view.
-- Inspector (right) shows the active tool’s parameters and range.
+- Inspector (right) shows the active tool’s parameters. Loop region is edited
+  in LoopEdit (Start/End as samples) and also available in the top bar (seconds).
 
-MVP scope
-- Time selection on the editor canvas (drag), shift-extend, double-click = select all.
-- AB loop markers (A/B keys). Loop toggle (L). Optional zero-cross snap (S).
-- Inspector (side panel) with actions: Trim, Gain, Normalize(dBFS), Fade In/Out,
-  Reverse, Silence (insert/mute). Apply to Selection / Whole / A–B.
-- Export Selection. Heavy operations (Pitch/Stretch) stay in background worker.
+MVP scope (updated)
+- Range Selection removed（クリックは常にシーク）。
+- Loop region（Start/End）を独立管理。Loop toggle は Off / OnWhole / Marker（L）。
+- ループ編集: インスペクタの LoopEdit でサンプル値を直接編集。プレイヘッド位置から
+  Start/End を設定するボタンも提供。
+- Inspector の操作（Trim / Gain / Normalize / Fade / Reverse / Silence）は「Whole」に適用。
+- Export Selection は撤廃。重い処理（Pitch/Stretch）は引き続きバックグラウンドワーカー。
 
-Data model additions (per EditorTab)
-- selection: Option<(usize, usize)>
-- ab_loop: Option<(usize, usize)>
+Data model (per EditorTab, updated)
+- loop_region: Option<(usize, usize)>  // 再生ループ用（編集選択は無し）
 - view_mode: Waveform | Spectrogram | Mel
-- snap_zero_cross: bool
-- drag_select_anchor: Option<usize>
+- snap_zero_cross: bool（現状未使用; Selection 撤廃のため将来再評価）
 
-Interactions
-- Click to seek; Left-drag to select; Ctrl+Wheel to zoom; Shift+Wheel or Middle/Right
-  drag to pan; Double-click to fit or select all; A/B to drop loop markers; L to toggle loop.
+Interactions (updated)
+- Click to seek（常時）; Ctrl+Wheel to zoom; Shift+Wheel or Middle/Right drag to pan。
+- Loop: K=Set Start @ playhead、P=Set End @ playhead、L=Off/OnWhole 切替。
 
-Rendering
-- Overlay the selection band and AB markers on top of multi-channel lanes.
+Rendering (updated)
+- Loop region Start/End（S/E）ラインのみをオーバーレイ表示。Selection 帯は無し。
 - Spectrogram view starts as visualization-only; zoom/pan/seek shared with waveform.
 
-Phases
-1) MVP above + Export Selection
-2) Spectrogram visualization + rectangular selection (time first; frequency later)
-3) Pitch/Stretch apply to selection (flush tail; replace preview buffer)
+Phases (updated)
+1) MVP above（Loop region 独立・Whole 編集）
+2) Spectrogram visualization（閲覧）
+3) Pitch/Stretch のオフライン適用（Whole）と安定化（flush/tail）
 4) SR/BitDepth conversion + TPDF dither; streaming export for long files
-5) Undo/Redo; regions; spectral brush/lasso; noise reduction
+5) Undo/Redo; regions; spectral tools（矩形/ブラシ）; noise reduction
