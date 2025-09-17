@@ -94,7 +94,7 @@ All notable changes in this repository (hand-written).
   - Folder cell click opens the folder in the OS file browser.
   - Disabled global hover brightening to avoid sluggish hover-follow effect; clickable cells now use button styling with pointer cursor.
   - Switching tabs now reloads the active tab's audio and loop state so playback always reflects the selected editor.
-  - Columns added: Ch/SR/Bits; LUFS removed for performance (RMS dBFS kept). Sorting by any column via header click.
+  - Columns added: Ch/SR/Bits に加えて LUFS (I) と Gain (dB) を表示。LUFS は近似→非同期再計算で更新し、すべての列で tri-state ソートに対応。
   - Added Search bar (filters by filename/folder), tri-state sorting (asc/desc/original), and auto-scroll to keep the selected row visible.
   - Top bar shows file counts (visible/total) with loading indicator (⏳) while metadata is still arriving.
   - Speed control moved to input field: "Speed x [1.0]" (0.25–4.0) with validation; audio engine supports fractional-rate playback with linear interpolation.

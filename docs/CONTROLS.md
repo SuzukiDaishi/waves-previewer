@@ -2,13 +2,17 @@
 
 ## キーボードショートカット
 - **Space**: 再生/停止（どこでも）
+- **K**: ループ開始を現在の再生位置に設定（エディタタブ）
+- **P**: ループ終了を現在の再生位置に設定（エディタタブ）
 - **L**: ループ再生トグル（エディタタブがアクティブのとき）
+- **S**: ゼロクロススナップのオン/オフ（エディタタブ）
 - **Ctrl+S**: 選択中のファイルにゲインを適用して保存（Export > Save Selected）
 - **Ctrl+W**: アクティブなエディタタブを閉じる
 - **Ctrl+A**: リスト全選択（表示中のファイルすべて）
 - **↑/↓**: リスト選択移動
 - **Shift + ↑/↓**: アンカーから範囲拡張（複数選択）
 - **Enter**: リストの選択項目をエディタタブで開く
+- **←/→**: 選択中の行の Gain(dB) を調整（既定 ±0.1dB / Shift ±1.0dB / Ctrl ±3.0dB）
 
 ## マウス操作
 ### シングルクリック
@@ -53,13 +57,15 @@
 - Volume スライダは dB（-80〜+6）。内部は振幅へ変換して再生に適用。
 - **ループ再生**: 
   - リスト表示時は常に無効（一度再生で停止）
-  - エディタタブ表示時のみ L キーでトグル可能（全範囲ループ）
+  - エディタタブ表示時のみ L キーで LoopMode (Off/OnWhole/Marker) をトグル
+  - Marker モードでは Inspector > LoopEdit の開始/終了サンプルとクロスフェード（長さ・シェイプ）を使用し、K/P でプレイヘッドから更新
   - Pitch/Stretch では処理時の出力レイテンシと残り出力（flush）を考慮して末尾欠けを防止。
 - Length 列は時間（mm:ss 形式）で表示、ソート時は秒数で比較。
-- 将来は範囲選択で `loop_start/end` を UI から変更予定。
----
+- LoopEdit はサンプル単位で `loop_start/end` を編集し、Apply Xfade は破壊的適用（Undo 無し）のため注意。
 
-# View/Tool Shortcuts (Hierarchical Editing)
+# View/Tool Shortcuts (計画中 / 未実装)
+
+※ Editing 2.0 で導入予定の操作です。現行バージョンでは未実装です。
 
 - Views: 1=Waveform, 2=Spectrogram, 3=Mel, 4=WORLD (planned)
 - Tools (contextual): Q=Seek/Select, W=Loop Edit, E=Trim, R=Fade, T=Gain, Y=Noise Reduce (Spec), Esc=Cancel tool

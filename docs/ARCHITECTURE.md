@@ -115,9 +115,10 @@
 
 ## ループ再生
 
-- 共有状態に `loop_enabled`, `loop_start`, `loop_end` を持つ。
-- コールバックで `pos >= loop_end` のときに即 `loop_start` へ巻き戻す（1サンプルも空けない）。
-- 現在は UI から全範囲ループのみ（将来は範囲選択を UI で指定）。
+- 共有状態に `loop_enabled`, `loop_start`, `loop_end`, `loop_xfade_samples`, `loop_xfade_shape` を保持。
+- コールバックでは `pos >= loop_end` になった時点で即 `loop_start` へ巻き戻し、必要に応じて終端/先頭のクロスフェードを適用して継ぎ目を滑らかにします。
+- UI では LoopMode (Off / OnWhole / Marker) を切り替え可能。Marker モードでは Inspector > LoopEdit で設定した開始/終了サンプルを使用し、K/P ショートカットでプレイヘッド位置から範囲を更新できます。
+- LoopEdit ではクロスフェード長・シェイプを指定し、Apply Xfade で波形へ焼き込むこともできます（Undo/Redo は未実装のため注意）。
 
 ## 非同期メタ情報（2段階）
 
@@ -158,13 +159,13 @@
 
 ## app
 - リスト: `egui_extras::TableBuilder`（内部スクロール）。`min_scrolled_height` で最下部まで枠を延ばし、`TableBody::rows` で仮想化。
-  - 列構成: File | Folder | Length | Ch | SR | Bits | Level(dBFS) | Wave
+  - 列構成: File | Folder | Length | Ch | SR | Bits | dBFS (Peak) | LUFS (I) | Gain (dB) | Wave
   - 全列がリサイズ可能（`.resizable(true)`）で初期幅を最適化済み
   - 長いテキスト（ファイル名・フォルダパス）は `.truncate(true)` で自動切り詰め、ホバーで全文表示
   - Wave 列は幅に応じてサムネ高さを比例拡大（1フレーム遅延で行高反映）
 - エディタ: 横幅に比例して縦も拡大（`wave_h = width * 0.35` を余白に収まる範囲で使用）。
-- 色分け: サムネは振幅（max(|min|,|max|)）を青→赤のグラデーションへ。dBFS 列は dB 値で着色。
-- ショートカット: Space（再生/停止）、L（ループトグル。エディタ時）、↑/↓（選択）、Enter（タブを開く）。
+- 色分け: サムネは振幅（max(|min|,|max|)）を青→赤のグラデーションへ。dBFS/LUFS 列は値に応じて着色。
+- ショートカット: Space（再生/停止）、K/P（Loop Start/End @ playhead）、L（ループトグル）、S（ゼロクロススナップ）、Ctrl+S（保存）、Ctrl+W（タブ閉）、Ctrl+A（全選択）、↑/↓/Shift+↑↓（選択操作）、←/→（Gain 調整。Shift/Ctrl でステップ変更）、Enter（タブを開く）。詳細は docs/CONTROLS.md を参照。
 - 検索/ソート: 検索バーで部分一致フィルタ。ソートは昇順→降順→元順をトグル（Length列は秒数順）。元順復帰のため `original_files` を保持。
 - スクロール: 選択行は `row.response().scroll_to_me()` で常に可視範囲へ。
 - 上部バー: Mode はセグメント切替（Speed/Pitch/Stretch）。値はコンパクトな DragValue（Speed/Stretch: 0.25–4.0, Pitch: -12–+12）。高さ・間隔を統一し横幅を節約。
