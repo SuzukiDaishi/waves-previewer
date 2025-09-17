@@ -8,6 +8,14 @@ use super::meta::spawn_meta_worker;
 use super::types::{EditorTab, ProcessingResult, ProcessingState, RateMode, SortDir, SortKey};
 
 impl super::WavesPreviewer {
+    /// Helper: read WAV `smpl` loop markers and map to given output SR, set tab.loop_region if valid
+    fn set_loop_region_from_wav_markers(tab: &mut EditorTab, path: &Path, in_sr: u32, out_sr: u32) {
+        if let Some((ls, le)) = crate::wave::read_wav_loop_markers(path) {
+            if let Some((s,e)) = crate::wave::map_wav_loop_markers(ls, le, in_sr, out_sr, tab.samples_len) {
+                tab.loop_region = Some((s,e));
+            }
+        }
+    }
     // multi-select aware selection update for list clicks (moved from app.rs)
     pub(super) fn update_selection_on_click(&mut self, row_idx: usize, mods: egui::Modifiers) {
         let len = self.files.len();
@@ -129,17 +137,7 @@ impl super::WavesPreviewer {
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
                 // Load loop markers from WAV (smpl) if available into loop_region
-                if let Some(tab) = self.tabs.last_mut() {
-                    if let Some((ls, le)) = crate::wave::read_wav_loop_markers(path) {
-                        // Convert positions from source SR to device SR if needed
-                        let out_sr = self.audio.shared.out_sample_rate.max(1);
-                        let s = ((ls as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
-                        let e = ((le as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
-                        let s = (s as usize).min(tab.samples_len);
-                        let e = (e as usize).min(tab.samples_len);
-                        if e > s { tab.loop_region = Some((s,e)); }
-                    }
-                }
+                if let Some(tab) = self.tabs.last_mut() { Self::set_loop_region_from_wav_markers(tab, path, in_sr, self.audio.shared.out_sample_rate); }
                 self.playing_path = Some(path.to_path_buf());
             }
             _ => {
@@ -184,16 +182,7 @@ impl super::WavesPreviewer {
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
                 // Load loop markers into loop_region if present
-                if let Some(tab) = self.tabs.last_mut() {
-                    if let Some((ls, le)) = crate::wave::read_wav_loop_markers(path) {
-                        let out_sr = self.audio.shared.out_sample_rate.max(1);
-                        let s = ((ls as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
-                        let e = ((le as u64) * (out_sr as u64) + (in_sr as u64/2)) / (in_sr as u64);
-                        let s = (s as usize).min(tab.samples_len);
-                        let e = (e as usize).min(tab.samples_len);
-                        if e > s { tab.loop_region = Some((s,e)); }
-                    }
-                }
+                if let Some(tab) = self.tabs.last_mut() { Self::set_loop_region_from_wav_markers(tab, path, in_sr, self.audio.shared.out_sample_rate); }
                 self.spawn_heavy_processing(path);
                 self.playing_path = Some(path.to_path_buf());
             }

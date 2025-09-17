@@ -6,6 +6,14 @@
 
 ---
 
+## Documentation
+
+See docs index for full guides and references:
+
+- docs/INDEX.md
+
+---
+
 ## デザイン方針（ご提案）
 
 基本画面は「リスト表示」。ファイル名をダブルクリックすると「波形エディタ」を開きます。
@@ -51,6 +59,7 @@
 - 選択行は自動で見える位置へスクロール
 - リストの Wave 列は min/max の簡易描画。エディタではズーム/パン/シークに対応。
 - 波形表示は Volume には影響されません（常に 0 dB と見なす）。Gain(dB) のみ反映されます。
+- エディタのループは上部バーで Off/On/Marker を切替、ループ範囲編集は Inspector > LoopEdit に集約。
 - 上部バーに未保存ゲイン件数（"Unsaved Gains: N"）を表示
 - Export メニュー:
   - Save Selected (Ctrl+S): 選択中のファイルへゲインを適用して保存（Overwrite／New File は Settings で指定）

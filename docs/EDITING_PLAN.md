@@ -16,11 +16,11 @@ Hierarchy overview
 - Inspector (right) shows the active tool’s parameters. Loop region is edited
   in LoopEdit (Start/End as samples) and also available in the top bar (seconds).
 
-MVP scope (updated)
+MVP scope（updated）
 - Range Selection removed（クリックは常にシーク）。
 - Loop region（Start/End）を独立管理。Loop toggle は Off / OnWhole / Marker（L）。
-- ループ編集: インスペクタの LoopEdit でサンプル値を直接編集。プレイヘッド位置から
-  Start/End を設定するボタンも提供。
+- ループ編集は Inspector の LoopEdit に集約（サンプル単位）。Top bar の秒指定は廃止。
+  - プレイヘッド位置からの Start/End 設定ボタンは LoopEdit 内に配置。
 - Inspector の操作（Trim / Gain / Normalize / Fade / Reverse / Silence）は「Whole」に適用。
 - Export Selection は撤廃。重い処理（Pitch/Stretch）は引き続きバックグラウンドワーカー。
 
@@ -33,9 +33,14 @@ Interactions (updated)
 - Click to seek（常時）; Ctrl+Wheel to zoom; Shift+Wheel or Middle/Right drag to pan。
 - Loop: K=Set Start @ playhead、P=Set End @ playhead、L=Off/OnWhole 切替。
 
-Rendering (updated)
-- Loop region Start/End（S/E）ラインのみをオーバーレイ表示。Selection 帯は無し。
-- Spectrogram view starts as visualization-only; zoom/pan/seek shared with waveform.
+Rendering（updated）
+- Waveform: zoom に応じて 2 方式
+  - Line（spp < 1.0）: 折れ線 + stems（pps>=6）。
+  - Aggregated（spp >= 1.0）: px 列ロックの min/max bins（build_minmax と同等）。
+- Overlay: base と同じルールに統一（Line/Aggregated ともに一致）。
+  - Time‑stretch 時は visible window を比率でマップし、px 列に対して overlay の min/max を算出。
+  - LoopEdit の境界帯は同じ列で太線上書き。
+  - Debug ビルドでは可視範囲の薄帯やズームログを出力可能。
 
 Phases (updated)
 1) MVP above（Loop region 独立・Whole 編集）

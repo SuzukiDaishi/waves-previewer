@@ -13,7 +13,8 @@ pub struct SharedAudio {
     pub play_pos: std::sync::atomic::AtomicUsize,
     pub play_pos_f: AtomicF32,                   // fractional position for rate control
     pub meter_rms: AtomicF32,
-    pub out_channels: usize,
+    #[allow(dead_code)]
+    pub _out_channels: usize,
     pub out_sample_rate: u32,
     pub loop_enabled: std::sync::atomic::AtomicBool,
     pub loop_start: std::sync::atomic::AtomicUsize,
@@ -46,7 +47,7 @@ impl AudioEngine {
             play_pos: std::sync::atomic::AtomicUsize::new(0),
             play_pos_f: AtomicF32::new(0.0),
             meter_rms: AtomicF32::new(0.0),
-            out_channels: cfg.channels() as usize,
+            _out_channels: cfg.channels() as usize,
             out_sample_rate: cfg.sample_rate().0,
             loop_enabled: std::sync::atomic::AtomicBool::new(false),
             loop_start: std::sync::atomic::AtomicUsize::new(0),

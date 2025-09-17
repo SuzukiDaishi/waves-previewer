@@ -131,6 +131,22 @@ pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
     None
 }
 
+/// Map WAV 'smpl' loop markers (ls, le) from source sample rate `in_sr` to output `out_sr`,
+/// and clamp to [0, samples_len]. Returns normalized (start<=end) if valid and non-empty.
+pub fn map_wav_loop_markers(ls: u32, le: u32, in_sr: u32, out_sr: u32, samples_len: usize) -> Option<(usize, usize)> {
+    if in_sr == 0 || out_sr == 0 || samples_len == 0 { return None; }
+    let in_sr_u = in_sr as u64;
+    let out_sr_u = out_sr as u64;
+    let s = ((ls as u64) * out_sr_u + (in_sr_u / 2)) / in_sr_u;
+    let e = ((le as u64) * out_sr_u + (in_sr_u / 2)) / in_sr_u;
+    let mut s = s as usize;
+    let mut e = e as usize;
+    if e < s { std::mem::swap(&mut s, &mut e); }
+    s = s.min(samples_len);
+    e = e.min(samples_len);
+    if e > s { Some((s, e)) } else { None }
+}
+
 // High level helper used by UI when a file is clicked
 pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>) -> Result<()> {
     let (mono, in_sr) = decode_wav_mono(path)?;
@@ -148,6 +164,7 @@ pub fn prepare_for_speed(path: &Path, audio: &AudioEngine, out_waveform: &mut Ve
 }
 
 // Prepare with PitchShift mode (preserve duration, shift pitch in semitones)
+#[allow(dead_code)]
 pub fn prepare_for_pitchshift(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, semitones: f32) -> Result<()> {
     let (mono, in_sr) = decode_wav_mono(path)?;
     let out_sr = audio.shared.out_sample_rate;
@@ -160,6 +177,7 @@ pub fn prepare_for_pitchshift(path: &Path, audio: &AudioEngine, out_waveform: &m
 }
 
 // Prepare with TimeStretch mode (preserve pitch, change duration by rate: 0.5 -> slower/longer)
+#[allow(dead_code)]
 pub fn prepare_for_timestretch(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, rate: f32) -> Result<()> {
     let rate = rate.clamp(0.25, 4.0);
     let (mono, in_sr) = decode_wav_mono(path)?;
@@ -241,6 +259,7 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
 }
 
 // Export a selection from in-memory multi-channel samples (float32) to a WAV file.
+#[allow(dead_code)]
 pub fn export_selection_wav(chans: &[Vec<f32>], sample_rate: u32, range: (usize,usize), dst: &Path) -> Result<()> {
     let ch = chans.len() as u16;
     let (mut s, mut e) = range;
@@ -358,7 +377,16 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
     let win = (0.400 * 48_000.0) as usize;
     let hop = (0.100 * 48_000.0) as usize;
     let means = block_means_power(&p_sum, win, hop);
-    if means.is_empty() { return Ok(f32::NEG_INFINITY); }
+    if means.is_empty() {
+        // Fallback for very short audio (< window): use whole-signal mean power.
+        // This avoids returning +/-inf for short clips where BS.1770 windowing can't be applied.
+        let mut acc = 0.0f64;
+        for &v in &p_sum { acc += v as f64; }
+        let n = p_sum.len().max(1) as f64;
+        let z = (acc / n).max(1e-24);
+        let l = K_CONST + 10.0 * (z.log10() as f32);
+        return Ok(l);
+    }
     let blocks_lufs: Vec<f32> = means.iter().map(|&m| K_CONST + 10.0 * (m.max(1e-24)).log10() as f32).collect();
     // Absolute gate -70 LUFS
     let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > -70.0).collect();

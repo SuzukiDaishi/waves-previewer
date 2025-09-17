@@ -42,15 +42,18 @@ pub struct ToolState {
 pub enum LoopMode { Off, OnWhole, Marker }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 pub enum MarkerKind { A, B }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoopXfadeShape { Linear, EqualPower }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
 pub enum FadeShape { Linear, EqualPower, Cosine, SCurve, Quadratic, Cubic }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum LeaveIntent {
     ToList,
     ToTab(usize),

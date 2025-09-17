@@ -4,11 +4,24 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Waveform/Overlay Consistency + Loop UI Simplification (Latest)
+- Overlay rendering reworked to match base waveform across all zoom modes.
+  - Line (spp < 1.0): per-sample polyline + stems (pps >= 6) — identical to base.
+  - Aggregated (spp >= 1.0): pixel-locked min/max bins per px column — identical to base.
+  - Time-stretched overlays map visible window via ratio; binning uses base px columns to avoid drift.
+  - LoopEdit boundaries are emphasized by drawing the same bins again with a thicker stroke.
+  - Fixed overlay-window mapping: start/end now derived from the visible window, not the whole file.
+- Loop controls in the top bar are simplified: keep only Loop mode toggles (Off / On / Marker).
+  - Numeric seconds for Start/End and Set Start/End/Clear were removed from the top bar.
+  - Loop region editing is now centralized in Inspector > LoopEdit (samples), K/P keys still supported.
+- Added debug prints for zoom/overlay mapping in dev builds to diagnose platform-specific input/rounding.
+
 ### Editor Loop/Selection Rework (Breaking)
 - Removed range Selection and the Seek/Select tool. The canvas always seeks on click.
 - Introduced independent `loop_region` per editor tab. Loop playback uses:
   - `Off` / `OnWhole` / `Marker` (Marker uses `loop_region`), toggled via `L`.
-  - Start/End can be edited as seconds in the top bar, and as samples in Inspector > LoopEdit.
+  - Start/End can be edited as samples in Inspector > LoopEdit.
+  - (Changed) The top bar no longer offers numeric Start/End editing.
   - Added buttons to set Start/End from current playhead position.
   - New: Loop crossfade. Configure duration (ms) and shape (Linear/EqualPower) in
     LoopEdit. Playback blends end→start inside the last N samples for click‑free loops.

@@ -21,6 +21,22 @@
   - デコード/リサンプル/波形(min/max)作成。`prepare_for_playback` で「再生準備＋波形作成」を一括で実行。
   - PitchShift/TimeStretch では `signalsmith-stretch` を用いたオフライン処理を実施。出力レイテンシ（`output_latency()`）と `flush()` 分を考慮して末尾欠けを防止。
 
+## Waveform Rendering（zoom-aware, unified with overlays）
+
+- Zoom 判定
+  - `spp = samples_per_px`（pxあたりサンプル数）
+  - `spp < 1.0` → Line、`spp >= 1.0` → Aggregated
+- Base（背景）
+  - Line: 可視サンプルを等間隔に x へ割当てて折れ線。`pps>=6` では stems を追加。
+  - Aggregated: 1px=1bin として `build_minmax(samples, bins=wave_w)` を用い、縦バーで min/max を描画。
+- Overlay（緑）
+  - ベースと同じルールで描画。見た目・列の位置・min/max の取り方が一致する。
+  - Time‑stretch 時は overlay 可視窓 [startb..endb] を導出し、px 列ごとに overlay 域の min/max を算出。
+    - ratio=overlay_len/orig_len、可視窓は `startb=round(start*ratio)`, `endb=startb+ceil(visible_len*ratio)`。
+    - Aggregated では base の px 列に合わせ、base の列スライス [i0,i1) を overlay へ線形写像して [o0,o1) を作成。
+  - LoopEdit の境界帯は該当列だけ太線で上書き（視認性のため）。
+  - Debug ビルドではズーム/マッピングのログや可視帯の薄いオーバーレイを有効にして診断可能。
+
 ## Export / Save（Gain 適用）
 
 - モデル
@@ -56,10 +72,10 @@
 - チャンネル合算: 現状は全ch=1.0 の重み合算（LFE除外・サラウンド+1.5dBは将来対応）。
 - UI 反映: リストに「LUFS (I)」列を追加。値に応じて背景着色。
 
-### Gain変更との連動
+### Gain 変更との連動
 
-- 即時表示（近似）: `lufs_est = lufs_base + gain_db` を表示・ソートに使用。
-- 厳密反映（再計算）: Gain変更後400msデバウンスでワーカーを起動し、ゲート込みで再計算。完了値を `lufs_override` に保存して上書き表示。
+- 即時表示（近似）: `lufs_est ≒ lufs_base + gain_db` を表示・ソートに使用。
+- 厳密反映（再計算）: Gain 変更後 400ms デバウンスでワーカーを起動し、ゲート込みで再計算。完了値を `lufs_override` に保存して上書き表示。
 - 制限: −70LUFS 近傍ではゲート通過/不通過が反転し、近似との差が出ることがある（再計算で確定）。
 
 ### パフォーマンス

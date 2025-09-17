@@ -93,6 +93,7 @@ pub fn format_time_s(secs: f32) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub fn open_in_file_explorer(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -114,6 +115,7 @@ pub fn open_in_file_explorer(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+#[allow(dead_code)]
 pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
