@@ -26,6 +26,65 @@ pub fn decode_wav_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
     Ok((mono, in_sr))
 }
 
+pub fn decode_wav_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>, u32, bool)> {
+    let mut reader = hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
+    let spec = reader.spec();
+    let ch = spec.channels.max(1) as usize;
+    let in_sr = spec.sample_rate;
+    let max_frames = ((in_sr as f32) * max_secs.max(0.0)).ceil() as usize;
+    let total_frames = reader.duration() as usize;
+    let target_frames = if max_frames == 0 { total_frames } else { max_frames.min(total_frames) };
+    let mut mono: Vec<f32> = Vec::with_capacity(target_frames);
+    let mut frames_read = 0usize;
+    match spec.sample_format {
+        hound::SampleFormat::Float => {
+            let mut acc: f32 = 0.0;
+            let mut c = 0usize;
+            for s in reader.samples::<f32>() {
+                let v = s?;
+                acc += v;
+                c += 1;
+                if c == ch {
+                    mono.push(acc / ch as f32);
+                    acc = 0.0;
+                    c = 0;
+                    frames_read += 1;
+                    if frames_read >= target_frames {
+                        break;
+                    }
+                }
+            }
+        }
+        hound::SampleFormat::Int => {
+            let max_abs = match spec.bits_per_sample {
+                8 => 127.0,
+                16 => 32767.0,
+                24 => 8_388_607.0,
+                32 => 2_147_483_647.0,
+                b => ((1u64 << (b - 1)) - 1) as f64 as f32,
+            };
+            let mut acc: f32 = 0.0;
+            let mut c = 0usize;
+            for s in reader.samples::<i32>() {
+                let v_i = s?;
+                let v = (v_i as f32) / max_abs;
+                acc += v;
+                c += 1;
+                if c == ch {
+                    mono.push(acc / ch as f32);
+                    acc = 0.0;
+                    c = 0;
+                    frames_read += 1;
+                    if frames_read >= target_frames {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok((mono, in_sr, total_frames > target_frames))
+}
+
 pub fn decode_wav_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
     let spec = reader.spec();
@@ -157,6 +216,14 @@ pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut
     Ok(())
 }
 
+pub fn prepare_for_list_preview(path: &Path, audio: &AudioEngine, max_secs: f32) -> Result<bool> {
+    let (mono, in_sr, truncated) = decode_wav_mono_prefix(path, max_secs)?;
+    let resampled = resample_linear(&mono, in_sr, audio.shared.out_sample_rate);
+    audio.set_samples(Arc::new(resampled));
+    audio.stop();
+    Ok(truncated)
+}
+
 // Prepare with Speed mode (rate change without pitch preservation)
 pub fn prepare_for_speed(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, _rate: f32) -> Result<()> {
     // playback rate is applied in the audio engine; here we just set the base buffer
@@ -202,6 +269,11 @@ pub fn process_pitchshift_offline(mono: &[f32], in_sr: u32, out_sr: u32, semiton
         let mut tail = vec![0.0_f32; olat];
         stretch.flush(&mut tail);
         out.extend_from_slice(&tail);
+        if out.len() > olat {
+            out.drain(0..olat);
+        } else {
+            out.clear();
+        }
     }
     out
 }
@@ -221,6 +293,11 @@ pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: 
         let mut tail = vec![0.0_f32; olat];
         stretch.flush(&mut tail);
         out.extend_from_slice(&tail);
+        if out.len() > olat {
+            out.drain(0..olat);
+        } else {
+            out.clear();
+        }
     }
     out
 }

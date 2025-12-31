@@ -6,12 +6,12 @@ use atomic_float::AtomicF32;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub struct SharedAudio {
-    pub samples: ArcSwapOption<Vec<f32>>,        // mono samples in [-1, 1]
-    pub vol: AtomicF32,                          // 0.0..1.0 linear gain
-    pub file_gain: AtomicF32,                    // per-file gain factor (can be > 1.0)
+    pub samples: ArcSwapOption<Vec<f32>>, // mono samples in [-1, 1]
+    pub vol: AtomicF32,                   // 0.0..1.0 linear gain
+    pub file_gain: AtomicF32,             // per-file gain factor (can be > 1.0)
     pub playing: std::sync::atomic::AtomicBool,
     pub play_pos: std::sync::atomic::AtomicUsize,
-    pub play_pos_f: AtomicF32,                   // fractional position for rate control
+    pub play_pos_f: AtomicF32, // fractional position for rate control
     pub meter_rms: AtomicF32,
     #[allow(dead_code)]
     pub _out_channels: usize,
@@ -21,7 +21,7 @@ pub struct SharedAudio {
     pub loop_end: std::sync::atomic::AtomicUsize,
     pub loop_xfade_samples: std::sync::atomic::AtomicUsize,
     pub loop_xfade_shape: std::sync::atomic::AtomicU8, // 0=Linear,1=EqualPower
-    pub rate: AtomicF32,                         // playback rate (0.25..4.0)
+    pub rate: AtomicF32,                               // playback rate (0.25..4.0)
 }
 
 pub struct AudioEngine {
@@ -58,16 +58,29 @@ impl AudioEngine {
         });
 
         let stream = match cfg.sample_format() {
-            cpal::SampleFormat::F32 => Self::build_stream::<f32>(&device, &cfg.into(), shared.clone())?,
-            cpal::SampleFormat::I16 => Self::build_stream::<i16>(&device, &cfg.into(), shared.clone())?,
-            cpal::SampleFormat::U16 => Self::build_stream::<u16>(&device, &cfg.into(), shared.clone())?,
+            cpal::SampleFormat::F32 => {
+                Self::build_stream::<f32>(&device, &cfg.into(), shared.clone())?
+            }
+            cpal::SampleFormat::I16 => {
+                Self::build_stream::<i16>(&device, &cfg.into(), shared.clone())?
+            }
+            cpal::SampleFormat::U16 => {
+                Self::build_stream::<u16>(&device, &cfg.into(), shared.clone())?
+            }
             _ => anyhow::bail!("Unsupported sample format"),
         };
 
-        Ok(Self { _stream: stream, shared })
+        Ok(Self {
+            _stream: stream,
+            shared,
+        })
     }
 
-    fn build_stream<T>(device: &cpal::Device, cfg: &cpal::StreamConfig, shared: Arc<SharedAudio>) -> Result<cpal::Stream>
+    fn build_stream<T>(
+        device: &cpal::Device,
+        cfg: &cpal::StreamConfig,
+        shared: Arc<SharedAudio>,
+    ) -> Result<cpal::Stream>
     where
         T: cpal::SizedSample + cpal::FromSample<f32>,
     {
@@ -83,16 +96,24 @@ impl AudioEngine {
                 let playing = shared.playing.load(std::sync::atomic::Ordering::Relaxed);
                 let vol = shared.vol.load(std::sync::atomic::Ordering::Relaxed)
                     * shared.file_gain.load(std::sync::atomic::Ordering::Relaxed);
-                let rate = shared.rate.load(std::sync::atomic::Ordering::Relaxed).clamp(0.25, 4.0);
-                let looping = shared.loop_enabled.load(std::sync::atomic::Ordering::Relaxed);
+                let rate = shared
+                    .rate
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .clamp(0.25, 4.0);
+                let looping = shared
+                    .loop_enabled
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let loop_start = shared.loop_start.load(std::sync::atomic::Ordering::Relaxed);
                 let loop_end = shared.loop_end.load(std::sync::atomic::Ordering::Relaxed);
                 if playing {
                     if let Some(samples_arc) = maybe_samples.as_ref() {
                         let samples = samples_arc.as_ref();
                         let len = samples.len();
-                        let mut pos_f = shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
-                        if !pos_f.is_finite() || pos_f < 0.0 { pos_f = 0.0; }
+                        let mut pos_f =
+                            shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
+                        if !pos_f.is_finite() || pos_f < 0.0 {
+                            pos_f = 0.0;
+                        }
                         let mut pos = pos_f.floor() as usize;
                         let valid_loop = looping && loop_end > loop_start && loop_end <= len;
                         for frame in data.chunks_mut(channels) {
@@ -100,8 +121,12 @@ impl AudioEngine {
                                 if valid_loop {
                                     pos_f = loop_start as f32;
                                 } else {
-                                    shared.playing.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    for ch in frame.iter_mut() { *ch = T::from_sample(0.0); }
+                                    shared
+                                        .playing
+                                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                                    for ch in frame.iter_mut() {
+                                        *ch = T::from_sample(0.0);
+                                    }
                                     continue;
                                 }
                             }
@@ -119,16 +144,22 @@ impl AudioEngine {
                             let mut s_lin = sample_at(pos_f);
                             // Crossfade near loop end if enabled
                             if valid_loop {
-                                let xfade = shared.loop_xfade_samples.load(std::sync::atomic::Ordering::Relaxed);
+                                let xfade = shared
+                                    .loop_xfade_samples
+                                    .load(std::sync::atomic::Ordering::Relaxed);
                                 if xfade > 0 {
                                     let xfade_f = xfade as f32;
                                     let rem = (loop_end as f32) - pos_f; // remaining until end
                                     if rem >= 0.0 && rem <= xfade_f {
-                                        let head_pf = (loop_start as f32) + (xfade_f - rem).clamp(0.0, xfade_f);
+                                        let head_pf = (loop_start as f32)
+                                            + (xfade_f - rem).clamp(0.0, xfade_f);
                                         let s_head = sample_at(head_pf);
                                         let tcf = ((xfade_f - rem) / xfade_f).clamp(0.0, 1.0);
-                                        let shape = shared.loop_xfade_shape.load(std::sync::atomic::Ordering::Relaxed);
-                                        let (w_out, w_in) = match shape { // shapes based on amplitude weights
+                                        let shape = shared
+                                            .loop_xfade_shape
+                                            .load(std::sync::atomic::Ordering::Relaxed);
+                                        let (w_out, w_in) = match shape {
+                                            // shapes based on amplitude weights
                                             1 => {
                                                 // equal-power: cos/sin over [0, pi/2]
                                                 let a = core::f32::consts::FRAC_PI_2 * tcf;
@@ -150,26 +181,38 @@ impl AudioEngine {
                                 *ch = T::from_sample(s_clamped);
                             }
                         }
-                        shared.play_pos.store(pos, std::sync::atomic::Ordering::Relaxed);
-                        shared.play_pos_f.store(pos_f, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .play_pos
+                            .store(pos, std::sync::atomic::Ordering::Relaxed);
+                        shared
+                            .play_pos_f
+                            .store(pos_f, std::sync::atomic::Ordering::Relaxed);
                     } else {
                         // No buffer, output silence
                         for frame in data.chunks_mut(channels) {
-                            for ch in frame.iter_mut() { *ch = T::from_sample(0.0); }
+                            for ch in frame.iter_mut() {
+                                *ch = T::from_sample(0.0);
+                            }
                         }
                     }
                 } else {
                     // not playing: silence
                     for frame in data.chunks_mut(channels) {
-                        for ch in frame.iter_mut() { *ch = T::from_sample(0.0); }
+                        for ch in frame.iter_mut() {
+                            *ch = T::from_sample(0.0);
+                        }
                     }
                 }
 
                 if n > 0 {
                     let rms = (sum_sq / n as f32).sqrt();
-                    shared.meter_rms.store(rms, std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .meter_rms
+                        .store(rms, std::sync::atomic::Ordering::Relaxed);
                 } else {
-                    shared.meter_rms.store(0.0, std::sync::atomic::Ordering::Relaxed);
+                    shared
+                        .meter_rms
+                        .store(0.0, std::sync::atomic::Ordering::Relaxed);
                 }
             },
             err_fn,
@@ -182,61 +225,166 @@ impl AudioEngine {
     pub fn set_samples(&self, samples: Arc<Vec<f32>>) {
         let len = samples.len();
         self.shared.samples.store(Some(samples));
-        self.shared.play_pos.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.shared.play_pos_f.store(0.0, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .play_pos
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .play_pos_f
+            .store(0.0, std::sync::atomic::Ordering::Relaxed);
         // update loop region to whole buffer by default
-        self.shared.loop_start.store(0, std::sync::atomic::Ordering::Relaxed);
-        self.shared.loop_end.store(len, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_start
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_end
+            .store(len, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn replace_samples_keep_pos(&self, samples: Arc<Vec<f32>>) {
+        let new_len = samples.len();
+        let old_len = self
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let pos = self
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut pos_f = self
+            .shared
+            .play_pos_f
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if !pos_f.is_finite() || pos_f < 0.0 {
+            pos_f = 0.0;
+        }
+        self.shared.samples.store(Some(samples));
+        if pos >= new_len {
+            self.shared
+                .play_pos
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .play_pos_f
+                .store(0.0, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            let max_pos_f = new_len.saturating_sub(1) as f32;
+            if pos_f > max_pos_f {
+                pos_f = pos as f32;
+            }
+            self.shared
+                .play_pos
+                .store(pos, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .play_pos_f
+                .store(pos_f, std::sync::atomic::Ordering::Relaxed);
+        }
+        let loop_start = self
+            .shared
+            .loop_start
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let loop_end = self
+            .shared
+            .loop_end
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if loop_start >= new_len {
+            self.shared
+                .loop_start
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        if loop_end == old_len || loop_end > new_len {
+            self.shared
+                .loop_end
+                .store(new_len, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     pub fn set_volume(&self, v: f32) {
-        self.shared.vol.store(v.clamp(0.0, 1.0), std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .vol
+            .store(v.clamp(0.0, 1.0), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_file_gain(&self, g: f32) {
         // allow >1.0 (up to, say, 16x = +24dB). Clamp to a reasonable upper bound.
         let g = g.clamp(0.0, 16.0);
-        self.shared.file_gain.store(g, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .file_gain
+            .store(g, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn toggle_play(&self) {
-        let now = !self.shared.playing.load(std::sync::atomic::Ordering::Relaxed);
-        self.shared.playing.store(now, std::sync::atomic::Ordering::Relaxed);
+        let now = !self
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .playing
+            .store(now, std::sync::atomic::Ordering::Relaxed);
         if now && self.shared.samples.load().is_none() {
-            self.shared.playing.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .playing
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
         if now {
             // on play, if at end, rewind
-            let pos = self.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+            let pos = self
+                .shared
+                .play_pos
+                .load(std::sync::atomic::Ordering::Relaxed);
             if let Some(s) = self.shared.samples.load().as_ref() {
                 if pos >= s.len() {
-                    self.shared.play_pos.store(0, std::sync::atomic::Ordering::Relaxed);
-                    self.shared.play_pos_f.store(0.0, std::sync::atomic::Ordering::Relaxed);
+                    self.shared
+                        .play_pos
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    self.shared
+                        .play_pos_f
+                        .store(0.0, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
     }
 
     pub fn stop(&self) {
-        self.shared.playing.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .playing
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_loop_enabled(&self, en: bool) {
-        self.shared.loop_enabled.store(en, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_enabled
+            .store(en, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_loop_region(&self, start: usize, end: usize) {
-        self.shared.loop_start.store(start, std::sync::atomic::Ordering::Relaxed);
-        self.shared.loop_end.store(end, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_start
+            .store(start, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_end
+            .store(end, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_loop_crossfade(&self, samples: usize, shape_linear_or_equal_power: u8) {
-        self.shared.loop_xfade_samples.store(samples, std::sync::atomic::Ordering::Relaxed);
-        self.shared.loop_xfade_shape.store(if shape_linear_or_equal_power > 0 { 1 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .loop_xfade_samples
+            .store(samples, std::sync::atomic::Ordering::Relaxed);
+        self.shared.loop_xfade_shape.store(
+            if shape_linear_or_equal_power > 0 {
+                1
+            } else {
+                0
+            },
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub fn set_rate(&self, rate: f32) {
-        self.shared.rate.store(rate.clamp(0.25, 4.0), std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .rate
+            .store(rate.clamp(0.25, 4.0), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn seek_to_sample(&self, pos: usize) {
@@ -244,8 +392,12 @@ impl AudioEngine {
         if let Some(buf) = self.shared.samples.load().as_ref() {
             let len = buf.len();
             let p = pos.min(len);
-            self.shared.play_pos.store(p, std::sync::atomic::Ordering::Relaxed);
-            self.shared.play_pos_f.store(p as f32, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .play_pos
+                .store(p, std::sync::atomic::Ordering::Relaxed);
+            self.shared
+                .play_pos_f
+                .store(p as f32, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

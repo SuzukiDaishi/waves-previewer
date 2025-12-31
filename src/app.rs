@@ -1,4 +1,5 @@
-﻿use std::collections::HashMap;
+﻿use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,14 +17,19 @@ mod logic;
 mod editor_ops;
 mod ui;
 mod render;
+mod capture;
 use self::{types::*, helpers::*};
+use self::capture::save_color_image_png;
+pub use self::types::StartupConfig;
+
+const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
 
 // moved to types.rs
 
     pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
-    pub files: Vec<PathBuf>,
+    pub files: Vec<usize>,
     pub all_files: Vec<PathBuf>,
     pub selected: Option<usize>,
     pub volume_db: f32,
@@ -35,6 +41,14 @@ use self::{types::*, helpers::*};
     pub active_tab: Option<usize>,
     pub meta: HashMap<PathBuf, FileMeta>,
     pub meta_rx: Option<std::sync::mpsc::Receiver<(PathBuf, FileMeta)>>,
+    pub meta_pool: Option<meta::MetaPool>,
+    pub meta_inflight: HashSet<PathBuf>,
+    pub spectro_cache: HashMap<PathBuf, std::sync::Arc<SpectrogramData>>,
+    pub spectro_inflight: HashSet<PathBuf>,
+    pub spectro_tx: Option<std::sync::mpsc::Sender<(PathBuf, SpectrogramData)>>,
+    pub spectro_rx: Option<std::sync::mpsc::Receiver<(PathBuf, SpectrogramData)>>,
+    pub scan_rx: Option<std::sync::mpsc::Receiver<ScanMessage>>,
+    pub scan_in_progress: bool,
     // dynamic row height for wave thumbnails (list view)
     pub wave_row_h: f32,
     // multi-selection (list view)
@@ -45,14 +59,22 @@ use self::{types::*, helpers::*};
     sort_dir: SortDir,
     // scroll behavior
     scroll_to_selected: bool,
+    last_list_scroll_at: Option<std::time::Instant>,
     // original order snapshot for tri-state sort
-    original_files: Vec<PathBuf>,
+    original_files: Vec<usize>,
     // search
     search_query: String,
+    search_dirty: bool,
+    search_deadline: Option<std::time::Instant>,
     // processing mode
     mode: RateMode,
     // heavy processing state (overlay)
     processing: Option<ProcessingState>,
+    // background full load for list preview
+    list_preview_rx: Option<std::sync::mpsc::Receiver<ListPreviewResult>>,
+    list_preview_job_id: u64,
+    // background heavy apply for editor (pitch/stretch)
+    editor_apply_state: Option<EditorApplyState>,
     // per-file pending gain edits (dB)
     pending_gains: HashMap<PathBuf, f32>,
     // background export state (gains)
@@ -79,9 +101,20 @@ use self::{types::*, helpers::*};
         heavy_preview_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
         heavy_preview_tool: Option<ToolKind>,
         // Heavy overlay worker (per-channel preview for Pitch/Stretch) with generation guard
-        heavy_overlay_rx: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Vec<Vec<f32>>, u64)>>,
+        heavy_overlay_rx: Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Vec<Vec<f32>>, usize, u64)>>,
         overlay_gen_counter: u64,
         overlay_expected_gen: u64,
+        overlay_expected_tool: Option<ToolKind>,
+
+        // startup automation/screenshot
+        startup: StartupState,
+        pending_screenshot: Option<PathBuf>,
+        exit_after_screenshot: bool,
+        screenshot_seq: u64,
+
+        // debug/automation
+        debug: DebugState,
+        debug_summary_seq: u64,
     }
 
 impl WavesPreviewer {
@@ -89,32 +122,41 @@ impl WavesPreviewer {
         if let Some(tab) = self.tabs.get(tab_idx) {
             // Rebuild mono from current destructive state
             let mono = Self::editor_mixdown_mono(tab);
+            self.audio.stop();
             self.audio.set_samples(std::sync::Arc::new(mono));
             // Reapply loop mode
             self.apply_loop_mode_for_tab(tab);
         }
     }
     fn set_preview_mono(&mut self, tab_idx: usize, tool: ToolKind, mono: Vec<f32>) {
+        self.audio.stop();
         self.audio.set_samples(std::sync::Arc::new(mono));
         if let Some(tab) = self.tabs.get_mut(tab_idx) { tab.preview_audio_tool = Some(tool); }
         if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
     }
     fn clear_preview_if_any(&mut self, tab_idx: usize) {
-        if let Some(tab) = self.tabs.get(tab_idx) {
-            if tab.preview_audio_tool.is_some() {
-                let _ = tab;
-                self.preview_restore_audio_for_tab(tab_idx);
-                if let Some(tabm) = self.tabs.get_mut(tab_idx) { tabm.preview_audio_tool = None; tabm.preview_overlay_ch = None; }
-            }
+        let had_preview_audio = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.preview_audio_tool)
+            .is_some();
+        if had_preview_audio {
+            self.audio.stop();
+            self.preview_restore_audio_for_tab(tab_idx);
         }
-        // also discard any in-flight heavy preview job
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        // also discard any in-flight preview/overlay job
         self.heavy_preview_rx = None;
         self.heavy_preview_tool = None;
+        self.heavy_overlay_rx = None;
+        self.overlay_expected_tool = None;
     }
     fn spawn_heavy_preview_owned(&mut self, mono: Vec<f32>, tool: ToolKind, param: f32) {
         use std::sync::mpsc;
-        let sr = self.audio.shared.out_sample_rate;
-        // cancel previous job by dropping receiver
+        let sr = self.audio.shared.out_sample_rate;        // cancel previous job by dropping receiver
         self.heavy_preview_rx = None; self.heavy_preview_tool = None;
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         std::thread::spawn(move || {
@@ -135,29 +177,92 @@ impl WavesPreviewer {
         use std::sync::mpsc;
         // Cancel previous overlay job by dropping receiver
         self.heavy_overlay_rx = None;
-        if let Some(tab) = self.tabs.get(tab_idx) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_overlay = None;
             let path = tab.path.clone();
             let ch = tab.ch_samples.clone();
             let sr = self.audio.shared.out_sample_rate;
+            let target_len = tab.samples_len;
             // generation guard
             self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
             let gen = self.overlay_gen_counter;
             self.overlay_expected_gen = gen;
-            let (tx, rx) = mpsc::channel::<(std::path::PathBuf, Vec<Vec<f32>>, u64)>();
+            self.overlay_expected_tool = Some(tool);
+            let (tx, rx) = mpsc::channel::<(std::path::PathBuf, Vec<Vec<f32>>, usize, u64)>();
             std::thread::spawn(move || {
                 let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
+                let mut result_len = target_len;
                 for chan in ch.iter() {
                     let processed = match tool {
-                        ToolKind::PitchShift => crate::wave::process_pitchshift_offline(chan, sr, sr, param),
-                        ToolKind::TimeStretch => crate::wave::process_timestretch_offline(chan, sr, sr, param),
+                        ToolKind::PitchShift => {
+                            crate::wave::process_pitchshift_offline(chan, sr, sr, param)
+                        }
+                        ToolKind::TimeStretch => {
+                            crate::wave::process_timestretch_offline(chan, sr, sr, param)
+                        }
                         _ => chan.clone(),
                     };
+                    result_len = processed.len();
                     out.push(processed);
                 }
-                let _ = tx.send((path, out, gen));
+                let timeline_len = out.get(0).map(|c| c.len()).unwrap_or(result_len).max(1);
+                let _ = tx.send((path, out, timeline_len, gen));
             });
             self.heavy_overlay_rx = Some(rx);
         }
+    }
+    fn spawn_editor_apply_for_tab(&mut self, tab_idx: usize, tool: ToolKind, param: f32) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        // Cancel any previous apply job
+        self.editor_apply_state = None;
+        self.audio.stop();
+        let ch = tab.ch_samples.clone();
+        let sr = self.audio.shared.out_sample_rate;
+        let (tx, rx) = mpsc::channel::<EditorApplyResult>();
+        std::thread::spawn(move || {
+            let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
+            for chan in ch.iter() {
+                let processed = match tool {
+                    ToolKind::PitchShift => {
+                        crate::wave::process_pitchshift_offline(chan, sr, sr, param)
+                    }
+                    ToolKind::TimeStretch => {
+                        crate::wave::process_timestretch_offline(chan, sr, sr, param)
+                    }
+                    _ => chan.clone(),
+                };
+                out.push(processed);
+            }
+            let len = out.get(0).map(|c| c.len()).unwrap_or(0);
+            let mut mono = vec![0.0f32; len];
+            let chn = out.len() as f32;
+            if chn > 0.0 {
+                for ch in &out {
+                    for (i, v) in ch.iter().enumerate() {
+                        if let Some(dst) = mono.get_mut(i) {
+                            *dst += *v;
+                        }
+                    }
+                }
+                for v in &mut mono {
+                    *v /= chn;
+                }
+            }
+            let _ = tx.send(EditorApplyResult {
+                tab_idx,
+                samples: mono,
+                channels: out,
+            });
+        });
+        let msg = match tool {
+            ToolKind::PitchShift => "Applying PitchShift...".to_string(),
+            ToolKind::TimeStretch => "Applying TimeStretch...".to_string(),
+            _ => "Applying...".to_string(),
+        };
+        self.editor_apply_state = Some(EditorApplyState { msg, rx, tab_idx });
     }
     fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
         let n = tab.samples_len;
@@ -168,6 +273,68 @@ impl WavesPreviewer {
         for ch in &tab.ch_samples { for i in 0..n { if let Some(&v)=ch.get(i) { out[i]+=v; } } }
         for v in &mut out { *v /= chn; }
         out
+    }
+    fn draw_spectrogram(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        wave_left: f32,
+        wave_w: f32,
+        tab: &EditorTab,
+        spec: &SpectrogramData,
+        view_mode: ViewMode,
+    ) {
+        if spec.frames == 0 || spec.bins == 0 {
+            return;
+        }
+        let area = egui::Rect::from_min_max(
+            egui::pos2(wave_left, rect.top()),
+            egui::pos2(rect.right(), rect.bottom()),
+        );
+        let width_px = area.width().max(1.0);
+        let height_px = area.height().max(1.0);
+        let spp = tab.samples_per_px.max(0.0001);
+        let vis = (wave_w * spp).ceil() as usize;
+        let start = tab.view_offset.min(tab.samples_len);
+        let end = (start + vis).min(tab.samples_len);
+        let frame_step = spec.frame_step.max(1);
+        let f0 = (start / frame_step).min(spec.frames.saturating_sub(1));
+        let mut f1 = (end / frame_step).min(spec.frames);
+        if f1 <= f0 {
+            f1 = (f0 + 1).min(spec.frames);
+        }
+        let frame_count = f1.saturating_sub(f0).max(1);
+        let target_w = (width_px / 3.0).clamp(64.0, 256.0) as usize;
+        let target_h = (height_px / 3.0).clamp(64.0, 192.0) as usize;
+        let cell_w = width_px / target_w as f32;
+        let cell_h = height_px / target_h as f32;
+        let max_bin = spec.bins.saturating_sub(1).max(1);
+        let sr = spec.sample_rate.max(1) as f32;
+        let mel_max = 2595.0 * (1.0 + (sr * 0.5) / 700.0).log10();
+        for x in 0..target_w {
+            let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+            let base = frame_idx * spec.bins;
+            for y in 0..target_h {
+                let frac = 1.0 - (y as f32 / (target_h.saturating_sub(1)) as f32);
+                let bin = match view_mode {
+                    ViewMode::Spectrogram | ViewMode::Waveform => {
+                        (frac * max_bin as f32).round() as usize
+                    }
+                    ViewMode::Mel => {
+                        let mel = frac * mel_max;
+                        let freq = 700.0 * (10.0_f32.powf(mel / 2595.0) - 1.0);
+                        let pos = (freq / (sr * 0.5)).clamp(0.0, 1.0);
+                        (pos * max_bin as f32).round() as usize
+                    }
+                };
+                let idx = base + bin.min(max_bin);
+                let db = spec.values_db.get(idx).copied().unwrap_or(-120.0).clamp(-80.0, 0.0);
+                let col = db_to_color(db);
+                let x0 = area.left() + x as f32 * cell_w;
+                let y0 = area.bottom() - (y as f32 + 1.0) * cell_h;
+                let r = egui::Rect::from_min_size(egui::pos2(x0, y0), egui::vec2(cell_w + 0.5, cell_h + 0.5));
+                painter.rect_filled(r, 0.0, col);
+            }
+        }
     }
     // editor operations moved to editor_ops.rs
     fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
@@ -197,9 +364,27 @@ impl WavesPreviewer {
                 else { let da = a.abs_diff(idx); let db = b.abs_diff(idx); if da <= db { tab.loop_region = Some((idx, b)); } else { tab.loop_region = Some((a, idx)); } }
             }
         }
-    }fn current_active_path(&self) -> Option<&PathBuf> {
+    }
+
+    fn path_for_row(&self, row_idx: usize) -> Option<&PathBuf> {
+        self.files
+            .get(row_idx)
+            .and_then(|&idx| self.all_files.get(idx))
+    }
+
+    fn row_for_path(&self, path: &std::path::Path) -> Option<usize> {
+        let idx = self.all_files.iter().position(|p| p == path)?;
+        self.files.iter().position(|&i| i == idx)
+    }
+
+    fn selected_path_buf(&self) -> Option<PathBuf> {
+        self.selected
+            .and_then(|i| self.path_for_row(i).cloned())
+    }
+
+    fn current_active_path(&self) -> Option<&PathBuf> {
         if let Some(i) = self.active_tab { return self.tabs.get(i).map(|t| &t.path); }
-        if let Some(i) = self.selected { return self.files.get(i); }
+        if let Some(i) = self.selected { return self.path_for_row(i); }
         None
     }
     pub(super) fn apply_effective_volume(&self) {
@@ -242,7 +427,15 @@ impl WavesPreviewer {
         use std::sync::mpsc;
         if indices.is_empty() { return; }
         let mut items: Vec<(PathBuf, f32)> = Vec::new();
-        for i in indices { if let Some(p) = self.files.get(i) { if let Some(db) = self.pending_gains.get(p) { if db.abs()>0.0001 { items.push((p.clone(), *db)); } } } }
+        for i in indices {
+            if let Some(p) = self.path_for_row(i) {
+                if let Some(db) = self.pending_gains.get(p) {
+                    if db.abs() > 0.0001 {
+                        items.push((p.clone(), *db));
+                    }
+                }
+            }
+        }
         if items.is_empty() { return; }
         let cfg = self.export_cfg.clone();
         // remember sources for post-save cleanup + reload
@@ -312,7 +505,7 @@ impl WavesPreviewer {
         if indices.is_empty() { return; }
         let mut affect_playing = false;
         for &i in indices {
-            if let Some(p) = self.files.get(i).cloned() {
+            if let Some(p) = self.path_for_row(i).cloned() {
                 let cur = *self.pending_gains.get(&p).unwrap_or(&0.0);
                 let new = Self::clamp_gain_db(cur + delta_db);
                 if new == 0.0 { self.pending_gains.remove(&p); } else { self.pending_gains.insert(p.clone(), new); }
@@ -329,11 +522,544 @@ impl WavesPreviewer {
         let dl = Instant::now() + Duration::from_millis(400);
         self.lufs_recalc_deadline.insert(path, dl);
     }
+
+    fn reset_meta_pool(&mut self) {
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(6);
+        let (pool, rx) = crate::app::meta::spawn_meta_pool(workers);
+        self.meta_pool = Some(pool);
+        self.meta_rx = Some(rx);
+        self.meta_inflight.clear();
+    }
+
+    fn ensure_meta_pool(&mut self) {
+        if self.meta_pool.is_none() {
+            self.reset_meta_pool();
+        }
+    }
+
+    fn queue_meta_for_path(&mut self, path: &PathBuf) {
+        if self.meta.contains_key(path) || self.meta_inflight.contains(path) {
+            return;
+        }
+        self.ensure_meta_pool();
+        if let Some(pool) = &self.meta_pool {
+            self.meta_inflight.insert(path.clone());
+            pool.enqueue(path.clone());
+        }
+    }
+
+    fn ensure_spectro_channel(&mut self) {
+        if self.spectro_tx.is_none() || self.spectro_rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, SpectrogramData)>();
+            self.spectro_tx = Some(tx);
+            self.spectro_rx = Some(rx);
+        }
+    }
+
+    fn spawn_spectrogram_job(&mut self, path: PathBuf, mono: Vec<f32>, sample_rate: u32) {
+        self.ensure_spectro_channel();
+        let Some(tx) = self.spectro_tx.as_ref().cloned() else { return; };
+        std::thread::spawn(move || {
+            let data = crate::app::render::spectrogram::compute_spectrogram(&mono, sample_rate);
+            let _ = tx.send((path, data));
+        });
+    }
+
+    fn queue_spectrogram_for_tab(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get(tab_idx) else { return; };
+        if tab.view_mode == ViewMode::Waveform {
+            return;
+        }
+        if tab.samples_len > LIVE_PREVIEW_SAMPLE_LIMIT {
+            return;
+        }
+        if self.spectro_cache.contains_key(&tab.path) || self.spectro_inflight.contains(&tab.path) {
+            return;
+        }
+        let mono = Self::editor_mixdown_mono(tab);
+        let sr = self.audio.shared.out_sample_rate;
+        self.spectro_inflight.insert(tab.path.clone());
+        self.spawn_spectrogram_job(tab.path.clone(), mono, sr);
+    }
+
+    fn start_scan_folder(&mut self, dir: PathBuf) {
+        self.scan_rx = Some(self.spawn_scan_worker(dir));
+        self.scan_in_progress = true;
+        self.all_files.clear();
+        self.files.clear();
+        self.original_files.clear();
+        self.meta.clear();
+        self.meta_inflight.clear();
+        self.spectro_cache.clear();
+        self.spectro_inflight.clear();
+        self.selected = None;
+        self.selected_multi.clear();
+        self.select_anchor = None;
+        self.reset_meta_pool();
+    }
+
+    fn append_scanned_paths(&mut self, batch: Vec<PathBuf>) {
+        if batch.is_empty() {
+            return;
+        }
+        let has_search = !self.search_query.trim().is_empty();
+        let query = self.search_query.to_lowercase();
+        self.all_files.reserve(batch.len());
+        if !has_search {
+            self.files.reserve(batch.len());
+            self.original_files.reserve(batch.len());
+        }
+        for p in batch {
+            let idx = self.all_files.len();
+            if !has_search {
+                self.all_files.push(p);
+                self.files.push(idx);
+                self.original_files.push(idx);
+            } else {
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                let parent = p.parent().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                let matches = name.contains(&query) || parent.contains(&query);
+                self.all_files.push(p);
+                if matches {
+                    self.files.push(idx);
+                    self.original_files.push(idx);
+                }
+            }
+        }
+    }
+
+    fn process_scan_messages(&mut self) {
+        let Some(rx) = &self.scan_rx else { return; };
+        let mut done = false;
+        let mut batches: Vec<Vec<PathBuf>> = Vec::new();
+        let start = std::time::Instant::now();
+        let budget = Duration::from_millis(3);
+        loop {
+            if start.elapsed() >= budget {
+                break;
+            }
+            match rx.try_recv() {
+                Ok(ScanMessage::Batch(batch)) => batches.push(batch),
+                Ok(ScanMessage::Done) => { done = true; break; }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => { done = true; break; }
+            }
+        }
+
+        for batch in batches {
+            self.append_scanned_paths(batch);
+        }
+
+        if done {
+            self.scan_rx = None;
+            self.scan_in_progress = false;
+            self.apply_filter_from_search();
+            self.apply_sort();
+        }
+    }
+
+    fn schedule_search_refresh(&mut self) {
+        self.search_dirty = true;
+        self.search_deadline = Some(std::time::Instant::now() + Duration::from_millis(150));
+    }
+
+    fn apply_search_if_due(&mut self) {
+        let Some(deadline) = self.search_deadline else { return; };
+        if !self.search_dirty {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            self.apply_filter_from_search();
+            self.apply_sort();
+            self.search_dirty = false;
+            self.search_deadline = None;
+        }
+    }
+
+    fn populate_dummy_list(&mut self, count: usize) {
+        self.audio.stop();
+        self.tabs.clear();
+        self.active_tab = None;
+        self.playing_path = None;
+        self.root = None;
+        self.scan_rx = None;
+        self.scan_in_progress = false;
+        self.meta.clear();
+        self.meta_inflight.clear();
+        self.reset_meta_pool();
+        self.spectro_cache.clear();
+        self.spectro_inflight.clear();
+        self.pending_gains.clear();
+        self.lufs_override.clear();
+        self.lufs_recalc_deadline.clear();
+        self.selected = None;
+        self.selected_multi.clear();
+        self.select_anchor = None;
+        self.search_query.clear();
+        self.search_dirty = false;
+        self.search_deadline = None;
+        self.files.clear();
+        self.all_files.clear();
+        self.original_files.clear();
+        if count == 0 {
+            return;
+        }
+        self.all_files.reserve(count);
+        let prefix = "C:\\_dummy\\waves";
+        for i in 0..count {
+            let name = format!("wav_{:06}.wav", i);
+            self.all_files.push(PathBuf::from(prefix).join(name));
+        }
+        self.files.extend(0..self.all_files.len());
+        self.original_files = self.files.clone();
+        self.apply_sort();
+        self.debug_log(format!("dummy list populated: {count}"));
+    }
+
+    fn apply_startup_paths(&mut self) {
+        let cfg = self.startup.cfg.clone();
+        if let Some(count) = cfg.dummy_list_count {
+            self.populate_dummy_list(count);
+            self.startup.open_first_pending = false;
+            return;
+        }
+        if !cfg.open_files.is_empty() {
+            self.replace_with_files(&cfg.open_files);
+            self.after_add_refresh();
+            return;
+        }
+        if let Some(dir) = cfg.open_folder {
+            self.root = Some(dir);
+            self.rescan();
+        }
+    }
+
+    fn open_first_in_list(&mut self) {
+        if let Some(path) = self.files.first().and_then(|&idx| self.all_files.get(idx)).cloned() {
+            self.selected = Some(0);
+            self.selected_multi.clear();
+            self.selected_multi.insert(0);
+            self.select_anchor = Some(0);
+            self.open_or_activate_tab(&path);
+        }
+    }
+
+    fn run_startup_actions(&mut self, ctx: &egui::Context) {
+        if self.startup.open_first_pending && !self.files.is_empty() {
+            self.open_first_in_list();
+            self.startup.open_first_pending = false;
+        }
+
+        if self.startup.screenshot_pending {
+            let wait_for_tab = self.startup.cfg.open_first;
+            let ready = if wait_for_tab {
+                self.active_tab.is_some()
+            } else {
+                true
+            };
+            if ready {
+                if self.startup.screenshot_frames_left > 0 {
+                    self.startup.screenshot_frames_left = self.startup.screenshot_frames_left.saturating_sub(1);
+                } else if let Some(path) = self.startup.cfg.screenshot_path.clone() {
+                    self.request_screenshot(ctx, path, self.startup.cfg.exit_after_screenshot);
+                    self.startup.screenshot_pending = false;
+                }
+            }
+        }
+    }
+
+    fn default_screenshot_path(&mut self) -> PathBuf {
+        let tag = if self.active_tab.is_some() { "editor" } else { "list" };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut name = format!("shot_{}_{}", stamp, tag);
+        if self.screenshot_seq > 0 {
+            name.push_str(&format!("_{:02}", self.screenshot_seq));
+        }
+        self.screenshot_seq = self.screenshot_seq.wrapping_add(1);
+        base.join("screenshots").join(format!("{name}.png"))
+    }
+
+    fn request_screenshot(&mut self, ctx: &egui::Context, path: PathBuf, exit_after: bool) {
+        if self.pending_screenshot.is_some() {
+            return;
+        }
+        self.pending_screenshot = Some(path);
+        self.exit_after_screenshot = exit_after;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+    }
+
+    fn handle_screenshot_events(&mut self, ctx: &egui::Context) {
+        let mut shot: Option<std::sync::Arc<egui::ColorImage>> = None;
+        ctx.input(|i| {
+            for ev in &i.events {
+                if let egui::Event::Screenshot { image, .. } = ev {
+                    shot = Some(image.clone());
+                }
+            }
+        });
+        if let Some(image) = shot {
+            if let Some(path) = self.pending_screenshot.take() {
+                if let Err(err) = save_color_image_png(&path, &image) {
+                    eprintln!("screenshot failed: {err:?}");
+                    self.debug_log(format!("screenshot failed: {err}"));
+                } else {
+                    eprintln!("screenshot saved: {}", path.display());
+                    self.debug_log(format!("screenshot saved: {}", path.display()));
+                }
+                if self.exit_after_screenshot {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.exit_after_screenshot = false;
+                }
+            }
+        }
+    }
+
+    fn debug_log(&mut self, msg: impl Into<String>) {
+        if !self.debug.cfg.enabled {
+            return;
+        }
+        let msg = msg.into();
+        self.debug.logs.push_back(msg.clone());
+        while self.debug.logs.len() > 200 {
+            self.debug.logs.pop_front();
+        }
+        if let Some(path) = self.debug.cfg.log_path.as_ref() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{msg}");
+            }
+        }
+    }
+
+    fn debug_summary(&self) -> String {
+        let selected = self.selected_path_buf().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".to_string());
+        let active_tab = self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.display_name.clone()).unwrap_or_else(|| "(none)".to_string());
+        let playing = self.audio.shared.playing.load(std::sync::atomic::Ordering::Relaxed);
+        let loop_enabled = self.audio.shared.loop_enabled.load(std::sync::atomic::Ordering::Relaxed);
+        let processing = self.processing.is_some();
+        let export = self.export_state.is_some();
+        let meta_pending = self.scan_in_progress || !self.meta_inflight.is_empty();
+        let gain_dirty = self.pending_gains.iter().filter(|(_, v)| v.abs() > 0.0001).count();
+        let mut lines = Vec::new();
+        lines.push(format!("files: {}/{}", self.files.len(), self.all_files.len()));
+        lines.push(format!("selected: {selected}"));
+        lines.push(format!("tabs: {} (active: {active_tab})", self.tabs.len()));
+        lines.push(format!("mode: {:?} rate {:.2} pitch {:.2}", self.mode, self.playback_rate, self.pitch_semitones));
+        lines.push(format!("playing: {} loop: {} meter_db: {:.1}", playing, loop_enabled, self.meter_db));
+        lines.push(format!("pending_gains: {}", gain_dirty));
+        lines.push(format!("processing: {} export: {}", processing, export));
+        lines.push(format!("meta_pending: {}", meta_pending));
+        lines.join("\n")
+    }
+
+    fn default_debug_summary_path(&mut self) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut name = format!("summary_{stamp}");
+        if self.debug_summary_seq > 0 {
+            name.push_str(&format!("_{:02}", self.debug_summary_seq));
+        }
+        self.debug_summary_seq = self.debug_summary_seq.wrapping_add(1);
+        base.join("debug").join(format!("{name}.txt"))
+    }
+
+    fn save_debug_summary(&mut self, path: PathBuf) {
+        let summary = self.debug_summary();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&path, summary) {
+            Ok(()) => self.debug_log(format!("debug summary saved: {}", path.display())),
+            Err(err) => self.debug_log(format!("debug summary failed: {err}")),
+        }
+    }
+
+    fn debug_check_invariants(&mut self) {
+        let mut issues = Vec::new();
+        if let Some(i) = self.selected {
+            if i >= self.files.len() {
+                issues.push(format!("selected out of range: {i}"));
+            }
+        }
+        if let Some(i) = self.active_tab {
+            if i >= self.tabs.len() {
+                issues.push(format!("active_tab out of range: {i}"));
+            }
+        }
+        if let Some(i) = self.active_tab {
+            if let Some(tab) = self.tabs.get(i) {
+                if tab.view_offset > tab.samples_len {
+                    issues.push(format!("view_offset > samples_len: {} > {}", tab.view_offset, tab.samples_len));
+                }
+                if tab.samples_per_px <= 0.0 {
+                    issues.push(format!("samples_per_px <= 0: {}", tab.samples_per_px));
+                }
+                for (ci, ch) in tab.ch_samples.iter().enumerate() {
+                    if ch.len() != tab.samples_len {
+                        issues.push(format!("channel {ci} len {} != {}", ch.len(), tab.samples_len));
+                        break;
+                    }
+                }
+                if let Some((a, b)) = tab.loop_region {
+                    if a > tab.samples_len || b > tab.samples_len {
+                        issues.push(format!("loop_region out of range: {a}..{b} len {}", tab.samples_len));
+                    }
+                }
+            }
+        }
+        if issues.is_empty() {
+            self.debug_log("invariant check ok");
+        } else {
+            for issue in issues {
+                self.debug_log(format!("invariant: {issue}"));
+            }
+        }
+    }
+
+    fn setup_debug_automation(&mut self) {
+        if !self.debug.cfg.auto_run {
+            return;
+        }
+        let delay = self.debug.cfg.auto_run_delay_frames.max(1);
+        let mut steps = std::collections::VecDeque::new();
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::ScreenshotAuto,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::OpenFirst,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::ScreenshotAuto,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::DumpSummaryAuto,
+        });
+        if self.debug.cfg.auto_run_exit {
+            steps.push_back(DebugStep {
+                wait_frames: 1,
+                action: DebugAction::Exit,
+            });
+        }
+        self.debug.auto = Some(DebugAutomation { steps });
+    }
+
+    fn debug_tick(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.key_pressed(Key::F12)) {
+            self.debug.cfg.enabled = true;
+            self.debug.show_window = !self.debug.show_window;
+        }
+
+        if !self.debug.cfg.enabled {
+            return;
+        }
+
+        if self.debug.check_counter > 0 {
+            self.debug.check_counter = self.debug.check_counter.saturating_sub(1);
+        } else {
+            self.debug_check_invariants();
+            self.debug.check_counter = self.debug.cfg.check_interval_frames.max(1);
+        }
+
+        self.debug_run_automation(ctx);
+    }
+
+    fn debug_run_automation(&mut self, ctx: &egui::Context) {
+        if self.files.is_empty() {
+            return;
+        }
+
+        let action = {
+            let Some(auto) = self.debug.auto.as_mut() else { return; };
+            if let Some(step) = auto.steps.front_mut() {
+                if step.wait_frames > 0 {
+                    step.wait_frames = step.wait_frames.saturating_sub(1);
+                    return;
+                }
+            }
+            auto.steps.pop_front().map(|step| step.action)
+        };
+
+        if let Some(action) = action {
+            self.execute_debug_action(ctx, action);
+        }
+
+        let completed = self
+            .debug
+            .auto
+            .as_ref()
+            .map(|auto| auto.steps.is_empty())
+            .unwrap_or(false);
+
+        if completed {
+            self.debug.auto = None;
+            self.debug_log("auto-run complete");
+        }
+    }
+
+    fn execute_debug_action(&mut self, ctx: &egui::Context, action: DebugAction) {
+        match action {
+            DebugAction::OpenFirst => {
+                if self.active_tab.is_none() {
+                    self.open_first_in_list();
+                    self.debug_log("auto: open first");
+                }
+            }
+            DebugAction::ScreenshotAuto => {
+                let path = self.default_screenshot_path();
+                self.request_screenshot(ctx, path, false);
+                self.debug_log("auto: screenshot");
+            }
+            DebugAction::ScreenshotPath(path) => {
+                self.request_screenshot(ctx, path, false);
+                self.debug_log("auto: screenshot path");
+            }
+            DebugAction::ToggleMode => {
+                self.mode = match self.mode {
+                    RateMode::Speed => RateMode::PitchShift,
+                    RateMode::PitchShift => RateMode::TimeStretch,
+                    RateMode::TimeStretch => RateMode::Speed,
+                };
+                self.rebuild_current_buffer_with_mode();
+                self.debug_log("auto: toggle mode");
+            }
+            DebugAction::PlayPause => {
+                self.audio.toggle_play();
+                self.debug_log("auto: play/pause");
+            }
+            DebugAction::SelectNext => {
+                if let Some(cur) = self.selected {
+                    let next = (cur + 1).min(self.files.len().saturating_sub(1));
+                    self.select_and_load(next);
+                    self.debug_log(format!("auto: select {next}"));
+                }
+            }
+            DebugAction::DumpSummaryAuto => {
+                let path = self.default_debug_summary_path();
+                self.save_debug_summary(path);
+            }
+            DebugAction::Exit => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
 }
 // moved to types.rs
 
 impl WavesPreviewer {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Result<Self> {
+    pub fn new(cc: &eframe::CreationContext<'_>, startup: StartupConfig) -> Result<Self> {
         // Visuals (dark, chic) + fonts
         let mut visuals = Visuals::dark();
         visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(20, 20, 23);
@@ -366,7 +1092,9 @@ impl WavesPreviewer {
         let audio = AudioEngine::new()?;
         // 初期状態（リスト表示�E�ではループを無効にする
         audio.set_loop_enabled(false);
-        Ok(Self {
+        let startup_state = StartupState::new(startup.clone());
+        let debug_state = DebugState::new(startup.debug.clone());
+        let mut app = Self {
             audio,
             root: None,
             files: Vec::new(),
@@ -380,16 +1108,30 @@ impl WavesPreviewer {
             active_tab: None,
             meta: HashMap::new(),
             meta_rx: None,
+            meta_pool: None,
+            meta_inflight: HashSet::new(),
+            spectro_cache: HashMap::new(),
+            spectro_inflight: HashSet::new(),
+            spectro_tx: None,
+            spectro_rx: None,
+            scan_rx: None,
+            scan_in_progress: false,
             wave_row_h: 26.0,
             selected_multi: std::collections::BTreeSet::new(),
             select_anchor: None,
             sort_key: SortKey::File,
             sort_dir: SortDir::None,
             scroll_to_selected: false,
+            last_list_scroll_at: None,
             original_files: Vec::new(),
             search_query: String::new(),
+            search_dirty: false,
+            search_deadline: None,
             mode: RateMode::Speed,
             processing: None,
+            list_preview_rx: None,
+            list_preview_job_id: 0,
+            editor_apply_state: None,
             pending_gains: HashMap::new(),
             export_state: None,
             playing_path: None,
@@ -412,8 +1154,19 @@ impl WavesPreviewer {
             heavy_overlay_rx: None,
             overlay_gen_counter: 0,
             overlay_expected_gen: 0,
+            overlay_expected_tool: None,
 
-        })
+            startup: startup_state,
+            pending_screenshot: None,
+            exit_after_screenshot: false,
+            screenshot_seq: 0,
+
+            debug: debug_state,
+            debug_summary_seq: 0,
+        };
+        app.apply_startup_paths();
+        app.setup_debug_automation();
+        Ok(app)
     }
 
 }
@@ -428,6 +1181,21 @@ impl eframe::App for WavesPreviewer {
         }
         // Ensure effective volume (global vol x per-file gain) is always applied
         self.apply_effective_volume();
+        // Drain scan results (background folder scan)
+        self.process_scan_messages();
+        // Debounced search apply (avoid per-keystroke full scan)
+        self.apply_search_if_due();
+        // Handle screenshot results from the backend
+        self.handle_screenshot_events(ctx);
+        // Manual screenshot trigger (F9)
+        if ctx.input(|i| i.key_pressed(Key::F9)) {
+            let path = self.default_screenshot_path();
+            self.request_screenshot(ctx, path, false);
+        }
+        // Startup automation (open first file, auto screenshot)
+        self.run_startup_actions(ctx);
+        // Debug automation + checks
+        self.debug_tick(ctx);
         // Drain heavy preview results
         if let Some(rx) = &self.heavy_preview_rx {
             if let Ok(mono) = rx.try_recv() {
@@ -435,22 +1203,76 @@ impl eframe::App for WavesPreviewer {
                 self.heavy_preview_rx = None; self.heavy_preview_tool = None;
             }
         }
+        // Drain list preview full-load results
+        if let Some(rx) = &self.list_preview_rx {
+            if let Ok(res) = rx.try_recv() {
+                if res.job_id == self.list_preview_job_id {
+                    if self.active_tab.is_none() && self.playing_path.as_ref() == Some(&res.path) {
+                        self.audio.replace_samples_keep_pos(std::sync::Arc::new(res.samples));
+                    }
+                }
+                self.list_preview_rx = None;
+            }
+        }
         // Drain heavy per-channel overlay results
         if let Some(rx) = &self.heavy_overlay_rx {
-            if let Ok((p, overlay, gen)) = rx.try_recv() {
+            if let Ok((p, overlay, timeline_len, gen)) = rx.try_recv() {
+                let expected_tool = self.overlay_expected_tool.take();
                 if gen == self.overlay_expected_gen {
                     if let Some(idx) = self.tabs.iter().position(|t| t.path == p) {
-                        if let Some(tab) = self.tabs.get_mut(idx) { tab.preview_overlay_ch = Some(overlay); }
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            if let Some(tool) = expected_tool {
+                                if tab.preview_audio_tool == Some(tool) || tab.active_tool == tool {
+                                    tab.preview_overlay = Some(PreviewOverlay { channels: overlay, source_tool: tool, timeline_len });
+                                }
+                            } else {
+                                tab.preview_overlay = Some(PreviewOverlay { channels: overlay, source_tool: tab.active_tool, timeline_len });
+                            }
+                        }
                     }
                 }
                 self.heavy_overlay_rx = None;
             }
         }
+        // Drain editor apply jobs (pitch/stretch)
+        if let Some(state) = &self.editor_apply_state {
+            if let Ok(res) = state.rx.try_recv() {
+                if res.tab_idx < self.tabs.len() {
+                    if let Some(tab) = self.tabs.get_mut(res.tab_idx) {
+                        tab.preview_audio_tool = None;
+                        tab.preview_overlay = None;
+                        tab.ch_samples = res.channels;
+                        tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                        tab.dirty = true;
+                        Self::editor_clamp_ranges(tab);
+                    }
+                    self.heavy_preview_rx = None;
+                    self.heavy_preview_tool = None;
+                    self.heavy_overlay_rx = None;
+                    self.overlay_expected_tool = None;
+                    self.audio.stop();
+                    self.audio.set_samples(std::sync::Arc::new(res.samples));
+                    if let Some(tab) = self.tabs.get(res.tab_idx) {
+                        self.apply_loop_mode_for_tab(tab);
+                    }
+                }
+                self.editor_apply_state = None;
+                ctx.request_repaint();
+            }
+        }
         // Drain metadata updates
         if let Some(rx) = &self.meta_rx {
             let mut resort = false;
-            while let Ok((p, m)) = rx.try_recv() { self.meta.insert(p, m); resort = true; }
+            while let Ok((p, m)) = rx.try_recv() { self.meta_inflight.remove(&p); self.meta.insert(p, m); resort = true; }
             if resort { self.apply_sort(); ctx.request_repaint(); }
+        }
+        // Drain spectrogram jobs
+        if let Some(rx) = &self.spectro_rx {
+            while let Ok((p, data)) = rx.try_recv() {
+                self.spectro_inflight.remove(&p);
+                self.spectro_cache.insert(p, std::sync::Arc::new(data));
+                ctx.request_repaint();
+            }
         }
 
         // Drain export results
@@ -461,16 +1283,24 @@ impl eframe::App for WavesPreviewer {
                     for p in &self.saving_sources { self.pending_gains.remove(p); self.lufs_override.remove(p); }
                     match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                         SaveMode::Overwrite => {
-                            if !self.saving_sources.is_empty() { self.meta_rx = Some(meta::spawn_meta_worker(self.saving_sources.clone())); }
+                            if !self.saving_sources.is_empty() {
+                                self.ensure_meta_pool();
+                                let sources = self.saving_sources.clone();
+                                for p in sources {
+                                    self.meta.remove(&p);
+                                    self.meta_inflight.remove(&p);
+                                    self.queue_meta_for_path(&p);
+                                }
+                            }
                             if let Some(path) = self.saving_sources.get(0).cloned() {
-                                if let Some(idx) = self.files.iter().position(|x| *x == path) { self.select_and_load(idx); }
+                                if let Some(idx) = self.row_for_path(&path) { self.select_and_load(idx); }
                             }
                         }
                         SaveMode::NewFile => {
                             let mut added_any=false; let mut first_added=None;
                             for p in &res.success_paths { if self.add_files_merge(&[p.clone()])>0 { if first_added.is_none(){ first_added=Some(p.clone()); } added_any=true; } }
                             if added_any { self.after_add_refresh(); }
-                            if let Some(p) = first_added { if let Some(idx) = self.files.iter().position(|x| *x == p) { self.select_and_load(idx); } }
+                            if let Some(p) = first_added { if let Some(idx) = self.row_for_path(&p) { self.select_and_load(idx); } }
                         }
                     }
                     self.saving_sources.clear(); self.saving_mode=None;
@@ -531,7 +1361,19 @@ impl eframe::App for WavesPreviewer {
         }
 
         // Shortcuts
-        if ctx.input(|i| i.key_pressed(Key::Space)) { self.audio.toggle_play(); }
+        if ctx.input(|i| i.key_pressed(Key::Space)) {
+            if let Some(tab_idx) = self.active_tab {
+                if self
+                    .tabs
+                    .get(tab_idx)
+                    .and_then(|t| t.preview_audio_tool)
+                    .is_some()
+                {
+                    self.clear_preview_if_any(tab_idx);
+                }
+            }
+            self.audio.toggle_play();
+        }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) { self.trigger_save_selected(); }
         // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
         if let Some(tab_idx) = self.active_tab {
@@ -653,6 +1495,9 @@ impl eframe::App for WavesPreviewer {
     let sr_ctx = self.audio.shared.out_sample_rate.max(1) as f32;
     let pos_ctx_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
     let mut request_seek: Option<usize> = None;
+    let spec_path = self.tabs[tab_idx].path.clone();
+    let spec_cache = self.spectro_cache.get(&spec_path).cloned();
+    let spec_loading = self.spectro_inflight.contains(&spec_path);
     ui.horizontal(|ui| {
         let tab = &mut self.tabs[tab_idx];
         let dirty_mark = if tab.dirty { " •" } else { "" };
@@ -701,16 +1546,19 @@ impl eframe::App for WavesPreviewer {
                 let mut do_apply_xfade: bool = false;
                 let mut do_fade_in: Option<((usize,usize), crate::app::types::FadeShape)> = None;
                 let mut do_fade_out: Option<((usize,usize), crate::app::types::FadeShape)> = None;
+                let mut stop_playback = false;
                 // Snapshot busy state and prepare deferred overlay job.
                 // IMPORTANT: Do NOT call `self.*` (which takes &mut self) while holding `let tab = &mut self.tabs[...]`.
                 // That pattern triggers borrow checker error E0499. Defer such calls to after the UI closures.
                 let overlay_busy = self.heavy_overlay_rx.is_some();
+                let apply_busy = self.editor_apply_state.is_some();
                 let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
                 // Split canvas and inspector: right panel fixed width
                 let inspector_w = 300.0f32;
                 let canvas_w = (avail.x - inspector_w).max(100.0);
                 ui.horizontal(|ui| {
                     let tab = &mut self.tabs[tab_idx];
+                    let preview_ok = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
                     // Canvas area
                     let mut need_restore_preview = false;
                     // Accumulate non-destructive preview audio to audition.
@@ -775,6 +1623,31 @@ impl eframe::App for WavesPreviewer {
                             }
                             t += step;
                         }
+                    }
+                }
+
+                if tab.view_mode != ViewMode::Waveform {
+                    if !preview_ok {
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        painter.text(
+                            egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                            egui::Align2::LEFT_TOP,
+                            "Spectrogram disabled for large clips",
+                            fid,
+                            Color32::GRAY,
+                        );
+                    } else if let Some(spec) = spec_cache.as_ref() {
+                        Self::draw_spectrogram(&painter, rect, wave_left, wave_w, tab, spec, tab.view_mode);
+                    } else {
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        let msg = if spec_loading { "Building spectrogram..." } else { "Spectrogram not ready" };
+                        painter.text(
+                            egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                            egui::Align2::LEFT_TOP,
+                            msg,
+                            fid,
+                            Color32::GRAY,
+                        );
                     }
                 }
 
@@ -869,9 +1742,98 @@ impl eframe::App for WavesPreviewer {
                         }
                     }
                 }
+                // Drag markers for LoopEdit / Trim (primary button only)
+                let mut suppress_seek = false;
+                if pointer_over_canvas
+                    && matches!(tab.active_tool, ToolKind::LoopEdit | ToolKind::Trim)
+                    && tab.samples_len > 0
+                {
+                    let pointer_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+                    let pointer_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
+                    if pointer_released || !pointer_down {
+                        tab.dragging_marker = None;
+                    }
+                    if pointer_down {
+                        let spp = tab.samples_per_px.max(0.0001);
+                        let vis = (wave_w * spp).ceil() as usize;
+                        let to_sample = |x: f32| {
+                            let x = x.clamp(wave_left, wave_left + wave_w);
+                            let pos = (((x - wave_left) / wave_w) * vis as f32) as usize;
+                            tab.view_offset.saturating_add(pos).min(tab.samples_len)
+                        };
+                        let to_x = |samp: usize| {
+                            wave_left
+                                + (((samp.saturating_sub(tab.view_offset)) as f32 / spp)
+                                    .clamp(0.0, wave_w))
+                        };
+                        let hit_radius = 7.0;
+                        if tab.dragging_marker.is_none() {
+                            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                let x = pos.x;
+                                match tab.active_tool {
+                                    ToolKind::LoopEdit => {
+                                        if let Some((a0, b0)) = tab.loop_region {
+                                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                            let ax = to_x(a);
+                                            let bx = to_x(b);
+                                            if (x - ax).abs() <= hit_radius {
+                                                tab.dragging_marker = Some(MarkerKind::A);
+                                            } else if (x - bx).abs() <= hit_radius {
+                                                tab.dragging_marker = Some(MarkerKind::B);
+                                            }
+                                        }
+                                    }
+                                    ToolKind::Trim => {
+                                        if let Some((a0, b0)) = tab.trim_range {
+                                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                            let ax = to_x(a);
+                                            let bx = to_x(b);
+                                            if (x - ax).abs() <= hit_radius {
+                                                tab.dragging_marker = Some(MarkerKind::A);
+                                            } else if (x - bx).abs() <= hit_radius {
+                                                tab.dragging_marker = Some(MarkerKind::B);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(marker) = tab.dragging_marker {
+                            if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                                let samp = to_sample(pos.x);
+                                match tab.active_tool {
+                                    ToolKind::LoopEdit => {
+                                        if let Some((a0, b0)) = tab.loop_region {
+                                            let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                            match marker {
+                                                MarkerKind::A => a = samp.min(b),
+                                                MarkerKind::B => b = samp.max(a),
+                                            }
+                                            tab.loop_region = Some((a, b));
+                                            apply_pending_loop = true;
+                                        }
+                                    }
+                                    ToolKind::Trim => {
+                                        if let Some((a0, b0)) = tab.trim_range {
+                                            let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                            match marker {
+                                                MarkerKind::A => a = samp.min(b),
+                                                MarkerKind::B => b = samp.max(a),
+                                            }
+                                            tab.trim_range = Some((a, b));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            suppress_seek = true;
+                        }
+                    }
+                }
                 // Selection vs Seek with primary button (Alt+LeftDrag = pan handled above)
                 let alt_now = ui.input(|i| i.modifiers.alt);
-                if !alt_now {
+                if !alt_now && !suppress_seek {
                     // Primary interactions: click to seek (no range selection)
                     if resp.clicked_by(egui::PointerButton::Primary) {
                         if let Some(pos) = resp.interact_pointer_pos() {
@@ -884,83 +1846,11 @@ impl eframe::App for WavesPreviewer {
                     }
                 }
 
-                // Draw loop region markers (shared across lanes)
-                {
-                    // no selection band (range selection removed)
-                    // Loop region markers and labels (LoopEdit only)
-                    if tab.active_tool == ToolKind::LoopEdit { if let Some((a,b)) = tab.loop_region {
-                        let spp = tab.samples_per_px.max(0.0001);
-                        let to_x = |samp: usize| wave_left + (((samp.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
-                        let ax = to_x(a); let bx = to_x(b);
-                        let st = egui::Stroke::new(2.0, Color32::from_rgb(60,160,255));
-                        painter.line_segment([egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())], st);
-                        painter.line_segment([egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())], st);
-                        let fid = TextStyle::Monospace.resolve(ui.style());
-                        painter.text(egui::pos2(ax + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "S", fid.clone(), Color32::from_rgb(170,200,255));
-                        painter.text(egui::pos2(bx + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "E", fid, Color32::from_rgb(170,200,255));
-
-                        // When LoopEdit is active, visualize crossfade spans and shapes + boundary fades
-                        if tab.active_tool == ToolKind::LoopEdit {
-                            let len = b.saturating_sub(a);
-                            let cf = tab.loop_xfade_samples.min(len / 2);
-                            if cf > 0 {
-                                let xs0 = to_x(a);
-                                let xs1 = to_x(a + cf);
-                                let xe0 = to_x(b.saturating_sub(cf));
-                                let xe1 = to_x(b);
-                                // shaded bands
-                                let col_in = Color32::from_rgba_unmultiplied(255, 180, 60, 40);
-                                let col_out = Color32::from_rgba_unmultiplied(60, 180, 255, 40);
-                                let r_in = egui::Rect::from_min_max(egui::pos2(xs0, rect.top()), egui::pos2(xs1, rect.bottom()));
-                                let r_out = egui::Rect::from_min_max(egui::pos2(xe0, rect.top()), egui::pos2(xe1, rect.bottom()));
-                                painter.rect_filled(r_in, 0.0, col_in);
-                                painter.rect_filled(r_out, 0.0, col_out);
-
-                                // draw shape curves (orange) for intuition
-                                let curve_col = Color32::from_rgb(255, 170, 60);
-                                let steps = 48;
-                                let mut last_in: Option<egui::Pos2> = None;
-                                let mut last_out: Option<egui::Pos2> = None;
-                                let h = rect.height();
-                                let y_of = |w: f32| rect.bottom() - w * h; // map weight to y
-                                for i in 0..=steps {
-                                    let t = (i as f32) / (steps as f32);
-                                    let (w_out, w_in) = match tab.loop_xfade_shape {
-                                        crate::app::types::LoopXfadeShape::EqualPower => {
-                                            let a = core::f32::consts::FRAC_PI_2 * t; (a.cos(), a.sin())
-                                        }
-                                        crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
-                                    };
-                                    // incoming (start side): left band
-                                    let x_in = egui::lerp(xs0..=xs1, t);
-                                    let p_in = egui::pos2(x_in, y_of(w_in));
-                                    if let Some(lp) = last_in { painter.line_segment([lp, p_in], egui::Stroke::new(2.0, curve_col)); }
-                                    last_in = Some(p_in);
-                                    // outgoing (end side): right band
-                                    let x_out = egui::lerp(xe0..=xe1, t);
-                                    let p_out = egui::pos2(x_out, y_of(w_out));
-                                    if let Some(lp) = last_out { painter.line_segment([lp, p_out], egui::Stroke::new(2.0, curve_col)); }
-                                    last_out = Some(p_out);
-                                }
-                            }
-                        }
-                    }}
-                    // Trim A/B markers (only in Trim tool)
-                    if tab.active_tool == ToolKind::Trim { if let Some((a,b)) = tab.trim_range { if b> a {
-                        let spp = tab.samples_per_px.max(0.0001);
-                        let to_x = |samp: usize| wave_left + (((samp.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w));
-                        let ax = to_x(a); let bx = to_x(b);
-                        let st = egui::Stroke::new(2.0, Color32::from_rgb(255,140,0));
-                        painter.line_segment([egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())], st);
-                        painter.line_segment([egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())], st);
-                        let fid = TextStyle::Monospace.resolve(ui.style());
-                        painter.text(egui::pos2(ax + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "A", fid.clone(), Color32::from_rgb(255,200,150));
-                        painter.text(egui::pos2(bx + 4.0, rect.top() + 4.0), egui::Align2::LEFT_TOP, "B", fid, Color32::from_rgb(255,200,150));
-                        // shaded band between A and B for clarity
-                        let r = egui::Rect::from_min_max(egui::pos2(ax, rect.top()), egui::pos2(bx, rect.bottom()));
-                        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(255,160,60,32));
-                    } }}
-                }
+                let spp = tab.samples_per_px.max(0.0001);
+                let vis = (wave_w * spp).ceil() as usize;
+                let start = tab.view_offset.min(tab.samples_len);
+                let end = (start + vis).min(tab.samples_len);
+                let visible_len = end.saturating_sub(start);
 
                 // Draw per-channel lanes with dB grid and playhead
                 for (ci, ch) in tab.ch_samples.iter().enumerate() {
@@ -981,12 +1871,6 @@ impl eframe::App for WavesPreviewer {
                         painter.text(egui::pos2(rect.left() + 2.0, y0), egui::Align2::LEFT_CENTER, format!("{db:.0} dB"), fid, Color32::GRAY);
                     }
 
-                    // visible range
-                    let spp = tab.samples_per_px.max(0.0001);
-                    let vis = (wave_w * spp).ceil() as usize; // samples in view
-                    let start = tab.view_offset.min(tab.samples_len);
-                    let end = (start + vis).min(tab.samples_len);
-                    let visible_len = end.saturating_sub(start);
                     if visible_len > 0 {
                         // Two rendering paths depending on zoom level:
                         // - Aggregated min/max bins for spp >= 1.0 (>= 1 sample per pixel)
@@ -1009,14 +1893,18 @@ impl eframe::App for WavesPreviewer {
                                 }
                             }
                             // Aggregated mode: also draw overlay here so it shows at widest zoom
-                            if tab.active_tool != ToolKind::Trim && tab.preview_overlay_ch.is_some() {
-                                if let Some(overlay) = &tab.preview_overlay_ch {
-                                    let och: Option<&[f32]> = overlay.get(ci).map(|v| v.as_slice()).or_else(|| overlay.get(0).map(|v| v.as_slice()));
+                            if tab.active_tool != ToolKind::Trim && tab.preview_overlay.is_some() {
+                                if let Some(overlay) = &tab.preview_overlay {
+                                    let och: Option<&[f32]> = overlay.channels.get(ci).map(|v| v.as_slice()).or_else(|| overlay.channels.get(0).map(|v| v.as_slice()));
                                     if let Some(buf) = och {
                                         use crate::app::render::overlay as ov;
                                         use crate::app::render::colors::{OVERLAY_COLOR, OVERLAY_STROKE_BASE, OVERLAY_STROKE_EMPH};
-                                        let orig_total = tab.samples_len.max(1);
-                                        let (startb, _endb, over_vis) = ov::map_visible_overlay(start, visible_len, orig_total, buf.len());
+                                        let base_total = tab.samples_len.max(1);
+                                        let overlay_total = overlay.timeline_len.max(1);
+                                        let start_scaled = if base_total == 0 { 0 } else { ((start as u128) * overlay_total as u128 / base_total as u128) as usize };
+                                        let mut vis_scaled = if base_total == 0 { visible_len } else { ((visible_len as u128) * overlay_total as u128 / base_total as u128) as usize };
+                                        if vis_scaled == 0 { vis_scaled = 1; }
+                                        let (startb, _endb, over_vis) = ov::map_visible_overlay(start_scaled, vis_scaled, overlay_total, buf.len());
                                         if over_vis > 0 {
                                             let bins = wave_w as usize;
                                             let bins_values = ov::compute_overlay_bins_for_base_columns(start, visible_len, startb, over_vis, buf, bins);
@@ -1029,7 +1917,7 @@ impl eframe::App for WavesPreviewer {
                                                     let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
                                                     if cf > 0 {
                                                         // Map original boundary segments into overlay domain using ratio
-                                                        let ratio = (buf.len().max(1) as f32) / (orig_total as f32);
+                                                        let ratio = if base_total > 0 { (overlay_total as f32) / (base_total as f32) } else { 1.0 };
                                                         let a0 = (((a as f32) * ratio).round() as usize).min(buf.len());
                                                         let a1 = (((a as f32 + cf as f32) * ratio).round() as usize).min(buf.len());
                                                         let b0 = (((b as f32 - cf as f32) * ratio).round() as usize).min(buf.len());
@@ -1097,24 +1985,25 @@ impl eframe::App for WavesPreviewer {
                     // Skip Trim tool (Trim does not show green overlay by spec).
                     // Draw whenever overlay data is present to avoid relying on preview_audio_tool state.
                     #[cfg(debug_assertions)]
-                    {
+                    if self.debug.cfg.enabled && self.debug.overlay_trace {
                         let mode = if spp >= 1.0 { "agg" } else { "line" };
-                        let has_ov = tab.preview_overlay_ch.is_some();
+                        let has_ov = tab.preview_overlay.is_some();
                         eprintln!(
                             "OVERLAY gate: mode={} has_overlay={} active={:?} spp={:.5} vis_len={} start={} end={} view_off={} len={}",
                             mode, has_ov, tab.active_tool, spp, visible_len, start, end, tab.view_offset, tab.samples_len
                         );
                     }
-                    if tab.active_tool != ToolKind::Trim && tab.preview_overlay_ch.is_some() {
-                        if let Some(overlay) = &tab.preview_overlay_ch {
+                    if tab.active_tool != ToolKind::Trim && tab.preview_overlay.is_some() {
+                        if let Some(overlay) = &tab.preview_overlay {
                             // try channel match, fallback to first channel if overlay is mono
-                            let och: Option<&[f32]> = overlay.get(ci).map(|v| v.as_slice()).or_else(|| overlay.get(0).map(|v| v.as_slice()));
+                            let och: Option<&[f32]> = overlay.channels.get(ci).map(|v| v.as_slice()).or_else(|| overlay.channels.get(0).map(|v| v.as_slice()));
                             if let Some(buf) = och {
                                 // Map original-visible [start,end) to overlay domain using length ratio.
                                 // This keeps overlays visible at any zoom, even when length differs (e.g. TimeStretch).
                                 let lenb = buf.len();
-                                let orig_total = tab.samples_len.max(1);
-                                let ratio = (lenb as f32) / (orig_total as f32);
+                    let base_total = tab.samples_len.max(1);
+                    let overlay_total = overlay.timeline_len.max(1);
+                    let ratio = if base_total > 0 { (overlay_total as f32) / (base_total as f32) } else { 1.0 };
                                 let orig_vis = visible_len.max(1);
                                 // Map visible window [start .. start+orig_vis) into overlay domain using total-length ratio
                                 // Align overlay start to original start using nearest sample to minimize off-by-one drift
@@ -1123,10 +2012,10 @@ impl eframe::App for WavesPreviewer {
                                 if endb > lenb { endb = lenb; }
                                 if startb >= endb { endb = (startb + 1).min(lenb); }
                                 let over_vis = (endb.saturating_sub(startb)).max(1);
-                                let r_w = (over_vis as f32) / (orig_vis as f32);
+                                let r_w = if orig_vis > 0 { (over_vis as f32) / (orig_vis as f32) } else { 1.0 };
                                 let ov_w = (wave_w * r_w).max(1.0);
                                 #[cfg(debug_assertions)]
-                                {
+                                if self.debug.cfg.enabled && self.debug.overlay_trace {
                                     let mode = if spp >= 1.0 { "agg" } else { "line" };
                                     eprintln!(
                                         "OVERLAY map: mode={} lenb={} startb={} endb={} over_vis={} ov_w_px={:.1}",
@@ -1162,7 +2051,7 @@ impl eframe::App for WavesPreviewer {
                                         let denom = (count.saturating_sub(1)).max(1) as f32;
                                         let scale_y = lane_rect.height() * 0.48;
                                         #[cfg(debug_assertions)]
-                                        {
+                                        if self.debug.cfg.enabled && self.debug.overlay_trace {
                                             let band = egui::Rect::from_min_max(egui::pos2(seg_x0, lane_rect.top()), egui::pos2(seg_x0 + seg_w, lane_rect.bottom()));
                                             painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(110, 255, 200, 20));
                                             eprintln!(
@@ -1182,8 +2071,10 @@ impl eframe::App for WavesPreviewer {
                                                 [egui::pos2(sx, sy - tick_h*0.5), egui::pos2(sx, sy + tick_h*0.5)],
                                                 egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))
                                             );
-                                            #[cfg(debug_assertions)]
+                                        #[cfg(debug_assertions)]
+                                        if self.debug.cfg.enabled && self.debug.overlay_trace {
                                             eprintln!("OVERLAY seg: fallback_tick used at x={:.1}", sx);
+                                        }
                                             return;
                                         }
                                         let mut last: Option<egui::Pos2> = None;
@@ -1317,6 +2208,266 @@ impl eframe::App for WavesPreviewer {
 
                 // (Removed) global mono overlay to avoid double/triple drawing.
 
+                // Overlay regions (loop/trim/fade) on top of waveform
+                if tab.samples_len > 0 {
+                    let to_x = |samp: usize| {
+                        wave_left
+                            + (((samp.saturating_sub(tab.view_offset)) as f32 / spp)
+                                .clamp(0.0, wave_w))
+                    };
+                    let draw_handle = |x: f32, col: Color32| {
+                        let handle_w = 6.0;
+                        let handle_h = 16.0;
+                        let r = egui::Rect::from_min_max(
+                            egui::pos2(x - handle_w * 0.5, rect.top()),
+                            egui::pos2(x + handle_w * 0.5, rect.top() + handle_h),
+                        );
+                        painter.rect_filled(r, 2.0, col);
+                    };
+                    let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+
+                    // Loop overlay
+                    if let Some((a0, b0)) = tab.loop_region {
+                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                        if b > a {
+                            let active = tab.active_tool == ToolKind::LoopEdit;
+                            let ax = to_x(a);
+                            let bx = to_x(b);
+                            let shade_alpha = if active { 40 } else { 22 };
+                            let line_alpha = if active { 220 } else { 160 };
+                            let shade = Color32::from_rgba_unmultiplied(60, 160, 255, shade_alpha);
+                            let line = Color32::from_rgba_unmultiplied(60, 160, 255, line_alpha);
+                            let r = egui::Rect::from_min_max(
+                                egui::pos2(ax, rect.top()),
+                                egui::pos2(bx, rect.bottom()),
+                            );
+                            painter.rect_filled(r, 0.0, shade);
+                            painter.line_segment(
+                                [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
+                                egui::Stroke::new(2.0, line),
+                            );
+                            painter.line_segment(
+                                [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
+                                egui::Stroke::new(2.0, line),
+                            );
+                            draw_handle(ax, line);
+                            draw_handle(bx, line);
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            painter.text(
+                                egui::pos2(ax + 6.0, rect.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "S",
+                                fid.clone(),
+                                Color32::from_rgb(170, 200, 255),
+                            );
+                            painter.text(
+                                egui::pos2(bx + 6.0, rect.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "E",
+                                fid.clone(),
+                                Color32::from_rgb(170, 200, 255),
+                            );
+                            let dur = (b.saturating_sub(a)) as f32 / sr;
+                            let label = crate::app::helpers::format_time_s(dur);
+                            painter.text(
+                                egui::pos2(ax + 6.0, rect.top() + 18.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("Loop {label}"),
+                                fid,
+                                Color32::from_rgb(160, 190, 230),
+                            );
+
+                            // Crossfade bands and shape
+                            let len = b.saturating_sub(a);
+                            let cf = tab.loop_xfade_samples.min(len / 2);
+                            if cf > 0 {
+                                let xs0 = to_x(a);
+                                let xs1 = to_x(a + cf);
+                                let xe0 = to_x(b.saturating_sub(cf));
+                                let xe1 = to_x(b);
+                                let band_alpha = if active { 50 } else { 28 };
+                                let col_in = Color32::from_rgba_unmultiplied(255, 180, 60, band_alpha);
+                                let col_out = Color32::from_rgba_unmultiplied(60, 180, 255, band_alpha);
+                                let r_in = egui::Rect::from_min_max(
+                                    egui::pos2(xs0, rect.top()),
+                                    egui::pos2(xs1, rect.bottom()),
+                                );
+                                let r_out = egui::Rect::from_min_max(
+                                    egui::pos2(xe0, rect.top()),
+                                    egui::pos2(xe1, rect.bottom()),
+                                );
+                                painter.rect_filled(r_in, 0.0, col_in);
+                                painter.rect_filled(r_out, 0.0, col_out);
+
+                                let curve_alpha = if active { 220 } else { 140 };
+                                let curve_col = Color32::from_rgba_unmultiplied(255, 170, 60, curve_alpha);
+                                let steps = 36;
+                                let mut last_in: Option<egui::Pos2> = None;
+                                let mut last_out: Option<egui::Pos2> = None;
+                                let h = rect.height();
+                                let y_of = |w: f32| rect.bottom() - w * h;
+                                for i in 0..=steps {
+                                    let t = (i as f32) / (steps as f32);
+                                    let (w_out, w_in) = match tab.loop_xfade_shape {
+                                        crate::app::types::LoopXfadeShape::EqualPower => {
+                                            let a = core::f32::consts::FRAC_PI_2 * t;
+                                            (a.cos(), a.sin())
+                                        }
+                                        crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
+                                    };
+                                    let x_in = egui::lerp(xs0..=xs1, t);
+                                    let p_in = egui::pos2(x_in, y_of(w_in));
+                                    if let Some(lp) = last_in {
+                                        painter.line_segment(
+                                            [lp, p_in],
+                                            egui::Stroke::new(2.0, curve_col),
+                                        );
+                                    }
+                                    last_in = Some(p_in);
+                                    let x_out = egui::lerp(xe0..=xe1, t);
+                                    let p_out = egui::pos2(x_out, y_of(w_out));
+                                    if let Some(lp) = last_out {
+                                        painter.line_segment(
+                                            [lp, p_out],
+                                            egui::Stroke::new(2.0, curve_col),
+                                        );
+                                    }
+                                    last_out = Some(p_out);
+                                }
+                            }
+                        }
+                    }
+
+                    // Trim overlay
+                    if let Some((a0, b0)) = tab.trim_range {
+                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                        if b > a {
+                            let active = tab.active_tool == ToolKind::Trim;
+                            let ax = to_x(a);
+                            let bx = to_x(b);
+                            let dim_alpha = if active { 80 } else { 50 };
+                            let keep_alpha = if active { 36 } else { 22 };
+                            let dim = Color32::from_rgba_unmultiplied(0, 0, 0, dim_alpha);
+                            let keep = Color32::from_rgba_unmultiplied(255, 160, 60, keep_alpha);
+                            let left = egui::Rect::from_min_max(
+                                egui::pos2(rect.left(), rect.top()),
+                                egui::pos2(ax, rect.bottom()),
+                            );
+                            let right = egui::Rect::from_min_max(
+                                egui::pos2(bx, rect.top()),
+                                egui::pos2(rect.right(), rect.bottom()),
+                            );
+                            painter.rect_filled(left, 0.0, dim);
+                            painter.rect_filled(right, 0.0, dim);
+                            let keep_r = egui::Rect::from_min_max(
+                                egui::pos2(ax, rect.top()),
+                                egui::pos2(bx, rect.bottom()),
+                            );
+                            painter.rect_filled(keep_r, 0.0, keep);
+                            let line = Color32::from_rgba_unmultiplied(255, 140, 0, if active { 230 } else { 160 });
+                            painter.line_segment(
+                                [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
+                                egui::Stroke::new(2.0, line),
+                            );
+                            painter.line_segment(
+                                [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
+                                egui::Stroke::new(2.0, line),
+                            );
+                            draw_handle(ax, line);
+                            draw_handle(bx, line);
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            painter.text(
+                                egui::pos2(ax + 6.0, rect.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "A",
+                                fid.clone(),
+                                Color32::from_rgb(255, 200, 150),
+                            );
+                            painter.text(
+                                egui::pos2(bx + 6.0, rect.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "B",
+                                fid,
+                                Color32::from_rgb(255, 200, 150),
+                            );
+                        }
+                    }
+
+                    // Fade overlays
+                    let draw_fade = |x0: f32, x1: f32, shape: crate::app::types::FadeShape, is_in: bool, base_col: Color32| {
+                        let steps = 28;
+                        let max_alpha = 80.0;
+                        for i in 0..steps {
+                            let t0 = i as f32 / steps as f32;
+                            let t1 = (i + 1) as f32 / steps as f32;
+                            let w0 = Self::fade_weight(shape, t0);
+                            let w1 = Self::fade_weight(shape, t1);
+                            let vol0 = if is_in { w0 } else { 1.0 - w0 };
+                            let vol1 = if is_in { w1 } else { 1.0 - w1 };
+                            let vol = (vol0 + vol1) * 0.5;
+                            let alpha = ((1.0 - vol) * max_alpha).clamp(0.0, 255.0) as u8;
+                            if alpha == 0 { continue; }
+                            let rx0 = egui::lerp(x0..=x1, t0);
+                            let rx1 = egui::lerp(x0..=x1, t1);
+                            let r = egui::Rect::from_min_max(
+                                egui::pos2(rx0, rect.top()),
+                                egui::pos2(rx1, rect.bottom()),
+                            );
+                            painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(base_col.r(), base_col.g(), base_col.b(), alpha));
+                        }
+                        let curve_col = Color32::from_rgba_unmultiplied(base_col.r(), base_col.g(), base_col.b(), 200);
+                        let mut last: Option<egui::Pos2> = None;
+                        for i in 0..=steps {
+                            let t = i as f32 / steps as f32;
+                            let w = Self::fade_weight(shape, t);
+                            let vol = if is_in { w } else { 1.0 - w };
+                            let x = egui::lerp(x0..=x1, t);
+                            let y = rect.bottom() - vol * rect.height();
+                            let p = egui::pos2(x, y);
+                            if let Some(lp) = last {
+                                painter.line_segment([lp, p], egui::Stroke::new(2.0, curve_col));
+                            }
+                            last = Some(p);
+                        }
+                    };
+                    let n_in = ((tab.tool_state.fade_in_ms / 1000.0) * sr).round() as usize;
+                    if n_in > 0 {
+                        let end = n_in.min(tab.samples_len);
+                        let x0 = to_x(0);
+                        let x1 = to_x(end);
+                        if x1 > x0 + 1.0 {
+                            draw_fade(x0, x1, tab.fade_in_shape, true, Color32::from_rgb(80, 180, 255));
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let secs = (end as f32) / sr;
+                            painter.text(
+                                egui::pos2(x0 + 6.0, rect.bottom() - 18.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                format!("Fade In {}", crate::app::helpers::format_time_s(secs)),
+                                fid,
+                                Color32::from_rgb(150, 190, 230),
+                            );
+                        }
+                    }
+                    let n_out = ((tab.tool_state.fade_out_ms / 1000.0) * sr).round() as usize;
+                    if n_out > 0 {
+                        let start_out = tab.samples_len.saturating_sub(n_out);
+                        let x0 = to_x(start_out);
+                        let x1 = to_x(tab.samples_len);
+                        if x1 > x0 + 1.0 {
+                            draw_fade(x0, x1, tab.fade_out_shape, false, Color32::from_rgb(255, 160, 90));
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let secs = (n_out as f32) / sr;
+                            painter.text(
+                                egui::pos2(x0 + 6.0, rect.bottom() - 18.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                format!("Fade Out {}", crate::app::helpers::format_time_s(secs)),
+                                fid,
+                                Color32::from_rgb(230, 190, 150),
+                            );
+                        }
+                    }
+                }
+
                 // Shared playhead across lanes
                 if tab.samples_len > 0 {
                     if let Some(buf) = self.audio.shared.samples.load().as_ref() {
@@ -1361,7 +2512,8 @@ impl eframe::App for WavesPreviewer {
                                 if tool != tab.active_tool {
                                     tab.active_tool_last = Some(tab.active_tool);
                                     // Leaving a tool: if we had a runtime preview, restore original audio
-                                    if tab.preview_audio_tool.is_some() { need_restore_preview = true; tab.preview_audio_tool = None; }
+                                    if tab.preview_audio_tool.is_some() { need_restore_preview = true; }
+                                    stop_playback = true;
                                     tab.active_tool = tool;
                                 }
                                 ui.separator();
@@ -1441,7 +2593,9 @@ impl eframe::App for WavesPreviewer {
 
                                             // Dynamic preview overlay for LoopEdit (non-destructive):
                                             // Build a mono preview applying the current loop crossfade to the mixdown.
-                                            if let Some((a,b)) = tab.loop_region {
+                                            if !preview_ok {
+                                                ui.label(RichText::new("Preview disabled for large clips").weak());
+                                            } else if let Some((a,b)) = tab.loop_region {
                                                 let len = b.saturating_sub(a);
                                                 let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
                                                 if cf > 0 {
@@ -1467,7 +2621,8 @@ impl eframe::App for WavesPreviewer {
                                                             ch[tail_idx] = m;
                                                         }
                                                     }
-                                                    tab.preview_overlay_ch = Some(overlay);
+                                                    let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                    tab.preview_overlay = Some(PreviewOverlay { channels: overlay, source_tool: ToolKind::LoopEdit, timeline_len });
                                                     tab.preview_audio_tool = Some(ToolKind::LoopEdit);
                                                 }
                                             }
@@ -1479,6 +2634,9 @@ impl eframe::App for WavesPreviewer {
                                             let s = ui.style_mut();
                                             s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                             s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                            if !preview_ok {
+                                                ui.label(RichText::new("Preview disabled for large clips").weak());
+                                            }
                                             // Trim has its own A/B range (independent from loop)
                                             let range_opt = tab.trim_range;
                                             if let Some((smp,emp)) = range_opt { ui.label(format!("Trim A–B: {}..{} samp", smp, emp)); } else { ui.label("Trim A–B: (set below)"); }
@@ -1489,11 +2647,17 @@ impl eframe::App for WavesPreviewer {
                                                 let new_r = match tab.trim_range { None => Some((pos, pos)), Some((_a,b)) => Some((pos.min(b), pos.max(b))) };
                                                     tab.trim_range = new_r;
                                                     if let Some((a,b)) = tab.trim_range { if b>a {
-                                                        // live preview: keep-only A–B
-                                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                                        mono = mono[a..b].to_vec();
-                                                    pending_preview = Some((ToolKind::Trim, mono));
-                                                    tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                        if preview_ok {
+                                                            // live preview: keep-only A–B
+                                                            let mut mono = Self::editor_mixdown_mono(tab);
+                                                            mono = mono[a..b].to_vec();
+                                                            pending_preview = Some((ToolKind::Trim, mono));
+                                                            stop_playback = true;
+                                                            tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                        } else {
+                                                            tab.preview_audio_tool = None;
+                                                            tab.preview_overlay = None;
+                                                        }
                                                     } }
                                                 }
                                                 if ui.button("Set B").on_hover_text("Set B at playhead").clicked() {
@@ -1501,10 +2665,16 @@ impl eframe::App for WavesPreviewer {
                                                 let new_r = match tab.trim_range { None => Some((pos, pos)), Some((a,_b)) => Some((a.min(pos), a.max(pos))) };
                                                     tab.trim_range = new_r;
                                                     if let Some((a,b)) = tab.trim_range { if b>a {
-                                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                                        mono = mono[a..b].to_vec();
-                                                    pending_preview = Some((ToolKind::Trim, mono));
-                                                    tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                        if preview_ok {
+                                                            let mut mono = Self::editor_mixdown_mono(tab);
+                                                            mono = mono[a..b].to_vec();
+                                                            pending_preview = Some((ToolKind::Trim, mono));
+                                                            stop_playback = true;
+                                                            tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                        } else {
+                                                            tab.preview_audio_tool = None;
+                                                            tab.preview_overlay = None;
+                                                        }
                                                     } }
                                                 }
                                                 if ui.button("Clear").clicked() { tab.trim_range = None; need_restore_preview = true; }
@@ -1524,6 +2694,9 @@ impl eframe::App for WavesPreviewer {
                                             let s = ui.style_mut();
                                             s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                             s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                            if !preview_ok {
+                                                ui.label(RichText::new("Preview disabled for large clips").weak());
+                                            }
                                             let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                             // Fade In
                                             ui.label("Fade In");
@@ -1533,27 +2706,34 @@ impl eframe::App for WavesPreviewer {
                                                 let changed = ui.add(egui::DragValue::new(&mut secs).clamp_range(0.0..=600.0).speed(0.05).fixed_decimals(2)).changed();
                                                 if changed {
                                                     tab.tool_state = ToolState{ fade_in_ms: (secs*1000.0).max(0.0), ..tab.tool_state };
-                                                    // Live preview (per-channel overlay) + mono audition
-                                                    let n = ((secs) * sr).round() as usize;
-                                                    // Build overlay per channel
-                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                    for ch in overlay.iter_mut() {
-                                                        let nn = n.min(ch.len());
-                                                        for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); ch[i] *= w; }
+                                                    if preview_ok {
+                                                        // Live preview (per-channel overlay) + mono audition
+                                                        let n = ((secs) * sr).round() as usize;
+                                                        // Build overlay per channel
+                                                        let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                        for ch in overlay.iter_mut() {
+                                                            let nn = n.min(ch.len());
+                                                            for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); ch[i] *= w; }
+                                                        }
+                                                        let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                        tab.preview_overlay = Some(PreviewOverlay { channels: overlay.clone(), source_tool: ToolKind::Fade, timeline_len });
+                                                        // Mono audition
+                                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                                        let nn = n.min(mono.len());
+                                                        for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); mono[i] *= w; }
+                                                        pending_preview = Some((ToolKind::Fade, mono));
+                                                        stop_playback = true;
+                                                        tab.preview_audio_tool = Some(ToolKind::Fade);
+                                                    } else {
+                                                        tab.preview_audio_tool = None;
+                                                        tab.preview_overlay = None;
                                                     }
-                                                    tab.preview_overlay_ch = Some(overlay.clone());
-                                                    // Mono audition
-                                                    let mut mono = Self::editor_mixdown_mono(tab);
-                                                    let nn = n.min(mono.len());
-                                                    for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); mono[i] *= w; }
-                                                    pending_preview = Some((ToolKind::Fade, mono));
-                                                    tab.preview_audio_tool = Some(ToolKind::Fade);
                                                 }
                                                 if ui.add_enabled(secs>0.0, egui::Button::new("Apply")).clicked() {
                                                     let n = ((secs) * sr).round() as usize;
                                                     do_fade_in = Some(((0, n.min(tab.samples_len)), tab.fade_in_shape));
                                                     tab.preview_audio_tool = None; // will be rebuilt from destructive result below
-                                                    tab.preview_overlay_ch = None;
+                                                    tab.preview_overlay = None;
                                                 }
                                             });
                                             ui.separator();
@@ -1565,26 +2745,33 @@ impl eframe::App for WavesPreviewer {
                                                 let changed = ui.add(egui::DragValue::new(&mut secs).clamp_range(0.0..=600.0).speed(0.05).fixed_decimals(2)).changed();
                                                 if changed {
                                                     tab.tool_state = ToolState{ fade_out_ms: (secs*1000.0).max(0.0), ..tab.tool_state };
-                                                    let n = ((secs) * sr).round() as usize;
-                                                    // per-channel overlay
-                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                    for ch in overlay.iter_mut() {
-                                                        let len = ch.len(); let nn = n.min(len);
-                                                        for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = 1.0 - Self::fade_weight(tab.fade_out_shape, t); let idx = len - nn + i; ch[idx] *= w; }
+                                                    if preview_ok {
+                                                        let n = ((secs) * sr).round() as usize;
+                                                        // per-channel overlay
+                                                        let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                        for ch in overlay.iter_mut() {
+                                                            let len = ch.len(); let nn = n.min(len);
+                                                            for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = 1.0 - Self::fade_weight(tab.fade_out_shape, t); let idx = len - nn + i; ch[idx] *= w; }
+                                                        }
+                                                        let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                        tab.preview_overlay = Some(PreviewOverlay { channels: overlay.clone(), source_tool: ToolKind::Fade, timeline_len });
+                                                        // mono audition
+                                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                                        let len = mono.len(); let nn = n.min(len);
+                                                        for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = 1.0 - Self::fade_weight(tab.fade_out_shape, t); let idx = len - nn + i; mono[idx] *= w; }
+                                                        pending_preview = Some((ToolKind::Fade, mono));
+                                                        stop_playback = true;
+                                                        tab.preview_audio_tool = Some(ToolKind::Fade);
+                                                    } else {
+                                                        tab.preview_audio_tool = None;
+                                                        tab.preview_overlay = None;
                                                     }
-                                                    tab.preview_overlay_ch = Some(overlay.clone());
-                                                    // mono audition
-                                                    let mut mono = Self::editor_mixdown_mono(tab);
-                                                    let len = mono.len(); let nn = n.min(len);
-                                                    for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = 1.0 - Self::fade_weight(tab.fade_out_shape, t); let idx = len - nn + i; mono[idx] *= w; }
-                                                    pending_preview = Some((ToolKind::Fade, mono));
-                                                    tab.preview_audio_tool = Some(ToolKind::Fade);
                                                 }
                                                 if ui.add_enabled(secs>0.0, egui::Button::new("Apply")).clicked() {
                                                     let n = ((secs) * sr).round() as usize;
                                                     do_fade_out = Some(((0, n.min(tab.samples_len)), tab.fade_out_shape));
                                                     tab.preview_audio_tool = None;
-                                                    tab.preview_overlay_ch = None;
+                                                    tab.preview_overlay = None;
                                                 }
                                             });
                                         });
@@ -1592,96 +2779,143 @@ impl eframe::App for WavesPreviewer {
                                     ToolKind::PitchShift => {
                                         ui.scope(|ui| {
                                             let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
+                                            if !preview_ok {
+                                                ui.label(RichText::new("Preview disabled for large clips").weak());
+                                            }
                                             let mut semi = tab.tool_state.pitch_semitones;
                                             ui.label("Semitones");
                                             let changed = ui.add(egui::DragValue::new(&mut semi).clamp_range(-12.0..=12.0).speed(0.1).fixed_decimals(2)).changed();
                                             if changed {
                                                 tab.tool_state = ToolState{ pitch_semitones: semi, ..tab.tool_state };
-                                                let mono = Self::editor_mixdown_mono(tab);
-                                                pending_heavy_preview = Some((ToolKind::PitchShift, mono, semi));
-                                                // Defer overlay spawn to avoid nested &mut borrow
-                                                pending_overlay_job = Some((ToolKind::PitchShift, semi));
-                                                tab.preview_audio_tool = Some(ToolKind::PitchShift);
+                                                if preview_ok {
+                                                    let mono = Self::editor_mixdown_mono(tab);
+                                                    pending_heavy_preview = Some((ToolKind::PitchShift, mono, semi));
+                                                    stop_playback = true;
+                                                    // Defer overlay spawn to avoid nested &mut borrow
+                                                    pending_overlay_job = Some((ToolKind::PitchShift, semi));
+                                                    tab.preview_audio_tool = Some(ToolKind::PitchShift);
+                                                } else {
+                                                    tab.preview_audio_tool = None;
+                                                    tab.preview_overlay = None;
+                                                }
                                             }
-                                            if overlay_busy { ui.add(egui::Spinner::new()); }
-                                            if ui.button("Apply").clicked() { pending_pitch_apply = Some(tab.tool_state.pitch_semitones); }
+                                            if overlay_busy || apply_busy { ui.add(egui::Spinner::new()); }
+                                            if ui.add_enabled(!apply_busy, egui::Button::new("Apply")).clicked() {
+                                                pending_pitch_apply = Some(tab.tool_state.pitch_semitones);
+                                            }
                                         });
                                     }
                                     ToolKind::TimeStretch => {
                                         ui.scope(|ui| {
                                             let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
+                                            if !preview_ok {
+                                                ui.label(RichText::new("Preview disabled for large clips").weak());
+                                            }
                                             let mut rate = tab.tool_state.stretch_rate;
                                             ui.label("Rate");
                                             let changed = ui.add(egui::DragValue::new(&mut rate).clamp_range(0.25..=4.0).speed(0.02).fixed_decimals(2)).changed();
                                             if changed {
                                                 tab.tool_state = ToolState{ stretch_rate: rate, ..tab.tool_state };
-                                                let mono = Self::editor_mixdown_mono(tab);
-                                                pending_heavy_preview = Some((ToolKind::TimeStretch, mono, rate));
-                                                // Defer overlay spawn to avoid nested &mut borrow
-                                                pending_overlay_job = Some((ToolKind::TimeStretch, rate));
-                                                tab.preview_audio_tool = Some(ToolKind::TimeStretch);
+                                                if preview_ok {
+                                                    let mono = Self::editor_mixdown_mono(tab);
+                                                    pending_heavy_preview = Some((ToolKind::TimeStretch, mono, rate));
+                                                    stop_playback = true;
+                                                    // Defer overlay spawn to avoid nested &mut borrow
+                                                    pending_overlay_job = Some((ToolKind::TimeStretch, rate));
+                                                    tab.preview_audio_tool = Some(ToolKind::TimeStretch);
+                                                } else {
+                                                    tab.preview_audio_tool = None;
+                                                    tab.preview_overlay = None;
+                                                }
                                             }
-                                            if overlay_busy { ui.add(egui::Spinner::new()); }
-                                            if ui.button("Apply").clicked() { pending_stretch_apply = Some(tab.tool_state.stretch_rate); }
+                                            if overlay_busy || apply_busy { ui.add(egui::Spinner::new()); }
+                                            if ui.add_enabled(!apply_busy, egui::Button::new("Apply")).clicked() {
+                                                pending_stretch_apply = Some(tab.tool_state.stretch_rate);
+                                            }
                                         });
                                     }
                                     ToolKind::Gain => {
+                                        if !preview_ok {
+                                            ui.label(RichText::new("Preview disabled for large clips").weak());
+                                        }
                                         let st = tab.tool_state;
                                         let mut gain_db = st.gain_db;
                                         ui.label("Gain (dB)"); ui.add(egui::DragValue::new(&mut gain_db).clamp_range(-24.0..=24.0).speed(0.1));
                                         tab.tool_state = ToolState{ gain_db, ..tab.tool_state };
                                         // live preview on change
                                         if (gain_db - st.gain_db).abs() > 1e-6 {
-                                            let g = db_to_amp(gain_db);
-                                            // per-channel overlay
-                                            let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                            for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
-                                            tab.preview_overlay_ch = Some(overlay);
-                                            // mono audition
-                                            let mut mono = Self::editor_mixdown_mono(tab);
-                                            for v in &mut mono { *v *= g; }
-                                            pending_preview = Some((ToolKind::Gain, mono));
-                                            tab.preview_audio_tool = Some(ToolKind::Gain);
+                                            if preview_ok {
+                                                let g = db_to_amp(gain_db);
+                                                // per-channel overlay
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                tab.preview_overlay = Some(PreviewOverlay { channels: overlay, source_tool: ToolKind::Gain, timeline_len });
+                                                // mono audition
+                                                let mut mono = Self::editor_mixdown_mono(tab);
+                                                for v in &mut mono { *v *= g; }
+                                                pending_preview = Some((ToolKind::Gain, mono));
+                                                stop_playback = true;
+                                                tab.preview_audio_tool = Some(ToolKind::Gain);
+                                            } else {
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
+                                            }
                                         }
-                                        if ui.button("Apply").clicked() { do_gain = Some(((0, tab.samples_len), gain_db)); tab.preview_audio_tool=None; tab.preview_overlay_ch=None; }
+                                        if ui.button("Apply").clicked() { do_gain = Some(((0, tab.samples_len), gain_db)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
                                     }
                                     ToolKind::Normalize => {
+                                        if !preview_ok {
+                                            ui.label(RichText::new("Preview disabled for large clips").weak());
+                                        }
                                         let st = tab.tool_state;
                                         let mut target_db = st.normalize_target_db;
                                         ui.label("Target dBFS"); ui.add(egui::DragValue::new(&mut target_db).clamp_range(-24.0..=0.0).speed(0.1));
                                         tab.tool_state = ToolState{ normalize_target_db: target_db, ..tab.tool_state };
-                                        // live preview: compute gain to reach target (based on current peak)
-                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                        if !mono.is_empty() {
-                                            let mut peak = 0.0f32; for &v in &mono { peak = peak.max(v.abs()); }
-                                            if peak > 0.0 {
-                                                let g = db_to_amp(target_db) / peak.max(1e-12);
-                                                // per-channel overlay
-                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
-                                                tab.preview_overlay_ch = Some(overlay);
-                                                // mono audition
-                                                for v in &mut mono { *v *= g; }
-                                                pending_preview = Some((ToolKind::Normalize, mono));
-                                                tab.preview_audio_tool = Some(ToolKind::Normalize);
+                                        if preview_ok {
+                                            // live preview: compute gain to reach target (based on current peak)
+                                            let mut mono = Self::editor_mixdown_mono(tab);
+                                            if !mono.is_empty() {
+                                                let mut peak = 0.0f32; for &v in &mono { peak = peak.max(v.abs()); }
+                                                if peak > 0.0 {
+                                                    let g = db_to_amp(target_db) / peak.max(1e-12);
+                                                    // per-channel overlay
+                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                    for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                                    let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                    tab.preview_overlay = Some(PreviewOverlay { channels: overlay, source_tool: ToolKind::Normalize, timeline_len });
+                                                    // mono audition
+                                                    for v in &mut mono { *v *= g; }
+                                                    pending_preview = Some((ToolKind::Normalize, mono));
+                                                    stop_playback = true;
+                                                    tab.preview_audio_tool = Some(ToolKind::Normalize);
+                                                }
                                             }
+                                        } else {
+                                            tab.preview_audio_tool = None;
+                                            tab.preview_overlay = None;
                                         }
-                                        if ui.button("Apply").clicked() { do_normalize = Some(((0, tab.samples_len), target_db)); tab.preview_audio_tool=None; tab.preview_overlay_ch=None; }
+                                        if ui.button("Apply").clicked() { do_normalize = Some(((0, tab.samples_len), target_db)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
                                     }
                                     ToolKind::Reverse => {
+                                        if !preview_ok {
+                                            ui.label(RichText::new("Preview disabled for large clips").weak());
+                                        }
                                         ui.horizontal_wrapped(|ui| {
-                                            if ui.button("Preview").clicked() {
+                                            if ui.add_enabled(preview_ok, egui::Button::new("Preview")).clicked() {
                                                 // per-channel overlay
                                                 let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
                                                 for ch in overlay.iter_mut() { ch.reverse(); }
-                                                tab.preview_overlay_ch = Some(overlay);
+                                                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                tab.preview_overlay = Some(PreviewOverlay { channels: overlay, source_tool: ToolKind::Reverse, timeline_len });
                                                 // mono audition
                                                 let mut mono = Self::editor_mixdown_mono(tab);
                                                 mono.reverse();
                                                 pending_preview = Some((ToolKind::Reverse, mono));
+                                                stop_playback = true;
                                                 tab.preview_audio_tool = Some(ToolKind::Reverse);
                                             }
-                                            if ui.button("Apply").clicked() { do_reverse = Some((0, tab.samples_len)); tab.preview_audio_tool=None; tab.preview_overlay_ch=None; }
+                                            if ui.button("Apply").clicked() { do_reverse = Some((0, tab.samples_len)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
                                             if ui.button("Cancel").clicked() { need_restore_preview = true; }
                                         });
                                     }
@@ -1694,29 +2928,12 @@ impl eframe::App for WavesPreviewer {
                     }); // end inspector
                     if let Some((tool, mono, p)) = pending_heavy_preview { self.spawn_heavy_preview_owned(mono, tool, p); }
                     if let Some(semi) = pending_pitch_apply {
-                        let sr = self.audio.shared.out_sample_rate;
-                        let mono_out = {
-                            let tab = &mut self.tabs[tab_idx];
-                            for ch in tab.ch_samples.iter_mut() { let out = crate::wave::process_pitchshift_offline(&*ch, sr, sr, semi); *ch = out; }
-                            let new_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0); tab.samples_len = new_len; tab.dirty = true;
-                            Self::editor_mixdown_mono(tab)
-                        };
-                        self.clear_preview_if_any(tab_idx);
-                        self.audio.set_samples(std::sync::Arc::new(mono_out));
-                        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+                        self.spawn_editor_apply_for_tab(tab_idx, ToolKind::PitchShift, semi);
                     }
                     if let Some(rate) = pending_stretch_apply {
-                        let sr = self.audio.shared.out_sample_rate;
-                        let mono_out = {
-                            let tab = &mut self.tabs[tab_idx];
-                            for ch in tab.ch_samples.iter_mut() { let out = crate::wave::process_timestretch_offline(&*ch, sr, sr, rate); *ch = out; }
-                            let new_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0); tab.samples_len = new_len; tab.dirty = true;
-                            Self::editor_mixdown_mono(tab)
-                        };
-                        self.clear_preview_if_any(tab_idx);
-                        self.audio.set_samples(std::sync::Arc::new(mono_out));
-                        if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+                        self.spawn_editor_apply_for_tab(tab_idx, ToolKind::TimeStretch, rate);
                     }
+                    if stop_playback { self.audio.stop(); }
                     if need_restore_preview { self.clear_preview_if_any(tab_idx); }
                     if let Some(s) = request_seek { self.audio.seek_to_sample(s); }
                     if let Some((tool_kind, mono)) = pending_preview { self.set_preview_mono(tab_idx, tool_kind, mono); }
@@ -1804,7 +3021,7 @@ impl eframe::App for WavesPreviewer {
                         row.set_selected(is_selected);
 
                         if is_data {
-                            let path_owned = self.files[row_idx].clone();
+                            let Some(path_owned) = self.path_for_row(row_idx).cloned() else { return; };
                             let name = path_owned.file_name().and_then(|s| s.to_str()).unwrap_or("(invalid)");
                             let parent = path_owned.parent().and_then(|p| p.to_str()).unwrap_or("");
                             let mut clicked_to_load = false;
@@ -2012,11 +3229,18 @@ impl eframe::App for WavesPreviewer {
             // Update effective volume to include per-file gain for the activated tab
             self.apply_effective_volume();
         }
-        // Clear pending scroll flag after building the table
-        self.scroll_to_selected = false;
+        // List auto-scroll flag is cleared by list view when consumed.
+
+        if let Some(tab_idx) = self.active_tab {
+            self.queue_spectrogram_for_tab(tab_idx);
+        }
 
         // Busy overlay (blocks input and shows loader)
-        if self.processing.is_some() || self.export_state.is_some() || self.heavy_preview_rx.is_some() {
+        if self.processing.is_some()
+            || self.export_state.is_some()
+            || self.heavy_preview_rx.is_some()
+            || self.editor_apply_state.is_some()
+        {
             use egui::{Id, LayerId, Order};
             let screen = ctx.screen_rect();
             // block input
@@ -2031,10 +3255,21 @@ impl eframe::App for WavesPreviewer {
                 egui::Frame::window(ui.style()).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add(egui::Spinner::new());
-                        let msg = if let Some(p) = &self.processing { p.msg.as_str() }
-                            else if let Some(st)=&self.export_state { st.msg.as_str() }
-                            else if let Some(t)=&self.heavy_preview_tool { match t { ToolKind::PitchShift => "Previewing PitchShift...", ToolKind::TimeStretch => "Previewing TimeStretch...", _ => "Previewing..." } }
-                            else { "Working..." };
+                        let msg = if let Some(p) = &self.processing {
+                            p.msg.as_str()
+                        } else if let Some(st) = &self.editor_apply_state {
+                            st.msg.as_str()
+                        } else if let Some(st) = &self.export_state {
+                            st.msg.as_str()
+                        } else if let Some(t) = &self.heavy_preview_tool {
+                            match t {
+                                ToolKind::PitchShift => "Previewing PitchShift...",
+                                ToolKind::TimeStretch => "Previewing TimeStretch...",
+                                _ => "Previewing...",
+                            }
+                        } else {
+                            "Working..."
+                        };
                         ui.label(RichText::new(msg).strong());
                     });
                 });
@@ -2090,8 +3325,22 @@ impl eframe::App for WavesPreviewer {
 
         // Export settings window (in separate UI module)
         self.ui_export_settings_window(ctx);
+        // Debug window
+        self.ui_debug_window(ctx);
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

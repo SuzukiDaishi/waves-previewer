@@ -4,6 +4,10 @@
 
 現状は WAV のみ対応（`hound`）。今後 `symphonia` による mp3/ogg/flac/aac 対応を予定しています。
 
+## 現状の画面イメージ
+![](docs/gamen_a.png)
+![](docs/gamen_b.png)
+
 ---
 
 ## Documentation
@@ -105,6 +109,34 @@ PitchShift/TimeStretch（signalsmith-stretch）を使うには C/C++ ツール�
 
 ```bash
 cargo run
+```
+
+### Automation (CLI)
+
+```bash
+cargo run -- --open-folder "C:\\path\\to\\wav" --open-first --screenshot screenshots\\shot.png --exit-after-screenshot
+```
+
+Options:
+- --open-folder <dir>
+- --open-file <wav> (repeatable)
+- --open-first
+- --screenshot <path.png>
+- --screenshot-delay <frames>
+- --exit-after-screenshot
+- --dummy-list <count>
+- --debug
+- --debug-log <path>
+- --auto-run
+- --auto-run-delay <frames>
+- --auto-run-no-exit
+- --debug-check-interval <frames>
+- F9 saves a screenshot into ./screenshots
+- F12 toggles the debug window
+
+Example:
+```bash
+cargo run -- --open-folder "C:\path\to\wav" --auto-run --debug-log debug\log.txt
 ```
 
 起動後、左上のメニュー「Choose」から Folder... / Files... を選択して一覧を置き換えます。ウィンドウへのドラッグ&ドロップでも追加可能です。ファイル名をダブルクリックしてタブで開き、Space で再生/停止、音量スライダと Mode の数値（Speed/Pitch/Stretch）で調整、検索バーで絞り込み。

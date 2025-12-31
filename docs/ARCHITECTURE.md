@@ -181,3 +181,7 @@
 - UI は 16ms 間隔で `request_repaint_after()`、CPU を占有しない程度に滑らかさを確保。
 - コールバックは O(1) 作業（ゲイン、補間、複製、RMS）に限定。補間は線形、追加の割当てなし。
 - サムネ/RMS はバックグラウンドで逐次計算（UI は受信次第更新）。
+
+### TimeStretch �o�͒��̈���
+- `process_timestretch_offline` �� rate �ɉ����Ĕg�`���� `1/rate` �{�ɐL�k���܂��B��: rate=0.5 �Ȃ�� 2 �{�Arate=2.0 �Ȃ�� 1/2 �̒����ɂȂ�܂��B
+- �������ꂽ�g�`�����̕`��̈�𒴂���P�[�X�irate < 1.0�j�ł��A���̂܂� UI/�Đ��ɔ��f����܂��B
