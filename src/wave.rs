@@ -275,6 +275,20 @@ pub fn process_pitchshift_offline(mono: &[f32], in_sr: u32, out_sr: u32, semiton
             out.clear();
         }
     }
+    // Remove input-latency pre-roll so the result aligns with the original start.
+    let input_lat = stretch.input_latency();
+    if input_lat > 0 && !out.is_empty() {
+        let target_len = out.len();
+        let pre_roll = (input_lat as f32).round() as usize;
+        if pre_roll >= out.len() {
+            out.clear();
+        } else if pre_roll > 0 {
+            out.drain(0..pre_roll);
+        }
+        if out.len() < target_len {
+            out.resize(target_len, 0.0);
+        }
+    }
     out
 }
 
@@ -297,6 +311,21 @@ pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: 
             out.drain(0..olat);
         } else {
             out.clear();
+        }
+    }
+    // Remove input-latency pre-roll so the result aligns with the original start.
+    let input_lat = stretch.input_latency();
+    if input_lat > 0 && !out.is_empty() {
+        let target_len = out.len();
+        let stretch_factor = out_len as f32 / resampled.len().max(1) as f32;
+        let pre_roll = ((input_lat as f32) * stretch_factor).round() as usize;
+        if pre_roll >= out.len() {
+            out.clear();
+        } else if pre_roll > 0 {
+            out.drain(0..pre_roll);
+        }
+        if out.len() < target_len {
+            out.resize(target_len, 0.0);
         }
     }
     out

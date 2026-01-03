@@ -25,11 +25,31 @@ pub struct SharedAudio {
 }
 
 pub struct AudioEngine {
-    _stream: cpal::Stream,
+    _stream: Option<cpal::Stream>,
     pub shared: Arc<SharedAudio>,
 }
 
 impl AudioEngine {
+    fn new_shared(out_channels: usize, out_sample_rate: u32) -> Arc<SharedAudio> {
+        Arc::new(SharedAudio {
+            samples: ArcSwapOption::from(None),
+            vol: AtomicF32::new(1.0),
+            file_gain: AtomicF32::new(1.0),
+            playing: std::sync::atomic::AtomicBool::new(false),
+            play_pos: std::sync::atomic::AtomicUsize::new(0),
+            play_pos_f: AtomicF32::new(0.0),
+            meter_rms: AtomicF32::new(0.0),
+            _out_channels: out_channels,
+            out_sample_rate,
+            loop_enabled: std::sync::atomic::AtomicBool::new(false),
+            loop_start: std::sync::atomic::AtomicUsize::new(0),
+            loop_end: std::sync::atomic::AtomicUsize::new(0),
+            loop_xfade_samples: std::sync::atomic::AtomicUsize::new(0),
+            loop_xfade_shape: std::sync::atomic::AtomicU8::new(0),
+            rate: AtomicF32::new(1.0),
+        })
+    }
+
     pub fn new() -> Result<Self> {
         let host = cpal::default_host();
         let device = host
@@ -39,23 +59,7 @@ impl AudioEngine {
             .default_output_config()
             .context("No default output config")?;
 
-        let shared = Arc::new(SharedAudio {
-            samples: ArcSwapOption::from(None),
-            vol: AtomicF32::new(1.0),
-            file_gain: AtomicF32::new(1.0),
-            playing: std::sync::atomic::AtomicBool::new(false),
-            play_pos: std::sync::atomic::AtomicUsize::new(0),
-            play_pos_f: AtomicF32::new(0.0),
-            meter_rms: AtomicF32::new(0.0),
-            _out_channels: cfg.channels() as usize,
-            out_sample_rate: cfg.sample_rate().0,
-            loop_enabled: std::sync::atomic::AtomicBool::new(false),
-            loop_start: std::sync::atomic::AtomicUsize::new(0),
-            loop_end: std::sync::atomic::AtomicUsize::new(0),
-            loop_xfade_samples: std::sync::atomic::AtomicUsize::new(0),
-            loop_xfade_shape: std::sync::atomic::AtomicU8::new(0),
-            rate: AtomicF32::new(1.0),
-        });
+        let shared = Self::new_shared(cfg.channels() as usize, cfg.sample_rate().0);
 
         let stream = match cfg.sample_format() {
             cpal::SampleFormat::F32 => {
@@ -71,9 +75,17 @@ impl AudioEngine {
         };
 
         Ok(Self {
-            _stream: stream,
+            _stream: Some(stream),
             shared,
         })
+    }
+
+    pub fn new_for_test() -> Self {
+        let shared = Self::new_shared(2, 48_000);
+        Self {
+            _stream: None,
+            shared,
+        }
     }
 
     fn build_stream<T>(

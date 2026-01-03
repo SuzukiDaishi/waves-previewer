@@ -22,6 +22,21 @@ impl MetaPool {
         q.push_back(path);
         self.shared.cv.notify_one();
     }
+
+    pub fn enqueue_front(&self, path: PathBuf) {
+        let mut q = self.shared.queue.lock().unwrap();
+        q.push_front(path);
+        self.shared.cv.notify_one();
+    }
+
+    pub fn promote(&self, path: &PathBuf) {
+        let mut q = self.shared.queue.lock().unwrap();
+        if let Some(pos) = q.iter().position(|p| p == path) {
+            q.remove(pos);
+            q.push_front(path.clone());
+            self.shared.cv.notify_one();
+        }
+    }
 }
 
 impl Drop for MetaPool {

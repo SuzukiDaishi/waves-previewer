@@ -45,7 +45,7 @@ impl crate::app::WavesPreviewer {
                 let target = if pressed_home { 0 } else { len.saturating_sub(1) };
                 let mods = ctx.input(|i| i.modifiers);
                 self.update_selection_on_click(target, mods);
-                self.select_and_load(target);
+                self.select_and_load(target, true);
                 key_moved = true;
             } else if pressed_pgdown || pressed_pgup {
                 let len = self.files.len();
@@ -57,7 +57,7 @@ impl crate::app::WavesPreviewer {
                 };
                 let mods = ctx.input(|i| i.modifiers);
                 self.update_selection_on_click(target, mods);
-                self.select_and_load(target);
+                self.select_and_load(target, true);
                 key_moved = true;
             } else if pressed_down || pressed_up {
                 let len = self.files.len();
@@ -69,7 +69,7 @@ impl crate::app::WavesPreviewer {
                 };
                 let mods = ctx.input(|i| i.modifiers);
                 self.update_selection_on_click(target, mods);
-                self.select_and_load(target);
+                self.select_and_load(target, true);
                 key_moved = true;
             }
             if pressed_enter {
@@ -120,6 +120,7 @@ impl crate::app::WavesPreviewer {
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .auto_shrink([false, true])
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(Align::Center))
             .column(egui_extras::Column::initial(200.0).resizable(true))
@@ -242,7 +243,7 @@ impl crate::app::WavesPreviewer {
                             Some(p) => p.clone(),
                             None => return,
                         };
-                        self.queue_meta_for_path(&path_owned);
+                        self.queue_meta_for_path(&path_owned, true);
                         let file_name = path_owned
                             .file_name()
                             .and_then(|s| s.to_str())
@@ -273,7 +274,7 @@ impl crate::app::WavesPreviewer {
                                                     .size(text_height * 1.0),
                                             )
                                             .sense(Sense::click())
-                                            .truncate(true),
+                                            .truncate(),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                                     if resp.clicked() && !resp.double_clicked() {
@@ -301,7 +302,7 @@ impl crate::app::WavesPreviewer {
                                                     .size(text_height * 1.0),
                                             )
                                             .sense(Sense::click())
-                                            .truncate(true),
+                                            .truncate(),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                                     if resp.clicked() && !resp.double_clicked() {
@@ -447,7 +448,7 @@ impl crate::app::WavesPreviewer {
                             let mut g = old;
                             let resp = ui.add(
                                 egui::DragValue::new(&mut g)
-                                    .clamp_range(-24.0..=24.0)
+                                    .range(-24.0..=24.0)
                                     .speed(0.1)
                                     .fixed_decimals(1)
                                     .suffix(" dB"),
@@ -505,10 +506,10 @@ impl crate::app::WavesPreviewer {
                         if clicked_any {
                             let mods = ctx.input(|i| i.modifiers);
                             self.update_selection_on_click(row_idx, mods);
-                            self.select_and_load(row_idx);
+                            self.select_and_load(row_idx, false);
                         } else if clicked_to_select {
                             self.selected = Some(row_idx);
-                            self.scroll_to_selected = true;
+                            self.scroll_to_selected = false;
                             self.selected_multi.clear();
                             self.selected_multi.insert(row_idx);
                             self.select_anchor = Some(row_idx);

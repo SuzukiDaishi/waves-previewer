@@ -4,6 +4,13 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Settings/Theme + Undo/Redo + List UX (Latest)
+- Added Appearance setting (Dark/Light), default Dark; preference persists across restarts.
+- Fixed initial theme application so startup respects the saved theme.
+- Added editor Undo/Redo (Ctrl+Z / Ctrl+Shift+Z) with toolbar buttons; destructive ops are tracked.
+- List UX: click selection no longer auto-centers; keyboard selection still auto-centers.
+- Metadata loading now prioritizes visible rows when jump-scrolling.
+
 ### Waveform/Overlay Consistency + Loop UI Simplification (Latest)
 - Overlay rendering reworked to match base waveform across all zoom modes.
   - Line (spp < 1.0): per-sample polyline + stems (pps >= 6) — identical to base.

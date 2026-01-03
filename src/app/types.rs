@@ -27,7 +27,13 @@ pub enum RateMode {
     TimeStretch,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThemeMode {
+    Dark,
+    Light,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewMode {
     Waveform,
     Spectrogram,
@@ -144,6 +150,10 @@ pub struct EditorTab {
     pub preview_offset_samples: Option<usize>,
     // Per-channel non-destructive preview overlay (green waveform)
     pub preview_overlay: Option<PreviewOverlay>,
+    pub undo_stack: Vec<EditorUndoState>,
+    pub undo_bytes: usize,
+    pub redo_stack: Vec<EditorUndoState>,
+    pub redo_bytes: usize,
 }
 
 #[derive(Clone)]
@@ -193,12 +203,37 @@ pub struct EditorApplyState {
     pub rx: std::sync::mpsc::Receiver<EditorApplyResult>,
     #[allow(dead_code)]
     pub tab_idx: usize,
+    pub undo: Option<EditorUndoState>,
 }
 
 pub struct EditorApplyResult {
     pub tab_idx: usize,
     pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
+}
+
+#[derive(Clone)]
+pub struct EditorUndoState {
+    pub ch_samples: Vec<Vec<f32>>,
+    pub samples_len: usize,
+    pub view_offset: usize,
+    pub samples_per_px: f32,
+    pub selection: Option<(usize, usize)>,
+    pub ab_loop: Option<(usize, usize)>,
+    pub loop_region: Option<(usize, usize)>,
+    pub trim_range: Option<(usize, usize)>,
+    pub loop_xfade_samples: usize,
+    pub loop_xfade_shape: LoopXfadeShape,
+    pub fade_in_range: Option<(usize, usize)>,
+    pub fade_out_range: Option<(usize, usize)>,
+    pub fade_in_shape: FadeShape,
+    pub fade_out_shape: FadeShape,
+    pub loop_mode: LoopMode,
+    pub snap_zero_cross: bool,
+    pub tool_state: ToolState,
+    pub active_tool: ToolKind,
+    pub dirty: bool,
+    pub approx_bytes: usize,
 }
 
 pub struct ListPreviewResult {
@@ -305,6 +340,7 @@ pub struct DebugConfig {
     pub enabled: bool,
     pub log_path: Option<PathBuf>,
     pub auto_run: bool,
+    pub auto_run_time_stretch_rate: Option<f32>,
     pub auto_run_delay_frames: u32,
     pub auto_run_exit: bool,
     pub check_interval_frames: u32,
@@ -316,6 +352,7 @@ impl Default for DebugConfig {
             enabled: false,
             log_path: None,
             auto_run: false,
+            auto_run_time_stretch_rate: None,
             auto_run_delay_frames: 8,
             auto_run_exit: true,
             check_interval_frames: 30,
@@ -366,6 +403,7 @@ pub enum DebugAction {
     ToggleMode,
     PlayPause,
     SelectNext,
+    PreviewTimeStretch(f32),
     DumpSummaryAuto,
     Exit,
 }

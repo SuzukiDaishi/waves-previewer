@@ -18,7 +18,7 @@ impl crate::app::WavesPreviewer {
                     }
                     if ui.button("Copy Summary").clicked() {
                         let summary = self.debug_summary();
-                        ctx.output_mut(|o| o.copied_text = summary);
+                        ctx.copy_text(summary);
                     }
                     if ui.button("Save Summary").clicked() {
                         let path = self.default_debug_summary_path();
@@ -40,7 +40,7 @@ impl crate::app::WavesPreviewer {
                     ui.label("Dummy files");
                     ui.add(
                         egui::DragValue::new(&mut self.debug.dummy_list_count)
-                            .clamp_range(0..=1_000_000)
+                            .range(0..=1_000_000)
                             .speed(5000),
                     );
                     if ui.button("Populate").clicked() {

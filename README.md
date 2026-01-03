@@ -4,6 +4,13 @@
 
 現状は WAV のみ対応（`hound`）。今後 `symphonia` による mp3/ogg/flac/aac 対応を予定しています。
 
+## Recent Updates
+- Added Settings > Appearance (Dark/Light). Default is Dark and it persists across restarts.
+- Theme preference is stored in `%APPDATA%\\waves-previewer\\prefs.txt`.
+- Undo/Redo in the editor (Ctrl+Z / Ctrl+Shift+Z) with toolbar buttons.
+- List UX: click selection no longer auto-centers; keyboard selection still auto-centers.
+- Metadata loading prioritizes visible rows when you jump-scroll.
+
 ## 現状の画面イメージ
 ![](docs/gamen_a.png)
 ![](docs/gamen_b.png)
@@ -45,6 +52,7 @@ See docs index for full guides and references:
 - 検索バーでファイル名/フォルダを部分一致フィルタ（表示数/総数を表示）
 - ファイル名のダブルクリックでエディタタブを開く（同一ウィンドウ内）
 - Space/ボタンで再生・停止、音量スライダ、dBFS メータ表示
+- エディタの Undo/Redo（Ctrl+Z / Ctrl+Shift+Z）。Inspector にボタンも表示
 - モード選択（Mode: Speed / PitchShift / TimeStretch）
   - Speed: 再生速度（Speed x [0.25〜4.0]）。ピッチは変化（非保持）。リアルタイム再生で低遅延。
   - PitchShift: セミトーン（-12〜+12）でピッチのみ変更。長さは保持。signalsmith-stretch によるオフライン処理。
@@ -60,7 +68,7 @@ See docs index for full guides and references:
 - Gain 列は dB で編集可能（-24..+24）。複数選択中に対象行で調整すると、変更量が選択全体に一括適用。未保存の行はファイル名末尾に " •" を表示
 - ソート: ヘッダクリックで「昇順→降順→元の順」をトグル（文字列はUTF順、数値は大小順、Length列は秒数順）
 - 行のどこでもクリックで選択＋音声ロード、ファイル名ダブルクリックでタブを開く、フォルダ名ダブルクリックでOSのファイルブラウザを開く（該当WAVを選択状態）
-- 選択行は自動で見える位置へスクロール
+- キーボード操作で選択した行は自動で見える位置へスクロール（クリック選択では位置を維持）
 - リストの Wave 列は min/max の簡易描画。エディタではズーム/パン/シークに対応。
 - 波形表示は Volume には影響されません（常に 0 dB と見なす）。Gain(dB) のみ反映されます。
 - エディタのループは上部バーで Off/On/Marker を切替、ループ範囲編集は Inspector > LoopEdit に集約。
@@ -69,7 +77,7 @@ See docs index for full guides and references:
   - Save Selected (Ctrl+S): 選択中のファイルへゲインを適用して保存（Overwrite／New File は Settings で指定）
   - Apply Gains (new files): すべての保留中ゲインを同一フォルダに新規 WAV として一括出力
   - Clear All Gains: すべての保留中ゲインを破棄
-  - Settings: 保存先フォルダ／ファイル名テンプレート（{name}, {gain:+0.0} など）／衝突時の挙動（Rename/Overwrite/Skip）／Overwrite 時の .bak 作成
+  - Settings: 保存先フォルダ／ファイル名テンプレート（{name}, {gain:+0.0} など）／衝突時の挙動（Rename/Overwrite/Skip）／Overwrite 時の .bak 作成／Appearance（Dark/Light）
 - **再生方式**:
   - **リスト表示時**: 常にループ無効（一度再生で停止、試聴に最適）
   - **エディタ表示時**: ループ再生のオン/オフ切替可能（無音ギャップなしのシームレスループ）
@@ -128,6 +136,7 @@ Options:
 - --debug
 - --debug-log <path>
 - --auto-run
+- --auto-run-time-stretch <rate>
 - --auto-run-delay <frames>
 - --auto-run-no-exit
 - --debug-check-interval <frames>
@@ -164,7 +173,7 @@ macOS/Linux の例:
 - WAV は `hound` で読み込み、モノラル化して簡易リサンプル（線形）。
 - 波形表示は固定ビンの min/max を事前計算して描画。
 - タブ UI は `egui` のタブ/コンテナで実装。将来 `egui` のマルチビューポートでポップアウト対応予定。
-- 視覚: ダークで落ち着いた配色（背景 #121214 付近、アクセントは寒色系）。日本語フォント（Meiryo/Yu Gothic/MSGothic 等）を OS から動的読み込み（Windows）。
+- 視覚: ダーク/ライト切替（Settings > Appearance）。デフォルトはダーク。日本語フォント（Meiryo/Yu Gothic/MSGothic 等）を OS から動的読み込み（Windows）。
 - スムーズな再描画: 60fps 目安で `request_repaint_after(16ms)` を使用。
 
 ### モジュール構成

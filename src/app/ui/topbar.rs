@@ -7,63 +7,60 @@ impl crate::app::WavesPreviewer {
             ui.horizontal_wrapped(|ui| {
                 ui.menu_button("Choose", |ui| {
                     if ui.button("Folder...").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        if let Some(dir) = self.pick_folder_dialog() {
                             self.root = Some(dir);
                             self.rescan();
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Files...").clicked() {
-                        if let Some(files) = rfd::FileDialog::new()
-                            .add_filter("WAV", &["wav"])
-                            .pick_files()
-                        {
+                        if let Some(files) = self.pick_files_dialog() {
                             self.replace_with_files(&files);
                             self.after_add_refresh();
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
                 ui.menu_button("Export", |ui| {
                     if ui.button("Apply Gains (new files)").clicked() {
                         self.spawn_export_gains(false);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Clear All Gains").clicked() {
                         self.pending_gains.clear();
                         self.lufs_override.clear();
                         self.lufs_recalc_deadline.clear();
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Save Selected (Ctrl+S)").clicked() {
                         self.trigger_save_selected();
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Settings...").clicked() {
                         self.show_export_settings = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Screenshot (F9)").clicked() {
                         let path = self.default_screenshot_path();
                         self.request_screenshot(ctx, path, false);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Open First in Editor").clicked() {
                         self.open_first_in_list();
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Debug Window (F12)").clicked() {
                         self.debug.cfg.enabled = true;
                         self.debug.show_window = !self.debug.show_window;
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Run Checks").clicked() {
                         self.debug.cfg.enabled = true;
                         self.debug_check_invariants();
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
                 // Files total + loading indicator
@@ -136,7 +133,7 @@ impl crate::app::WavesPreviewer {
                         RateMode::Speed => {
                             let resp = ui.add(
                                 egui::DragValue::new(&mut self.playback_rate)
-                                    .clamp_range(0.25..=4.0)
+                                    .range(0.25..=4.0)
                                     .speed(0.05)
                                     .fixed_decimals(2)
                                     .suffix(" x"),
@@ -148,7 +145,7 @@ impl crate::app::WavesPreviewer {
                         RateMode::PitchShift => {
                             let resp = ui.add(
                                 egui::DragValue::new(&mut self.pitch_semitones)
-                                    .clamp_range(-12.0..=12.0)
+                                    .range(-12.0..=12.0)
                                     .speed(0.1)
                                     .fixed_decimals(1)
                                     .suffix(" st"),
@@ -161,7 +158,7 @@ impl crate::app::WavesPreviewer {
                         RateMode::TimeStretch => {
                             let resp = ui.add(
                                 egui::DragValue::new(&mut self.playback_rate)
-                                    .clamp_range(0.25..=4.0)
+                                    .range(0.25..=4.0)
                                     .speed(0.05)
                                     .fixed_decimals(2)
                                     .suffix(" x"),
@@ -215,7 +212,12 @@ impl crate::app::WavesPreviewer {
                     let bar_h = 16.0;
                     let (rect, painter) =
                         ui.allocate_painter(egui::vec2(bar_w, bar_h), Sense::hover());
-                    painter.rect_stroke(rect.rect, 2.0, egui::Stroke::new(1.0, Color32::GRAY));
+                    painter.rect_stroke(
+                        rect.rect,
+                        2.0,
+                        egui::Stroke::new(1.0, Color32::GRAY),
+                        egui::StrokeKind::Inside,
+                    );
                     let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
                     let fill =
                         egui::Rect::from_min_size(rect.rect.min, egui::vec2(bar_w * norm, bar_h));

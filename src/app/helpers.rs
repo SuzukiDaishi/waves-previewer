@@ -86,8 +86,20 @@ pub fn sortable_header(
             };
         } else {
             *sort_dir = match *sort_dir {
-                SortDir::Asc => SortDir::Desc,
-                SortDir::Desc => SortDir::None,
+                SortDir::Asc => {
+                    if default_asc {
+                        SortDir::Desc
+                    } else {
+                        SortDir::None
+                    }
+                }
+                SortDir::Desc => {
+                    if default_asc {
+                        SortDir::None
+                    } else {
+                        SortDir::Asc
+                    }
+                }
                 SortDir::None => {
                     if default_asc {
                         SortDir::Asc

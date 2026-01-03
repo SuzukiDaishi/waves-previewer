@@ -1,10 +1,10 @@
-use crate::app::types::{ConflictPolicy, SaveMode};
+use crate::app::types::{ConflictPolicy, SaveMode, ThemeMode};
 use egui::RichText;
 
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_export_settings_window(&mut self, ctx: &egui::Context) {
         if self.show_export_settings {
-            egui::Window::new("Export Settings")
+            egui::Window::new("Settings")
                 .resizable(true)
                 .show(ctx, |ui| {
                     ui.label("Default Save Mode:");
@@ -35,7 +35,7 @@ impl crate::app::WavesPreviewer {
                                 .unwrap_or("(source folder)");
                             ui.label(RichText::new(folder).monospace());
                             if ui.button("Choose...").clicked() {
-                                if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                if let Some(d) = self.pick_folder_dialog() {
                                     self.export_cfg.dest_folder = Some(d);
                                 }
                             }
@@ -75,6 +75,26 @@ impl crate::app::WavesPreviewer {
                             &mut self.export_cfg.backup_bak,
                             ".wav.bak backup on overwrite",
                         );
+                    }
+                    ui.separator();
+                    ui.label("Appearance:");
+                    let mut next_theme = self.theme_mode;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.theme_mode == ThemeMode::Dark, "Dark")
+                            .clicked()
+                        {
+                            next_theme = ThemeMode::Dark;
+                        }
+                        if ui
+                            .selectable_label(self.theme_mode == ThemeMode::Light, "Light")
+                            .clicked()
+                        {
+                            next_theme = ThemeMode::Light;
+                        }
+                    });
+                    if next_theme != self.theme_mode {
+                        self.set_theme(ctx, next_theme);
                     }
                     ui.separator();
                     if ui.button("Close").clicked() {

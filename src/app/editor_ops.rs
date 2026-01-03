@@ -25,6 +25,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 let dur = (e - s).max(1) as f32;
                 for ch in tab.ch_samples.iter_mut() {
                     for i in s..e {
@@ -58,6 +59,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 let dur = (e - s).max(1) as f32;
                 for ch in tab.ch_samples.iter_mut() {
                     for i in s..e {
@@ -132,6 +134,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 for ch in tab.ch_samples.iter_mut() {
                     ch[s..e].reverse();
                 }
@@ -157,6 +160,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 for ch in tab.ch_samples.iter_mut() {
                     let mut seg = ch[s..e].to_vec();
                     std::mem::swap(ch, &mut seg);
@@ -192,6 +196,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 let g = crate::app::helpers::db_to_amp(gain_db);
                 for ch in tab.ch_samples.iter_mut() {
                     for i in s..e {
@@ -233,6 +238,7 @@ impl crate::app::WavesPreviewer {
                 if peak <= 0.0 {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 let g = crate::app::helpers::db_to_amp(target_db) / peak.max(1e-12);
                 for ch in tab.ch_samples.iter_mut() {
                     for i in s..e {
@@ -267,6 +273,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                 let nin = ((in_ms / 1000.0) * sr) as usize;
                 let nout = ((out_ms / 1000.0) * sr) as usize;
@@ -310,6 +317,7 @@ impl crate::app::WavesPreviewer {
                 if n == 0 {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 for ch in tab.ch_samples.iter_mut() {
                     for i in 0..n {
                         let t = i as f32 / (n as f32);
@@ -350,6 +358,7 @@ impl crate::app::WavesPreviewer {
                 if e <= s || e > tab.samples_len {
                     return;
                 }
+                Self::push_undo_state(tab, true);
                 let remove_len = e - s;
                 for ch in tab.ch_samples.iter_mut() {
                     ch.drain(s..e);

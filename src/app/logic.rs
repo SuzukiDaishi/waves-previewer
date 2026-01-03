@@ -57,12 +57,12 @@ impl super::WavesPreviewer {
     }
     /// Select a row and load audio buffer accordingly.
     /// Used when any cell in the row is clicked so Space can play immediately.
-    pub(super) fn select_and_load(&mut self, row_idx: usize) {
+    pub(super) fn select_and_load(&mut self, row_idx: usize, auto_scroll: bool) {
         if row_idx >= self.files.len() {
             return;
         }
         self.selected = Some(row_idx);
-        self.scroll_to_selected = true;
+        self.scroll_to_selected = auto_scroll;
         let Some(p_owned) = self.path_for_row(row_idx).cloned() else {
             return;
         };
@@ -212,6 +212,10 @@ impl super::WavesPreviewer {
                     active_tool_last: None,
                     preview_offset_samples: None,
                     preview_overlay: None,
+                    undo_stack: Vec::new(),
+                    undo_bytes: 0,
+                    redo_stack: Vec::new(),
+                    redo_bytes: 0,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
                 // Load loop markers from WAV (smpl) if available into loop_region
@@ -286,6 +290,10 @@ impl super::WavesPreviewer {
                     active_tool_last: None,
                     preview_offset_samples: None,
                     preview_overlay: None,
+                    undo_stack: Vec::new(),
+                    undo_bytes: 0,
+                    redo_stack: Vec::new(),
+                    redo_bytes: 0,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
                 // Load loop markers into loop_region if present

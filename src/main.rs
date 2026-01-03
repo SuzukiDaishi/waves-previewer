@@ -1,6 +1,4 @@
-mod app;
-mod audio;
-mod wave;
+use waves_previewer::app;
 
 fn parse_startup_config() -> app::StartupConfig {
     let mut cfg = app::StartupConfig::default();
@@ -55,6 +53,15 @@ fn parse_startup_config() -> app::StartupConfig {
                 cfg.debug.enabled = true;
                 cfg.debug.auto_run = true;
             }
+            "--auto-run-time-stretch" => {
+                if let Some(v) = args.next() {
+                    if let Ok(rate) = v.parse::<f32>() {
+                        cfg.debug.enabled = true;
+                        cfg.debug.auto_run = true;
+                        cfg.debug.auto_run_time_stretch_rate = Some(rate);
+                    }
+                }
+            }
             "--auto-run-delay" => {
                 if let Some(v) = args.next() {
                     if let Ok(n) = v.parse::<u32>() {
@@ -74,7 +81,7 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage:\n  waves-previewer [options]\n\nOptions:\n  --open-folder <dir>\n  --open-file <wav> (repeatable)\n  --open-first\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --help"
+                    "Usage:\n  waves-previewer [options]\n\nOptions:\n  --open-folder <dir>\n  --open-file <wav> (repeatable)\n  --open-first\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --help"
                 );
                 std::process::exit(0);
             }
@@ -96,9 +103,9 @@ fn main() -> eframe::Result<()> {
         "waves-previewer",
         native_options,
         Box::new(move |cc| {
-            Box::new(
+            Ok(Box::new(
                 app::WavesPreviewer::new(cc, startup.clone()).expect("failed to init app"),
-            )
+            ))
         }),
     )
 }
