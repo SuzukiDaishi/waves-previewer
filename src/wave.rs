@@ -2,126 +2,59 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
+use fdk_aac::enc::{
+    AudioObjectType as FdkAudioObjectType, BitRate as AacBitRate, ChannelMode as AacChannelMode,
+    Encoder as AacEncoder, EncoderParams as AacEncoderParams, Transport as AacTransport,
+};
+use mp3lame_encoder::{
+    max_required_buffer_size, Bitrate as Mp3Bitrate, Builder as Mp3Builder, DualPcm, FlushNoGap,
+    MonoPcm, Quality as Mp3Quality,
+};
+use mp4::{
+    AacConfig, AudioObjectType as Mp4AudioObjectType, ChannelConfig, MediaConfig, Mp4Config,
+    Mp4Sample, Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
+};
 
 use crate::audio::AudioEngine;
+use crate::audio_io;
 use signalsmith_stretch::Stretch;
 
 pub fn decode_wav_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
-    let mut reader = hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
-    let spec = reader.spec();
-    let ch = spec.channels.max(1) as usize;
-    let in_sr = spec.sample_rate;
-    let mut mono: Vec<f32> = Vec::new();
-    match spec.sample_format {
-        hound::SampleFormat::Float => {
-            let mut acc: f32 = 0.0; let mut c = 0usize;
-            for s in reader.samples::<f32>() { let v = s?; acc += v; c += 1; if c == ch { mono.push(acc / ch as f32); acc = 0.0; c = 0; } }
-        }
-        hound::SampleFormat::Int => {
-            let max_abs = match spec.bits_per_sample { 8 => 127.0, 16 => 32767.0, 24 => 8_388_607.0, 32 => 2_147_483_647.0, b => ((1u64 << (b - 1)) - 1) as f64 as f32 };
-            let mut acc: f32 = 0.0; let mut c = 0usize;
-            for s in reader.samples::<i32>() { let v_i = s?; let v = (v_i as f32) / max_abs; acc += v; c += 1; if c == ch { mono.push(acc / ch as f32); acc = 0.0; c = 0; } }
-        }
-    }
-    Ok((mono, in_sr))
+    audio_io::decode_audio_mono(path)
 }
 
 pub fn decode_wav_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>, u32, bool)> {
-    let mut reader = hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
-    let spec = reader.spec();
-    let ch = spec.channels.max(1) as usize;
-    let in_sr = spec.sample_rate;
-    let max_frames = ((in_sr as f32) * max_secs.max(0.0)).ceil() as usize;
-    let total_frames = reader.duration() as usize;
-    let target_frames = if max_frames == 0 { total_frames } else { max_frames.min(total_frames) };
-    let mut mono: Vec<f32> = Vec::with_capacity(target_frames);
-    let mut frames_read = 0usize;
-    match spec.sample_format {
-        hound::SampleFormat::Float => {
-            let mut acc: f32 = 0.0;
-            let mut c = 0usize;
-            for s in reader.samples::<f32>() {
-                let v = s?;
-                acc += v;
-                c += 1;
-                if c == ch {
-                    mono.push(acc / ch as f32);
-                    acc = 0.0;
-                    c = 0;
-                    frames_read += 1;
-                    if frames_read >= target_frames {
-                        break;
-                    }
-                }
-            }
-        }
-        hound::SampleFormat::Int => {
-            let max_abs = match spec.bits_per_sample {
-                8 => 127.0,
-                16 => 32767.0,
-                24 => 8_388_607.0,
-                32 => 2_147_483_647.0,
-                b => ((1u64 << (b - 1)) - 1) as f64 as f32,
-            };
-            let mut acc: f32 = 0.0;
-            let mut c = 0usize;
-            for s in reader.samples::<i32>() {
-                let v_i = s?;
-                let v = (v_i as f32) / max_abs;
-                acc += v;
-                c += 1;
-                if c == ch {
-                    mono.push(acc / ch as f32);
-                    acc = 0.0;
-                    c = 0;
-                    frames_read += 1;
-                    if frames_read >= target_frames {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    Ok((mono, in_sr, total_frames > target_frames))
+    audio_io::decode_audio_mono_prefix(path, max_secs)
 }
 
 pub fn decode_wav_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
-    let mut reader = hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
-    let spec = reader.spec();
-    let ch = spec.channels.max(1) as usize;
-    let in_sr = spec.sample_rate;
-    let mut chans: Vec<Vec<f32>> = vec![Vec::new(); ch];
-    match spec.sample_format {
-        hound::SampleFormat::Float => {
-            for (i, s) in reader.samples::<f32>().enumerate() {
-                let v = s?;
-                let ci = i % ch;
-                chans[ci].push(v);
-            }
-        }
-        hound::SampleFormat::Int => {
-            let max_abs = match spec.bits_per_sample { 8 => 127.0, 16 => 32767.0, 24 => 8_388_607.0, 32 => 2_147_483_647.0, b => ((1u64 << (b - 1)) - 1) as f64 as f32 };
-            for (i, s) in reader.samples::<i32>().enumerate() {
-                let v_i = s?;
-                let v = (v_i as f32) / max_abs;
-                let ci = i % ch;
-                chans[ci].push(v);
-            }
-        }
-    }
-    Ok((chans, in_sr))
+    audio_io::decode_audio_multi(path)
 }
 
 pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
-    if in_sr == out_sr || mono.is_empty() { return mono.to_vec(); }
-    let ratio = out_sr as f32 / in_sr as f32;
-    let out_len = (mono.len() as f32 * ratio).ceil() as usize;
+    if in_sr == out_sr || mono.is_empty() {
+        return mono.to_vec();
+    }
+    if in_sr == 0 || out_sr == 0 {
+        return mono.to_vec();
+    }
+    let ratio = out_sr as f64 / in_sr as f64;
+    let out_len = ((mono.len() as f64) * ratio).ceil() as usize;
+    if out_len == 0 {
+        return Vec::new();
+    }
     let mut out = Vec::with_capacity(out_len);
+    let len = mono.len();
     for i in 0..out_len {
-        let src_pos = (i as f32) / ratio;
+        let src_pos = (i as f64) / ratio;
         let i0 = src_pos.floor() as usize;
-        let i1 = (i0 + 1).min(mono.len().saturating_sub(1));
-        let t = (src_pos - i0 as f32).clamp(0.0, 1.0);
+        if i0 >= len {
+            out.push(mono[len - 1]);
+            continue;
+        }
+        let i1 = (i0 + 1).min(len.saturating_sub(1));
+        let t = (src_pos - i0 as f64).clamp(0.0, 1.0) as f32;
         let v = mono[i0] * (1.0 - t) + mono[i1] * t;
         out.push(v);
     }
@@ -190,9 +123,9 @@ pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
     None
 }
 
-/// Map WAV 'smpl' loop markers (ls, le) from source sample rate `in_sr` to output `out_sr`,
+/// Map loop markers (ls, le) from source sample rate `in_sr` to output `out_sr`,
 /// and clamp to [0, samples_len]. Returns normalized (start<=end) if valid and non-empty.
-pub fn map_wav_loop_markers(ls: u32, le: u32, in_sr: u32, out_sr: u32, samples_len: usize) -> Option<(usize, usize)> {
+pub fn map_loop_markers_between_sr(ls: u32, le: u32, in_sr: u32, out_sr: u32, samples_len: usize) -> Option<(usize, usize)> {
     if in_sr == 0 || out_sr == 0 || samples_len == 0 { return None; }
     let in_sr_u = in_sr as u64;
     let out_sr_u = out_sr as u64;
@@ -204,6 +137,82 @@ pub fn map_wav_loop_markers(ls: u32, le: u32, in_sr: u32, out_sr: u32, samples_l
     s = s.min(samples_len);
     e = e.min(samples_len);
     if e > s { Some((s, e)) } else { None }
+}
+
+/// Map loop markers from output SR (device) to file SR.
+pub fn map_loop_markers_to_file_sr(s: usize, e: usize, out_sr: u32, file_sr: u32) -> Option<(u32, u32)> {
+    if out_sr == 0 || file_sr == 0 { return None; }
+    if e <= s { return None; }
+    let out_sr_u = out_sr as u64;
+    let file_sr_u = file_sr as u64;
+    let s = ((s as u64) * file_sr_u + (out_sr_u / 2)) / out_sr_u;
+    let e = ((e as u64) * file_sr_u + (out_sr_u / 2)) / out_sr_u;
+    if e <= s { return None; }
+    if s > u32::MAX as u64 || e > u32::MAX as u64 { return None; }
+    Some((s as u32, e as u32))
+}
+
+/// Write or remove WAV 'smpl' loop markers (overwrites file safely).
+pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Result<()> {
+    use std::fs;
+    let data = fs::read(path).with_context(|| format!("open wav: {}", path.display()))?;
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        anyhow::bail!("not a RIFF/WAVE file");
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(data.len() + 128);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&[0, 0, 0, 0]); // placeholder size
+    out.extend_from_slice(b"WAVE");
+    let mut pos = 12usize;
+    while pos + 8 <= data.len() {
+        let id = &data[pos..pos + 4];
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]) as usize;
+        let chunk_start = pos + 8;
+        let chunk_end = chunk_start.saturating_add(size).min(data.len());
+        if id != b"smpl" {
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(size as u32).to_le_bytes());
+            out.extend_from_slice(&data[chunk_start..chunk_end]);
+            if size & 1 == 1 { out.push(0); }
+        }
+        let advance = 8 + size + (size & 1);
+        if pos + advance <= pos { break; }
+        pos = pos.saturating_add(advance);
+    }
+    if let Some((ls, le)) = loop_opt {
+        if le > ls {
+            let mut chunk: Vec<u8> = Vec::with_capacity(60);
+            // 9 u32 header fields
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // manufacturer
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // product
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // sample_period
+            chunk.extend_from_slice(&60u32.to_le_bytes()); // midi_unity_note (C4)
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // midi_pitch_fraction
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // smpte_format
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // smpte_offset
+            chunk.extend_from_slice(&1u32.to_le_bytes()); // num_sample_loops
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // sampler_data
+            // loop struct (6 u32)
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // cue_point_id
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // type (0=forward)
+            chunk.extend_from_slice(&ls.to_le_bytes()); // start
+            chunk.extend_from_slice(&le.to_le_bytes()); // end
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // fraction
+            chunk.extend_from_slice(&0u32.to_le_bytes()); // play_count
+            out.extend_from_slice(b"smpl");
+            out.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+            out.extend_from_slice(&chunk);
+            if chunk.len() & 1 == 1 { out.push(0); }
+        }
+    }
+    let riff_size = (out.len().saturating_sub(8)) as u32;
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join("._wvp_tmp_smpl.wav");
+    if tmp.exists() { let _ = fs::remove_file(&tmp); }
+    fs::write(&tmp, out)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 // High level helper used by UI when a file is clicked
@@ -364,6 +373,301 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     Ok(())
 }
 
+pub fn export_gain_audio(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    let fmt = pick_format(src, dst)
+        .ok_or_else(|| anyhow::anyhow!("unsupported format: {}", src.display()))?;
+    match fmt.as_str() {
+        "wav" => export_gain_wav(src, dst, gain_db),
+        "mp3" => export_gain_mp3(src, dst, gain_db),
+        "m4a" => export_gain_m4a(src, dst, gain_db),
+        _ => anyhow::bail!("unsupported format: {}", fmt),
+    }
+}
+
+fn export_gain_mp3(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    use std::fs;
+    let (mut chans, in_sr) = decode_wav_multi(src)?;
+    apply_gain_in_place(&mut chans, gain_db);
+    let data = encode_mp3(&chans, in_sr)?;
+    fs::write(dst, data)?;
+    Ok(())
+}
+
+fn export_gain_m4a(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    let (mut chans, in_sr) = decode_wav_multi(src)?;
+    apply_gain_in_place(&mut chans, gain_db);
+    encode_aac_to_mp4(dst, &chans, in_sr)
+}
+
+fn pick_format(src: &Path, dst: &Path) -> Option<String> {
+    if let Some(ext) = ext_lower(dst) {
+        if audio_io::is_supported_extension(&ext) {
+            return Some(ext);
+        }
+    }
+    ext_lower(src).filter(|ext| audio_io::is_supported_extension(ext))
+}
+
+fn ext_lower(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+}
+
+fn normalize_channels_for_encode(chans: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    match chans.len() {
+        0 => Vec::new(),
+        1 => vec![chans[0].clone()],
+        _ => vec![chans[0].clone(), chans[1].clone()],
+    }
+}
+
+fn apply_gain_in_place(chans: &mut [Vec<f32>], gain_db: f32) {
+    let g = 10.0f32.powf(gain_db / 20.0);
+    for ch in chans.iter_mut() {
+        for v in ch.iter_mut() {
+            *v = (*v * g).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn resample_channels(chans: &[Vec<f32>], in_sr: u32, out_sr: u32) -> Vec<Vec<f32>> {
+    if in_sr == out_sr {
+        return chans.to_vec();
+    }
+    chans
+        .iter()
+        .map(|c| resample_linear(c, in_sr, out_sr))
+        .collect()
+}
+
+fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
+    if chans.is_empty() {
+        anyhow::bail!("empty channels");
+    }
+    let mut chans = normalize_channels_for_encode(chans);
+    let mut sr = in_sr;
+    let mut builder = Mp3Builder::new().context("init mp3 encoder")?;
+    builder
+        .set_num_channels(chans.len() as u8)
+        .map_err(|e| anyhow::anyhow!("mp3 channels: {e:?}"))?;
+    if let Err(err) = builder.set_sample_rate(sr) {
+        if matches!(err, mp3lame_encoder::BuildError::BadSampleFreq) {
+            let target = 44_100;
+            chans = resample_channels(&chans, in_sr, target);
+            sr = target;
+            builder
+                .set_sample_rate(sr)
+                .map_err(|e| anyhow::anyhow!("mp3 sample rate: {e:?}"))?;
+        } else {
+            return Err(anyhow::anyhow!("mp3 sample rate: {err:?}"));
+        }
+    }
+    builder
+        .set_brate(Mp3Bitrate::Kbps192)
+        .map_err(|e| anyhow::anyhow!("mp3 bitrate: {e:?}"))?;
+    builder
+        .set_quality(Mp3Quality::Best)
+        .map_err(|e| anyhow::anyhow!("mp3 quality: {e:?}"))?;
+    let mut encoder = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("mp3 build: {e:?}"))?;
+    let frames = chans[0].len().max(1);
+    let mut out = Vec::new();
+    out.reserve(max_required_buffer_size(frames));
+    if chans.len() == 1 {
+        let input = MonoPcm(&chans[0]);
+        encoder
+            .encode_to_vec(input, &mut out)
+            .map_err(|e| anyhow::anyhow!("mp3 encode: {e:?}"))?;
+    } else {
+        let frames = chans[0].len().min(chans[1].len());
+        let input = DualPcm {
+            left: &chans[0][..frames],
+            right: &chans[1][..frames],
+        };
+        encoder
+            .encode_to_vec(input, &mut out)
+            .map_err(|e| anyhow::anyhow!("mp3 encode: {e:?}"))?;
+    }
+    encoder
+        .flush_to_vec::<FlushNoGap>(&mut out)
+        .map_err(|e| anyhow::anyhow!("mp3 flush: {e:?}"))?;
+    Ok(out)
+}
+
+fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
+    use std::fs::File;
+    if chans.is_empty() {
+        anyhow::bail!("empty channels");
+    }
+    let mut chans = normalize_channels_for_encode(chans);
+    let mut sr = in_sr;
+    let mut freq_index = aac_freq_index(sr);
+    if freq_index.is_none() {
+        let target = 48_000;
+        chans = resample_channels(&chans, in_sr, target);
+        sr = target;
+        freq_index = aac_freq_index(sr);
+    }
+    let freq_index = freq_index.context("unsupported AAC sample rate")?;
+    let channels = chans.len();
+    let bitrate = if channels == 1 { 96_000 } else { 192_000 };
+    let params = AacEncoderParams {
+        bit_rate: AacBitRate::Cbr(bitrate),
+        sample_rate: sr,
+        transport: AacTransport::Raw,
+        channels: if channels == 1 {
+            AacChannelMode::Mono
+        } else {
+            AacChannelMode::Stereo
+        },
+        audio_object_type: FdkAudioObjectType::Mpeg4LowComplexity,
+    };
+    let encoder = AacEncoder::new(params)
+        .map_err(|e| anyhow::anyhow!("aac encoder init: {e}"))?;
+    let info = encoder
+        .info()
+        .map_err(|e| anyhow::anyhow!("aac encoder info: {e}"))?;
+    let frame_len = info.frameLength as usize;
+    if frame_len == 0 {
+        anyhow::bail!("aac frame length is zero");
+    }
+    let max_out = (info.maxOutBufBytes as usize).max(4096);
+    let interleaved = interleave_i16(&chans);
+    let frame_samples = frame_len * channels;
+    let file = File::create(dst)
+        .with_context(|| format!("create m4a: {}", dst.display()))?;
+    let config = Mp4Config {
+        major_brand: "M4A ".parse().expect("FourCC"),
+        minor_version: 512,
+        compatible_brands: vec![
+            "M4A ".parse().expect("FourCC"),
+            "isom".parse().expect("FourCC"),
+            "iso2".parse().expect("FourCC"),
+            "mp41".parse().expect("FourCC"),
+        ],
+        timescale: sr.max(1),
+    };
+    let mut writer = Mp4Writer::write_start(file, &config)
+        .map_err(|e| anyhow::anyhow!("mp4 start: {e:?}"))?;
+    let track_conf = TrackConfig {
+        track_type: TrackType::Audio,
+        timescale: sr.max(1),
+        language: "und".to_string(),
+        media_conf: MediaConfig::AacConfig(AacConfig {
+            bitrate,
+            profile: Mp4AudioObjectType::AacLowComplexity,
+            freq_index,
+            chan_conf: if channels == 1 {
+                ChannelConfig::Mono
+            } else {
+                ChannelConfig::Stereo
+            },
+        }),
+    };
+    writer
+        .add_track(&track_conf)
+        .map_err(|e| anyhow::anyhow!("mp4 add track: {e:?}"))?;
+    let track_id = 1u32;
+    let mut frame_index = 0u64;
+    let mut pos = 0usize;
+    while pos < interleaved.len() {
+        let end = (pos + frame_samples).min(interleaved.len());
+        let mut input_slice = &interleaved[pos..end];
+        let mut padded;
+        if input_slice.len() < frame_samples {
+            padded = vec![0i16; frame_samples];
+            padded[..input_slice.len()].copy_from_slice(input_slice);
+            input_slice = &padded;
+        }
+        let mut out_buf = vec![0u8; max_out];
+        let enc_info = encoder
+            .encode(input_slice, &mut out_buf)
+            .map_err(|e| anyhow::anyhow!("aac encode: {e}"))?;
+        if enc_info.output_size > 0 {
+            let bytes = Bytes::copy_from_slice(&out_buf[..enc_info.output_size]);
+            let sample = Mp4Sample {
+                start_time: frame_index * frame_len as u64,
+                duration: frame_len as u32,
+                rendering_offset: 0,
+                is_sync: true,
+                bytes,
+            };
+            writer
+                .write_sample(track_id, &sample)
+                .map_err(|e| anyhow::anyhow!("mp4 write sample: {e:?}"))?;
+            frame_index += 1;
+        }
+        if enc_info.input_consumed == 0 {
+            break;
+        }
+        pos += enc_info.input_consumed;
+    }
+    loop {
+        let mut out_buf = vec![0u8; max_out];
+        let enc_info = encoder
+            .encode(&[], &mut out_buf)
+            .map_err(|e| anyhow::anyhow!("aac flush: {e}"))?;
+        if enc_info.output_size == 0 {
+            break;
+        }
+        let bytes = Bytes::copy_from_slice(&out_buf[..enc_info.output_size]);
+        let sample = Mp4Sample {
+            start_time: frame_index * frame_len as u64,
+            duration: frame_len as u32,
+            rendering_offset: 0,
+            is_sync: true,
+            bytes,
+        };
+        writer
+            .write_sample(track_id, &sample)
+            .map_err(|e| anyhow::anyhow!("mp4 write sample: {e:?}"))?;
+        frame_index += 1;
+    }
+    writer
+        .write_end()
+        .map_err(|e| anyhow::anyhow!("mp4 finalize: {e:?}"))?;
+    Ok(())
+}
+
+fn interleave_i16(chans: &[Vec<f32>]) -> Vec<i16> {
+    let channels = chans.len().max(1);
+    let frames = chans.iter().map(|c| c.len()).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(frames * channels);
+    for i in 0..frames {
+        for ch in chans {
+            let v = ch.get(i).copied().unwrap_or(0.0);
+            out.push(f32_to_i16(v));
+        }
+    }
+    out
+}
+
+fn f32_to_i16(v: f32) -> i16 {
+    let clamped = v.clamp(-1.0, 1.0);
+    (clamped * i16::MAX as f32) as i16
+}
+
+fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
+    match sr {
+        96_000 => Some(SampleFreqIndex::Freq96000),
+        88_200 => Some(SampleFreqIndex::Freq88200),
+        64_000 => Some(SampleFreqIndex::Freq64000),
+        48_000 => Some(SampleFreqIndex::Freq48000),
+        44_100 => Some(SampleFreqIndex::Freq44100),
+        32_000 => Some(SampleFreqIndex::Freq32000),
+        24_000 => Some(SampleFreqIndex::Freq24000),
+        22_050 => Some(SampleFreqIndex::Freq22050),
+        16_000 => Some(SampleFreqIndex::Freq16000),
+        12_000 => Some(SampleFreqIndex::Freq12000),
+        11_025 => Some(SampleFreqIndex::Freq11025),
+        8_000 => Some(SampleFreqIndex::Freq8000),
+        7_350 => Some(SampleFreqIndex::Freq7350),
+        _ => None,
+    }
+}
+
 // Export a selection from in-memory multi-channel samples (float32) to a WAV file.
 #[allow(dead_code)]
 pub fn export_selection_wav(chans: &[Vec<f32>], sample_rate: u32, range: (usize,usize), dst: &Path) -> Result<()> {
@@ -400,6 +704,27 @@ pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> 
     if backup {
         // backup as "<original>.wav.bak"
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup.wav");
+        let bak = src.with_file_name(format!("{}.bak", fname));
+        let _ = fs::remove_file(&bak);
+        let _ = fs::copy(src, &bak);
+    }
+    let _ = fs::remove_file(src);
+    fs::rename(&tmp, src)?;
+    Ok(())
+}
+
+// Overwrite: apply gain and replace the source file safely with optional .bak (all supported formats)
+pub fn overwrite_gain_audio(src: &Path, gain_db: f32, backup: bool) -> Result<()> {
+    use std::fs;
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
+    let tmp = parent.join(format!("._wvp_tmp.{}", ext));
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
+    export_gain_audio(src, &tmp, gain_db)?;
+    if backup {
+        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
         let bak = src.with_file_name(format!("{}.bak", fname));
         let _ = fs::remove_file(&bak);
         let _ = fs::copy(src, &bak);

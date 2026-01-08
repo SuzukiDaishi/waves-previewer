@@ -73,7 +73,7 @@ impl crate::app::WavesPreviewer {
                         ui.separator();
                         ui.checkbox(
                             &mut self.export_cfg.backup_bak,
-                            ".wav.bak backup on overwrite",
+                            ".bak backup on overwrite",
                         );
                     }
                     ui.separator();
@@ -95,6 +95,24 @@ impl crate::app::WavesPreviewer {
                     });
                     if next_theme != self.theme_mode {
                         self.set_theme(ctx, next_theme);
+                    }
+                    ui.separator();
+                    ui.label("List:");
+                    let mut next_skip = self.skip_dotfiles;
+                    if ui
+                        .checkbox(&mut next_skip, "Skip dotfiles (.*)")
+                        .changed()
+                    {
+                        self.skip_dotfiles = next_skip;
+                        self.save_prefs();
+                        if let Some(root) = self.root.clone() {
+                            self.start_scan_folder(root);
+                        } else if self.skip_dotfiles {
+                            self.all_files
+                                .retain(|p| !Self::is_dotfile_path(p));
+                            self.apply_filter_from_search();
+                            self.apply_sort();
+                        }
                     }
                     ui.separator();
                     if ui.button("Close").clicked() {

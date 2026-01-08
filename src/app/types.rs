@@ -119,6 +119,7 @@ pub struct EditorTab {
     pub samples_len: usize,        // length in samples
     pub view_offset: usize,        // first visible sample index
     pub samples_per_px: f32,       // time zoom: samples per pixel
+    pub last_wave_w: f32,          // last waveform width (for resize anchoring)
     pub dirty: bool,               // unsaved edits exist
     #[allow(dead_code)]
     pub ops: Vec<EditOp>,          // non-destructive operations (skeleton)
@@ -128,6 +129,9 @@ pub struct EditorTab {
     pub ab_loop: Option<(usize, usize)>,
     // Playback loop region (independent from editing selection)
     pub loop_region: Option<(usize, usize)>,
+    // Loop markers baseline (device SR) for dirty tracking
+    pub loop_markers_saved: Option<(usize, usize)>,
+    pub loop_markers_dirty: bool,
     // Trim-specific A/B range (independent from loop)
     pub trim_range: Option<(usize, usize)>,
     pub loop_xfade_samples: usize, // crossfade length in samples (device SR)
@@ -167,6 +171,7 @@ pub struct FileMeta {
     pub peak_db: Option<f32>,
     pub lufs_i: Option<f32>,
     pub thumb: Vec<(f32, f32)>,
+    pub decode_error: Option<String>,
 }
 
 pub struct SpectrogramData {
@@ -234,6 +239,28 @@ pub struct EditorUndoState {
     pub active_tool: ToolKind,
     pub dirty: bool,
     pub approx_bytes: usize,
+}
+
+#[derive(Clone)]
+pub struct CachedEdit {
+    pub ch_samples: Vec<Vec<f32>>,
+    pub samples_len: usize,
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub dirty: bool,
+    pub loop_region: Option<(usize, usize)>,
+    pub loop_markers_saved: Option<(usize, usize)>,
+    pub loop_markers_dirty: bool,
+    pub trim_range: Option<(usize, usize)>,
+    pub loop_xfade_samples: usize,
+    pub loop_xfade_shape: LoopXfadeShape,
+    pub fade_in_range: Option<(usize, usize)>,
+    pub fade_out_range: Option<(usize, usize)>,
+    pub fade_in_shape: FadeShape,
+    pub fade_out_shape: FadeShape,
+    pub loop_mode: LoopMode,
+    pub snap_zero_cross: bool,
+    pub tool_state: ToolState,
+    pub active_tool: ToolKind,
 }
 
 pub struct ListPreviewResult {

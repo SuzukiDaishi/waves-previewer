@@ -125,6 +125,7 @@ impl crate::app::WavesPreviewer {
         if tab.preview_offset_samples.map(|v| v > len).unwrap_or(false) {
             tab.preview_offset_samples = None;
         }
+        Self::update_loop_markers_dirty(tab);
     }
 
     pub(super) fn editor_apply_reverse_range(&mut self, tab_idx: usize, range: (usize, usize)) {
@@ -312,15 +313,23 @@ impl crate::app::WavesPreviewer {
                         return;
                     }
                 };
-                let seg_len = e - s;
-                let n = tab.loop_xfade_samples.min(seg_len / 2).min(tab.samples_len);
-                if n == 0 {
+                let half = Self::effective_loop_xfade_samples(
+                    s,
+                    e,
+                    tab.samples_len,
+                    tab.loop_xfade_samples,
+                );
+                if half == 0 {
                     return;
                 }
                 Self::push_undo_state(tab, true);
+                let win_len = half.saturating_mul(2);
+                let denom = (win_len.saturating_sub(1)).max(1) as f32;
+                let s_start = s.saturating_sub(half);
+                let e_start = e.saturating_sub(half);
                 for ch in tab.ch_samples.iter_mut() {
-                    for i in 0..n {
-                        let t = i as f32 / (n as f32);
+                    for i in 0..win_len {
+                        let t = (i as f32) / denom;
                         let (w_out, w_in) = match tab.loop_xfade_shape {
                             crate::app::types::LoopXfadeShape::EqualPower => {
                                 let a = core::f32::consts::FRAC_PI_2 * t;
@@ -328,13 +337,16 @@ impl crate::app::WavesPreviewer {
                             }
                             crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
                         };
-                        let head_idx = s + i;
-                        let tail_idx = e - n + i;
-                        let head = ch[head_idx];
-                        let tail = ch[tail_idx];
-                        let mixed = tail * w_out + head * w_in;
-                        ch[head_idx] = mixed;
-                        ch[tail_idx] = mixed;
+                        let s_idx = s_start + i;
+                        let e_idx = e_start + i;
+                        if s_idx >= ch.len() || e_idx >= ch.len() {
+                            break;
+                        }
+                        let s = ch[s_idx];
+                        let e = ch[e_idx];
+                        let mixed = e * w_out + s * w_in;
+                        ch[s_idx] = mixed;
+                        ch[e_idx] = mixed;
                     }
                 }
                 tab.loop_xfade_samples = 0;

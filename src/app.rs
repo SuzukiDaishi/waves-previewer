@@ -1,6 +1,6 @@
-﻿use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -94,8 +94,11 @@ pub struct WavesPreviewer {
     original_files: Vec<usize>,
     // search
     search_query: String,
+    search_use_regex: bool,
     search_dirty: bool,
     search_deadline: Option<std::time::Instant>,
+    // list filtering
+    skip_dotfiles: bool,
     // processing mode
     mode: RateMode,
     // heavy processing state (overlay)
@@ -105,6 +108,8 @@ pub struct WavesPreviewer {
     list_preview_job_id: u64,
     // background heavy apply for editor (pitch/stretch)
     editor_apply_state: Option<EditorApplyState>,
+    // cached edited audio when tabs are closed (kept until save)
+    edited_cache: HashMap<PathBuf, CachedEdit>,
     // per-file pending gain edits (dB)
     pending_gains: HashMap<PathBuf, f32>,
     // background export state (gains)
@@ -116,6 +121,18 @@ pub struct WavesPreviewer {
     show_export_settings: bool,
     show_first_save_prompt: bool,
     theme_mode: ThemeMode,
+    show_rename_dialog: bool,
+    rename_target: Option<PathBuf>,
+    rename_input: String,
+    rename_error: Option<String>,
+    show_batch_rename_dialog: bool,
+    batch_rename_targets: Vec<PathBuf>,
+    batch_rename_pattern: String,
+    batch_rename_start: u32,
+    batch_rename_pad: u32,
+    batch_rename_error: Option<String>,
+    show_delete_confirm: bool,
+    delete_targets: Vec<PathBuf>,
         saving_sources: Vec<PathBuf>,
         saving_mode: Option<SaveMode>,
 
@@ -247,6 +264,9 @@ impl WavesPreviewer {
                     "light" => ThemeMode::Light,
                     _ => ThemeMode::Dark,
                 };
+            } else if let Some(rest) = line.strip_prefix("skip_dotfiles=") {
+                let v = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+                self.skip_dotfiles = v;
             }
         }
     }
@@ -257,7 +277,22 @@ impl WavesPreviewer {
             ThemeMode::Dark => "dark",
             ThemeMode::Light => "light",
         };
-        let _ = std::fs::write(path, format!("theme={}\n", theme));
+        let skip = if self.skip_dotfiles { "1" } else { "0" };
+        let _ = std::fs::write(path, format!("theme={}\nskip_dotfiles={}\n", theme, skip));
+    }
+
+    fn is_dotfile_path(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.starts_with('.'))
+            .unwrap_or(false)
+    }
+
+    fn is_decode_failed_path(&self, path: &Path) -> bool {
+        self.meta
+            .get(path)
+            .and_then(|m| m.decode_error.as_ref())
+            .is_some()
     }
 
     fn preview_restore_audio_for_tab(&self, tab_idx: usize) {
@@ -358,6 +393,11 @@ impl WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
+        if matches!(tool, ToolKind::PitchShift | ToolKind::TimeStretch)
+            && self.is_decode_failed_path(&tab.path)
+        {
+            return;
+        }
         let undo = Some(Self::capture_undo_state(tab));
         // Cancel any previous apply job
         self.editor_apply_state = None;
@@ -480,6 +520,21 @@ impl WavesPreviewer {
         }
     }
     // editor operations moved to editor_ops.rs
+    fn effective_loop_xfade_samples(
+        loop_start: usize,
+        loop_end: usize,
+        total_len: usize,
+        requested: usize,
+    ) -> usize {
+        if loop_end <= loop_start || loop_end > total_len || total_len == 0 {
+            return 0;
+        }
+        let loop_len = loop_end - loop_start;
+        let mut cf = requested.min(loop_len / 2);
+        cf = cf.min(loop_start);
+        cf = cf.min(total_len.saturating_sub(loop_end));
+        cf
+    }
     fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
         match tab.loop_mode {
             LoopMode::Off => { self.audio.set_loop_enabled(false); }
@@ -488,12 +543,12 @@ impl WavesPreviewer {
                 if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                     let len = buf.len();
                     self.audio.set_loop_region(0, len);
-                    let cf = tab.loop_xfade_samples.min(len / 2);
+                    let cf = Self::effective_loop_xfade_samples(0, len, len, tab.loop_xfade_samples);
                     self.audio.set_loop_crossfade(cf, match tab.loop_xfade_shape { crate::app::types::LoopXfadeShape::Linear => 0, crate::app::types::LoopXfadeShape::EqualPower => 1 });
                 }
             }
             LoopMode::Marker => {
-                if let Some((a,b)) = tab.loop_region { if a!=b { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); let cf = tab.loop_xfade_samples.min((e.saturating_sub(s)) / 2); self.audio.set_loop_crossfade(cf, match tab.loop_xfade_shape { crate::app::types::LoopXfadeShape::Linear => 0, crate::app::types::LoopXfadeShape::EqualPower => 1 }); return; } }
+                if let Some((a,b)) = tab.loop_region { if a!=b { let (s,e) = if a<=b {(a,b)} else {(b,a)}; self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); let cf = Self::effective_loop_xfade_samples(s, e, tab.samples_len, tab.loop_xfade_samples); self.audio.set_loop_crossfade(cf, match tab.loop_xfade_shape { crate::app::types::LoopXfadeShape::Linear => 0, crate::app::types::LoopXfadeShape::EqualPower => 1 }); return; } }
                 self.audio.set_loop_enabled(false);
             }
         }
@@ -507,6 +562,11 @@ impl WavesPreviewer {
                 else { let da = a.abs_diff(idx); let db = b.abs_diff(idx); if da <= db { tab.loop_region = Some((idx, b)); } else { tab.loop_region = Some((a, idx)); } }
             }
         }
+        Self::update_loop_markers_dirty(tab);
+    }
+
+    fn update_loop_markers_dirty(tab: &mut EditorTab) {
+        tab.loop_markers_dirty = tab.loop_region != tab.loop_markers_saved;
     }
 
     fn path_for_row(&self, row_idx: usize) -> Option<&PathBuf> {
@@ -525,6 +585,24 @@ impl WavesPreviewer {
             .and_then(|i| self.path_for_row(i).cloned())
     }
 
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        let mut rows: Vec<usize> = self.selected_multi.iter().copied().collect();
+        if rows.is_empty() {
+            if let Some(sel) = self.selected {
+                rows.push(sel);
+            } else if let Some(idx) = self.active_tab {
+                if let Some(tab) = self.tabs.get(idx) {
+                    return vec![tab.path.clone()];
+                }
+            }
+        }
+        rows.sort_unstable();
+        rows
+            .into_iter()
+            .filter_map(|row| self.path_for_row(row).cloned())
+            .collect()
+    }
+
     fn current_active_path(&self) -> Option<&PathBuf> {
         if let Some(i) = self.active_tab { return self.tabs.get(i).map(|t| &t.path); }
         if let Some(i) = self.selected { return self.path_for_row(i); }
@@ -540,6 +618,307 @@ impl WavesPreviewer {
         let fg = db_to_amp(gain_db);
         self.audio.set_file_gain(fg);
     }
+
+    fn open_rename_dialog(&mut self, path: PathBuf) {
+        self.rename_input = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        self.rename_target = Some(path);
+        self.rename_error = None;
+        self.show_rename_dialog = true;
+    }
+
+    fn open_batch_rename_dialog(&mut self, paths: Vec<PathBuf>) {
+        self.batch_rename_targets = paths;
+        self.batch_rename_pattern = "{name}_{n}".into();
+        self.batch_rename_start = 1;
+        self.batch_rename_pad = 2;
+        self.batch_rename_error = None;
+        self.show_batch_rename_dialog = true;
+    }
+
+    fn open_delete_confirm(&mut self, paths: Vec<PathBuf>) {
+        self.delete_targets = paths;
+        self.show_delete_confirm = true;
+    }
+
+    fn close_tabs_for_paths(&mut self, paths: &std::collections::HashSet<PathBuf>) {
+        let mut removed_active = false;
+        for i in (0..self.tabs.len()).rev() {
+            if paths.contains(&self.tabs[i].path) {
+                self.clear_preview_if_any(i);
+                self.cache_dirty_tab_at(i);
+                self.tabs.remove(i);
+                match self.active_tab {
+                    Some(ai) if ai == i => {
+                        self.active_tab = None;
+                        removed_active = true;
+                    }
+                    Some(ai) if ai > i => self.active_tab = Some(ai - 1),
+                    _ => {}
+                }
+            }
+        }
+        if removed_active {
+            self.audio.stop();
+            self.audio.set_loop_enabled(false);
+        }
+    }
+
+    fn replace_path_in_state(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        let Some(idx) = self.all_files.iter().position(|p| p == from) else {
+            return;
+        };
+        let new_path = to.to_path_buf();
+        self.all_files[idx] = new_path.clone();
+        if let Some(v) = self.meta.remove(from) {
+            self.meta.insert(new_path.clone(), v);
+        }
+        if let Some(v) = self.spectro_cache.remove(from) {
+            self.spectro_cache.insert(new_path.clone(), v);
+        }
+        if let Some(v) = self.edited_cache.remove(from) {
+            self.edited_cache.insert(new_path.clone(), v);
+        }
+        self.meta_inflight.remove(from);
+        self.spectro_inflight.remove(from);
+        if let Some(v) = self.pending_gains.remove(from) {
+            self.pending_gains.insert(new_path.clone(), v);
+        }
+        if let Some(v) = self.lufs_override.remove(from) {
+            self.lufs_override.insert(new_path.clone(), v);
+        }
+        if let Some(v) = self.lufs_recalc_deadline.remove(from) {
+            self.lufs_recalc_deadline.insert(new_path.clone(), v);
+        }
+        for p in self.saving_sources.iter_mut() {
+            if p.as_path() == from {
+                *p = new_path.clone();
+            }
+        }
+        if self.pending_activate_path.as_ref().map(|p| p.as_path()) == Some(from) {
+            self.pending_activate_path = Some(new_path.clone());
+        }
+        for tab in self.tabs.iter_mut() {
+            if tab.path.as_path() == from {
+                tab.path = new_path.clone();
+                tab.display_name = new_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("(invalid)")
+                    .to_string();
+            }
+        }
+        if self.playing_path.as_ref().map(|p| p.as_path()) == Some(from) {
+            self.playing_path = Some(new_path);
+        }
+    }
+
+    fn rename_file_path(&mut self, from: &PathBuf, new_name: &str) -> Result<PathBuf, String> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err("Name is empty.".to_string());
+        }
+        let mut name = name.to_string();
+        let has_ext = std::path::Path::new(&name).extension().is_some();
+        if !has_ext {
+            if let Some(ext) = from.extension().and_then(|s| s.to_str()) {
+                name.push('.');
+                name.push_str(ext);
+            } else {
+                name.push_str(".wav");
+            }
+        }
+        let Some(parent) = from.parent() else {
+            return Err("Missing parent folder.".to_string());
+        };
+        let to = parent.join(name);
+        if to == *from {
+            return Ok(to);
+        }
+        if to.exists() {
+            return Err("Target already exists.".to_string());
+        }
+        std::fs::rename(from, &to).map_err(|e| format!("Rename failed: {e}"))?;
+        self.replace_path_in_state(from, &to);
+        self.apply_filter_from_search();
+        self.apply_sort();
+        Ok(to)
+    }
+
+    fn batch_rename_paths(&mut self) -> Result<(), String> {
+        if self.batch_rename_targets.is_empty() {
+            return Err("No files selected.".to_string());
+        }
+        let pattern = self.batch_rename_pattern.trim().to_string();
+        if pattern.is_empty() {
+            return Err("Pattern is empty.".to_string());
+        }
+        let targets = self.batch_rename_targets.clone();
+        let src_set: std::collections::HashSet<PathBuf> = targets.iter().cloned().collect();
+        let mut mappings: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (i, src) in targets.iter().enumerate() {
+            if !src.is_file() {
+                self.remove_missing_path(src);
+                continue;
+            }
+            let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let num = self.batch_rename_start.saturating_add(i as u32);
+            let num_str = if self.batch_rename_pad > 0 {
+                format!("{:0width$}", num, width = self.batch_rename_pad as usize)
+            } else {
+                num.to_string()
+            };
+            let mut name = pattern.replace("{name}", stem).replace("{n}", &num_str);
+            if name.contains('/') || name.contains('\\') {
+                return Err("Pattern must be a file name (no path separators).".to_string());
+            }
+            if name.trim().is_empty() {
+                return Err("Generated name is empty.".to_string());
+            }
+            let has_ext = std::path::Path::new(&name).extension().is_some();
+            if !has_ext {
+                if let Some(ext) = src.extension().and_then(|s| s.to_str()) {
+                    name.push('.');
+                    name.push_str(ext);
+                } else {
+                    name.push_str(".wav");
+                }
+            }
+            let parent = src.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let dst = parent.join(name);
+            mappings.push((src.clone(), dst));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (src, dst) in &mappings {
+            if src == dst {
+                continue;
+            }
+            if !seen.insert(dst.clone()) {
+                return Err("Duplicate target names.".to_string());
+            }
+            if dst.exists() && !src_set.contains(dst) {
+                return Err(format!("Target already exists: {}", dst.display()));
+            }
+        }
+        let needs_temp = mappings
+            .iter()
+            .any(|(src, dst)| src != dst && src_set.contains(dst));
+        if needs_temp {
+            let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();
+            for (i, (src, dst)) in mappings.iter().enumerate() {
+                if src == dst {
+                    continue;
+                }
+                let parent = src.parent().unwrap_or_else(|| std::path::Path::new("."));
+                let mut tmp = parent.join(format!("._wvp_tmp_rename_{:03}.tmp", i));
+                let mut bump = 0;
+                while tmp.exists() {
+                    bump += 1;
+                    tmp = parent.join(format!("._wvp_tmp_rename_{:03}_{bump}.tmp", i));
+                }
+                std::fs::rename(src, &tmp).map_err(|e| format!("Rename failed: {e}"))?;
+                self.replace_path_in_state(src, &tmp);
+                temps.push((tmp, dst.clone()));
+            }
+            for (tmp, dst) in temps {
+                std::fs::rename(&tmp, &dst).map_err(|e| format!("Rename failed: {e}"))?;
+                self.replace_path_in_state(&tmp, &dst);
+            }
+        } else {
+            for (src, dst) in &mappings {
+                if src == dst {
+                    continue;
+                }
+                std::fs::rename(src, dst).map_err(|e| format!("Rename failed: {e}"))?;
+                self.replace_path_in_state(src, dst);
+            }
+        }
+        self.apply_filter_from_search();
+        self.apply_sort();
+        self.selected_multi.clear();
+        for (_, dst) in mappings {
+            if let Some(row) = self.row_for_path(&dst) {
+                self.selected_multi.insert(row);
+            }
+        }
+        self.selected = self.selected_multi.iter().next().copied();
+        if let Some(sel) = self.selected {
+            self.select_anchor = Some(sel);
+        }
+        Ok(())
+    }
+
+    fn unique_copy_target(dest_dir: &std::path::Path, src: &PathBuf) -> PathBuf {
+        let name = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("copy");
+        let base = src
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("copy");
+        let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let mut candidate = dest_dir.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        for i in 1.. {
+            let suffix = if i == 1 {
+                " (copy)".to_string()
+            } else {
+                format!(" (copy {i})")
+            };
+            let file = if ext.is_empty() {
+                format!("{base}{suffix}")
+            } else {
+                format!("{base}{suffix}.{ext}")
+            };
+            candidate = dest_dir.join(file);
+            if !candidate.exists() {
+                return candidate;
+            }
+        }
+        candidate
+    }
+
+    fn copy_paths_to_folder(&mut self, paths: &[PathBuf], dest_dir: &PathBuf) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut added: Vec<PathBuf> = Vec::new();
+        for src in paths {
+            if !src.is_file() {
+                continue;
+            }
+            let dst = Self::unique_copy_target(dest_dir, src);
+            match std::fs::copy(src, &dst) {
+                Ok(_) => added.push(dst),
+                Err(e) => eprintln!("copy failed: {} -> {} ({})", src.display(), dst.display(), e),
+            }
+        }
+        if !added.is_empty() {
+            if self.add_files_merge(&added) > 0 {
+                self.after_add_refresh();
+            }
+        }
+    }
+
+    fn delete_paths(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let targets: std::collections::HashSet<PathBuf> = paths.iter().cloned().collect();
+        self.close_tabs_for_paths(&targets);
+        for p in targets {
+            if let Err(e) = std::fs::remove_file(&p) {
+                eprintln!("delete failed: {} ({})", p.display(), e);
+            }
+            self.remove_missing_path(&p);
+        }
+    }
     fn spawn_export_gains(&mut self, _overwrite: bool) {
         use std::sync::mpsc;
         let mut targets: Vec<(PathBuf, f32)> = Vec::new();
@@ -550,8 +929,13 @@ impl WavesPreviewer {
             let mut ok = 0usize; let mut failed = 0usize; let mut success_paths = Vec::new(); let mut failed_paths = Vec::new();
             for (src, db) in targets {
                 let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-                let dst = src.with_file_name(format!("{} (gain{:+.1}dB).wav", stem, db));
-                match crate::wave::export_gain_wav(&src, &dst, db) { Ok(_) => { ok += 1; success_paths.push(dst); }, Err(e) => { eprintln!("export failed {}: {e:?}", src.display()); failed += 1; failed_paths.push(src.clone()); } }
+                let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
+                let dst = if ext.is_empty() {
+                    src.with_file_name(format!("{} (gain{:+.1}dB)", stem, db))
+                } else {
+                    src.with_file_name(format!("{} (gain{:+.1}dB).{}", stem, db, ext))
+                };
+                match crate::wave::export_gain_audio(&src, &dst, db) { Ok(_) => { ok += 1; success_paths.push(dst); }, Err(e) => { eprintln!("export failed {}: {e:?}", src.display()); failed += 1; failed_paths.push(src.clone()); } }
             }
             let _ = tx.send(ExportResult{ ok, failed, success_paths, failed_paths });
         });
@@ -590,7 +974,7 @@ impl WavesPreviewer {
             for (src, db) in items {
                 match cfg.save_mode {
                     SaveMode::Overwrite => {
-                        match crate::wave::overwrite_gain_wav(&src, db, cfg.backup_bak) {
+                        match crate::wave::overwrite_gain_audio(&src, db, cfg.backup_bak) {
                             Ok(()) => { ok+=1; success_paths.push(src.clone()); },
                             Err(_)  => { failed+=1; failed_paths.push(src.clone()); }
                         }
@@ -605,25 +989,33 @@ impl WavesPreviewer {
                         name = name.replace("{gain}", &format!("{:+.1}", db));
                         let name = crate::app::helpers::sanitize_filename_component(&name);
                         let mut dst = parent.join(name);
-                        match dst.extension().and_then(|e| e.to_str()) { Some(ext) if ext.eq_ignore_ascii_case("wav") => {}, _ => { dst.set_extension("wav"); } }
+                        let src_ext = src.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+                        let dst_ext = dst.extension().and_then(|e| e.to_str());
+                        let use_dst_ext = dst_ext.map(|e| crate::audio_io::is_supported_extension(e)).unwrap_or(false);
+                        if !use_dst_ext {
+                            dst.set_extension(src_ext);
+                        }
                         if dst.exists() {
                             match cfg.conflict {
                                 ConflictPolicy::Overwrite => {}
                                 ConflictPolicy::Skip => { failed+=1; failed_paths.push(src.clone()); continue; }
                                 ConflictPolicy::Rename => {
                                     let orig = dst.clone();
+                                    let orig_ext = orig.extension().and_then(|e| e.to_str()).unwrap_or("");
                                     let mut idx=1u32; loop {
                                         let stem2 = orig.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
                                         let n = crate::app::helpers::sanitize_filename_component(&format!("{}_{:02}", stem2, idx));
                                         dst = orig.with_file_name(n);
-                                        match dst.extension().and_then(|e| e.to_str()) { Some(ext) if ext.eq_ignore_ascii_case("wav") => {}, _ => { dst.set_extension("wav"); } }
+                                        if !orig_ext.is_empty() {
+                                            dst.set_extension(orig_ext);
+                                        }
                                         if !dst.exists() { break; }
                                         idx+=1; if idx>999 { break; }
                                     }
                                 }
                             }
                         }
-                        match crate::wave::export_gain_wav(&src, &dst, db) {
+                        match crate::wave::export_gain_audio(&src, &dst, db) {
                             Ok(()) => { ok+=1; success_paths.push(dst.clone()); },
                             Err(_)  => { failed+=1; failed_paths.push(src.clone()); }
                         }
@@ -736,7 +1128,7 @@ impl WavesPreviewer {
     }
 
     fn start_scan_folder(&mut self, dir: PathBuf) {
-        self.scan_rx = Some(self.spawn_scan_worker(dir));
+        self.scan_rx = Some(self.spawn_scan_worker(dir, self.skip_dotfiles));
         self.scan_in_progress = true;
         self.all_files.clear();
         self.files.clear();
@@ -1295,13 +1687,16 @@ impl WavesPreviewer {
             last_list_scroll_at: None,
             original_files: Vec::new(),
             search_query: String::new(),
+            search_use_regex: false,
             search_dirty: false,
             search_deadline: None,
+            skip_dotfiles: true,
             mode: RateMode::Speed,
             processing: None,
             list_preview_rx: None,
             list_preview_job_id: 0,
             editor_apply_state: None,
+            edited_cache: HashMap::new(),
             pending_gains: HashMap::new(),
             export_state: None,
             playing_path: None,
@@ -1317,6 +1712,18 @@ impl WavesPreviewer {
             show_export_settings: false,
             show_first_save_prompt: false,
             theme_mode: ThemeMode::Dark,
+            show_rename_dialog: false,
+            rename_target: None,
+            rename_input: String::new(),
+            rename_error: None,
+            show_batch_rename_dialog: false,
+            batch_rename_targets: Vec::new(),
+            batch_rename_pattern: "{name}_{n}".into(),
+            batch_rename_start: 1,
+            batch_rename_pad: 2,
+            batch_rename_error: None,
+            show_delete_confirm: false,
+            delete_targets: Vec::new(),
             saving_sources: Vec::new(),
             saving_mode: None,
 
@@ -1470,6 +1877,7 @@ impl WavesPreviewer {
             tab.dragging_marker = None;
             tab.preview_offset_samples = None;
             tab.dirty = state.dirty;
+            Self::update_loop_markers_dirty(tab);
         }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
@@ -1525,7 +1933,7 @@ impl WavesPreviewer {
         #[cfg(not(feature = "kittest"))]
         {
             rfd::FileDialog::new()
-                .add_filter("WAV", &["wav"])
+                .add_filter("Audio", crate::audio_io::SUPPORTED_EXTS)
                 .pick_files()
         }
     }
@@ -1900,6 +2308,7 @@ impl eframe::App for WavesPreviewer {
                     let s = pos_now.min(end);
                     let e = end.max(s);
                     tab.loop_region = Some((s,e));
+                    Self::update_loop_markers_dirty(tab);
                 }
             }
             if ctx.input(|i| i.key_pressed(Key::P)) { // Set Loop End
@@ -1909,6 +2318,7 @@ impl eframe::App for WavesPreviewer {
                     let s = start.min(pos_now);
                     let e = pos_now.max(start);
                     tab.loop_region = Some((s,e));
+                    Self::update_loop_markers_dirty(tab);
                 }
             }
             if ctx.input(|i| i.key_pressed(Key::L)) {
@@ -1929,7 +2339,7 @@ impl eframe::App for WavesPreviewer {
             if let Some(active_idx) = self.active_tab {
                 self.audio.stop();
                 self.tabs.remove(active_idx);
-                // 閉じたタブ�E後にタブがあれば次のタブ、なければ前�EタブをアクチE��ブに
+                // NOTE: invalid-encoding comment removed
                 if !self.tabs.is_empty() {
                     let new_active = if active_idx < self.tabs.len() { 
                         active_idx 
@@ -1945,7 +2355,7 @@ impl eframe::App for WavesPreviewer {
         
         // Top controls (always visible)
         self.ui_top_bar(ctx);
-        // Drag & Drop: merge dropped files/folders into the list (WAV only)
+        // Drag & Drop: merge dropped files/folders into the list (supported audio)
         {
             let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
             if !dropped.is_empty() {
@@ -1975,9 +2385,17 @@ impl eframe::App for WavesPreviewer {
                 for i in 0..tabs_len {
                     // avoid holding immutable borrow over calls that mutate self inside closure
                     let active = self.active_tab == Some(i);
-                    let display = self.tabs[i].display_name.clone();
-                    let path_for_activate = self.tabs[i].path.clone();
-                    let text = if active { RichText::new(format!("[{}]", display)).strong() } else { RichText::new(display) };
+                    let tab = &self.tabs[i];
+                    let mut display = tab.display_name.clone();
+                    if tab.dirty || tab.loop_markers_dirty {
+                        display.push_str(" *");
+                    }
+                    let path_for_activate = tab.path.clone();
+                    let text = if active {
+                        RichText::new(format!("[{}]", display)).strong()
+                    } else {
+                        RichText::new(display)
+                    };
                     ui.horizontal(|ui| {
                         if ui.selectable_label(active, text).clicked() {
                             // Leaving previous tab: discard any un-applied preview
@@ -1995,6 +2413,7 @@ impl eframe::App for WavesPreviewer {
                     });
                 }
                 if let Some(i) = to_close {
+                    self.cache_dirty_tab_at(i);
                     self.tabs.remove(i);
                     match self.active_tab {
                         Some(ai) if ai == i => self.active_tab = None,
@@ -2015,7 +2434,7 @@ impl eframe::App for WavesPreviewer {
     let spec_loading = self.spectro_inflight.contains(&spec_path);
     ui.horizontal(|ui| {
         let tab = &mut self.tabs[tab_idx];
-        let dirty_mark = if tab.dirty { " •" } else { "" };
+        let dirty_mark = if tab.dirty || tab.loop_markers_dirty { " *" } else { "" };
         ui.label(RichText::new(format!("{}{}", tab.path.display(), dirty_mark)).monospace());
         ui.separator();
         // Loop mode toggles (kept): Off / OnWhole / Marker
@@ -2059,6 +2478,7 @@ impl eframe::App for WavesPreviewer {
                 // let mut do_silence: Option<(usize,usize)> = None; // removed
                 let mut do_cutjoin: Option<(usize,usize)> = None;
                 let mut do_apply_xfade: bool = false;
+                let mut do_write_loop_markers: bool = false;
                 let mut do_fade_in: Option<((usize,usize), crate::app::types::FadeShape)> = None;
                 let mut do_fade_out: Option<((usize,usize), crate::app::types::FadeShape)> = None;
                 let mut stop_playback = false;
@@ -2107,6 +2527,24 @@ impl eframe::App for WavesPreviewer {
                             let fit_spp = (tab.samples_len as f32 / wave_w.max(1.0)).max(0.01);
                             tab.samples_per_px = fit_spp;
                             tab.view_offset = 0;
+                        }
+                        // Keep the same center sample anchored when the window width changes.
+                        if tab.samples_len > 0 {
+                            let spp = tab.samples_per_px.max(0.0001);
+                            let old_wave_w = tab.last_wave_w;
+                            if old_wave_w > 0.0 && (old_wave_w - wave_w).abs() > 0.5 {
+                                let old_vis = (old_wave_w * spp).ceil() as usize;
+                                let new_vis = (wave_w * spp).ceil() as usize;
+                                if old_vis > 0 && new_vis > 0 {
+                                    let anchor = tab.view_offset.saturating_add(old_vis / 2);
+                                    let max_left = tab.samples_len.saturating_sub(new_vis);
+                                    let new_view = anchor.saturating_sub(new_vis / 2).min(max_left);
+                                    tab.view_offset = new_view;
+                                }
+                            }
+                            tab.last_wave_w = wave_w;
+                        } else {
+                            tab.last_wave_w = wave_w;
                         }
 
                 // Time ruler (ticks + labels) across all lanes
@@ -2333,6 +2771,7 @@ impl eframe::App for WavesPreviewer {
                                                 MarkerKind::B => b = samp.max(a),
                                             }
                                             tab.loop_region = Some((a, b));
+                                            Self::update_loop_markers_dirty(tab);
                                             apply_pending_loop = true;
                                         }
                                     }
@@ -2443,15 +2882,23 @@ impl eframe::App for WavesPreviewer {
                                             // Emphasize LoopEdit boundary segments if applicable
                                             if tab.active_tool == ToolKind::LoopEdit {
                                                 if let Some((a, b)) = tab.loop_region {
-                                                    let len = b.saturating_sub(a);
-                                                    let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
+                                                    let cf = Self::effective_loop_xfade_samples(
+                                                        a,
+                                                        b,
+                                                        tab.samples_len,
+                                                        tab.loop_xfade_samples,
+                                                    );
                                                     if cf > 0 {
-                                                        // Map original boundary segments into overlay domain using ratio
+                                                        // Map required pre/post segments into overlay domain using ratio
                                                         let ratio = if base_total > 0 { (overlay_total as f32) / (base_total as f32) } else { 1.0 };
-                                                        let a0 = (((a as f32) * ratio).round() as usize).min(buf.len());
-                                                        let a1 = (((a as f32 + cf as f32) * ratio).round() as usize).min(buf.len());
-                                                        let b0 = (((b as f32 - cf as f32) * ratio).round() as usize).min(buf.len());
-                                                        let b1 = (((b as f32) * ratio).round() as usize).min(buf.len());
+                                                        let pre0 = a.saturating_sub(cf);
+                                                        let pre1 = (a + cf).min(tab.samples_len);
+                                                        let post0 = b.saturating_sub(cf);
+                                                        let post1 = (b + cf).min(tab.samples_len);
+                                                        let a0 = (((pre0 as f32) * ratio).round() as usize).min(buf.len());
+                                                        let a1 = (((pre1 as f32) * ratio).round() as usize).min(buf.len());
+                                                        let b0 = (((post0 as f32) * ratio).round() as usize).min(buf.len());
+                                                        let b1 = (((post1 as f32) * ratio).round() as usize).min(buf.len());
                                                         let segs = [(a0, a1), (b0, b1)];
                                                         for (s, e) in segs {
                                                             if let Some((p0, p1)) = ov::overlay_px_range_for_segment(startb, over_vis, bins, s, e) {
@@ -2563,13 +3010,21 @@ impl eframe::App for WavesPreviewer {
                                     // Pre-compute LoopEdit highlight segments (mapped to overlay domain)
                                     let (seg1_opt, seg2_opt) = if tab.active_tool == ToolKind::LoopEdit {
                                         if let Some((a, b)) = tab.loop_region {
-                                            let len = b.saturating_sub(a);
-                                            let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
+                                            let cf = Self::effective_loop_xfade_samples(
+                                                a,
+                                                b,
+                                                tab.samples_len,
+                                                tab.loop_xfade_samples,
+                                            );
                                             if cf > 0 {
-                                                let a0 = (((a as f32) * ratio).round() as usize).min(lenb);
-                                                let a1 = (((a as f32 + cf as f32) * ratio).round() as usize).min(lenb);
-                                                let b0 = (((b as f32 - cf as f32) * ratio).round() as usize).min(lenb);
-                                                let b1 = (((b as f32) * ratio).round() as usize).min(lenb);
+                                                let pre0 = a.saturating_sub(cf);
+                                                let pre1 = (a + cf).min(tab.samples_len);
+                                                let post0 = b.saturating_sub(cf);
+                                                let post1 = (b + cf).min(tab.samples_len);
+                                                let a0 = (((pre0 as f32) * ratio).round() as usize).min(lenb);
+                                                let a1 = (((pre1 as f32) * ratio).round() as usize).min(lenb);
+                                                let b0 = (((post0 as f32) * ratio).round() as usize).min(lenb);
+                                                let b1 = (((post1 as f32) * ratio).round() as usize).min(lenb);
                                                 let s1 = a0.max(startb); let e1 = a1.min(endb);
                                                 let s2 = b0.max(startb); let e2 = b1.min(endb);
                                                 (if s1 < e1 { Some((s1,e1)) } else { None }, if s2 < e2 { Some((s2,e2)) } else { None })
@@ -2773,14 +3228,28 @@ impl eframe::App for WavesPreviewer {
                     // Loop overlay
                     if let Some((a0, b0)) = tab.loop_region {
                         let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                        if b > a {
-                            let active = tab.active_tool == ToolKind::LoopEdit;
-                            let ax = to_x(a);
+                        let active = tab.active_tool == ToolKind::LoopEdit;
+                        let line_alpha = if active { 220 } else { 160 };
+                        let line = Color32::from_rgba_unmultiplied(60, 160, 255, line_alpha);
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        let ax = to_x(a);
+                        if b == a {
+                            painter.line_segment(
+                                [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
+                                egui::Stroke::new(2.0, line),
+                            );
+                            draw_handle(ax, line);
+                            painter.text(
+                                egui::pos2(ax + 6.0, rect.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "S",
+                                fid,
+                                Color32::from_rgb(170, 200, 255),
+                            );
+                        } else {
                             let bx = to_x(b);
                             let shade_alpha = if active { 40 } else { 22 };
-                            let line_alpha = if active { 220 } else { 160 };
                             let shade = Color32::from_rgba_unmultiplied(60, 160, 255, shade_alpha);
-                            let line = Color32::from_rgba_unmultiplied(60, 160, 255, line_alpha);
                             let r = egui::Rect::from_min_max(
                                 egui::pos2(ax, rect.top()),
                                 egui::pos2(bx, rect.bottom()),
@@ -2796,7 +3265,6 @@ impl eframe::App for WavesPreviewer {
                             );
                             draw_handle(ax, line);
                             draw_handle(bx, line);
-                            let fid = TextStyle::Monospace.resolve(ui.style());
                             painter.text(
                                 egui::pos2(ax + 6.0, rect.top() + 2.0),
                                 egui::Align2::LEFT_TOP,
@@ -2822,13 +3290,21 @@ impl eframe::App for WavesPreviewer {
                             );
 
                             // Crossfade bands and shape
-                            let len = b.saturating_sub(a);
-                            let cf = tab.loop_xfade_samples.min(len / 2);
+                            let cf = Self::effective_loop_xfade_samples(
+                                a,
+                                b,
+                                tab.samples_len,
+                                tab.loop_xfade_samples,
+                            );
                             if cf > 0 {
-                                let xs0 = to_x(a);
-                                let xs1 = to_x(a + cf);
-                                let xe0 = to_x(b.saturating_sub(cf));
-                                let xe1 = to_x(b);
+                                let pre0 = a.saturating_sub(cf);
+                                let pre1 = (a + cf).min(tab.samples_len);
+                                let post0 = b.saturating_sub(cf);
+                                let post1 = (b + cf).min(tab.samples_len);
+                                let xs0 = to_x(pre0);
+                                let xs1 = to_x(pre1);
+                                let xe0 = to_x(post0);
+                                let xe1 = to_x(post1);
                                 let band_alpha = if active { 50 } else { 28 };
                                 let col_in = Color32::from_rgba_unmultiplied(255, 180, 60, band_alpha);
                                 let col_out = Color32::from_rgba_unmultiplied(60, 180, 255, band_alpha);
@@ -2846,8 +3322,10 @@ impl eframe::App for WavesPreviewer {
                                 let curve_alpha = if active { 220 } else { 140 };
                                 let curve_col = Color32::from_rgba_unmultiplied(255, 170, 60, curve_alpha);
                                 let steps = 36;
-                                let mut last_in: Option<egui::Pos2> = None;
-                                let mut last_out: Option<egui::Pos2> = None;
+                                let mut last_in_up: Option<egui::Pos2> = None;
+                                let mut last_in_down: Option<egui::Pos2> = None;
+                                let mut last_out_up: Option<egui::Pos2> = None;
+                                let mut last_out_down: Option<egui::Pos2> = None;
                                 let h = rect.height();
                                 let y_of = |w: f32| rect.bottom() - w * h;
                                 for i in 0..=steps {
@@ -2860,23 +3338,40 @@ impl eframe::App for WavesPreviewer {
                                         crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
                                     };
                                     let x_in = egui::lerp(xs0..=xs1, t);
-                                    let p_in = egui::pos2(x_in, y_of(w_in));
-                                    if let Some(lp) = last_in {
+                                    let p_in_up = egui::pos2(x_in, y_of(w_in));
+                                    let p_in_down = egui::pos2(x_in, y_of(w_out));
+                                    if let Some(lp) = last_in_up {
                                         painter.line_segment(
-                                            [lp, p_in],
+                                            [lp, p_in_up],
                                             egui::Stroke::new(2.0, curve_col),
                                         );
                                     }
-                                    last_in = Some(p_in);
+                                    if let Some(lp) = last_in_down {
+                                        painter.line_segment(
+                                            [lp, p_in_down],
+                                            egui::Stroke::new(2.0, curve_col),
+                                        );
+                                    }
+                                    last_in_up = Some(p_in_up);
+                                    last_in_down = Some(p_in_down);
+
                                     let x_out = egui::lerp(xe0..=xe1, t);
-                                    let p_out = egui::pos2(x_out, y_of(w_out));
-                                    if let Some(lp) = last_out {
+                                    let p_out_up = egui::pos2(x_out, y_of(w_in));
+                                    let p_out_down = egui::pos2(x_out, y_of(w_out));
+                                    if let Some(lp) = last_out_up {
                                         painter.line_segment(
-                                            [lp, p_out],
+                                            [lp, p_out_up],
                                             egui::Stroke::new(2.0, curve_col),
                                         );
                                     }
-                                    last_out = Some(p_out);
+                                    if let Some(lp) = last_out_down {
+                                        painter.line_segment(
+                                            [lp, p_out_down],
+                                            egui::Stroke::new(2.0, curve_col),
+                                        );
+                                    }
+                                    last_out_up = Some(p_out_up);
+                                    last_out_down = Some(p_out_down);
                                 }
                             }
                         }
@@ -2885,9 +3380,24 @@ impl eframe::App for WavesPreviewer {
                     // Trim overlay
                     if let Some((a0, b0)) = tab.trim_range {
                         let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                        if b > a {
-                            let active = tab.active_tool == ToolKind::Trim;
-                            let ax = to_x(a);
+                        let active = tab.active_tool == ToolKind::Trim;
+                        let line = Color32::from_rgba_unmultiplied(255, 140, 0, if active { 230 } else { 160 });
+                        let fid = TextStyle::Monospace.resolve(ui.style());
+                        let ax = to_x(a);
+                        if b == a {
+                            painter.line_segment(
+                                [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
+                                egui::Stroke::new(2.0, line),
+                            );
+                            draw_handle(ax, line);
+                            painter.text(
+                                egui::pos2(ax + 6.0, rect.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "A",
+                                fid,
+                                Color32::from_rgb(255, 200, 150),
+                            );
+                        } else {
                             let bx = to_x(b);
                             let dim_alpha = if active { 80 } else { 50 };
                             let keep_alpha = if active { 36 } else { 22 };
@@ -2908,7 +3418,6 @@ impl eframe::App for WavesPreviewer {
                                 egui::pos2(bx, rect.bottom()),
                             );
                             painter.rect_filled(keep_r, 0.0, keep);
-                            let line = Color32::from_rgba_unmultiplied(255, 140, 0, if active { 230 } else { 160 });
                             painter.line_segment(
                                 [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
                                 egui::Stroke::new(2.0, line),
@@ -2919,7 +3428,6 @@ impl eframe::App for WavesPreviewer {
                             );
                             draw_handle(ax, line);
                             draw_handle(bx, line);
-                            let fid = TextStyle::Monospace.resolve(ui.style());
                             painter.text(
                                 egui::pos2(ax + 6.0, rect.top() + 2.0),
                                 egui::Align2::LEFT_TOP,
@@ -3173,6 +3681,7 @@ impl eframe::App for WavesPreviewer {
                                                     let mut e = e_i.clamp(0, max_i) as usize;
                                                     if e < s { std::mem::swap(&mut s, &mut e); }
                                                     tab.loop_region = Some((s,e));
+                                                    Self::update_loop_markers_dirty(tab);
                                                     apply_pending_loop = true;
                                                 }
                                             });
@@ -3201,6 +3710,7 @@ impl eframe::App for WavesPreviewer {
                                                     let (mut s, mut e) = (pos, end);
                                                     if e < s { std::mem::swap(&mut s, &mut e); }
                                                     tab.loop_region = Some((s,e));
+                                                    Self::update_loop_markers_dirty(tab);
                                                     apply_pending_loop = true;
                                                 }
                                                 if ui.button("Set End").on_hover_text("Set End at playhead").clicked() {
@@ -3209,6 +3719,7 @@ impl eframe::App for WavesPreviewer {
                                                     let (mut s, mut e) = (start, pos);
                                                     if e < s { std::mem::swap(&mut s, &mut e); }
                                                     tab.loop_region = Some((s,e));
+                                                    Self::update_loop_markers_dirty(tab);
                                                     apply_pending_loop = true;
                                                 }
                                                 if ui.button("Clear").clicked() { do_set_loop_from = Some((0,0)); }
@@ -3216,10 +3727,47 @@ impl eframe::App for WavesPreviewer {
 
                                             // Crossfade controls already above; add Apply button to destructively bake Xfade
                                             ui.horizontal_wrapped(|ui| {
-                                                let len_ok = tab.loop_region.map(|(a,b)| b> a).unwrap_or(false);
-                                                let n = tab.loop_xfade_samples;
-                                                if ui.add_enabled(len_ok && n>0, egui::Button::new("Apply Xfade")).on_hover_text("Bake crossfade into data at loop boundary").clicked() {
+                                                let effective_cf = tab
+                                                    .loop_region
+                                                    .map(|(a, b)| {
+                                                        Self::effective_loop_xfade_samples(
+                                                            a,
+                                                            b,
+                                                            tab.samples_len,
+                                                            tab.loop_xfade_samples,
+                                                        )
+                                                    })
+                                                    .unwrap_or(0);
+                                                if ui
+                                                    .add_enabled(
+                                                        effective_cf > 0,
+                                                        egui::Button::new("Apply Xfade"),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Bake crossfade into data at loop boundary",
+                                                    )
+                                                    .clicked()
+                                                {
                                                     do_apply_xfade = true;
+                                                }
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                let label = if tab.loop_region.is_some() {
+                                                    "Write Markers to File"
+                                                } else {
+                                                    "Clear Markers in File"
+                                                };
+                                                if ui
+                                                    .add_enabled(
+                                                        tab.loop_markers_dirty,
+                                                        egui::Button::new(label),
+                                                    )
+                                                    .on_hover_text(
+                                                        "Write loop markers into file metadata",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    do_write_loop_markers = true;
                                                 }
                                             });
 
@@ -3228,29 +3776,38 @@ impl eframe::App for WavesPreviewer {
                                             if !preview_ok {
                                                 ui.label(RichText::new("Preview disabled for large clips").weak());
                                             } else if let Some((a,b)) = tab.loop_region {
-                                                let len = b.saturating_sub(a);
-                                                let cf = tab.loop_xfade_samples.min(len / 2).min(tab.samples_len);
+                                                let cf = Self::effective_loop_xfade_samples(
+                                                    a,
+                                                    b,
+                                                    tab.samples_len,
+                                                    tab.loop_xfade_samples,
+                                                );
                                                 if cf > 0 {
-                                                    // Build per-channel overlay applying crossfade at boundaries
+                                                    // Build per-channel overlay applying crossfade across centered windows
                                                     let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                    let cf_f = cf.max(1) as f32;
+                                                    let win_len = cf.saturating_mul(2);
+                                                    let denom = (win_len.saturating_sub(1)).max(1) as f32;
+                                                    let s_start = a.saturating_sub(cf);
+                                                    let e_start = b.saturating_sub(cf);
                                                     for ch in overlay.iter_mut() {
-                                                        for i in 0..cf {
-                                                            let head_idx = a.saturating_add(i);
-                                                            let tail_idx = b.saturating_sub(cf).saturating_add(i);
-                                                            if head_idx >= ch.len() || tail_idx >= ch.len() { break; }
-                                                            let t = (i as f32) / cf_f;
+                                                        for i in 0..win_len {
+                                                            let s_idx = s_start.saturating_add(i);
+                                                            let e_idx = e_start.saturating_add(i);
+                                                            if s_idx >= ch.len() || e_idx >= ch.len() {
+                                                                break;
+                                                            }
+                                                            let t = (i as f32) / denom;
                                                             let (w_out, w_in) = match tab.loop_xfade_shape {
                                                                 crate::app::types::LoopXfadeShape::EqualPower => {
                                                                     let ang = core::f32::consts::FRAC_PI_2 * t; (ang.cos(), ang.sin())
                                                                 }
                                                                 crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
                                                             };
-                                                            let head = ch[head_idx];
-                                                            let tail = ch[tail_idx];
-                                                            let m = tail * w_out + head * w_in;
-                                                            ch[head_idx] = m;
-                                                            ch[tail_idx] = m;
+                                                            let s = ch[s_idx];
+                                                            let e = ch[e_idx];
+                                                            let mixed = e * w_out + s * w_in;
+                                                            ch[s_idx] = mixed;
+                                                            ch[e_idx] = mixed;
                                                         }
                                                     }
                                                     let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
@@ -3271,7 +3828,7 @@ impl eframe::App for WavesPreviewer {
                                             }
                                             // Trim has its own A/B range (independent from loop)
                                             let range_opt = tab.trim_range;
-                                            if let Some((smp,emp)) = range_opt { ui.label(format!("Trim A–B: {}..{} samp", smp, emp)); } else { ui.label("Trim A–B: (set below)"); }
+                                            if let Some((smp,emp)) = range_opt { ui.label(format!("Trim A?B: {}..{} samp", smp, emp)); } else { ui.label("Trim A?B: (set below)"); }
                                             // A/B setters from playhead
                                             ui.horizontal_wrapped(|ui| {
                                                 if ui.button("Set A").on_hover_text("Set A at playhead").clicked() {
@@ -3280,7 +3837,7 @@ impl eframe::App for WavesPreviewer {
                                                     tab.trim_range = new_r;
                                                     if let Some((a,b)) = tab.trim_range { if b>a {
                                                         if preview_ok {
-                                                            // live preview: keep-only A–B
+                                                            // live preview: keep-only A?B
                                                             let mut mono = Self::editor_mixdown_mono(tab);
                                                             mono = mono[a..b].to_vec();
                                                             pending_preview = Some((ToolKind::Trim, mono));
@@ -3316,7 +3873,7 @@ impl eframe::App for WavesPreviewer {
                                             let dis = !range_opt.map(|(s,e)| e> s).unwrap_or(false);
                                             let range = range_opt.unwrap_or((0,0));
                                             if ui.add_enabled(!dis, egui::Button::new("Cut+Join")).clicked() { do_cutjoin = Some(range); }
-                                            if ui.add_enabled(!dis, egui::Button::new("Apply Keep A–B")).clicked() { do_trim = Some(range); tab.preview_audio_tool=None; }
+                                            if ui.add_enabled(!dis, egui::Button::new("Apply Keep A?B")).clicked() { do_trim = Some(range); tab.preview_audio_tool=None; }
                                         });
                                         });
                                     }
@@ -3561,7 +4118,16 @@ impl eframe::App for WavesPreviewer {
                             _ => { ui.label("Tools for this view will appear here."); }
                         }
                     }); // end inspector
-                    if let Some((tool, mono, p)) = pending_heavy_preview { self.spawn_heavy_preview_owned(mono, tool, p); }
+                    if let Some((tool, mono, p)) = pending_heavy_preview {
+                        if self.is_decode_failed_path(&self.tabs[tab_idx].path) {
+                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                                tab.preview_audio_tool = None;
+                                tab.preview_overlay = None;
+                            }
+                        } else {
+                            self.spawn_heavy_preview_owned(mono, tool, p);
+                        }
+                    }
                     if let Some(semi) = pending_pitch_apply {
                         self.spawn_editor_apply_for_tab(tab_idx, ToolKind::PitchShift, semi);
                     }
@@ -3576,7 +4142,11 @@ impl eframe::App for WavesPreviewer {
 
                 // perform pending actions after borrows end
                 // Defer starting heavy overlay until after UI to avoid nested &mut self borrow (E0499)
-                if let Some((tool, p)) = pending_overlay_job { self.spawn_heavy_overlay_for_tab(tab_idx, tool, p); }
+                if let Some((tool, p)) = pending_overlay_job {
+                    if !self.is_decode_failed_path(&self.tabs[tab_idx].path) {
+                        self.spawn_heavy_overlay_for_tab(tab_idx, tool, p);
+                    }
+                }
                 if request_undo {
                     self.clear_preview_if_any(tab_idx);
                     self.editor_apply_state = None;
@@ -3587,7 +4157,17 @@ impl eframe::App for WavesPreviewer {
                     self.editor_apply_state = None;
                     self.redo_in_tab(tab_idx);
                 }
-                if let Some((s,e)) = do_set_loop_from { if let Some(tab) = self.tabs.get_mut(tab_idx) { if s==0 && e==0 { tab.loop_region=None; } else { tab.loop_region=Some((s,e)); if tab.loop_mode==LoopMode::Marker { self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); } } } }
+                if let Some((s,e)) = do_set_loop_from {
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        if s==0 && e==0 {
+                            tab.loop_region=None;
+                        } else {
+                            tab.loop_region=Some((s,e));
+                            if tab.loop_mode==LoopMode::Marker { self.audio.set_loop_enabled(true); self.audio.set_loop_region(s,e); }
+                        }
+                        Self::update_loop_markers_dirty(tab);
+                    }
+                }
                 if let Some((s,e)) = do_trim { self.editor_apply_trim_range(tab_idx, (s,e)); }
                 if let Some(((s,e), in_ms, out_ms)) = do_fade { self.editor_apply_fade_range(tab_idx, (s,e), in_ms, out_ms); }
                 if let Some(((s,e), shp)) = do_fade_in { self.editor_apply_fade_in_explicit(tab_idx, (s,e), shp); }
@@ -3605,6 +4185,7 @@ impl eframe::App for WavesPreviewer {
                 if let Some((_,_)) = do_cutjoin { if let Some(tab) = self.tabs.get_mut(tab_idx) { tab.trim_range = None; } }
                 if let Some((s,e)) = do_cutjoin { self.editor_delete_range_and_join(tab_idx, (s,e)); }
                 if do_apply_xfade { self.editor_apply_loop_xfade(tab_idx); }
+                if do_write_loop_markers { self.write_loop_markers_for_tab(tab_idx); }
                 if apply_pending_loop { if let Some(tab_ro) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab_ro); } }
             } else {
                 // List view
@@ -3673,9 +4254,21 @@ impl eframe::App for WavesPreviewer {
                             let mut clicked_to_select = false;
                             // Ensure quick header meta is present when row is shown
                             if !self.meta.contains_key(&path_owned) {
-                                if let Ok(reader) = hound::WavReader::open(&path_owned) {
-                                    let spec = reader.spec();
-                                    self.meta.insert(path_owned.clone(), FileMeta { channels: spec.channels, sample_rate: spec.sample_rate, bits_per_sample: spec.bits_per_sample, duration_secs: None, rms_db: None, peak_db: None, lufs_i: None, thumb: Vec::new() });
+                                if let Ok(info) = crate::audio_io::read_audio_info(&path_owned) {
+                                    self.meta.insert(
+                                        path_owned.clone(),
+                                        FileMeta {
+                                            channels: info.channels,
+                                            sample_rate: info.sample_rate,
+                                            bits_per_sample: info.bits_per_sample,
+                                            duration_secs: info.duration_secs,
+                                            rms_db: None,
+                                            peak_db: None,
+                                            lufs_i: None,
+                                            thumb: Vec::new(),
+                                            decode_error: None,
+                                        },
+                                    );
                                 }
                             }
                             let meta = self.meta.get(&path_owned).cloned();
@@ -3683,16 +4276,17 @@ impl eframe::App for WavesPreviewer {
                             // col 0: File (clickable label with clipping)
                             row.col(|ui| {
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    let mark = if self.pending_gains.get(&path_owned).map(|v| v.abs() > 0.0001).unwrap_or(false) { " •" } else { "" };
+                                    let mark = if self.pending_gains.get(&path_owned).map(|v| v.abs() > 0.0001).unwrap_or(false) { " ?" } else { "" };
                                     let resp = ui.add(
                                         egui::Label::new(RichText::new(format!("{}{}", name, mark)).size(text_height * 1.05))
                                             .sense(Sense::click())
                                             .truncate()
+                                            .show_tooltip_when_elided(false)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     
-                                    // シングルクリチE��: 行選抁E+ 音声ロード（後段で一括処琁E��E                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
+                                    // NOTE: invalid-encoding comment removed
                                     
-                                    // ダブルクリチE��: エチE��タタブで開く
+                                    // NOTE: invalid-encoding comment removed
                                     if resp.double_clicked() { clicked_to_select = true; to_open = Some(path_owned.clone()); }
                                     
                                     if resp.hovered() {
@@ -3707,11 +4301,12 @@ impl eframe::App for WavesPreviewer {
                                         egui::Label::new(RichText::new(parent).monospace().size(text_height * 1.0))
                                             .sense(Sense::click())
                                             .truncate()
+                                            .show_tooltip_when_elided(false)
                                     ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                     
-                                    // シングルクリチE��: 行選抁E+ 音声ローチE                                    if resp.clicked() && !resp.double_clicked() { clicked_to_load = true; }
+                                    // NOTE: invalid-encoding comment removed
                                     
-                                    // ダブルクリチE��: シスチE��のファイルブラウザでフォルダを開く！EAVファイルを選択状態で�E�E                                    if resp.double_clicked() { clicked_to_select = true; let _ = open_folder_with_file_selected(&path_owned); }
+                                    // NOTE: invalid-encoding comment removed
                                     
                                     if resp.hovered() {
                                         resp.on_hover_text(parent);
@@ -3755,7 +4350,7 @@ impl eframe::App for WavesPreviewer {
                                 ).on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if resp.clicked() { clicked_to_load = true; }
                             });
-                            // col 6: dBFS (Peak) with Gain反映�E�Eolumeは含めなぁE��E clickable
+                            // NOTE: invalid-encoding comment removed
                             row.col(|ui| {
                                 let (rect2, resp2) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h*0.9), Sense::click());
                                 let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
@@ -3865,14 +4460,31 @@ impl eframe::App for WavesPreviewer {
             if let Some(pending) = self.pending_activate_path.take() { activate_path = Some(pending); }
         }
         if let Some(p) = activate_path {
-            // Reload audio for the activated tab only; do not touch stored waveform
-            match self.mode {
-                RateMode::Speed => { let _ = prepare_for_speed(&p, &self.audio, &mut Vec::new(), self.playback_rate); self.audio.set_rate(self.playback_rate); }
-                _ => { self.audio.set_rate(1.0); self.spawn_heavy_processing(&p); }
+            if !self.apply_dirty_tab_audio_with_mode(&p) {
+                // Reload audio for the activated tab only; do not touch stored waveform
+                match self.mode {
+                    RateMode::Speed => {
+                        let _ = prepare_for_speed(
+                            &p,
+                            &self.audio,
+                            &mut Vec::new(),
+                            self.playback_rate,
+                        );
+                        self.audio.set_rate(self.playback_rate);
+                    }
+                    _ => {
+                        self.audio.set_rate(1.0);
+                        self.spawn_heavy_processing(&p);
+                    }
+                }
+                if let Some(idx) = self.active_tab {
+                    if let Some(tab) = self.tabs.get(idx) {
+                        self.apply_loop_mode_for_tab(tab);
+                    }
+                }
+                // Update effective volume to include per-file gain for the activated tab
+                self.apply_effective_volume();
             }
-            if let Some(idx) = self.active_tab { if let Some(tab) = self.tabs.get(idx) { self.apply_loop_mode_for_tab(tab); } }
-            // Update effective volume to include per-file gain for the activated tab
-            self.apply_effective_volume();
         }
         // List auto-scroll flag is cleared by list view when consumed.
 
@@ -3930,7 +4542,11 @@ impl eframe::App for WavesPreviewer {
                     if ui.button("Leave").clicked() {
                         match self.leave_intent.take() {
                             Some(LeaveIntent::CloseTab(i)) => {
-                                if i < self.tabs.len() { self.tabs.remove(i); if let Some(ai)=self.active_tab { if ai==i { self.active_tab=None; } else if ai>i { self.active_tab=Some(ai-1); } } }
+                                if i < self.tabs.len() {
+                                    self.cache_dirty_tab_at(i);
+                                    self.tabs.remove(i);
+                                    if let Some(ai)=self.active_tab { if ai==i { self.active_tab=None; } else if ai>i { self.active_tab=Some(ai-1); } }
+                                }
                                 self.audio.stop();
                             }
                             Some(LeaveIntent::ToTab(i)) => {
@@ -3970,6 +4586,147 @@ impl eframe::App for WavesPreviewer {
 
         // Export settings window (in separate UI module)
         self.ui_export_settings_window(ctx);
+        // Rename dialog
+        if self.show_rename_dialog {
+            let mut do_rename = false;
+            egui::Window::new("Rename File")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    if let Some(path) = self.rename_target.as_ref() {
+                        ui.label(path.display().to_string());
+                    }
+                    let resp = ui.text_edit_singleline(&mut self.rename_input);
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        do_rename = true;
+                    }
+                    if let Some(err) = self.rename_error.as_ref() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, err);
+                    }
+                    ui.horizontal(|ui| {
+                        let can = !self.rename_input.trim().is_empty();
+                        if ui.add_enabled(can, egui::Button::new("Rename")).clicked() {
+                            do_rename = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_rename_dialog = false;
+                        }
+                    });
+                });
+            if do_rename {
+                let name = self.rename_input.clone();
+                if let Some(path) = self.rename_target.clone() {
+                    match self.rename_file_path(&path, &name) {
+                        Ok(_) => {
+                            self.show_rename_dialog = false;
+                            self.rename_target = None;
+                            self.rename_error = None;
+                        }
+                        Err(err) => {
+                            self.rename_error = Some(err);
+                        }
+                    }
+                } else {
+                    self.show_rename_dialog = false;
+                }
+            }
+        }
+        if self.show_batch_rename_dialog {
+            let mut do_rename = false;
+            egui::Window::new("Batch Rename")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(format!("{} files", self.batch_rename_targets.len()));
+                    ui.horizontal(|ui| {
+                        ui.label("Pattern:");
+                        ui.text_edit_singleline(&mut self.batch_rename_pattern);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Start:");
+                        ui.add(egui::DragValue::new(&mut self.batch_rename_start).range(0..=1_000_000));
+                        ui.label("Zero pad:");
+                        ui.add(egui::DragValue::new(&mut self.batch_rename_pad).range(0..=6));
+                    });
+                    ui.label("Tokens: {name} (original stem), {n} (sequence)");
+                    if let Some(err) = self.batch_rename_error.as_ref() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, err);
+                    }
+                    let preview_count = 4usize;
+                    ui.separator();
+                    ui.label("Preview:");
+                    for (i, src) in self.batch_rename_targets.iter().take(preview_count).enumerate() {
+                        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        let num = self.batch_rename_start.saturating_add(i as u32);
+                        let num_str = if self.batch_rename_pad > 0 {
+                            format!("{:0width$}", num, width = self.batch_rename_pad as usize)
+                        } else {
+                            num.to_string()
+                        };
+                        let mut name = self
+                            .batch_rename_pattern
+                            .replace("{name}", stem)
+                            .replace("{n}", &num_str);
+                        let has_ext = std::path::Path::new(&name).extension().is_some();
+                        if !has_ext {
+                            if let Some(ext) = src.extension().and_then(|s| s.to_str()) {
+                                name.push('.');
+                                name.push_str(ext);
+                            }
+                        }
+                        ui.label(format!("{} -> {}", src.display(), name));
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Rename").clicked() {
+                            do_rename = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_batch_rename_dialog = false;
+                            self.batch_rename_targets.clear();
+                            self.batch_rename_error = None;
+                        }
+                    });
+                });
+            if do_rename {
+                match self.batch_rename_paths() {
+                    Ok(()) => {
+                        self.show_batch_rename_dialog = false;
+                        self.batch_rename_targets.clear();
+                        self.batch_rename_error = None;
+                    }
+                    Err(err) => {
+                        self.batch_rename_error = Some(err);
+                    }
+                }
+            }
+        }
+        // Delete confirmation
+        if self.show_delete_confirm {
+            let count = self.delete_targets.len();
+            egui::Window::new("Delete Files?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(format!("Delete {} file(s)?", count));
+                    ui.label("This cannot be undone.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            let targets = self.delete_targets.clone();
+                            self.delete_paths(&targets);
+                            self.delete_targets.clear();
+                            self.show_delete_confirm = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.delete_targets.clear();
+                            self.show_delete_confirm = false;
+                        }
+                    });
+                });
+        }
         // Debug window
         self.ui_debug_window(ctx);
     }

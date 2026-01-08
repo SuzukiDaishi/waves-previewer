@@ -81,7 +81,7 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage:\n  waves-previewer [options]\n\nOptions:\n  --open-folder <dir>\n  --open-file <wav> (repeatable)\n  --open-first\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --help"
+                    "Usage:\n  waves-previewer [options]\n\nOptions:\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --help"
                 );
                 std::process::exit(0);
             }

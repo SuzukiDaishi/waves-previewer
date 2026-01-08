@@ -4,6 +4,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::types::FileMeta;
+use crate::audio_io;
 
 
 struct MetaQueue {
@@ -75,19 +76,19 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<(
                 let Some(p) = path_opt else { break; };
 
                 // Stage 1: quick header-only metadata
-                let header_ok = if let Ok(reader) = hound::WavReader::open(&p) {
-                    let spec = reader.spec();
+                let header_ok = if let Ok(info) = audio_io::read_audio_info(&p) {
                     let _ = tx.send((
                         p.clone(),
                         FileMeta {
-                            channels: spec.channels,
-                            sample_rate: spec.sample_rate,
-                            bits_per_sample: spec.bits_per_sample,
-                            duration_secs: None,
+                            channels: info.channels,
+                            sample_rate: info.sample_rate,
+                            bits_per_sample: info.bits_per_sample,
+                            duration_secs: info.duration_secs,
                             rms_db: None,
                             peak_db: None,
                             lufs_i: None,
                             thumb: Vec::new(),
+                            decode_error: None,
                         },
                     ));
                     true
@@ -103,6 +104,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<(
                             peak_db: None,
                             lufs_i: None,
                             thumb: Vec::new(),
+                            decode_error: Some("Decode failed".to_string()),
                         },
                     ));
                     false
@@ -112,7 +114,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<(
                 }
 
                 // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
-                if let Ok((chans, sr)) = crate::wave::decode_wav_multi(&p) {
+                if let Ok((chans, sr, decode_errors)) = audio_io::decode_audio_multi_with_errors(&p) {
                     // Mono mixdown for RMS/thumbnail
                     let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
                     let mut mono = Vec::with_capacity(len);
@@ -150,16 +152,18 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<(
                             if m > peak_abs { peak_abs = m; }
                         }
                     }
-                    let peak_db = if peak_abs > 0.0 { 20.0 * peak_abs.log10() } else { f32::NEG_INFINITY };
+                    let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+                    let peak_db = if peak_abs > silent_thresh {
+                        20.0 * peak_abs.log10()
+                    } else {
+                        f32::NEG_INFINITY
+                    };
                     let mut thumb = Vec::new();
                     crate::wave::build_minmax(&mut thumb, &mono, 128);
                     let lufs_i = crate::wave::lufs_integrated_from_multi(&chans, sr).ok();
-                    let (ch, bits) = if let Ok(reader2) = hound::WavReader::open(&p) {
-                        let s = reader2.spec();
-                        (s.channels, s.bits_per_sample)
-                    } else {
-                        (chans.len() as u16, 0)
-                    };
+                    let (ch, bits) = audio_io::read_audio_info(&p)
+                        .map(|info| (info.channels, info.bits_per_sample))
+                        .unwrap_or((chans.len() as u16, 0));
                     let length_secs = if sr > 0 { mono.len() as f32 / sr as f32 } else { f32::NAN };
                     let _ = tx.send((
                         p,
@@ -172,6 +176,55 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<(
                             peak_db: Some(peak_db),
                             lufs_i,
                             thumb,
+                            decode_error: if decode_errors > 0 {
+                                Some(format!("DecodeError x{decode_errors}"))
+                            } else {
+                                None
+                            },
+                        },
+                    ));
+                } else if let Ok((mono, sr, _truncated, decode_errors)) =
+                    audio_io::decode_audio_mono_prefix_with_errors(&p, 3.0)
+                {
+                    let mut sum_sq = 0.0f64;
+                    for &v in &mono {
+                        sum_sq += (v as f64) * (v as f64);
+                    }
+                    let n = mono.len().max(1) as f64;
+                    let rms = (sum_sq / n).sqrt() as f32;
+                    let rms_db = if rms > 0.0 { 20.0 * rms.log10() } else { -120.0 };
+                    let mut peak_abs = 0.0f32;
+                    for &v in &mono {
+                        let a = v.abs();
+                        if a > peak_abs {
+                            peak_abs = a;
+                        }
+                    }
+                    let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+                    let peak_db = if peak_abs > silent_thresh {
+                        20.0 * peak_abs.log10()
+                    } else {
+                        f32::NEG_INFINITY
+                    };
+                    let mut thumb = Vec::new();
+                    crate::wave::build_minmax(&mut thumb, &mono, 128);
+                    let info = audio_io::read_audio_info(&p).ok();
+                    let _ = tx.send((
+                        p,
+                        FileMeta {
+                            channels: info.map(|i| i.channels).unwrap_or(0),
+                            sample_rate: if sr > 0 { sr } else { info.map(|i| i.sample_rate).unwrap_or(0) },
+                            bits_per_sample: info.map(|i| i.bits_per_sample).unwrap_or(0),
+                            duration_secs: info.and_then(|i| i.duration_secs),
+                            rms_db: Some(rms_db),
+                            peak_db: Some(peak_db),
+                            lufs_i: None,
+                            thumb,
+                            decode_error: if decode_errors > 0 {
+                                Some(format!("DecodeError x{decode_errors} (prefix)"))
+                            } else {
+                                Some("Decode failed (prefix)".to_string())
+                            },
                         },
                     ));
                 }

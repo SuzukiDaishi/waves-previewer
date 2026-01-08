@@ -17,6 +17,13 @@ impl crate::app::WavesPreviewer {
         let visible_rows = ((avail_h - header_h) / row_h).floor().max(1.0) as usize;
         ui.set_min_width(ui.available_width());
         let row_count = self.files.len().max(12);
+        let mut dirty_paths: std::collections::HashSet<PathBuf> = self
+            .tabs
+            .iter()
+            .filter(|t| t.dirty || t.loop_markers_dirty)
+            .map(|t| t.path.clone())
+            .collect();
+        dirty_paths.extend(self.edited_cache.keys().cloned());
 
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
@@ -104,6 +111,7 @@ impl crate::app::WavesPreviewer {
         }
 
         let mut sort_changed = false;
+        let mut missing_paths: Vec<PathBuf> = Vec::new();
         let list_rect = ui.available_rect_before_wrap();
         let pointer_over_list = ui
             .input(|i| i.pointer.hover_pos())
@@ -243,6 +251,10 @@ impl crate::app::WavesPreviewer {
                             Some(p) => p.clone(),
                             None => return,
                         };
+                        if !path_owned.is_file() {
+                            missing_paths.push(path_owned.clone());
+                            return;
+                        }
                         self.queue_meta_for_path(&path_owned, true);
                         let file_name = path_owned
                             .file_name()
@@ -258,6 +270,9 @@ impl crate::app::WavesPreviewer {
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     let mut display = file_name.to_string();
+                                    if dirty_paths.contains(&path_owned) {
+                                        display.push_str(" *");
+                                    }
                                     if self
                                         .pending_gains
                                         .get(&path_owned)
@@ -274,10 +289,13 @@ impl crate::app::WavesPreviewer {
                                                     .size(text_height * 1.0),
                                             )
                                             .sense(Sense::click())
-                                            .truncate(),
+                                            .truncate()
+                                            .show_tooltip_when_elided(false),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked() && !resp.double_clicked() {
+                                    if resp.clicked_by(egui::PointerButton::Primary)
+                                        && !resp.double_clicked()
+                                    {
                                         clicked_to_load = true;
                                     }
                                     if resp.double_clicked() {
@@ -302,10 +320,13 @@ impl crate::app::WavesPreviewer {
                                                     .size(text_height * 1.0),
                                             )
                                             .sense(Sense::click())
-                                            .truncate(),
+                                            .truncate()
+                                            .show_tooltip_when_elided(false),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked() && !resp.double_clicked() {
+                                    if resp.clicked_by(egui::PointerButton::Primary)
+                                        && !resp.double_clicked()
+                                    {
                                         clicked_to_load = true;
                                     }
                                     if resp.double_clicked() {
@@ -337,7 +358,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked() {
+                            if resp.clicked_by(egui::PointerButton::Primary) {
                                 clicked_to_load = true;
                             }
                         });
@@ -349,7 +370,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked() {
+                            if resp.clicked_by(egui::PointerButton::Primary) {
                                 clicked_to_load = true;
                             }
                         });
@@ -365,7 +386,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked() {
+                            if resp.clicked_by(egui::PointerButton::Primary) {
                                 clicked_to_load = true;
                             }
                         });
@@ -383,7 +404,7 @@ impl crate::app::WavesPreviewer {
                                     .sense(Sense::click()),
                                 )
                                 .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked() {
+                            if resp.clicked_by(egui::PointerButton::Primary) {
                                 clicked_to_load = true;
                             }
                         });
@@ -409,7 +430,7 @@ impl crate::app::WavesPreviewer {
                                 fid,
                                 egui::Color32::WHITE,
                             );
-                            if resp2.clicked() {
+                            if resp2.clicked_by(egui::PointerButton::Primary) {
                                 clicked_to_load = true;
                             }
                         });
@@ -439,7 +460,7 @@ impl crate::app::WavesPreviewer {
                                 fid,
                                 egui::Color32::WHITE,
                             );
-                            if resp2.clicked() {
+                            if resp2.clicked_by(egui::PointerButton::Primary) {
                                 clicked_to_load = true;
                             }
                         });
@@ -479,18 +500,41 @@ impl crate::app::WavesPreviewer {
                                 egui::vec2(ui.available_width(), row_h * 0.9),
                                 Sense::hover(),
                             );
+                            let error_text = self
+                                .meta
+                                .get(&path_owned)
+                                .and_then(|m| m.decode_error.as_deref());
+                            let (wave_rect, error_rect) = if error_text.is_some() {
+                                let err_max = (rect2.height() * 0.45).max(8.0);
+                                let mut err_h = (row_h * 0.36).max(8.0);
+                                if err_h > err_max {
+                                    err_h = err_max;
+                                }
+                                let wave_h = (rect2.height() - err_h).max(1.0);
+                                let wave_rect = egui::Rect::from_min_size(
+                                    rect2.min,
+                                    egui::vec2(rect2.width(), wave_h),
+                                );
+                                let error_rect = egui::Rect::from_min_size(
+                                    egui::pos2(rect2.min.x, rect2.max.y - err_h),
+                                    egui::vec2(rect2.width(), err_h),
+                                );
+                                (wave_rect, Some(error_rect))
+                            } else {
+                                (rect2, None)
+                            };
                             if let Some(m) = self.meta.get(&path_owned) {
-                                let w = rect2.width();
-                                let h = rect2.height();
+                                let w = wave_rect.width();
+                                let h = wave_rect.height();
                                 let n = m.thumb.len().max(1) as f32;
                                 let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
                                 let scale = db_to_amp(gain_db);
                                 for (idx, &(mn0, mx0)) in m.thumb.iter().enumerate() {
                                     let mn = (mn0 * scale).clamp(-1.0, 1.0);
                                     let mx = (mx0 * scale).clamp(-1.0, 1.0);
-                                    let x = rect2.left() + (idx as f32 / n) * w;
-                                    let y0 = rect2.center().y - mx * (h * 0.45);
-                                    let y1 = rect2.center().y - mn * (h * 0.45);
+                                    let x = wave_rect.left() + (idx as f32 / n) * w;
+                                    let y0 = wave_rect.center().y - mx * (h * 0.45);
+                                    let y1 = wave_rect.center().y - mn * (h * 0.45);
                                     let a = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
                                     let col = amp_to_color(a);
                                     ui.painter().line_segment(
@@ -499,10 +543,67 @@ impl crate::app::WavesPreviewer {
                                     );
                                 }
                             }
+                            if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
+                                let text_pos = egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
+                                let mut font_size = text_height * 0.85;
+                                if font_size < 10.0 {
+                                    font_size = 10.0;
+                                }
+                                if font_size > err_rect.height() {
+                                    font_size = err_rect.height();
+                                }
+                                let font = egui::FontId::proportional(font_size);
+                                ui.painter().text(
+                                    text_pos,
+                                    egui::Align2::LEFT_CENTER,
+                                    text,
+                                    font,
+                                    egui::Color32::from_rgb(220, 90, 90),
+                                );
+                            }
                         });
                         // row-level interaction (must call response() after at least one col())
                         let resp = row.response();
-                        let clicked_any = resp.clicked() || clicked_to_load;
+                        if resp.secondary_clicked() && !self.selected_multi.contains(&row_idx) {
+                            let mods = ctx.input(|i| i.modifiers);
+                            self.update_selection_on_click(row_idx, mods);
+                        }
+                        resp.context_menu(|ui| {
+                            let selected = self.selected_paths();
+                            let has_selection = !selected.is_empty();
+                            if ui
+                                .add_enabled(has_selection, egui::Button::new("Copy..."))
+                                .clicked()
+                            {
+                                if let Some(dir) = self.pick_folder_dialog() {
+                                    self.copy_paths_to_folder(&selected, &dir);
+                                }
+                                ui.close();
+                            }
+                            if selected.len() == 1 {
+                                if ui.button("Rename...").clicked() {
+                                    self.open_rename_dialog(selected[0].clone());
+                                    ui.close();
+                                }
+                            }
+                            if ui
+                                .add_enabled(has_selection, egui::Button::new("Delete..."))
+                                .clicked()
+                            {
+                                self.open_delete_confirm(selected.clone());
+                                ui.close();
+                            }
+                            let has_edits = self.has_edits_for_paths(&selected);
+                            if ui
+                                .add_enabled(has_edits, egui::Button::new("Clear Edits"))
+                                .clicked()
+                            {
+                                self.clear_edits_for_paths(&selected);
+                                ui.close();
+                            }
+                        });
+                        let clicked_any =
+                            resp.clicked_by(egui::PointerButton::Primary) || clicked_to_load;
                         if clicked_any {
                             let mods = ctx.input(|i| i.modifiers);
                             self.update_selection_on_click(row_idx, mods);
@@ -528,6 +629,11 @@ impl crate::app::WavesPreviewer {
                 });
             });
 
+        if !missing_paths.is_empty() {
+            for p in missing_paths {
+                self.remove_missing_path(&p);
+            }
+        }
         if sort_changed {
             self.apply_sort();
         }

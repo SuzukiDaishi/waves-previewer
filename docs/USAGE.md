@@ -5,15 +5,15 @@ This document summarizes the recent UX changes: the top-bar menu, drag & drop, a
 ## Top Menu: "Choose"
 
 - Folder...
-  - Select a folder and replace the list with its WAV files (recursively).
+  - Select a folder and replace the list with its audio files (recursively).
   - Internally sets `root` and runs a rescan.
 
 - Files...
-  - Select multiple files and replace the list with those WAV files.
+  - Select multiple files and replace the list with those audio files.
   - Does not set `root` (clears it). Useful for ad‑hoc multi‑file preview.
 
 Notes
-- Only `.wav` is supported at the moment. Other formats will come with `symphonia`.
+- Supported extensions: `.wav`, `.mp3`, `.m4a`.
 - Duplicates are skipped automatically.
 
 For details of the upcoming editor features (multichannel, dB grid, seek, zoom), see `docs/EDITOR_SPEC.md`.
@@ -24,8 +24,8 @@ For details of the upcoming editor features (multichannel, dB grid, seek, zoom),
   - Apply pending Gain (dB) to selected files and save.
   - Output mode (Overwrite / New File) follows Settings.
 - Apply Gains (new files)
-  - Create new WAV files next to the sources for all files with pending Gain edits.
-  - File name format: `<name> (gain+X.YdB).wav`.
+  - Create new files next to the sources for all files with pending Gain edits.
+  - File name format: `<name> (gain+X.YdB).<ext>` (extension follows the source unless the template includes one).
 - Clear All Gains
   - Discard all pending Gain edits.
 - Settings…
@@ -33,7 +33,7 @@ For details of the upcoming editor features (multichannel, dB grid, seek, zoom),
   - Destination Folder (for New File): choose or use source folder
   - Name Template: tokens `{name}`, `{gain}`, `{gain:+0.0}`, `{gain:+.1}`
   - On Conflict: Rename / Overwrite / Skip
-  - Overwrite: create `.wav.bak` backup (optional)
+  - Overwrite: create `.bak` backup (optional)
 
 Notes
 - The list shows an "Unsaved Gains: N" counter in the top bar.
@@ -41,8 +41,8 @@ Notes
 
 ## Drag & Drop
 
-- Dropping files or folders onto the window adds them to the list (WAV only).
-- Folders are scanned recursively; only `.wav` files are added.
+- Dropping files or folders onto the window adds them to the list (`.wav` / `.mp3` / `.m4a`).
+- Folders are scanned recursively; only supported audio files are added.
 - Existing entries are de‑duplicated.
 - Search and sort are preserved; metadata (RMS/thumbnail) is refreshed asynchronously.
 

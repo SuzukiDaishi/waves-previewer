@@ -62,6 +62,44 @@ impl crate::app::WavesPreviewer {
                         self.debug_check_invariants();
                         ui.close();
                     }
+                    ui.separator();
+                    let selected = self.selected_paths();
+                    let has_selection = !selected.is_empty();
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Copy Selected..."))
+                        .clicked()
+                    {
+                        if let Some(dir) = self.pick_folder_dialog() {
+                            self.copy_paths_to_folder(&selected, &dir);
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Rename Selected..."))
+                        .clicked()
+                    {
+                        if selected.len() == 1 {
+                            self.open_rename_dialog(selected[0].clone());
+                        } else {
+                            self.open_batch_rename_dialog(selected.clone());
+                        }
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(has_selection, egui::Button::new("Delete Selected..."))
+                        .clicked()
+                    {
+                        self.open_delete_confirm(selected.clone());
+                        ui.close();
+                    }
+                    let has_edits = self.has_edits_for_paths(&selected);
+                    if ui
+                        .add_enabled(has_edits, egui::Button::new("Clear Edits for Selected"))
+                        .clicked()
+                    {
+                        self.clear_edits_for_paths(&selected);
+                        ui.close();
+                    }
                 });
                 // Files total + loading indicator
                 let total_vis = self.files.len();
@@ -186,10 +224,18 @@ impl crate::app::WavesPreviewer {
                 }
                 ui.separator();
                 // Search bar
+                let regex_changed =
+                    ui.checkbox(&mut self.search_use_regex, "Regex").changed();
                 let te = egui::TextEdit::singleline(&mut self.search_query).hint_text("Search...");
                 let resp = ui.add(te);
                 if resp.changed() {
                     self.schedule_search_refresh();
+                }
+                if regex_changed {
+                    self.apply_filter_from_search();
+                    self.apply_sort();
+                    self.search_dirty = false;
+                    self.search_deadline = None;
                 }
                 if resp.has_focus() && ctx.input(|i| i.key_pressed(Key::Enter)) {
                     self.apply_filter_from_search();

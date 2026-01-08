@@ -154,32 +154,52 @@ impl AudioEngine {
                             };
 
                             let mut s_lin = sample_at(pos_f);
-                            // Crossfade near loop end if enabled
+                            // Crossfade near loop start/end if enabled (using centered windows)
                             if valid_loop {
                                 let xfade = shared
                                     .loop_xfade_samples
                                     .load(std::sync::atomic::Ordering::Relaxed);
                                 if xfade > 0 {
-                                    let xfade_f = xfade as f32;
-                                    let rem = (loop_end as f32) - pos_f; // remaining until end
-                                    if rem >= 0.0 && rem <= xfade_f {
-                                        let head_pf = (loop_start as f32)
-                                            + (xfade_f - rem).clamp(0.0, xfade_f);
-                                        let s_head = sample_at(head_pf);
-                                        let tcf = ((xfade_f - rem) / xfade_f).clamp(0.0, 1.0);
+                                    let loop_len = loop_end.saturating_sub(loop_start);
+                                    let pre = loop_start;
+                                    let post = len.saturating_sub(loop_end);
+                                    let xfade = xfade.min(loop_len / 2).min(pre).min(post);
+                                    if xfade > 0 {
+                                        let xfade_f = xfade as f32;
+                                        let win_len = xfade_f * 2.0;
+                                        let s_start = loop_start as f32 - xfade_f;
+                                        let s_end = loop_start as f32 + xfade_f;
+                                        let e_start = loop_end as f32 - xfade_f;
+                                        let e_end = loop_end as f32 + xfade_f;
                                         let shape = shared
                                             .loop_xfade_shape
                                             .load(std::sync::atomic::Ordering::Relaxed);
-                                        let (w_out, w_in) = match shape {
-                                            // shapes based on amplitude weights
-                                            1 => {
-                                                // equal-power: cos/sin over [0, pi/2]
-                                                let a = core::f32::consts::FRAC_PI_2 * tcf;
-                                                (a.cos(), a.sin())
+                                        let weights = |tcf: f32| -> (f32, f32) {
+                                            match shape {
+                                                1 => {
+                                                    let a = core::f32::consts::FRAC_PI_2 * tcf;
+                                                    (a.cos(), a.sin())
+                                                }
+                                                _ => (1.0 - tcf, tcf),
                                             }
-                                            _ => (1.0 - tcf, tcf), // linear
                                         };
-                                        s_lin = s_lin * w_out + s_head * w_in;
+                                        if (pos_f >= s_start && pos_f < s_end)
+                                            || (pos_f >= e_start && pos_f < e_end)
+                                        {
+                                            let win_start = if pos_f < s_end && pos_f >= s_start {
+                                                s_start
+                                            } else {
+                                                e_start
+                                            };
+                                            let offset = pos_f - win_start;
+                                            let tcf = (offset / win_len).clamp(0.0, 1.0);
+                                            let s_pf = s_start + offset;
+                                            let e_pf = e_start + offset;
+                                            let s_s = sample_at(s_pf);
+                                            let s_e = sample_at(e_pf);
+                                            let (w_e, w_s) = weights(tcf);
+                                            s_lin = s_e * w_e + s_s * w_s;
+                                        }
                                     }
                                 }
                             }
