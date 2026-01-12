@@ -1,6 +1,6 @@
 # UI/UX デザイン仕様（提案）
 
-このドキュメントは、waves-previewer（WavesViewer）の画面設計と振る舞いをまとめたものです。
+このドキュメントは、NeoWaves Audio List Editor（NeoWaves）の画面設計と振る舞いをまとめたものです。
 
 画像モックは以下を参照してください。
 - リスト: docs/要件定義_リスト.png

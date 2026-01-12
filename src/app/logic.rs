@@ -46,7 +46,7 @@ impl super::WavesPreviewer {
             let Some(tab) = self.tabs.get(idx) else {
                 return;
             };
-            if !tab.dirty && !tab.loop_markers_dirty {
+            if !tab.dirty && !tab.loop_markers_dirty && !tab.markers_dirty {
                 return;
             }
             let mut waveform = tab.waveform_minmax.clone();
@@ -64,6 +64,9 @@ impl super::WavesPreviewer {
                     loop_region: tab.loop_region,
                     loop_markers_saved: tab.loop_markers_saved,
                     loop_markers_dirty: tab.loop_markers_dirty,
+                    markers: tab.markers.clone(),
+                    markers_saved: tab.markers_saved.clone(),
+                    markers_dirty: tab.markers_dirty,
                     trim_range: tab.trim_range,
                     loop_xfade_samples: tab.loop_xfade_samples,
                     loop_xfade_shape: tab.loop_xfade_shape,
@@ -235,18 +238,23 @@ impl super::WavesPreviewer {
                 RateMode::Speed => "Processing...".to_string(),
             },
             path,
+            autoplay_when_ready: false,
             rx,
         });
     }
 
     pub(super) fn has_edits_for_paths(&self, paths: &[PathBuf]) -> bool {
         paths.iter().any(|p| {
-            self.pending_gains.get(p).map(|v| v.abs() > 0.0001).unwrap_or(false)
-                || self.edited_cache.get(p).map(|c| c.dirty || c.loop_markers_dirty).unwrap_or(false)
+            self.has_pending_gain(p)
                 || self
-                    .tabs
-                    .iter()
-                    .any(|t| (t.dirty || t.loop_markers_dirty) && t.path.as_path() == p.as_path())
+                    .edited_cache
+                    .get(p)
+                    .map(|c| c.dirty || c.loop_markers_dirty || c.markers_dirty)
+                    .unwrap_or(false)
+                || self.tabs.iter().any(|t| {
+                    (t.dirty || t.loop_markers_dirty || t.markers_dirty)
+                        && t.path.as_path() == p.as_path()
+                })
         })
     }
 
@@ -257,6 +265,9 @@ impl super::WavesPreviewer {
         tab.dirty = false;
         tab.ops.clear();
         tab.selection = None;
+        tab.markers.clear();
+        tab.markers_saved.clear();
+        tab.markers_dirty = false;
         tab.ab_loop = None;
         tab.loop_region = None;
         tab.loop_markers_saved = None;
@@ -330,6 +341,7 @@ impl super::WavesPreviewer {
                     }
                 }
                 let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
+                let file_sr = self.sample_rate_for_path(&path, in_sr);
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     tab.display_name = name;
                     tab.waveform_minmax = waveform;
@@ -337,6 +349,7 @@ impl super::WavesPreviewer {
                     tab.samples_len = samples_len;
                     Self::reset_tab_defaults(tab);
                     Self::set_loop_region_from_file_markers(tab, &path, in_sr, out_sr);
+                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
                 }
             }
             _ => {
@@ -350,6 +363,7 @@ impl super::WavesPreviewer {
                     }
                 }
                 let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
+                let file_sr = self.sample_rate_for_path(&path, in_sr);
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     tab.display_name = name;
                     tab.waveform_minmax.clear();
@@ -357,6 +371,7 @@ impl super::WavesPreviewer {
                     tab.samples_len = samples_len;
                     Self::reset_tab_defaults(tab);
                     Self::set_loop_region_from_file_markers(tab, &path, in_sr, out_sr);
+                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
                 }
                 if update_audio {
                     self.audio.set_rate(1.0);
@@ -385,7 +400,7 @@ impl super::WavesPreviewer {
             if !unique.insert(p.clone()) {
                 continue;
             }
-            self.pending_gains.remove(p);
+            self.set_pending_gain_db_for_path(p, 0.0);
             self.lufs_override.remove(p);
             self.lufs_recalc_deadline.remove(p);
             if self.playing_path.as_ref() == Some(p) {
@@ -433,6 +448,54 @@ impl super::WavesPreviewer {
         tab.loop_markers_dirty = false;
     }
 
+    fn sample_rate_for_path(&self, path: &Path, fallback: u32) -> u32 {
+        self.meta_for_path(path)
+            .map(|m| m.sample_rate)
+            .filter(|&sr| sr > 0)
+            .or_else(|| audio_io::read_audio_info(path).ok().map(|i| i.sample_rate))
+            .unwrap_or(fallback)
+    }
+
+    fn load_markers_for_tab(tab: &mut EditorTab, path: &Path, out_sr: u32, file_sr: u32) {
+        let out_sr = out_sr.max(1);
+        match crate::markers::read_markers(path, out_sr, file_sr) {
+            Ok(mut markers) => {
+                markers.retain(|m| m.sample <= tab.samples_len);
+                tab.markers = markers.clone();
+                tab.markers_saved = markers;
+                tab.markers_dirty = false;
+            }
+            Err(err) => {
+                eprintln!("read markers failed {}: {err:?}", path.display());
+                tab.markers.clear();
+                tab.markers_saved.clear();
+                tab.markers_dirty = false;
+            }
+        }
+    }
+
+    pub(super) fn write_markers_for_tab(&mut self, tab_idx: usize) -> bool {
+        let (path, markers, file_sr) = {
+            let Some(tab) = self.tabs.get(tab_idx) else { return false; };
+            let file_sr = self.sample_rate_for_path(&tab.path, self.audio.shared.out_sample_rate);
+            (tab.path.clone(), tab.markers.clone(), file_sr)
+        };
+        if !path.is_file() {
+            self.remove_missing_path(&path);
+            return false;
+        }
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        if let Err(err) = crate::markers::write_markers(&path, out_sr, file_sr, &markers) {
+            eprintln!("write markers failed {}: {err:?}", path.display());
+            return false;
+        }
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.markers_saved = tab.markers.clone();
+            tab.markers_dirty = false;
+        }
+        true
+    }
+
     pub(super) fn write_loop_markers_for_tab(&mut self, tab_idx: usize) -> bool {
         let (path, loop_region, out_sr) = {
             let Some(tab) = self.tabs.get(tab_idx) else { return false; };
@@ -443,8 +506,7 @@ impl super::WavesPreviewer {
             return false;
         }
         let file_sr = self
-            .meta
-            .get(&path)
+            .meta_for_path(&path)
             .map(|m| m.sample_rate)
             .filter(|&sr| sr > 0)
             .or_else(|| audio_io::read_audio_info(&path).ok().map(|i| i.sample_rate))
@@ -454,7 +516,7 @@ impl super::WavesPreviewer {
             if let Some((mut ls, mut le)) =
                 crate::wave::map_loop_markers_to_file_sr(s, e, out_sr, file_sr)
             {
-                if let Some(meta) = self.meta.get(&path) {
+                if let Some(meta) = self.meta_for_path(&path) {
                     if let Some(secs) = meta.duration_secs {
                         let max = (secs * file_sr as f32).round().max(0.0) as u64;
                         if max > 0 {
@@ -609,7 +671,7 @@ impl super::WavesPreviewer {
         if path.exists() {
             return;
         }
-        let Some(idx) = self.all_files.iter().position(|p| p == path) else {
+        let Some(id) = self.path_index.get(path).copied() else {
             return;
         };
         let selected_path = self.selected_path_buf();
@@ -624,24 +686,22 @@ impl super::WavesPreviewer {
         let path_buf = path.to_path_buf();
         let was_playing = self.playing_path.as_ref() == Some(&path_buf);
 
-        self.all_files.remove(idx);
-        let remap = |v: &mut Vec<usize>| {
-            v.retain(|&i| i != idx);
-            for i in v.iter_mut() {
-                if *i > idx {
-                    *i -= 1;
-                }
+        if let Some(idx) = self.item_index.remove(&id) {
+            self.items.remove(idx);
+            for i in idx..self.items.len() {
+                let id = self.items[i].id;
+                self.item_index.insert(id, i);
             }
-        };
-        remap(&mut self.files);
-        remap(&mut self.original_files);
+        }
+        self.path_index.remove(&path_buf);
+        self.files.retain(|&fid| fid != id);
+        self.original_files.retain(|&fid| fid != id);
 
-        self.meta.remove(&path_buf);
         self.meta_inflight.remove(&path_buf);
+        self.transcript_inflight.remove(&path_buf);
         self.spectro_cache.remove(&path_buf);
         self.spectro_inflight.remove(&path_buf);
         self.edited_cache.remove(&path_buf);
-        self.pending_gains.remove(&path_buf);
         self.lufs_override.remove(&path_buf);
         self.lufs_recalc_deadline.remove(&path_buf);
         if was_playing {
@@ -649,7 +709,87 @@ impl super::WavesPreviewer {
             self.list_preview_rx = None;
             self.audio.stop();
         }
+        if self.external_source.is_some() {
+            self.apply_external_mapping();
+        }
+        self.apply_filter_from_search();
+        self.apply_sort();
+        self.selected = selected_path.and_then(|p| self.row_for_path(&p));
+        self.selected_multi.clear();
+        for p in selected_paths {
+            if let Some(row) = self.row_for_path(&p) {
+                self.selected_multi.insert(row);
+            }
+        }
+        if let Some(sel) = self.selected {
+            if self.selected_multi.is_empty() {
+                self.selected_multi.insert(sel);
+            }
+        }
+        self.select_anchor = anchor_path.and_then(|p| self.row_for_path(&p));
+        if self.files.is_empty() {
+            self.selected = None;
+            self.selected_multi.clear();
+            self.select_anchor = None;
+        }
+    }
 
+    pub(super) fn remove_paths_from_list(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let unique: HashSet<PathBuf> = paths.iter().cloned().collect();
+        if unique.is_empty() {
+            return;
+        }
+        let selected_path = self.selected_path_buf();
+        let selected_paths: Vec<PathBuf> = self
+            .selected_multi
+            .iter()
+            .filter_map(|&row| self.path_for_row(row).cloned())
+            .collect();
+        let anchor_path = self
+            .select_anchor
+            .and_then(|row| self.path_for_row(row).cloned());
+        let was_playing = self
+            .playing_path
+            .as_ref()
+            .map(|p| unique.contains(p))
+            .unwrap_or(false);
+
+        let mut removed_ids = HashSet::new();
+        for path in unique.iter() {
+            if let Some(id) = self.path_index.get(path).copied() {
+                removed_ids.insert(id);
+            }
+        }
+        if removed_ids.is_empty() {
+            return;
+        }
+        self.items.retain(|item| !removed_ids.contains(&item.id));
+        self.rebuild_item_indexes();
+        self.files.retain(|id| !removed_ids.contains(id));
+        self.original_files.retain(|id| !removed_ids.contains(id));
+
+        for path in unique.iter() {
+            self.meta_inflight.remove(path);
+            self.transcript_inflight.remove(path);
+            self.spectro_cache.remove(path);
+            self.spectro_inflight.remove(path);
+            self.edited_cache.remove(path);
+            self.lufs_override.remove(path);
+            self.lufs_recalc_deadline.remove(path);
+        }
+        if was_playing {
+            self.playing_path = None;
+            self.list_preview_rx = None;
+            self.audio.stop();
+        }
+        if self.external_source.is_some() {
+            self.apply_external_mapping();
+        }
+        self.apply_filter_from_search();
+        self.apply_sort();
         self.selected = selected_path.and_then(|p| self.row_for_path(&p));
         self.selected_multi.clear();
         for p in selected_paths {
@@ -671,10 +811,12 @@ impl super::WavesPreviewer {
     }
     pub fn rescan(&mut self) {
         self.files.clear();
-        self.all_files.clear();
+        self.items.clear();
+        self.item_index.clear();
+        self.path_index.clear();
         self.original_files.clear();
-        self.meta.clear();
         self.meta_inflight.clear();
+        self.transcript_inflight.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.scan_rx = None;
@@ -700,6 +842,14 @@ impl super::WavesPreviewer {
             self.active_tab = Some(idx);
             return;
         }
+        if self.tabs.len() >= crate::app::MAX_EDITOR_TABS {
+            self.debug_log(format!(
+                "tab limit reached ({}); skipping {}",
+                crate::app::MAX_EDITOR_TABS,
+                path.display()
+            ));
+            return;
+        }
         if let Some(cached) = self.edited_cache.remove(path) {
             let name = path
                 .file_name()
@@ -719,6 +869,9 @@ impl super::WavesPreviewer {
                 dirty: cached.dirty,
                 ops: Vec::new(),
                 selection: None,
+                markers: cached.markers,
+                markers_saved: cached.markers_saved,
+                markers_dirty: cached.markers_dirty,
                 ab_loop: None,
                 loop_region: cached.loop_region,
                 loop_markers_saved: cached.loop_markers_saved,
@@ -793,6 +946,9 @@ impl super::WavesPreviewer {
                     dirty: false,
                     ops: Vec::new(),
                     selection: None,
+                    markers: Vec::new(),
+                    markers_saved: Vec::new(),
+                    markers_dirty: false,
                     ab_loop: None,
                     loop_region: None,
                     loop_markers_saved: None,
@@ -828,14 +984,12 @@ impl super::WavesPreviewer {
                     redo_bytes: 0,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
+                let out_sr = self.audio.shared.out_sample_rate;
+                let file_sr = self.sample_rate_for_path(path, in_sr);
                 // Load loop markers from file if available into loop_region
                 if let Some(tab) = self.tabs.last_mut() {
-                    Self::set_loop_region_from_file_markers(
-                        tab,
-                        path,
-                        in_sr,
-                        self.audio.shared.out_sample_rate,
-                    );
+                    Self::set_loop_region_from_file_markers(tab, path, in_sr, out_sr);
+                    Self::load_markers_for_tab(tab, path, out_sr, file_sr);
                 }
                 self.playing_path = Some(path.to_path_buf());
             }
@@ -874,6 +1028,9 @@ impl super::WavesPreviewer {
                     dirty: false,
                     ops: Vec::new(),
                     selection: None,
+                    markers: Vec::new(),
+                    markers_saved: Vec::new(),
+                    markers_dirty: false,
                     ab_loop: None,
                     loop_region: None,
                     loop_markers_saved: None,
@@ -909,14 +1066,12 @@ impl super::WavesPreviewer {
                     redo_bytes: 0,
                 });
                 self.active_tab = Some(self.tabs.len() - 1);
+                let out_sr = self.audio.shared.out_sample_rate;
+                let file_sr = self.sample_rate_for_path(path, in_sr);
                 // Load loop markers into loop_region if present
                 if let Some(tab) = self.tabs.last_mut() {
-                    Self::set_loop_region_from_file_markers(
-                        tab,
-                        path,
-                        in_sr,
-                        self.audio.shared.out_sample_rate,
-                    );
+                    Self::set_loop_region_from_file_markers(tab, path, in_sr, out_sr);
+                    Self::load_markers_for_tab(tab, path, out_sr, file_sr);
                 }
                 if decode_failed {
                     let _ = crate::wave::prepare_for_speed(
@@ -934,10 +1089,15 @@ impl super::WavesPreviewer {
         }
     }
 
+    pub(super) fn open_paths_in_tabs(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            self.open_or_activate_tab(path);
+        }
+    }
+
     // Merge helper: add a folder recursively (supported audio only)
     pub(super) fn add_folder_merge(&mut self, dir: &Path) -> usize {
         let mut added = 0usize;
-        let mut existing: HashSet<PathBuf> = self.all_files.iter().cloned().collect();
         let skip_dotfiles = self.skip_dotfiles;
         for entry in WalkDir::new(dir)
             .follow_links(false)
@@ -952,10 +1112,15 @@ impl super::WavesPreviewer {
                     }
                     if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
                         if audio_io::is_supported_extension(ext) {
-                            if existing.insert(p.clone()) {
-                                self.all_files.push(p);
-                                added += 1;
+                            if self.path_index.contains_key(&p) {
+                                continue;
                             }
+                            let item = self.make_media_item(p.clone());
+                            let id = item.id;
+                            self.path_index.insert(p.clone(), id);
+                            self.item_index.insert(id, self.items.len());
+                            self.items.push(item);
+                            added += 1;
                         }
                     }
                 }
@@ -967,7 +1132,6 @@ impl super::WavesPreviewer {
     // Merge helper: add explicit files (supported audio only)
     pub(super) fn add_files_merge(&mut self, paths: &[PathBuf]) -> usize {
         let mut added = 0usize;
-        let mut existing: HashSet<PathBuf> = self.all_files.iter().cloned().collect();
         for p in paths {
             if p.is_file() {
                 if self.should_skip_path(p) {
@@ -975,10 +1139,15 @@ impl super::WavesPreviewer {
                 }
                 if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
                     if audio_io::is_supported_extension(ext) {
-                        if existing.insert(p.clone()) {
-                            self.all_files.push(p.clone());
-                            added += 1;
+                        if self.path_index.contains_key(p) {
+                            continue;
                         }
+                        let item = self.make_media_item(p.clone());
+                        let id = item.id;
+                        self.path_index.insert(p.clone(), id);
+                        self.item_index.insert(id, self.items.len());
+                        self.items.push(item);
+                        added += 1;
                     }
                 }
             } else if p.is_dir() {
@@ -989,6 +1158,9 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn after_add_refresh(&mut self) {
+        if self.external_source.is_some() {
+            self.apply_external_mapping();
+        }
         self.apply_filter_from_search();
         self.apply_sort();
         self.ensure_meta_pool();
@@ -998,10 +1170,12 @@ impl super::WavesPreviewer {
     pub(super) fn replace_with_files(&mut self, paths: &[PathBuf]) {
         self.root = None;
         self.files.clear();
-        self.all_files.clear();
+        self.items.clear();
+        self.item_index.clear();
+        self.path_index.clear();
         self.original_files.clear();
-        self.meta.clear();
         self.meta_inflight.clear();
+        self.transcript_inflight.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.scan_rx = None;
@@ -1015,7 +1189,11 @@ impl super::WavesPreviewer {
                 if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
                     if audio_io::is_supported_extension(ext) {
                         if set.insert(p.clone()) {
-                            self.all_files.push(p.clone());
+                            let item = self.make_media_item(p.clone());
+                            let id = item.id;
+                            self.path_index.insert(p.clone(), id);
+                            self.item_index.insert(id, self.items.len());
+                            self.items.push(item);
                         }
                     }
                 }
@@ -1027,32 +1205,57 @@ impl super::WavesPreviewer {
     pub(super) fn apply_filter_from_search(&mut self) {
         // Preserve selection index if possible
         let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
-        let query = self.search_query.trim();
+        let query = self.search_query.trim().to_string();
         if query.is_empty() {
-            self.files = (0..self.all_files.len()).collect();
+            self.files = self.items.iter().map(|item| item.id).collect();
         } else if self.search_use_regex {
-            let re = RegexBuilder::new(query)
+            let re = RegexBuilder::new(&query)
                 .case_insensitive(true)
                 .build();
             if let Ok(re) = re {
                 self.files = self
-                    .all_files
+                    .items
                     .iter()
-                    .enumerate()
-                    .filter(|(_, p)| {
+                    .filter(|item| {
+                        let p = &item.path;
                         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
                         let parent = p.parent().and_then(|s| s.to_str()).unwrap_or("");
-                        re.is_match(name) || re.is_match(parent)
+                        let transcript = item
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.full_text.as_str())
+                            .unwrap_or("");
+                        let meta_text = item
+                            .meta
+                            .as_ref()
+                            .map(|m| {
+                                format!(
+                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                                    m.sample_rate,
+                                    m.bits_per_sample,
+                                    m.channels,
+                                    m.duration_secs.unwrap_or(0.0),
+                                    m.peak_db.unwrap_or(0.0),
+                                    m.lufs_i.unwrap_or(0.0)
+                                )
+                            })
+                            .unwrap_or_default();
+                        let external_hit = item.external.values().any(|v| re.is_match(v));
+                        re.is_match(name)
+                            || re.is_match(parent)
+                            || re.is_match(transcript)
+                            || re.is_match(&meta_text)
+                            || external_hit
                     })
-                    .map(|(idx, _)| idx)
+                    .map(|item| item.id)
                     .collect();
             } else {
                 let q = query.to_lowercase();
                 self.files = self
-                    .all_files
+                    .items
                     .iter()
-                    .enumerate()
-                    .filter(|(_, p)| {
+                    .filter(|item| {
+                        let p = &item.path;
                         let name = p
                             .file_name()
                             .and_then(|s| s.to_str())
@@ -1063,18 +1266,46 @@ impl super::WavesPreviewer {
                             .and_then(|s| s.to_str())
                             .unwrap_or("")
                             .to_lowercase();
-                        name.contains(&q) || parent.contains(&q)
+                        let transcript = item
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.full_text.to_lowercase())
+                            .unwrap_or_default();
+                        let meta_text = item
+                            .meta
+                            .as_ref()
+                            .map(|m| {
+                                format!(
+                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                                    m.sample_rate,
+                                    m.bits_per_sample,
+                                    m.channels,
+                                    m.duration_secs.unwrap_or(0.0),
+                                    m.peak_db.unwrap_or(0.0),
+                                    m.lufs_i.unwrap_or(0.0)
+                                )
+                            })
+                            .unwrap_or_default();
+                        let external_hit = item
+                            .external
+                            .values()
+                            .any(|v| v.to_lowercase().contains(&q));
+                        name.contains(&q)
+                            || parent.contains(&q)
+                            || transcript.contains(&q)
+                            || meta_text.to_lowercase().contains(&q)
+                            || external_hit
                     })
-                    .map(|(idx, _)| idx)
+                    .map(|item| item.id)
                     .collect();
             }
         } else {
             let q = query.to_lowercase();
             self.files = self
-                .all_files
+                .items
                 .iter()
-                .enumerate()
-                .filter(|(_, p)| {
+                .filter(|item| {
+                    let p = &item.path;
                     let name = p
                         .file_name()
                         .and_then(|s| s.to_str())
@@ -1085,10 +1316,38 @@ impl super::WavesPreviewer {
                         .and_then(|s| s.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    name.contains(&q) || parent.contains(&q)
-                })
-                .map(|(idx, _)| idx)
-                .collect();
+                let transcript = item
+                    .transcript
+                    .as_ref()
+                    .map(|t| t.full_text.to_lowercase())
+                    .unwrap_or_default();
+                let meta_text = item
+                    .meta
+                    .as_ref()
+                    .map(|m| {
+                        format!(
+                            "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                            m.sample_rate,
+                            m.bits_per_sample,
+                            m.channels,
+                            m.duration_secs.unwrap_or(0.0),
+                            m.peak_db.unwrap_or(0.0),
+                            m.lufs_i.unwrap_or(0.0)
+                        )
+                    })
+                    .unwrap_or_default();
+                let external_hit = item
+                    .external
+                    .values()
+                    .any(|v| v.to_lowercase().contains(&q));
+                name.contains(&q)
+                    || parent.contains(&q)
+                    || transcript.contains(&q)
+                    || meta_text.to_lowercase().contains(&q)
+                    || external_hit
+            })
+            .map(|item| item.id)
+            .collect();
         }
         self.original_files = self.files.clone();
         // restore selected index
@@ -1107,10 +1366,26 @@ impl super::WavesPreviewer {
         if dir == SortDir::None {
             self.files = self.original_files.clone();
         } else {
+            let items = &self.items;
+            let item_index = &self.item_index;
+            let lufs_override = &self.lufs_override;
+            let external_cols = &self.external_visible_columns;
             self.files.sort_by(|a, b| {
                 use std::cmp::Ordering;
-                let pa = &self.all_files[*a];
-                let pb = &self.all_files[*b];
+                let pa_idx = match item_index.get(a) {
+                    Some(idx) => *idx,
+                    None => return Ordering::Equal,
+                };
+                let pb_idx = match item_index.get(b) {
+                    Some(idx) => *idx,
+                    None => return Ordering::Equal,
+                };
+                let pa_item = &items[pa_idx];
+                let pb_item = &items[pb_idx];
+                let pa = &pa_item.path;
+                let pb = &pb_item.path;
+                let ma = pa_item.meta.as_ref();
+                let mb = pb_item.meta.as_ref();
                 let ord = match key {
                     SortKey::File => {
                         let sa = pa.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -1122,71 +1397,66 @@ impl super::WavesPreviewer {
                         let sb = pb.parent().and_then(|p| p.to_str()).unwrap_or("");
                         sa.cmp(sb)
                     }
+                    SortKey::Transcript => {
+                        let sa = pa_item
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.full_text.as_str())
+                            .unwrap_or("");
+                        let sb = pb_item
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.full_text.as_str())
+                            .unwrap_or("");
+                        sa.cmp(sb)
+                    }
                     SortKey::Length => num_order(
-                        self.meta
-                            .get(pa)
-                            .and_then(|m| m.duration_secs)
+                        ma.and_then(|m| m.duration_secs)
                             .unwrap_or(0.0),
-                        self.meta
-                            .get(pb)
-                            .and_then(|m| m.duration_secs)
+                        mb.and_then(|m| m.duration_secs)
                             .unwrap_or(0.0),
                     ),
                     SortKey::Channels => num_order(
-                        self.meta.get(pa).map(|m| m.channels as f32).unwrap_or(0.0),
-                        self.meta.get(pb).map(|m| m.channels as f32).unwrap_or(0.0),
+                        ma.map(|m| m.channels as f32).unwrap_or(0.0),
+                        mb.map(|m| m.channels as f32).unwrap_or(0.0),
                     ),
                     SortKey::SampleRate => num_order(
-                        self.meta
-                            .get(pa)
-                            .map(|m| m.sample_rate as f32)
-                            .unwrap_or(0.0),
-                        self.meta
-                            .get(pb)
-                            .map(|m| m.sample_rate as f32)
-                            .unwrap_or(0.0),
+                        ma.map(|m| m.sample_rate as f32).unwrap_or(0.0),
+                        mb.map(|m| m.sample_rate as f32).unwrap_or(0.0),
                     ),
                     SortKey::Bits => num_order(
-                        self.meta
-                            .get(pa)
-                            .map(|m| m.bits_per_sample as f32)
-                            .unwrap_or(0.0),
-                        self.meta
-                            .get(pb)
-                            .map(|m| m.bits_per_sample as f32)
-                            .unwrap_or(0.0),
+                        ma.map(|m| m.bits_per_sample as f32).unwrap_or(0.0),
+                        mb.map(|m| m.bits_per_sample as f32).unwrap_or(0.0),
                     ),
                     SortKey::Level => num_order(
-                        self.meta
-                            .get(pa)
-                            .and_then(|m| m.peak_db)
-                            .unwrap_or(f32::NEG_INFINITY),
-                        self.meta
-                            .get(pb)
-                            .and_then(|m| m.peak_db)
-                            .unwrap_or(f32::NEG_INFINITY),
+                        ma.and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
+                        mb.and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
                     ),
                     // LUFS sorting uses effective value: override if present, else base + gain
                     SortKey::Lufs => {
-                        let ga = *self.pending_gains.get(pa).unwrap_or(&0.0);
-                        let gb = *self.pending_gains.get(pb).unwrap_or(&0.0);
-                        let va = if let Some(v) = self.lufs_override.get(pa) {
+                        let ga = pa_item.pending_gain_db;
+                        let gb = pb_item.pending_gain_db;
+                        let va = if let Some(v) = lufs_override.get(pa) {
                             *v
                         } else {
-                            self.meta
-                                .get(pa)
-                                .and_then(|m| m.lufs_i.map(|x| x + ga))
+                            ma.and_then(|m| m.lufs_i.map(|x| x + ga))
                                 .unwrap_or(f32::NEG_INFINITY)
                         };
-                        let vb = if let Some(v) = self.lufs_override.get(pb) {
+                        let vb = if let Some(v) = lufs_override.get(pb) {
                             *v
                         } else {
-                            self.meta
-                                .get(pb)
-                                .and_then(|m| m.lufs_i.map(|x| x + gb))
+                            mb.and_then(|m| m.lufs_i.map(|x| x + gb))
                                 .unwrap_or(f32::NEG_INFINITY)
                         };
                         num_order(va, vb)
+                    }
+                    SortKey::External(idx) => {
+                        let Some(col) = external_cols.get(idx) else {
+                            return Ordering::Equal;
+                        };
+                        let sa = pa_item.external.get(col).map(|v| v.as_str()).unwrap_or("");
+                        let sb = pb_item.external.get(col).map(|v| v.as_str()).unwrap_or("");
+                        sa.cmp(sb)
                     }
                 };
                 match dir {
@@ -1313,6 +1583,7 @@ impl super::WavesPreviewer {
                 RateMode::Speed => "Processing...".to_string(),
             },
             path: path_buf,
+            autoplay_when_ready: false,
             rx,
         });
     }

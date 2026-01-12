@@ -3,7 +3,7 @@
 ## セットアップ / ビルド
 
 - Rust stable を使用。
-- 実行中の `waves-previewer.exe` があると Windows では再ビルドに失敗する（OS エラー 5）。再ビルド前にアプリを終了してください。
+- 実行中の `NeoWaves.exe` があると Windows では再ビルドに失敗する（OS エラー 5）。再ビルド前にアプリを終了してください。
 - 依存：`egui`, `eframe`, `egui_extras`, `cpal`, `hound`, `walkdir`, `arc-swap` など。
 
 ```

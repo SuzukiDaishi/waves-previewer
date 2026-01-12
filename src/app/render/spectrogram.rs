@@ -3,7 +3,7 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use crate::app::types::SpectrogramData;
 
 pub fn compute_spectrogram(mono: &[f32], sample_rate: u32) -> SpectrogramData {
-    let win = 1024usize;
+    let win = 2048usize;
     let bins = win / 2;
     let len = mono.len();
     if len == 0 {
@@ -16,8 +16,8 @@ pub fn compute_spectrogram(mono: &[f32], sample_rate: u32) -> SpectrogramData {
         };
     }
 
-    let max_frames = 1024usize;
-    let min_step = win / 4;
+    let max_frames = 2048usize;
+    let min_step = win / 8;
     let mut frame_step = len / max_frames;
     if frame_step < min_step {
         frame_step = min_step;

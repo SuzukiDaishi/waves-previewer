@@ -1,6 +1,6 @@
 # Editing UX/Implementation Plan (MVP → Extend)
 
-This document captures the concrete plan for waveform editing in waves-previewer.
+This document captures the concrete plan for waveform editing in NeoWaves Audio List Editor.
 It follows a hierarchical UX (View → Tool). First pick a View (Waveform /
 Spectrogram / Mel / WORLD), then pick a Tool for that view. All views share
 time/playhead and an independent Loop region. A/B markers and range Selection

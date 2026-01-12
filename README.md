@@ -1,4 +1,4 @@
-# waves-previewer (WavesViewer)
+# NeoWaves Audio List Editor (NeoWaves)
 
 外部フォルダを再帰的に走査して `.wav` を一覧表示し、Space で即試聴、波形(min/max)と dBFS メータを表示する Rust 製の軽量プレビュワーです。GUI は `eframe/egui`、オーディオ出力は `cpal` を使用しています。リストは大規模でも軽快に動作し、検索・ソート・即時プレビューに最適化しています。
 
@@ -6,7 +6,7 @@
 
 ## Recent Updates
 - Added Settings > Appearance (Dark/Light). Default is Dark and it persists across restarts.
-- Theme preference is stored in `%APPDATA%\\waves-previewer\\prefs.txt`.
+- Theme preference is stored in `%APPDATA%\\NeoWaves\\prefs.txt`.
 - Undo/Redo in the editor (Ctrl+Z / Ctrl+Shift+Z) with toolbar buttons.
 - List UX: click selection no longer auto-centers; keyboard selection still auto-centers.
 - Metadata loading prioritizes visible rows when you jump-scroll.
@@ -119,6 +119,24 @@ PitchShift/TimeStretch（signalsmith-stretch）を使うには C/C++ ツール�
 cargo run
 ```
 
+### Installer (Windows)
+
+Windows向けは Inno Setup でインストーラを生成します。
+将来的なマルチプラットフォーム化を見据えていますが、現状はWindowsのみ対応です。
+
+Build (Release) + Inno Setup:
+```powershell
+cargo build --release
+"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" installer\\NeoWaves.iss
+```
+
+Output:
+- `dist\\NeoWaves-Setup-<version>.exe`
+
+Notes:
+- 既定のインストール先は `C:\\ProgramData\\NeoWaves`
+- セットアップアイコンを使う場合は `icons\\icon.ico` を用意して `SetupIconFile` を有効化してください
+
 ### Automation (CLI)
 
 ```bash
@@ -140,8 +158,43 @@ Options:
 - --auto-run-delay <frames>
 - --auto-run-no-exit
 - --debug-check-interval <frames>
-- F9 saves a screenshot into ./screenshots
+- F9 saves a screenshot into the OS screenshot folder (Windows: `Pictures\\Screenshots`)
 - F12 toggles the debug window
+
+### MCP (stdio/http)
+
+The app exposes a small MCP server over stdio (JSON-RPC, one request per line).
+You can start it either from the UI or via CLI flags.
+
+UI:
+- Tools -> Start MCP (stdio)
+- Tools -> Start MCP (HTTP)
+  - If a root folder is already opened, it is used as the default allow-path.
+
+CLI:
+- `--mcp-stdio` enables MCP over stdio.
+- `--mcp-http` enables MCP over HTTP (`127.0.0.1:7464`).
+- `--mcp-http-addr <addr>` set HTTP bind address (example: `127.0.0.1:9000`).
+- `--mcp-allow-path <path>` add allowed path (repeatable).
+- `--mcp-allow-write` allow write operations.
+- `--mcp-allow-export` allow export operations.
+- `--mcp-readwrite` disable read-only mode (same as allowing writes).
+
+Example (stdio request):
+```
+{"jsonrpc":"2.0","id":1,"method":"list_tools","params":{}}
+```
+
+Example (HTTP request):
+```bash
+curl -X POST http://127.0.0.1:7464/rpc -H "Content-Type: application/json" ^
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"list_tools\",\"params\":{}}"
+```
+
+MCP Debugging (HTTP):
+- Set `NEOWAVES_MCP_DEBUG=1` before launch to print MCP request logs.
+- Run the smoke test script: `powershell -ExecutionPolicy Bypass -File .\\commands\\mcp_smoke.ps1`
+  - Optional: `-Addr 127.0.0.1:7464 -ToolName get_debug_summary`
 
 Example:
 ```bash

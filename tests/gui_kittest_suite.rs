@@ -5,8 +5,8 @@ mod kittest_suite {
 
     use egui::{Key, Modifiers};
     use egui_kittest::{Harness, kittest::Queryable};
-    use waves_previewer::{StartupConfig, WavesPreviewer};
-    use waves_previewer::kittest::{harness_default, harness_with_startup};
+    use neowaves::{StartupConfig, WavesPreviewer};
+    use neowaves::kittest::{harness_default, harness_with_startup};
     use walkdir::WalkDir;
 
     const DEFAULT_WAV_DIR: &str =
@@ -93,11 +93,16 @@ mod kittest_suite {
         }
     }
 
+    fn path_for_row(state: &WavesPreviewer, row: usize) -> PathBuf {
+        let id = state.files[row];
+        let idx = *state.item_index.get(&id).expect("missing item id");
+        state.items[idx].path.clone()
+    }
+
     fn select_first_row(harness: &mut Harness<'static, WavesPreviewer>) -> PathBuf {
         let path = {
             let state = harness.state();
-            let idx = *state.files.first().expect("no files");
-            state.all_files[idx].clone()
+            path_for_row(state, 0)
         };
         let label = path
             .file_name()
@@ -205,9 +210,7 @@ mod kittest_suite {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);
         let initial_len = harness.state().files.len();
-        let first_name = harness
-            .state()
-            .all_files[*harness.state().files.first().unwrap()]
+        let first_name = path_for_row(harness.state(), 0)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("")
@@ -219,10 +222,8 @@ mod kittest_suite {
         harness.run_steps(2);
         let filtered_len = harness.state().files.len();
         assert!(filtered_len <= initial_len);
-        if let Some(&idx) = harness.state().files.first() {
-            let name = harness
-                .state()
-                .all_files[idx]
+        if !harness.state().files.is_empty() {
+            let name = path_for_row(harness.state(), 0)
                 .to_string_lossy()
                 .to_lowercase();
             assert!(name.contains(&query.to_lowercase()));
@@ -348,12 +349,12 @@ mod kittest_suite {
     fn add_paths_avoids_duplicates() {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);
-        let before = harness.state().all_files.len();
-        let path = harness.state().all_files[0].clone();
+        let before = harness.state().items.len();
+        let path = harness.state().items[0].path.clone();
         let added = harness.state_mut().test_add_paths(&[path]);
         harness.run_steps(2);
         assert_eq!(added, 0);
-        assert_eq!(harness.state().all_files.len(), before);
+        assert_eq!(harness.state().items.len(), before);
     }
 
     #[test]
@@ -362,15 +363,15 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         let files = harness
             .state()
-            .all_files
+            .items
             .iter()
             .take(2)
-            .cloned()
+            .map(|item| item.path.clone())
             .collect::<Vec<_>>();
         harness.state_mut().test_replace_with_files(&files);
         harness.run_steps(2);
         assert!(harness.state().root.is_none());
-        assert_eq!(harness.state().all_files.len(), files.len());
+        assert_eq!(harness.state().items.len(), files.len());
     }
 
     #[test]
@@ -443,7 +444,7 @@ mod kittest_suite {
         harness.get_by_label("Files...").click();
         harness.run_steps(2);
         assert!(harness.state().root.is_none());
-        assert_eq!(harness.state().all_files.len(), files.len());
+        assert_eq!(harness.state().items.len(), files.len());
     }
 
     #[test]
@@ -453,7 +454,7 @@ mod kittest_suite {
         let added = harness.state_mut().test_simulate_drop_paths(&[dir]);
         harness.run_steps(2);
         assert!(added > 0);
-        assert_eq!(harness.state().all_files.len(), added);
+        assert_eq!(harness.state().items.len(), added);
         assert!(harness.state().root.is_none());
     }
 }

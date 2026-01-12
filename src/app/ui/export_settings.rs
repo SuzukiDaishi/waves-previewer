@@ -108,11 +108,54 @@ impl crate::app::WavesPreviewer {
                         if let Some(root) = self.root.clone() {
                             self.start_scan_folder(root);
                         } else if self.skip_dotfiles {
-                            self.all_files
-                                .retain(|p| !Self::is_dotfile_path(p));
+                            self.items
+                                .retain(|item| !Self::is_dotfile_path(&item.path));
+                            self.rebuild_item_indexes();
                             self.apply_filter_from_search();
                             self.apply_sort();
                         }
+                    }
+                    ui.separator();
+                    ui.label("List Columns:");
+                    let mut next_cols = self.list_columns;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut next_cols.file, "File");
+                        ui.checkbox(&mut next_cols.folder, "Folder");
+                        ui.checkbox(&mut next_cols.transcript, "Transcript");
+                        if self.external_visible_columns.is_empty() {
+                            ui.add_enabled(false, egui::Checkbox::new(&mut next_cols.external, "External"));
+                        } else {
+                            ui.checkbox(&mut next_cols.external, "External");
+                        }
+                        ui.checkbox(&mut next_cols.length, "Length");
+                        ui.checkbox(&mut next_cols.channels, "Ch");
+                        ui.checkbox(&mut next_cols.sample_rate, "SR");
+                        ui.checkbox(&mut next_cols.bits, "Bits");
+                        ui.checkbox(&mut next_cols.peak, "Peak");
+                        ui.checkbox(&mut next_cols.lufs, "LUFS");
+                        ui.checkbox(&mut next_cols.gain, "Gain");
+                        ui.checkbox(&mut next_cols.wave, "Wave");
+                    });
+                    let external_available = !self.external_visible_columns.is_empty();
+                    let any_visible = next_cols.file
+                        || next_cols.folder
+                        || next_cols.transcript
+                        || (next_cols.external && external_available)
+                        || next_cols.length
+                        || next_cols.channels
+                        || next_cols.sample_rate
+                        || next_cols.bits
+                        || next_cols.peak
+                        || next_cols.lufs
+                        || next_cols.gain
+                        || next_cols.wave;
+                    if !any_visible {
+                        next_cols.file = true;
+                    }
+                    if next_cols != self.list_columns {
+                        self.list_columns = next_cols;
+                        self.ensure_sort_key_visible();
+                        self.apply_sort();
                     }
                     ui.separator();
                     if ui.button("Close").clicked() {

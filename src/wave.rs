@@ -268,11 +268,21 @@ pub fn prepare_for_timestretch(path: &Path, audio: &AudioEngine, out_waveform: &
 // Heavy offline: pitch-shift preserving duration
 pub fn process_pitchshift_offline(mono: &[f32], in_sr: u32, out_sr: u32, semitones: f32) -> Vec<f32> {
     let resampled = resample_linear(mono, in_sr, out_sr);
+    if resampled.is_empty() {
+        return Vec::new();
+    }
+    let out_len = resampled.len().max(1);
     let mut stretch = Stretch::preset_default(1, out_sr);
     stretch.set_transpose_factor_semitones(semitones, None);
-    let mut out = vec![0.0_f32; resampled.len()];
+    let mut out = vec![0.0_f32; out_len];
+    // Prefer `exact()` to handle latency alignment; fallback only for very short buffers.
+    if stretch.exact(&resampled, &mut out) {
+        return out;
+    }
+    let mut stretch = Stretch::preset_default(1, out_sr);
+    stretch.set_transpose_factor_semitones(semitones, None);
+    stretch_seek_preroll(&mut stretch, &resampled, 1.0);
     stretch.process(&resampled, &mut out);
-    // Append remaining tail to avoid end being cut
     let olat = stretch.output_latency();
     if olat > 0 {
         let mut tail = vec![0.0_f32; olat];
@@ -282,20 +292,6 @@ pub fn process_pitchshift_offline(mono: &[f32], in_sr: u32, out_sr: u32, semiton
             out.drain(0..olat);
         } else {
             out.clear();
-        }
-    }
-    // Remove input-latency pre-roll so the result aligns with the original start.
-    let input_lat = stretch.input_latency();
-    if input_lat > 0 && !out.is_empty() {
-        let target_len = out.len();
-        let pre_roll = (input_lat as f32).round() as usize;
-        if pre_roll >= out.len() {
-            out.clear();
-        } else if pre_roll > 0 {
-            out.drain(0..pre_roll);
-        }
-        if out.len() < target_len {
-            out.resize(target_len, 0.0);
         }
     }
     out
@@ -305,12 +301,21 @@ pub fn process_pitchshift_offline(mono: &[f32], in_sr: u32, out_sr: u32, semiton
 pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: f32) -> Vec<f32> {
     let rate = rate.clamp(0.25, 4.0);
     let resampled = resample_linear(mono, in_sr, out_sr);
+    if resampled.is_empty() {
+        return Vec::new();
+    }
+    let out_len = ((resampled.len() as f64) / (rate as f64)).ceil().max(1.0) as usize;
     let mut stretch = Stretch::preset_default(1, out_sr);
     stretch.set_transpose_factor(1.0, None);
-    let out_len = ((resampled.len() as f64) / (rate as f64)).ceil() as usize;
     let mut out = vec![0.0_f32; out_len];
+    // Prefer `exact()` to handle latency alignment; fallback only for very short buffers.
+    if stretch.exact(&resampled, &mut out) {
+        return out;
+    }
+    let mut stretch = Stretch::preset_default(1, out_sr);
+    stretch.set_transpose_factor(1.0, None);
+    stretch_seek_preroll(&mut stretch, &resampled, rate);
     stretch.process(&resampled, &mut out);
-    // Append remaining tail to avoid end being cut
     let olat = stretch.output_latency();
     if olat > 0 {
         let mut tail = vec![0.0_f32; olat];
@@ -322,22 +327,22 @@ pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: 
             out.clear();
         }
     }
-    // Remove input-latency pre-roll so the result aligns with the original start.
-    let input_lat = stretch.input_latency();
-    if input_lat > 0 && !out.is_empty() {
-        let target_len = out.len();
-        let stretch_factor = out_len as f32 / resampled.len().max(1) as f32;
-        let pre_roll = ((input_lat as f32) * stretch_factor).round() as usize;
-        if pre_roll >= out.len() {
-            out.clear();
-        } else if pre_roll > 0 {
-            out.drain(0..pre_roll);
-        }
-        if out.len() < target_len {
-            out.resize(target_len, 0.0);
-        }
-    }
     out
+}
+
+fn stretch_seek_preroll(stretch: &mut Stretch, input: &[f32], playback_rate: f32) {
+    let in_lat = stretch.input_latency();
+    if in_lat == 0 {
+        return;
+    }
+    // Feed pre-roll so the processed output starts aligned (prevents leading silence drift).
+    let take = in_lat.min(input.len());
+    let mut pre = Vec::with_capacity(in_lat);
+    pre.extend_from_slice(&input[..take]);
+    if take < in_lat {
+        pre.resize(in_lat, 0.0);
+    }
+    stretch.seek(&pre, playback_rate as f64);
 }
 
 // Export: apply gain to source WAV and write to a new file (preserve channels & sample_rate).

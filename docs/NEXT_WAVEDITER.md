@@ -1,6 +1,6 @@
 ﻿# 次世代 Audio Editorの開発について
 
-本ドキュメントは、waves-previewer を「次世代 Audio Editor」へ拡張するための
+本ドキュメントは、NeoWaves Audio List Editor を「次世代 Audio Editor」へ拡張するための
 機能設計と実装計画をまとめたものです。要求が増えても破綻しない設計を前提に、
 MCP/LLM連携や外部ツール統合まで視野に入れます。
 

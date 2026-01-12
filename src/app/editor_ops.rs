@@ -3,13 +3,35 @@ impl crate::app::WavesPreviewer {
         let x = t.clamp(0.0, 1.0);
         match shape {
             crate::app::types::FadeShape::Linear => x,
-            crate::app::types::FadeShape::EqualPower => (core::f32::consts::PI * x / 2.0).sin(),
+            crate::app::types::FadeShape::EqualPower => (core::f32::consts::FRAC_PI_2 * x).sin(),
             crate::app::types::FadeShape::Cosine => {
-                (1.0 - (core::f32::consts::PI * (1.0 - x)).cos()) * 0.5
+                (1.0 - (core::f32::consts::PI * x).cos()) * 0.5
             }
             crate::app::types::FadeShape::SCurve => x * x * (3.0 - 2.0 * x),
             crate::app::types::FadeShape::Quadratic => x * x,
             crate::app::types::FadeShape::Cubic => x * x * x,
+        }
+    }
+
+    pub(super) fn fade_weight_out(shape: crate::app::types::FadeShape, t: f32) -> f32 {
+        let x = t.clamp(0.0, 1.0);
+        match shape {
+            crate::app::types::FadeShape::Linear => 1.0 - x,
+            crate::app::types::FadeShape::EqualPower => {
+                (core::f32::consts::FRAC_PI_2 * x).cos()
+            }
+            crate::app::types::FadeShape::Cosine => {
+                (1.0 + (core::f32::consts::PI * x).cos()) * 0.5
+            }
+            crate::app::types::FadeShape::SCurve => 1.0 - Self::fade_weight(shape, x),
+            crate::app::types::FadeShape::Quadratic => {
+                let y = 1.0 - x;
+                y * y
+            }
+            crate::app::types::FadeShape::Cubic => {
+                let y = 1.0 - x;
+                y * y * y
+            }
         }
     }
 
@@ -64,7 +86,7 @@ impl crate::app::WavesPreviewer {
                 for ch in tab.ch_samples.iter_mut() {
                     for i in s..e {
                         let t = (i - s) as f32 / dur;
-                        let w = 1.0 - Self::fade_weight(shape, t);
+                        let w = Self::fade_weight_out(shape, t);
                         ch[i] *= w;
                     }
                 }
@@ -286,7 +308,7 @@ impl crate::app::WavesPreviewer {
                     }
                     for i in 0..nout.min(e - s) {
                         let t = i as f32 / nout.max(1) as f32;
-                        let w = 1.0 - Self::fade_weight(crate::app::types::FadeShape::SCurve, t);
+                        let w = Self::fade_weight_out(crate::app::types::FadeShape::SCurve, t);
                         ch[e - 1 - i] *= w;
                     }
                 }

@@ -4,7 +4,8 @@ use egui_extras::TableBuilder;
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
-            amp_to_color, db_to_amp, db_to_color, format_duration, sortable_header,
+            amp_to_color, db_to_amp, db_to_color, format_duration, highlight_text_job,
+            sortable_header,
         };
         use crate::app::types::SortKey;
         use std::path::PathBuf;
@@ -17,17 +18,27 @@ impl crate::app::WavesPreviewer {
         let visible_rows = ((avail_h - header_h) / row_h).floor().max(1.0) as usize;
         ui.set_min_width(ui.available_width());
         let row_count = self.files.len().max(12);
+        let cols = self.list_columns;
+        let external_cols = if cols.external {
+            self.external_visible_columns.clone()
+        } else {
+            Vec::new()
+        };
+        let list_rect = ui.available_rect_before_wrap();
+        let pointer_over_list = ui
+            .input(|i| i.pointer.hover_pos())
+            .map_or(false, |p| list_rect.contains(p));
         let mut dirty_paths: std::collections::HashSet<PathBuf> = self
             .tabs
             .iter()
-            .filter(|t| t.dirty || t.loop_markers_dirty)
+            .filter(|t| t.dirty || t.loop_markers_dirty || t.markers_dirty)
             .map(|t| t.path.clone())
             .collect();
         dirty_paths.extend(self.edited_cache.keys().cloned());
 
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
-        if self.active_tab.is_none() && !self.files.is_empty() {
+        if self.active_tab.is_none() && !self.files.is_empty() && !ctx.wants_keyboard_input() {
             let pressed_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
             let pressed_up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
             let pressed_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
@@ -38,6 +49,7 @@ impl crate::app::WavesPreviewer {
             let pressed_pgup = ctx.input(|i| i.key_pressed(egui::Key::PageUp));
             let pressed_home = ctx.input(|i| i.key_pressed(egui::Key::Home));
             let pressed_end = ctx.input(|i| i.key_pressed(egui::Key::End));
+            let pressed_delete = ctx.input(|i| i.key_pressed(egui::Key::Delete));
             if pressed_ctrl_a {
                 self.selected_multi.clear();
                 for i in 0..self.files.len() {
@@ -79,24 +91,26 @@ impl crate::app::WavesPreviewer {
                 self.select_and_load(target, true);
                 key_moved = true;
             }
-            if pressed_enter {
-                if let Some(i) = self.selected {
-                    if let Some(p) = self.path_for_row(i).cloned() {
-                        self.open_or_activate_tab(&p);
-                    }
+            if pressed_enter && pointer_over_list && !self.suppress_list_enter {
+                let selected = self.selected_paths();
+                if !selected.is_empty() {
+                    self.open_paths_in_tabs(&selected);
                 }
+            }
+            if pressed_delete {
+                let selected = self.selected_paths();
+                if !selected.is_empty() {
+                    self.remove_paths_from_list(&selected);
+                }
+            }
+            if key_moved && self.auto_play_list_nav {
+                self.request_list_autoplay();
             }
 
             // Per-file Gain(dB) adjust: Left/Right arrows
             if pressed_left || pressed_right {
                 let mods = ctx.input(|i| i.modifiers);
-                let step = if mods.ctrl {
-                    3.0
-                } else if mods.shift {
-                    1.0
-                } else {
-                    0.1
-                };
+                let step = if mods.shift { 0.1 } else { 1.0 };
                 let delta = if pressed_left { -step } else { step };
                 let mut indices = self.selected_multi.clone();
                 if indices.is_empty() {
@@ -112,10 +126,6 @@ impl crate::app::WavesPreviewer {
 
         let mut sort_changed = false;
         let mut missing_paths: Vec<PathBuf> = Vec::new();
-        let list_rect = ui.available_rect_before_wrap();
-        let pointer_over_list = ui
-            .input(|i| i.pointer.hover_pos())
-            .map_or(false, |p| list_rect.contains(p));
         let wheel_raw = ctx.input(|i| i.raw_scroll_delta);
         if pointer_over_list && wheel_raw != egui::Vec2::ZERO {
             self.last_list_scroll_at = Some(std::time::Instant::now());
@@ -125,24 +135,67 @@ impl crate::app::WavesPreviewer {
                 || self
                     .last_list_scroll_at
                     .map_or(true, |t| t.elapsed() > std::time::Duration::from_millis(300)));
+        let mut filler_cols = 0usize;
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .auto_shrink([false, true])
             .sense(egui::Sense::click())
-            .cell_layout(egui::Layout::left_to_right(Align::Center))
-            .column(egui_extras::Column::initial(200.0).resizable(true))
-            .column(egui_extras::Column::initial(250.0).resizable(true))
-            .column(egui_extras::Column::initial(60.0).resizable(true))
-            .column(egui_extras::Column::initial(40.0).resizable(true))
-            .column(egui_extras::Column::initial(70.0).resizable(true))
-            .column(egui_extras::Column::initial(50.0).resizable(true))
-            .column(egui_extras::Column::initial(90.0).resizable(true))
-            .column(egui_extras::Column::initial(90.0).resizable(true))
-            .column(egui_extras::Column::initial(80.0).resizable(true))
-            .column(egui_extras::Column::initial(150.0).resizable(true))
+            .cell_layout(egui::Layout::left_to_right(Align::Center));
+        if cols.file {
+            table = table.column(egui_extras::Column::initial(200.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.folder {
+            table = table.column(egui_extras::Column::initial(250.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.transcript {
+            table = table.column(egui_extras::Column::initial(280.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.external {
+            for _ in 0..external_cols.len() {
+                table = table.column(egui_extras::Column::initial(140.0).resizable(true));
+                filler_cols += 1;
+            }
+        }
+        if cols.length {
+            table = table.column(egui_extras::Column::initial(60.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.channels {
+            table = table.column(egui_extras::Column::initial(40.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.sample_rate {
+            table = table.column(egui_extras::Column::initial(70.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.bits {
+            table = table.column(egui_extras::Column::initial(50.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.peak {
+            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.lufs {
+            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.gain {
+            table = table.column(egui_extras::Column::initial(80.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.wave {
+            table = table.column(egui_extras::Column::initial(150.0).resizable(true));
+            filler_cols += 1;
+        }
+        table = table
             .column(egui_extras::Column::remainder())
             .min_scrolled_height((avail_h - header_h).max(0.0));
+        filler_cols += 1;
         if allow_auto_scroll {
             if let Some(sel) = self.selected {
                 if sel < row_count {
@@ -154,101 +207,147 @@ impl crate::app::WavesPreviewer {
 
         table
             .header(header_h, |mut header| {
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "File",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::File,
-                        true,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "Folder",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::Folder,
-                        true,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "Length",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::Length,
-                        true,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "Ch",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::Channels,
-                        true,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "SR",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::SampleRate,
-                        true,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "Bits",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::Bits,
-                        true,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "dBFS (Peak)",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::Level,
-                        false,
-                    );
-                });
-                header.col(|ui| {
-                    sort_changed |= sortable_header(
-                        ui,
-                        "LUFS (I)",
-                        &mut self.sort_key,
-                        &mut self.sort_dir,
-                        SortKey::Lufs,
-                        false,
-                    );
-                });
-                header.col(|ui| {
-                    ui.label(RichText::new("Gain (dB)").strong());
-                });
-                header.col(|ui| {
-                    ui.label(RichText::new("Wave").strong());
-                });
+                if cols.file {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "File",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::File,
+                            true,
+                        );
+                    });
+                }
+                if cols.folder {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Folder",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Folder,
+                            true,
+                        );
+                    });
+                }
+                if cols.transcript {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Transcript",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Transcript,
+                            true,
+                        );
+                    });
+                }
+                if cols.external {
+                    for (idx, name) in external_cols.iter().enumerate() {
+                        header.col(|ui| {
+                            sort_changed |= sortable_header(
+                                ui,
+                                name,
+                                &mut self.sort_key,
+                                &mut self.sort_dir,
+                                SortKey::External(idx),
+                                true,
+                            );
+                        });
+                    }
+                }
+                if cols.length {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Length",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Length,
+                            true,
+                        );
+                    });
+                }
+                if cols.channels {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Ch",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Channels,
+                            true,
+                        );
+                    });
+                }
+                if cols.sample_rate {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "SR",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::SampleRate,
+                            true,
+                        );
+                    });
+                }
+                if cols.bits {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Bits",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Bits,
+                            true,
+                        );
+                    });
+                }
+                if cols.peak {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "dBFS (Peak)",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Level,
+                            false,
+                        );
+                    });
+                }
+                if cols.lufs {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "LUFS (I)",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Lufs,
+                            false,
+                        );
+                    });
+                }
+                if cols.gain {
+                    header.col(|ui| {
+                        ui.label(RichText::new("Gain (dB)").strong());
+                    });
+                }
+                if cols.wave {
+                    header.col(|ui| {
+                        ui.label(RichText::new("Wave").strong());
+                    });
+                }
                 header.col(|_ui| {});
             })
             .body(|body| {
                 body.rows(row_h, row_count, |mut row| {
                     let row_idx = row.index();
                     if row_idx < self.files.len() {
-                        let file_idx = self.files[row_idx];
-                        let path_owned = match self.all_files.get(file_idx) {
-                            Some(p) => p.clone(),
+                        let id = self.files[row_idx];
+                        let path_owned = match self.item_for_id(id) {
+                            Some(item) => item.path.clone(),
                             None => return,
                         };
                         if !path_owned.is_file() {
@@ -256,6 +355,10 @@ impl crate::app::WavesPreviewer {
                             return;
                         }
                         self.queue_meta_for_path(&path_owned, true);
+                        self.queue_transcript_for_path(&path_owned, true);
+                        let Some(item) = self.item_for_id(id) else {
+                            return;
+                        };
                         let file_name = path_owned
                             .file_name()
                             .and_then(|s| s.to_str())
@@ -265,7 +368,8 @@ impl crate::app::WavesPreviewer {
                         row.set_selected(is_selected);
                         let mut clicked_to_load = false;
                         let mut clicked_to_select = false;
-                        row.col(|ui| {
+                        if cols.file {
+                            row.col(|ui| {
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
@@ -273,12 +377,7 @@ impl crate::app::WavesPreviewer {
                                     if dirty_paths.contains(&path_owned) {
                                         display.push_str(" *");
                                     }
-                                    if self
-                                        .pending_gains
-                                        .get(&path_owned)
-                                        .map(|v| v.abs() > 0.0001)
-                                        .unwrap_or(false)
-                                    {
+                                    if self.has_pending_gain(&path_owned) {
                                         display.push_str(" •");
                                     }
                                     let resp = ui
@@ -308,7 +407,8 @@ impl crate::app::WavesPreviewer {
                                 },
                             );
                         });
-                        row.col(|ui| {
+                        if cols.wave {
+                            row.col(|ui| {
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
@@ -340,169 +440,255 @@ impl crate::app::WavesPreviewer {
                                     }
                                 },
                             );
-                        });
-                        row.col(|ui| {
-                            let secs = self
-                                .meta
-                                .get(&path_owned)
-                                .and_then(|m| m.duration_secs)
-                                .unwrap_or(f32::NAN);
-                            let text = if secs.is_finite() {
-                                format_duration(secs)
-                            } else {
-                                "...".into()
-                            };
-                            let resp = ui
-                                .add(
-                                    egui::Label::new(RichText::new(text).monospace())
-                                        .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked_by(egui::PointerButton::Primary) {
-                                clicked_to_load = true;
-                            }
-                        });
-                        row.col(|ui| {
-                            let ch = self.meta.get(&path_owned).map(|m| m.channels).unwrap_or(0);
-                            let resp = ui
-                                .add(
-                                    egui::Label::new(RichText::new(format!("{}", ch)).monospace())
-                                        .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked_by(egui::PointerButton::Primary) {
-                                clicked_to_load = true;
-                            }
-                        });
-                        row.col(|ui| {
-                            let sr = self
-                                .meta
-                                .get(&path_owned)
-                                .map(|m| m.sample_rate)
-                                .unwrap_or(0);
-                            let resp = ui
-                                .add(
-                                    egui::Label::new(RichText::new(format!("{}", sr)).monospace())
-                                        .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked_by(egui::PointerButton::Primary) {
-                                clicked_to_load = true;
-                            }
-                        });
-                        row.col(|ui| {
-                            let bits = self
-                                .meta
-                                .get(&path_owned)
-                                .map(|m| m.bits_per_sample)
-                                .unwrap_or(0);
-                            let resp = ui
-                                .add(
-                                    egui::Label::new(
-                                        RichText::new(format!("{}", bits)).monospace(),
-                                    )
-                                    .sense(Sense::click()),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            if resp.clicked_by(egui::PointerButton::Primary) {
-                                clicked_to_load = true;
-                            }
-                        });
-                        row.col(|ui| {
-                            let (rect2, resp2) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), row_h * 0.9),
-                                Sense::click(),
-                            );
-                            let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
-                            let orig = self.meta.get(&path_owned).and_then(|m| m.peak_db);
-                            let adj = orig.map(|db| db + gain_db);
-                            if let Some(db) = adj {
-                                ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                            }
-                            let text = adj
-                                .map(|db| format!("{:.1}", db))
-                                .unwrap_or_else(|| "...".into());
-                            let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                            ui.painter().text(
-                                rect2.center(),
-                                egui::Align2::CENTER_CENTER,
-                                text,
-                                fid,
-                                egui::Color32::WHITE,
-                            );
-                            if resp2.clicked_by(egui::PointerButton::Primary) {
-                                clicked_to_load = true;
-                            }
-                        });
-                        row.col(|ui| {
-                            let base = self.meta.get(&path_owned).and_then(|m| m.lufs_i);
-                            let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
-                            let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
-                                Some(*v)
-                            } else {
-                                base.map(|v| v + gain_db)
-                            };
-                            let (rect2, resp2) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), row_h * 0.9),
-                                Sense::click(),
-                            );
-                            if let Some(db) = eff {
-                                ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                            }
-                            let text = eff
-                                .map(|v| format!("{:.1}", v))
-                                .unwrap_or_else(|| "...".into());
-                            let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                            ui.painter().text(
-                                rect2.center(),
-                                egui::Align2::CENTER_CENTER,
-                                text,
-                                fid,
-                                egui::Color32::WHITE,
-                            );
-                            if resp2.clicked_by(egui::PointerButton::Primary) {
-                                clicked_to_load = true;
-                            }
-                        });
-                        row.col(|ui| {
-                            let old = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
-                            let mut g = old;
-                            let resp = ui.add(
-                                egui::DragValue::new(&mut g)
-                                    .range(-24.0..=24.0)
-                                    .speed(0.1)
-                                    .fixed_decimals(1)
-                                    .suffix(" dB"),
-                            );
-                            if resp.changed() {
-                                let new = crate::app::WavesPreviewer::clamp_gain_db(g);
-                                let delta = new - old;
-                                if self.selected_multi.len() > 1
-                                    && self.selected_multi.contains(&row_idx)
+                            });
+                        }
+                        if cols.folder {
+                        if cols.transcript {
+                            row.col(|ui| {
+                                let transcript_text = item
+                                    .transcript
+                                    .as_ref()
+                                    .map(|t| t.full_text.as_str())
+                                    .unwrap_or("");
+                                let display = if transcript_text.is_empty()
+                                    && self.transcript_inflight.contains(&path_owned)
                                 {
-                                    let indices = self.selected_multi.clone();
-                                    self.adjust_gain_for_indices(&indices, delta);
+                                    "..."
                                 } else {
-                                    if new == 0.0 {
-                                        self.pending_gains.remove(&path_owned);
-                                    } else {
-                                        self.pending_gains.insert(path_owned.clone(), new);
-                                    }
-                                    if self.playing_path.as_ref() == Some(&path_owned) {
-                                        self.apply_effective_volume();
-                                    }
-                                    self.schedule_lufs_for_path(path_owned.clone());
+                                    transcript_text
+                                };
+                                let label = if let Some(job) = highlight_text_job(
+                                    display,
+                                    &self.search_query,
+                                    self.search_use_regex,
+                                    ui.style(),
+                                ) {
+                                    egui::Label::new(job).sense(Sense::click()).truncate()
+                                } else {
+                                    egui::Label::new(
+                                        RichText::new(display).size(text_height * 0.95),
+                                    )
+                                    .sense(Sense::click())
+                                    .truncate()
+                                };
+                                let resp = ui
+                                    .add(label.show_tooltip_when_elided(false))
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary)
+                                    && !resp.double_clicked()
+                                {
+                                    clicked_to_load = true;
                                 }
+                                if resp.hovered() && !transcript_text.is_empty() {
+                                    resp.on_hover_text(transcript_text);
+                                }
+                            });
+                        }
+                        }
+                        if cols.external {
+                            for name in external_cols.iter() {
+                                row.col(|ui| {
+                                    let value = item
+                                        .external
+                                        .get(name)
+                                        .map(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(value).size(text_height * 0.95),
+                                            )
+                                            .sense(Sense::click())
+                                            .truncate()
+                                            .show_tooltip_when_elided(false),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    if resp.clicked_by(egui::PointerButton::Primary)
+                                        && !resp.double_clicked()
+                                    {
+                                        clicked_to_load = true;
+                                    }
+                                    if resp.hovered() && !value.is_empty() {
+                                        resp.on_hover_text(value);
+                                    }
+                                });
                             }
-                        });
+                        }
+                        if cols.length {
+                            row.col(|ui| {
+                                let secs = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.duration_secs)
+                                    .unwrap_or(f32::NAN);
+                                let text = if secs.is_finite() {
+                                    format_duration(secs)
+                                } else {
+                                    "...".into()
+                                };
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(RichText::new(text).monospace())
+                                            .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.channels {
+                            row.col(|ui| {
+                                let ch = self
+                                    .meta_for_path(&path_owned)
+                                    .map(|m| m.channels)
+                                    .unwrap_or(0);
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{}", ch)).monospace(),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.sample_rate {
+                            row.col(|ui| {
+                                let sr = self
+                                    .meta_for_path(&path_owned)
+                                    .map(|m| m.sample_rate)
+                                    .unwrap_or(0);
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{}", sr)).monospace(),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.bits {
+                            row.col(|ui| {
+                                let bits = self
+                                    .meta_for_path(&path_owned)
+                                    .map(|m| m.bits_per_sample)
+                                    .unwrap_or(0);
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(format!("{}", bits)).monospace(),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.peak {
+                            row.col(|ui| {
+                                let (rect2, resp2) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), row_h * 0.9),
+                                    Sense::click(),
+                                );
+                                let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                let orig = self.meta_for_path(&path_owned).and_then(|m| m.peak_db);
+                                let adj = orig.map(|db| db + gain_db);
+                                if let Some(db) = adj {
+                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                }
+                                let text = adj
+                                    .map(|db| format!("{:.1}", db))
+                                    .unwrap_or_else(|| "...".into());
+                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                ui.painter().text(
+                                    rect2.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    text,
+                                    fid,
+                                    egui::Color32::WHITE,
+                                );
+                                if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.lufs {
+                            row.col(|ui| {
+                                let base = self.meta_for_path(&path_owned).and_then(|m| m.lufs_i);
+                                let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
+                                    Some(*v)
+                                } else {
+                                    base.map(|v| v + gain_db)
+                                };
+                                let (rect2, resp2) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), row_h * 0.9),
+                                    Sense::click(),
+                                );
+                                if let Some(db) = eff {
+                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                }
+                                let text = eff
+                                    .map(|v| format!("{:.1}", v))
+                                    .unwrap_or_else(|| "...".into());
+                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                ui.painter().text(
+                                    rect2.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    text,
+                                    fid,
+                                    egui::Color32::WHITE,
+                                );
+                                if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.gain {
+                            row.col(|ui| {
+                                let old = self.pending_gain_db_for_path(&path_owned);
+                                let mut g = old;
+                                let resp = ui.add(
+                                    egui::DragValue::new(&mut g)
+                                        .range(-24.0..=24.0)
+                                        .speed(0.1)
+                                        .fixed_decimals(1)
+                                        .suffix(" dB"),
+                                );
+                                if resp.changed() {
+                                    let new = crate::app::WavesPreviewer::clamp_gain_db(g);
+                                    let delta = new - old;
+                                    if self.selected_multi.len() > 1
+                                        && self.selected_multi.contains(&row_idx)
+                                    {
+                                        let indices = self.selected_multi.clone();
+                                        self.adjust_gain_for_indices(&indices, delta);
+                                    } else {
+                                        self.set_pending_gain_db_for_path(&path_owned, new);
+                                        if self.playing_path.as_ref() == Some(&path_owned) {
+                                            self.apply_effective_volume();
+                                        }
+                                        self.schedule_lufs_for_path(path_owned.clone());
+                                    }
+                                }
+                            });
+                        }
                         row.col(|ui| {
                             let (rect2, _resp2) = ui.allocate_exact_size(
                                 egui::vec2(ui.available_width(), row_h * 0.9),
                                 Sense::hover(),
                             );
                             let error_text = self
-                                .meta
-                                .get(&path_owned)
+                                .meta_for_path(&path_owned)
                                 .and_then(|m| m.decode_error.as_deref());
                             let (wave_rect, error_rect) = if error_text.is_some() {
                                 let err_max = (rect2.height() * 0.45).max(8.0);
@@ -523,11 +709,11 @@ impl crate::app::WavesPreviewer {
                             } else {
                                 (rect2, None)
                             };
-                            if let Some(m) = self.meta.get(&path_owned) {
+                            if let Some(m) = self.meta_for_path(&path_owned) {
                                 let w = wave_rect.width();
                                 let h = wave_rect.height();
                                 let n = m.thumb.len().max(1) as f32;
-                                let gain_db = *self.pending_gains.get(&path_owned).unwrap_or(&0.0);
+                                let gain_db = self.pending_gain_db_for_path(&path_owned);
                                 let scale = db_to_amp(gain_db);
                                 for (idx, &(mn0, mx0)) in m.thumb.iter().enumerate() {
                                     let mn = (mn0 * scale).clamp(-1.0, 1.0);
@@ -561,7 +747,9 @@ impl crate::app::WavesPreviewer {
                                     egui::Color32::from_rgb(220, 90, 90),
                                 );
                             }
-                        });
+                            });
+                        }
+                        row.col(|_ui| {});
                         // row-level interaction (must call response() after at least one col())
                         let resp = row.response();
                         if resp.secondary_clicked() && !self.selected_multi.contains(&row_idx) {
@@ -587,10 +775,10 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             if ui
-                                .add_enabled(has_selection, egui::Button::new("Delete..."))
+                                .add_enabled(has_selection, egui::Button::new("Remove from List"))
                                 .clicked()
                             {
-                                self.open_delete_confirm(selected.clone());
+                                self.remove_paths_from_list(&selected);
                                 ui.close();
                             }
                             let has_edits = self.has_edits_for_paths(&selected);
@@ -617,7 +805,7 @@ impl crate::app::WavesPreviewer {
                         }
                     } else {
                         // filler
-                        for _ in 0..11 {
+                        for _ in 0..filler_cols {
                             row.col(|ui| {
                                 let _ = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),

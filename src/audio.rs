@@ -59,7 +59,7 @@ impl AudioEngine {
             .default_output_config()
             .context("No default output config")?;
 
-        let shared = Self::new_shared(cfg.channels() as usize, cfg.sample_rate().0);
+        let shared = Self::new_shared(cfg.channels() as usize, cfg.sample_rate());
 
         let stream = match cfg.sample_format() {
             cpal::SampleFormat::F32 => {
@@ -374,6 +374,29 @@ impl AudioEngine {
                         .play_pos_f
                         .store(0.0, std::sync::atomic::Ordering::Relaxed);
                 }
+            }
+        }
+    }
+
+    pub fn play(&self) {
+        if self.shared.samples.load().is_none() {
+            return;
+        }
+        self.shared
+            .playing
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let pos = self
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(s) = self.shared.samples.load().as_ref() {
+            if pos >= s.len() {
+                self.shared
+                    .play_pos
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                self.shared
+                    .play_pos_f
+                    .store(0.0, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }

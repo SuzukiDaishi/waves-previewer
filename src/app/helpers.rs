@@ -1,4 +1,5 @@
-use egui::{Color32, RichText};
+use egui::{text::LayoutJob, text::TextFormat, Color32, FontId, RichText, TextStyle};
+use regex::RegexBuilder;
 
 use super::types::{SortDir, SortKey};
 
@@ -144,6 +145,61 @@ pub fn format_time_s(secs: f32) -> String {
         // fallback: no decimals for very long
         format!("{}:{:02}", m, s.floor() as u64)
     }
+}
+
+pub fn highlight_text_job(
+    text: &str,
+    query: &str,
+    use_regex: bool,
+    style: &egui::Style,
+) -> Option<LayoutJob> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    let re = if use_regex {
+        RegexBuilder::new(q).case_insensitive(true).build().ok()?
+    } else {
+        RegexBuilder::new(&regex::escape(q))
+            .case_insensitive(true)
+            .build()
+            .ok()?
+    };
+    let mut matches = Vec::new();
+    for m in re.find_iter(text) {
+        matches.push((m.start(), m.end()));
+    }
+    if matches.is_empty() {
+        return None;
+    }
+    let font_id = style
+        .text_styles
+        .get(&TextStyle::Body)
+        .cloned()
+        .unwrap_or_else(|| FontId::proportional(14.0));
+    let normal = TextFormat {
+        font_id: font_id.clone(),
+        color: style.visuals.text_color(),
+        ..Default::default()
+    };
+    let highlight = TextFormat {
+        font_id,
+        color: Color32::from_rgb(255, 200, 80),
+        ..Default::default()
+    };
+    let mut job = LayoutJob::default();
+    let mut last = 0;
+    for (s, e) in matches {
+        if s > last {
+            job.append(&text[last..s], 0.0, normal.clone());
+        }
+        job.append(&text[s..e], 0.0, highlight.clone());
+        last = e;
+    }
+    if last < text.len() {
+        job.append(&text[last..], 0.0, normal);
+    }
+    Some(job)
 }
 
 #[allow(dead_code)]

@@ -1,16 +1,51 @@
-﻿use std::collections::VecDeque;
+﻿use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use crate::markers::MarkerEntry;
+
+pub type MediaId = u64;
+
+#[derive(Clone, Debug)]
+pub enum MediaStatus {
+    Ok,
+    DecodeFailed(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct MediaItem {
+    pub id: MediaId,
+    pub path: PathBuf,
+    pub meta: Option<FileMeta>,
+    pub pending_gain_db: f32,
+    pub status: MediaStatus,
+    pub transcript: Option<Transcript>,
+    pub external: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TranscriptSegment {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub text: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Transcript {
+    pub segments: Vec<TranscriptSegment>,
+    pub full_text: String,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     File,
     Folder,
+    Transcript,
     Length,
     Channels,
     SampleRate,
     Bits,
     Level,
     Lufs,
+    External(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -18,6 +53,48 @@ pub enum SortDir {
     Asc,
     Desc,
     None,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ListColumnConfig {
+    pub file: bool,
+    pub folder: bool,
+    pub transcript: bool,
+    pub external: bool,
+    pub length: bool,
+    pub channels: bool,
+    pub sample_rate: bool,
+    pub bits: bool,
+    pub peak: bool,
+    pub lufs: bool,
+    pub gain: bool,
+    pub wave: bool,
+}
+
+impl Default for ListColumnConfig {
+    fn default() -> Self {
+        Self {
+            file: true,
+            folder: true,
+            transcript: false,
+            external: true,
+            length: true,
+            channels: true,
+            sample_rate: true,
+            bits: true,
+            peak: true,
+            lufs: true,
+            gain: true,
+            wave: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExternalKeyRule {
+    FileName,
+    Stem,
+    Regex,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +120,7 @@ pub enum ViewMode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolKind {
     LoopEdit,
+    Markers,
     Trim,
     Fade,
     PitchShift,
@@ -125,6 +203,9 @@ pub struct EditorTab {
     pub ops: Vec<EditOp>,          // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
     pub selection: Option<(usize, usize)>, // [start,end) in samples
+    pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
+    pub markers_saved: Vec<MarkerEntry>,   // last saved markers
+    pub markers_dirty: bool,
     // Deprecated: ab_loop (A/B) is no longer used as loop region; kept for transition
     pub ab_loop: Option<(usize, usize)>,
     // Playback loop region (independent from editing selection)
@@ -160,7 +241,7 @@ pub struct EditorTab {
     pub redo_bytes: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FileMeta {
     pub channels: u16,
     pub sample_rate: u32,
@@ -192,6 +273,7 @@ pub struct ProcessingState {
     pub msg: String,
     #[allow(dead_code)]
     pub path: PathBuf,
+    pub autoplay_when_ready: bool,
     pub rx: std::sync::mpsc::Receiver<ProcessingResult>,
 }
 
@@ -250,6 +332,9 @@ pub struct CachedEdit {
     pub loop_region: Option<(usize, usize)>,
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
+    pub markers: Vec<MarkerEntry>,
+    pub markers_saved: Vec<MarkerEntry>,
+    pub markers_dirty: bool,
     pub trim_range: Option<(usize, usize)>,
     pub loop_xfade_samples: usize,
     pub loop_xfade_shape: LoopXfadeShape,
@@ -325,6 +410,12 @@ pub struct StartupConfig {
     pub exit_after_screenshot: bool,
     pub dummy_list_count: Option<usize>,
     pub debug: DebugConfig,
+    pub mcp_stdio: bool,
+    pub mcp_allow_paths: Vec<PathBuf>,
+    pub mcp_allow_write: bool,
+    pub mcp_allow_export: bool,
+    pub mcp_read_only: bool,
+    pub mcp_http_addr: Option<String>,
 }
 
 impl Default for StartupConfig {
@@ -338,6 +429,12 @@ impl Default for StartupConfig {
             exit_after_screenshot: false,
             dummy_list_count: None,
             debug: DebugConfig::default(),
+            mcp_stdio: false,
+            mcp_allow_paths: Vec::new(),
+            mcp_allow_write: false,
+            mcp_allow_export: false,
+            mcp_read_only: true,
+            mcp_http_addr: None,
         }
     }
 }
@@ -367,6 +464,7 @@ pub struct DebugConfig {
     pub enabled: bool,
     pub log_path: Option<PathBuf>,
     pub auto_run: bool,
+    pub auto_run_pitch_shift_semitones: Option<f32>,
     pub auto_run_time_stretch_rate: Option<f32>,
     pub auto_run_delay_frames: u32,
     pub auto_run_exit: bool,
@@ -379,6 +477,7 @@ impl Default for DebugConfig {
             enabled: false,
             log_path: None,
             auto_run: false,
+            auto_run_pitch_shift_semitones: None,
             auto_run_time_stretch_rate: None,
             auto_run_delay_frames: 8,
             auto_run_exit: true,
@@ -430,6 +529,7 @@ pub enum DebugAction {
     ToggleMode,
     PlayPause,
     SelectNext,
+    PreviewPitchShift(f32),
     PreviewTimeStretch(f32),
     DumpSummaryAuto,
     Exit,
