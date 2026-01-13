@@ -1010,6 +1010,58 @@ args = ""
             }
         }
     }
+    fn time_stretch_ratio_for_tab(&self, tab: &EditorTab) -> Option<f32> {
+        let time_stretch_active = self.mode == RateMode::TimeStretch
+            || tab.preview_audio_tool == Some(ToolKind::TimeStretch);
+        if !time_stretch_active {
+            return None;
+        }
+        let audio_len = self
+            .audio
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        if audio_len == 0 || tab.samples_len == 0 {
+            return None;
+        }
+        let ratio = audio_len as f32 / tab.samples_len as f32;
+        if (ratio - 1.0).abs() < 1.0e-4 {
+            None
+        } else {
+            Some(ratio)
+        }
+    }
+    fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
+        if let Some(ratio) = self.time_stretch_ratio_for_tab(tab) {
+            let mapped = ((audio_pos as f32) / ratio).round() as usize;
+            mapped.min(tab.samples_len)
+        } else {
+            audio_pos.min(tab.samples_len)
+        }
+    }
+    fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
+        if let Some(ratio) = self.time_stretch_ratio_for_tab(tab) {
+            let mapped = ((display_pos as f32) * ratio).round() as usize;
+            let audio_len = self
+                .audio
+                .shared
+                .samples
+                .load()
+                .as_ref()
+                .map(|s| s.len())
+                .unwrap_or(0);
+            if audio_len > 0 {
+                mapped.min(audio_len)
+            } else {
+                mapped
+            }
+        } else {
+            display_pos
+        }
+    }
 
     fn rebuild_external_lookup(&mut self) {
         self.external_lookup.clear();
@@ -2278,7 +2330,10 @@ args = ""
             return;
         }
         let sr = self.audio.shared.out_sample_rate.max(1) as u64;
-        let samples = ((start_ms * sr) / 1000) as usize;
+        let mut samples = ((start_ms * sr) / 1000) as usize;
+        if let Some(tab) = self.tabs.iter().find(|t| t.path == path) {
+            samples = self.map_display_to_audio_sample(tab, samples);
+        }
         self.audio.seek_to_sample(samples);
         self.pending_transcript_seek = None;
     }
@@ -3608,7 +3663,16 @@ impl eframe::App for WavesPreviewer {
         if let Some(tab_idx) = self.active_tab {
             // Loop Start/End at playhead
             if ctx.input(|i| i.key_pressed(Key::K)) { // Set Loop Start
-                let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+                let pos_audio = self
+                    .audio
+                    .shared
+                    .play_pos
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let pos_now = self
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
+                    .unwrap_or(0);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     let end = tab.loop_region.map(|(_,e)| e).unwrap_or(pos_now);
                     let s = pos_now.min(end);
@@ -3618,7 +3682,16 @@ impl eframe::App for WavesPreviewer {
                 }
             }
             if ctx.input(|i| i.key_pressed(Key::P)) { // Set Loop End
-                let pos_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+                let pos_audio = self
+                    .audio
+                    .shared
+                    .play_pos
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let pos_now = self
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
+                    .unwrap_or(0);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     let start = tab.loop_region.map(|(s,_)| s).unwrap_or(pos_now);
                     let s = start.min(pos_now);
@@ -3733,7 +3806,38 @@ impl eframe::App for WavesPreviewer {
         if let Some(tab_idx) = self.active_tab {
     // Pre-read audio values to avoid borrowing self while editing tab
     let sr_ctx = self.audio.shared.out_sample_rate.max(1) as f32;
-    let pos_ctx_now = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed);
+    let pos_audio_now = self
+        .audio
+        .shared
+        .play_pos
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let tab_samples_len = self.tabs[tab_idx].samples_len;
+    let time_stretch_ratio = self.time_stretch_ratio_for_tab(&self.tabs[tab_idx]);
+    let audio_len = self
+        .audio
+        .shared
+        .samples
+        .load()
+        .as_ref()
+        .map(|s| s.len())
+        .unwrap_or(0);
+    let map_audio_to_display = |audio_pos: usize| -> usize {
+        let mapped = if let Some(ratio) = time_stretch_ratio {
+            ((audio_pos as f32) / ratio).round() as usize
+        } else {
+            audio_pos
+        };
+        mapped.min(tab_samples_len)
+    };
+    let map_display_to_audio = |display_pos: usize| -> usize {
+        if let Some(ratio) = time_stretch_ratio {
+            let mapped = ((display_pos as f32) * ratio).round() as usize;
+            if audio_len > 0 { mapped.min(audio_len) } else { mapped }
+        } else {
+            display_pos
+        }
+    };
+    let playhead_display_now = map_audio_to_display(pos_audio_now);
     let mut request_seek: Option<usize> = None;
     let spec_path = self.tabs[tab_idx].path.clone();
     let spec_cache = self.spectro_cache.get(&spec_path).cloned();
@@ -3766,7 +3870,7 @@ impl eframe::App for WavesPreviewer {
         ui.separator();
         // Time HUD: play position (editable) / total length
         let sr = sr_ctx; // restore local sample-rate alias after removing top-level Loop block
-        let mut pos_sec = pos_ctx_now as f32 / sr as f32;
+        let mut pos_sec = playhead_display_now as f32 / sr as f32;
         let len_sec = (tab.samples_len as f32 / sr as f32).max(0.0);
         ui.label("Pos:");
         let pos_resp = ui.add(
@@ -3775,7 +3879,11 @@ impl eframe::App for WavesPreviewer {
                 .speed(0.05)
                 .fixed_decimals(2)
         );
-        if pos_resp.changed() { let samp = (pos_sec.max(0.0) * sr) as usize; request_seek = Some(samp.min(tab.samples_len)); }
+        if pos_resp.changed() {
+            let display_samp = (pos_sec.max(0.0) * sr) as usize;
+            let audio_samp = map_display_to_audio(display_samp);
+            request_seek = Some(audio_samp);
+        }
         ui.label(RichText::new(format!(" / {}", crate::app::helpers::format_time_s(len_sec))).monospace());
     });
     ui.separator();
@@ -4203,7 +4311,7 @@ impl eframe::App for WavesPreviewer {
                                     }
                                 }
                             }
-                            request_seek = Some(pos_samp);
+                            request_seek = Some(map_display_to_audio(pos_samp));
                         }
                     }
                 }
@@ -5041,7 +5149,13 @@ impl eframe::App for WavesPreviewer {
                 if tab.samples_len > 0 {
                     if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                         let len = buf.len().max(1);
-                        let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(len);
+                        let pos_audio = self
+                            .audio
+                            .shared
+                            .play_pos
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            .min(len);
+                        let pos = map_audio_to_display(pos_audio);
                         let spp = tab.samples_per_px.max(0.0001);
                         let x = wave_left + ((pos.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w);
                         painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0, Color32::from_rgb(70,140,255)));
@@ -5172,7 +5286,7 @@ impl eframe::App for WavesPreviewer {
                                             });
                                             ui.horizontal_wrapped(|ui| {
                                                 if ui.button("Set Start").on_hover_text("Set Start at playhead").clicked() {
-                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                    let pos = playhead_display_now;
                                                     let end = tab.loop_region.map(|(_,e)| e).unwrap_or(pos);
                                                     let (mut s, mut e) = (pos, end);
                                                     if e < s { std::mem::swap(&mut s, &mut e); }
@@ -5181,7 +5295,7 @@ impl eframe::App for WavesPreviewer {
                                                     apply_pending_loop = true;
                                                 }
                                                 if ui.button("Set End").on_hover_text("Set End at playhead").clicked() {
-                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                    let pos = playhead_display_now;
                                                     let start = tab.loop_region.map(|(s,_)| s).unwrap_or(pos);
                                                     let (mut s, mut e) = (start, pos);
                                                     if e < s { std::mem::swap(&mut s, &mut e); }
@@ -5293,12 +5407,7 @@ impl eframe::App for WavesPreviewer {
                                             let out_sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                             ui.horizontal_wrapped(|ui| {
                                                 if ui.button("Add at Playhead").clicked() {
-                                                    let pos = self
-                                                        .audio
-                                                        .shared
-                                                        .play_pos
-                                                        .load(std::sync::atomic::Ordering::Relaxed)
-                                                        .min(tab.samples_len);
+                                                    let pos = playhead_display_now;
                                                     let label = Self::next_marker_label(&tab.markers);
                                                     let entry = crate::markers::MarkerEntry {
                                                         sample: pos,
@@ -5440,7 +5549,7 @@ ToolKind::Trim => {
                                             // A/B setters from playhead
                                             ui.horizontal_wrapped(|ui| {
                                                 if ui.button("Set A").on_hover_text("Set A at playhead").clicked() {
-                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                    let pos = playhead_display_now;
                                                 let new_r = match tab.trim_range { None => Some((pos, pos)), Some((_a,b)) => Some((pos.min(b), pos.max(b))) };
                                                     tab.trim_range = new_r;
                                                     if let Some((a,b)) = tab.trim_range { if b>a {
@@ -5458,7 +5567,7 @@ ToolKind::Trim => {
                                                     } }
                                                 }
                                                 if ui.button("Set B").on_hover_text("Set B at playhead").clicked() {
-                                                    let pos = self.audio.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed).min(tab.samples_len);
+                                                    let pos = playhead_display_now;
                                                 let new_r = match tab.trim_range { None => Some((pos, pos)), Some((a,_b)) => Some((a.min(pos), a.max(pos))) };
                                                     tab.trim_range = new_r;
                                                     if let Some((a,b)) = tab.trim_range { if b>a {

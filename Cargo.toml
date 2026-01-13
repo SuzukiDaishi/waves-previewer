@@ -2,6 +2,8 @@
 name = "neowaves"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
+description = "NeoWaves Audio List Editor"
 
 [dependencies]
 anyhow = "1.0.100"
@@ -37,3 +39,6 @@ default = ["glow"]
 glow = ["eframe/glow"]
 wgpu = ["eframe/wgpu"]
 kittest = ["egui_kittest"]
+
+[build-dependencies]
+windows_exe_info = "0.5.2"
