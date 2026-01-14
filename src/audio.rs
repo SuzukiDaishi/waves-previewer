@@ -5,8 +5,36 @@ use arc_swap::ArcSwapOption;
 use atomic_float::AtomicF32;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+pub struct AudioBuffer {
+    pub channels: Vec<Vec<f32>>, // per-channel samples in [-1, 1]
+}
+
+impl AudioBuffer {
+    pub fn from_mono(mono: Vec<f32>) -> Self {
+        Self { channels: vec![mono] }
+    }
+
+    pub fn from_channels(channels: Vec<Vec<f32>>) -> Self {
+        if channels.is_empty() {
+            Self {
+                channels: vec![Vec::new()],
+            }
+        } else {
+            Self { channels }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.channels.get(0).map(|c| c.len()).unwrap_or(0)
+    }
+
+    pub fn channel_count(&self) -> usize {
+        self.channels.len().max(1)
+    }
+}
+
 pub struct SharedAudio {
-    pub samples: ArcSwapOption<Vec<f32>>, // mono samples in [-1, 1]
+    pub samples: ArcSwapOption<AudioBuffer>, // multi-channel samples in [-1, 1]
     pub vol: AtomicF32,                   // 0.0..1.0 linear gain
     pub file_gain: AtomicF32,             // per-file gain factor (can be > 1.0)
     pub playing: std::sync::atomic::AtomicBool,
@@ -121,6 +149,15 @@ impl AudioEngine {
                     if let Some(samples_arc) = maybe_samples.as_ref() {
                         let samples = samples_arc.as_ref();
                         let len = samples.len();
+                        if len == 0 {
+                            for frame in data.chunks_mut(channels) {
+                                for ch in frame.iter_mut() {
+                                    *ch = T::from_sample(0.0);
+                                }
+                            }
+                            return;
+                        }
+                        let src_channels = samples.channel_count();
                         let mut pos_f =
                             shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
                         if !pos_f.is_finite() || pos_f < 0.0 {
@@ -145,73 +182,87 @@ impl AudioEngine {
                             if valid_loop && pos >= loop_end {
                                 pos_f = loop_start as f32;
                             }
-                            // fractional sample accessor
-                            let sample_at = |pf: f32| -> f32 {
+                            // fractional sample accessor (per channel)
+                            let sample_at = |ch_idx: usize, pf: f32| -> f32 {
+                                let channel = samples
+                                    .channels
+                                    .get(ch_idx)
+                                    .unwrap_or_else(|| &samples.channels[0]);
                                 let i0 = pf.floor() as usize;
-                                let i1 = (i0 + 1).min(len.saturating_sub(1));
+                                let i1 = (i0 + 1).min(channel.len().saturating_sub(1));
                                 let t = (pf - i0 as f32).clamp(0.0, 1.0);
-                                samples[i0] * (1.0 - t) + samples[i1] * t
+                                channel[i0] * (1.0 - t) + channel[i1] * t
                             };
 
-                            let mut s_lin = sample_at(pos_f);
-                            // Crossfade near loop start/end if enabled (using centered windows)
-                            if valid_loop {
-                                let xfade = shared
-                                    .loop_xfade_samples
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                if xfade > 0 {
-                                    let loop_len = loop_end.saturating_sub(loop_start);
-                                    let pre = loop_start;
-                                    let post = len.saturating_sub(loop_end);
-                                    let xfade = xfade.min(loop_len / 2).min(pre).min(post);
+                            let mut frame_sum = 0.0f32;
+                            for (out_ch, out_sample) in frame.iter_mut().enumerate() {
+                                let src_ch = if src_channels == 1 {
+                                    0
+                                } else if out_ch < src_channels {
+                                    out_ch
+                                } else {
+                                    src_channels - 1
+                                };
+                                let mut s_lin = sample_at(src_ch, pos_f);
+                                // Crossfade near loop start/end if enabled (using centered windows)
+                                if valid_loop {
+                                    let xfade = shared
+                                        .loop_xfade_samples
+                                        .load(std::sync::atomic::Ordering::Relaxed);
                                     if xfade > 0 {
-                                        let xfade_f = xfade as f32;
-                                        let win_len = xfade_f * 2.0;
-                                        let s_start = loop_start as f32 - xfade_f;
-                                        let s_end = loop_start as f32 + xfade_f;
-                                        let e_start = loop_end as f32 - xfade_f;
-                                        let e_end = loop_end as f32 + xfade_f;
-                                        let shape = shared
-                                            .loop_xfade_shape
-                                            .load(std::sync::atomic::Ordering::Relaxed);
-                                        let weights = |tcf: f32| -> (f32, f32) {
-                                            match shape {
-                                                1 => {
-                                                    let a = core::f32::consts::FRAC_PI_2 * tcf;
-                                                    (a.cos(), a.sin())
+                                        let loop_len = loop_end.saturating_sub(loop_start);
+                                        let pre = loop_start;
+                                        let post = len.saturating_sub(loop_end);
+                                        let xfade = xfade.min(loop_len / 2).min(pre).min(post);
+                                        if xfade > 0 {
+                                            let xfade_f = xfade as f32;
+                                            let win_len = xfade_f * 2.0;
+                                            let s_start = loop_start as f32 - xfade_f;
+                                            let s_end = loop_start as f32 + xfade_f;
+                                            let e_start = loop_end as f32 - xfade_f;
+                                            let e_end = loop_end as f32 + xfade_f;
+                                            let shape = shared
+                                                .loop_xfade_shape
+                                                .load(std::sync::atomic::Ordering::Relaxed);
+                                            let weights = |tcf: f32| -> (f32, f32) {
+                                                match shape {
+                                                    1 => {
+                                                        let a = core::f32::consts::FRAC_PI_2 * tcf;
+                                                        (a.cos(), a.sin())
+                                                    }
+                                                    _ => (1.0 - tcf, tcf),
                                                 }
-                                                _ => (1.0 - tcf, tcf),
-                                            }
-                                        };
-                                        if (pos_f >= s_start && pos_f < s_end)
-                                            || (pos_f >= e_start && pos_f < e_end)
-                                        {
-                                            let win_start = if pos_f < s_end && pos_f >= s_start {
-                                                s_start
-                                            } else {
-                                                e_start
                                             };
-                                            let offset = pos_f - win_start;
-                                            let tcf = (offset / win_len).clamp(0.0, 1.0);
-                                            let s_pf = s_start + offset;
-                                            let e_pf = e_start + offset;
-                                            let s_s = sample_at(s_pf);
-                                            let s_e = sample_at(e_pf);
-                                            let (w_e, w_s) = weights(tcf);
-                                            s_lin = s_e * w_e + s_s * w_s;
+                                            if (pos_f >= s_start && pos_f < s_end)
+                                                || (pos_f >= e_start && pos_f < e_end)
+                                            {
+                                                let win_start =
+                                                    if pos_f < s_end && pos_f >= s_start {
+                                                        s_start
+                                                    } else {
+                                                        e_start
+                                                    };
+                                                let offset = pos_f - win_start;
+                                                let tcf = (offset / win_len).clamp(0.0, 1.0);
+                                                let s_pf = s_start + offset;
+                                                let e_pf = e_start + offset;
+                                                let s_s = sample_at(src_ch, s_pf);
+                                                let s_e = sample_at(src_ch, e_pf);
+                                                let (w_e, w_s) = weights(tcf);
+                                                s_lin = s_e * w_e + s_s * w_s;
+                                            }
                                         }
                                     }
                                 }
+                                let s = (s_lin * vol).clamp(-1.0, 1.0);
+                                frame_sum += s;
+                                *out_sample = T::from_sample(s);
                             }
-                            let s = s_lin * vol;
+                            let frame_avg = frame_sum / channels as f32;
+                            sum_sq += frame_avg * frame_avg;
+                            n += 1;
                             pos_f += rate;
                             pos = pos_f.floor() as usize;
-                            let s_clamped = s.clamp(-1.0, 1.0);
-                            sum_sq += s_clamped * s_clamped;
-                            n += 1;
-                            for ch in frame.iter_mut() {
-                                *ch = T::from_sample(s_clamped);
-                            }
                         }
                         shared
                             .play_pos
@@ -254,7 +305,7 @@ impl AudioEngine {
         Ok(stream)
     }
 
-    pub fn set_samples(&self, samples: Arc<Vec<f32>>) {
+    pub fn set_samples(&self, samples: Arc<AudioBuffer>) {
         let len = samples.len();
         self.shared.samples.store(Some(samples));
         self.shared
@@ -272,7 +323,15 @@ impl AudioEngine {
             .store(len, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn replace_samples_keep_pos(&self, samples: Arc<Vec<f32>>) {
+    pub fn set_samples_mono(&self, mono: Vec<f32>) {
+        self.set_samples(Arc::new(AudioBuffer::from_mono(mono)));
+    }
+
+    pub fn set_samples_channels(&self, channels: Vec<Vec<f32>>) {
+        self.set_samples(Arc::new(AudioBuffer::from_channels(channels)));
+    }
+
+    pub fn replace_samples_keep_pos(&self, samples: Arc<AudioBuffer>) {
         let new_len = samples.len();
         let old_len = self
             .shared

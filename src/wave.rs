@@ -1,6 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fdk_aac::enc::{
@@ -32,6 +30,10 @@ pub fn decode_wav_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
     audio_io::decode_audio_multi(path)
 }
 
+pub fn decode_wav_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    audio_io::decode_audio_multi_prefix(path, max_secs)
+}
+
 pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
     if in_sr == out_sr || mono.is_empty() {
         return mono.to_vec();
@@ -57,6 +59,29 @@ pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
         let t = (src_pos - i0 as f64).clamp(0.0, 1.0) as f32;
         let v = mono[i0] * (1.0 - t) + mono[i1] * t;
         out.push(v);
+    }
+    out
+}
+
+fn mixdown_channels_mono(chans: &[Vec<f32>]) -> Vec<f32> {
+    if chans.is_empty() {
+        return Vec::new();
+    }
+    let len = chans[0].len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let chn = chans.len() as f32;
+    let mut out = vec![0.0f32; len];
+    for ch in chans {
+        for (i, v) in ch.iter().enumerate() {
+            if let Some(dst) = out.get_mut(i) {
+                *dst += *v;
+            }
+        }
+    }
+    for v in &mut out {
+        *v /= chn;
     }
     out
 }
@@ -217,18 +242,29 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
 
 // High level helper used by UI when a file is clicked
 pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>) -> Result<()> {
-    let (mono, in_sr) = decode_wav_mono(path)?;
-    let resampled = resample_linear(&mono, in_sr, audio.shared.out_sample_rate);
-    audio.set_samples(Arc::new(resampled));
+    let (mut chans, in_sr) = decode_wav_multi(path)?;
+    let out_sr = audio.shared.out_sample_rate;
+    if in_sr != out_sr {
+        for c in chans.iter_mut() {
+            *c = resample_linear(c, in_sr, out_sr);
+        }
+    }
+    let mono = mixdown_channels_mono(&chans);
+    audio.set_samples_channels(chans);
     audio.stop();
     build_minmax(out_waveform, &mono, 2048);
     Ok(())
 }
 
 pub fn prepare_for_list_preview(path: &Path, audio: &AudioEngine, max_secs: f32) -> Result<bool> {
-    let (mono, in_sr, truncated) = decode_wav_mono_prefix(path, max_secs)?;
-    let resampled = resample_linear(&mono, in_sr, audio.shared.out_sample_rate);
-    audio.set_samples(Arc::new(resampled));
+    let (mut chans, in_sr, truncated) = decode_wav_multi_prefix(path, max_secs)?;
+    let out_sr = audio.shared.out_sample_rate;
+    if in_sr != out_sr {
+        for c in chans.iter_mut() {
+            *c = resample_linear(c, in_sr, out_sr);
+        }
+    }
+    audio.set_samples_channels(chans);
     audio.stop();
     Ok(truncated)
 }
@@ -247,7 +283,7 @@ pub fn prepare_for_pitchshift(path: &Path, audio: &AudioEngine, out_waveform: &m
     let mut out = process_pitchshift_offline(&mono, in_sr, out_sr, semitones);
     // waveform reflects processed output
     build_minmax(out_waveform, &out, 2048);
-    audio.set_samples(Arc::new(std::mem::take(&mut out)));
+    audio.set_samples_mono(std::mem::take(&mut out));
     audio.stop();
     Ok(())
 }
@@ -260,7 +296,7 @@ pub fn prepare_for_timestretch(path: &Path, audio: &AudioEngine, out_waveform: &
     let out_sr = audio.shared.out_sample_rate;
     let mut out = process_timestretch_offline(&mono, in_sr, out_sr, rate);
     build_minmax(out_waveform, &out, 2048);
-    audio.set_samples(Arc::new(std::mem::take(&mut out)));
+    audio.set_samples_mono(std::mem::take(&mut out));
     audio.stop();
     Ok(())
 }

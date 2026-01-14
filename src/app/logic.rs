@@ -1,7 +1,5 @@
 ﻿use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use crate::audio_io;
 use crate::loop_markers;
 use crate::wave::prepare_for_speed;
@@ -93,28 +91,28 @@ impl super::WavesPreviewer {
         {
             Some(i) => i,
             None => {
-                let mono = {
+                let channels = {
                     let cached = match self.edited_cache.get(path) {
                         Some(v) => v,
                         None => return false,
                     };
-                    Self::mixdown_channels_mono(&cached.ch_samples, cached.samples_len)
+                    cached.ch_samples.clone()
                 };
                 self.playing_path = Some(path.to_path_buf());
                 match self.mode {
                     RateMode::Speed => {
-                        self.audio.set_samples(Arc::new(mono));
+                        self.audio.set_samples_channels(channels);
                         self.audio.stop();
                         self.audio.set_rate(self.playback_rate);
                     }
                     _ => {
                         if decode_failed {
-                            self.audio.set_samples(Arc::new(mono));
+                            self.audio.set_samples_channels(channels);
                             self.audio.stop();
                             self.audio.set_rate(1.0);
                         } else {
                             self.audio.set_rate(1.0);
-                            self.spawn_heavy_processing_from_mono(path.to_path_buf(), mono);
+                            self.spawn_heavy_processing_from_channels(path.to_path_buf(), channels);
                         }
                     }
                 }
@@ -122,25 +120,25 @@ impl super::WavesPreviewer {
                 return true;
             }
         };
-        let (mono, tab_path) = {
+        let (channels, tab_path) = {
             let tab = &self.tabs[idx];
-            (Self::editor_mixdown_mono(tab), tab.path.clone())
+            (tab.ch_samples.clone(), tab.path.clone())
         };
         self.playing_path = Some(tab_path.clone());
         match self.mode {
             RateMode::Speed => {
-                self.audio.set_samples(Arc::new(mono));
+                self.audio.set_samples_channels(channels);
                 self.audio.stop();
                 self.audio.set_rate(self.playback_rate);
             }
             _ => {
                 if decode_failed {
-                    self.audio.set_samples(Arc::new(mono));
+                    self.audio.set_samples_channels(channels);
                     self.audio.stop();
                     self.audio.set_rate(1.0);
                 } else {
                     self.audio.set_rate(1.0);
-                    self.spawn_heavy_processing_from_mono(tab_path.clone(), mono);
+                    self.spawn_heavy_processing_from_channels(tab_path.clone(), channels);
                 }
             }
         }
@@ -159,12 +157,12 @@ impl super::WavesPreviewer {
         {
             Some(i) => i,
             None => {
-                let mono = {
+                let channels = {
                     let cached = match self.edited_cache.get(path) {
                         Some(v) => v,
                         None => return false,
                     };
-                    Self::mixdown_channels_mono(&cached.ch_samples, cached.samples_len)
+                    cached.ch_samples.clone()
                 };
                 self.playing_path = Some(path.to_path_buf());
                 self.audio.set_loop_enabled(false);
@@ -175,15 +173,15 @@ impl super::WavesPreviewer {
                     1.0
                 };
                 self.audio.set_rate(rate);
-                self.audio.set_samples(Arc::new(mono));
+                self.audio.set_samples_channels(channels);
                 self.audio.stop();
                 self.apply_effective_volume();
                 return true;
             }
         };
-        let mono = {
+        let channels = {
             let tab = &self.tabs[idx];
-            Self::editor_mixdown_mono(tab)
+            tab.ch_samples.clone()
         };
         self.playing_path = Some(path.to_path_buf());
         self.audio.set_loop_enabled(false);
@@ -194,16 +192,16 @@ impl super::WavesPreviewer {
             1.0
         };
         self.audio.set_rate(rate);
-        self.audio.set_samples(Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         self.apply_effective_volume();
         true
     }
 
-    pub(super) fn spawn_heavy_processing_from_mono(
+    pub(super) fn spawn_heavy_processing_from_channels(
         &mut self,
         path: PathBuf,
-        mono: Vec<f32>,
+        channels: Vec<Vec<f32>>,
     ) {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel::<ProcessingResult>();
@@ -213,22 +211,28 @@ impl super::WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate;
         let path_for_thread = path.clone();
         std::thread::spawn(move || {
-            let samples = match mode {
-                RateMode::PitchShift => {
-                    crate::wave::process_pitchshift_offline(&mono, out_sr, out_sr, sem)
-                }
-                RateMode::TimeStretch => {
-                    crate::wave::process_timestretch_offline(&mono, out_sr, out_sr, rate)
-                }
-                RateMode::Speed => mono,
-            };
+            let mut processed: Vec<Vec<f32>> = Vec::with_capacity(channels.len());
+            for chan in channels.iter() {
+                let out = match mode {
+                    RateMode::PitchShift => {
+                        crate::wave::process_pitchshift_offline(chan, out_sr, out_sr, sem)
+                    }
+                    RateMode::TimeStretch => {
+                        crate::wave::process_timestretch_offline(chan, out_sr, out_sr, rate)
+                    }
+                    RateMode::Speed => chan.clone(),
+                };
+                processed.push(out);
+            }
+            let len = processed.get(0).map(|c| c.len()).unwrap_or(0);
+            let samples = Self::mixdown_channels_mono(&processed, len);
             let mut waveform = Vec::new();
             crate::wave::build_minmax(&mut waveform, &samples, 2048);
             let _ = tx.send(ProcessingResult {
                 path: path_for_thread,
                 samples,
                 waveform,
-                channels: Vec::new(),
+                channels: processed,
             });
         });
         self.processing = Some(ProcessingState {
@@ -239,6 +243,7 @@ impl super::WavesPreviewer {
             },
             path,
             autoplay_when_ready: false,
+            started_at: std::time::Instant::now(),
             rx,
         });
     }
@@ -609,7 +614,7 @@ impl super::WavesPreviewer {
         if need_heavy && !decode_failed {
             self.audio.set_rate(1.0);
             self.audio.stop();
-            self.audio.set_samples(Arc::new(Vec::new()));
+            self.audio.set_samples_mono(Vec::new());
             self.spawn_heavy_processing(&p_owned);
             self.apply_effective_volume();
             return;
@@ -636,7 +641,7 @@ impl super::WavesPreviewer {
                 } else {
                     eprintln!("load error: {e:?}");
                     self.audio.stop();
-                    self.audio.set_samples(Arc::new(Vec::new()));
+                    self.audio.set_samples_mono(Vec::new());
                 }
             }
         }
@@ -652,11 +657,13 @@ impl super::WavesPreviewer {
         let (tx, rx) = mpsc::channel::<ListPreviewResult>();
         std::thread::spawn(move || {
             let res = (|| -> anyhow::Result<ListPreviewResult> {
-                let (mono, in_sr) = crate::wave::decode_wav_mono(&path)?;
-                let resampled = crate::wave::resample_linear(&mono, in_sr, out_sr);
+                let (mut chans, in_sr) = crate::wave::decode_wav_multi(&path)?;
+                for c in chans.iter_mut() {
+                    *c = crate::wave::resample_linear(c, in_sr, out_sr);
+                }
                 Ok(ListPreviewResult {
                     path,
-                    samples: resampled,
+                    channels: chans,
                     job_id,
                 })
             })();
@@ -1584,6 +1591,7 @@ impl super::WavesPreviewer {
             },
             path: path_buf,
             autoplay_when_ready: false,
+            started_at: std::time::Instant::now(),
             rx,
         });
     }

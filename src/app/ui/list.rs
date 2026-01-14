@@ -796,6 +796,9 @@ impl crate::app::WavesPreviewer {
                             let mods = ctx.input(|i| i.modifiers);
                             self.update_selection_on_click(row_idx, mods);
                             self.select_and_load(row_idx, false);
+                            if self.auto_play_list_nav {
+                                self.request_list_autoplay();
+                            }
                         } else if clicked_to_select {
                             self.selected = Some(row_idx);
                             self.scroll_to_selected = false;

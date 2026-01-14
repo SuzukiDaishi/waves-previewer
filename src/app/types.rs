@@ -229,7 +229,7 @@ pub struct EditorTab {
     pub tool_state: ToolState,               // simple per-tool parameters
     pub loop_mode: LoopMode,                 // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
-    // Preview audio state (non-destructive): which tool is driving runtime preview
+    // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     pub active_tool_last: Option<ToolKind>,
     pub preview_offset_samples: Option<usize>,
@@ -274,6 +274,7 @@ pub struct ProcessingState {
     #[allow(dead_code)]
     pub path: PathBuf,
     pub autoplay_when_ready: bool,
+    pub started_at: std::time::Instant,
     pub rx: std::sync::mpsc::Receiver<ProcessingResult>,
 }
 
@@ -350,7 +351,7 @@ pub struct CachedEdit {
 
 pub struct ListPreviewResult {
     pub path: PathBuf,
-    pub samples: Vec<f32>,
+    pub channels: Vec<Vec<f32>>,
     pub job_id: u64,
 }
 

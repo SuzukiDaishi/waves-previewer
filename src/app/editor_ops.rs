@@ -41,7 +41,7 @@ impl crate::app::WavesPreviewer {
         range: (usize, usize),
         shape: crate::app::types::FadeShape,
     ) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -57,12 +57,12 @@ impl crate::app::WavesPreviewer {
                     }
                 }
                 tab.dirty = true;
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -75,7 +75,7 @@ impl crate::app::WavesPreviewer {
         range: (usize, usize),
         shape: crate::app::types::FadeShape,
     ) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -91,12 +91,12 @@ impl crate::app::WavesPreviewer {
                     }
                 }
                 tab.dirty = true;
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -151,7 +151,7 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_apply_reverse_range(&mut self, tab_idx: usize, range: (usize, usize)) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -163,12 +163,12 @@ impl crate::app::WavesPreviewer {
                 }
                 tab.dirty = true;
                 Self::editor_clamp_ranges(tab);
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -177,7 +177,7 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize, usize)) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -195,12 +195,12 @@ impl crate::app::WavesPreviewer {
                 tab.loop_region = None;
                 tab.dirty = true;
                 Self::editor_clamp_ranges(tab);
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -213,7 +213,7 @@ impl crate::app::WavesPreviewer {
         range: (usize, usize),
         gain_db: f32,
     ) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -228,12 +228,12 @@ impl crate::app::WavesPreviewer {
                 }
                 tab.dirty = true;
                 Self::editor_clamp_ranges(tab);
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -246,7 +246,7 @@ impl crate::app::WavesPreviewer {
         range: (usize, usize),
         target_db: f32,
     ) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -270,12 +270,12 @@ impl crate::app::WavesPreviewer {
                 }
                 tab.dirty = true;
                 Self::editor_clamp_ranges(tab);
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -290,7 +290,7 @@ impl crate::app::WavesPreviewer {
         in_ms: f32,
         out_ms: f32,
     ) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -314,12 +314,12 @@ impl crate::app::WavesPreviewer {
                 }
                 tab.dirty = true;
                 Self::editor_clamp_ranges(tab);
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -327,7 +327,7 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_apply_loop_xfade(&mut self, tab_idx: usize) {
-        let mono = {
+        let channels = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = match tab.loop_region {
                     Some((a, b)) if b > a => (a, b),
@@ -373,12 +373,12 @@ impl crate::app::WavesPreviewer {
                 }
                 tab.loop_xfade_samples = 0;
                 tab.dirty = true;
-                Self::editor_mixdown_mono(tab)
+                tab.ch_samples.clone()
             } else {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
@@ -386,7 +386,7 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_delete_range_and_join(&mut self, tab_idx: usize, range: (usize, usize)) {
-        let (mono, loop_mode, lr, len) = {
+        let (channels, loop_mode, lr, len) = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 let (s, e) = range;
                 if e <= s || e > tab.samples_len {
@@ -402,7 +402,7 @@ impl crate::app::WavesPreviewer {
                 tab.dirty = true;
                 Self::editor_clamp_ranges(tab);
                 (
-                    Self::editor_mixdown_mono(tab),
+                    tab.ch_samples.clone(),
                     tab.loop_mode,
                     tab.loop_region,
                     tab.samples_len,
@@ -411,7 +411,7 @@ impl crate::app::WavesPreviewer {
                 return;
             }
         };
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(channels);
         self.audio.stop();
         match loop_mode {
             crate::app::types::LoopMode::OnWhole => {

@@ -109,10 +109,10 @@ pub struct WavesPreviewer {
     pub tool_args_overrides: HashMap<String, String>,
     pub tool_config_error: Option<String>,
     pub pending_tool_confirm: Option<ToolJob>,
-    pub spectro_cache: HashMap<PathBuf, std::sync::Arc<SpectrogramData>>,
+    pub spectro_cache: HashMap<PathBuf, std::sync::Arc<Vec<SpectrogramData>>>,
     pub spectro_inflight: HashSet<PathBuf>,
-    pub spectro_tx: Option<std::sync::mpsc::Sender<(PathBuf, SpectrogramData)>>,
-    pub spectro_rx: Option<std::sync::mpsc::Receiver<(PathBuf, SpectrogramData)>>,
+    pub spectro_tx: Option<std::sync::mpsc::Sender<(PathBuf, Vec<SpectrogramData>)>>,
+    pub spectro_rx: Option<std::sync::mpsc::Receiver<(PathBuf, Vec<SpectrogramData>)>>,
     pub scan_rx: Option<std::sync::mpsc::Receiver<ScanMessage>>,
     pub scan_in_progress: bool,
     // dynamic row height for wave thumbnails (list view)
@@ -555,19 +555,208 @@ args = ""
 
     fn preview_restore_audio_for_tab(&self, tab_idx: usize) {
         if let Some(tab) = self.tabs.get(tab_idx) {
-            // Rebuild mono from current destructive state
-            let mono = Self::editor_mixdown_mono(tab);
             self.audio.stop();
-            self.audio.set_samples(std::sync::Arc::new(mono));
+            self.audio.set_samples_channels(tab.ch_samples.clone());
             // Reapply loop mode
             self.apply_loop_mode_for_tab(tab);
         }
     }
     fn set_preview_mono(&mut self, tab_idx: usize, tool: ToolKind, mono: Vec<f32>) {
         self.audio.stop();
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_mono(mono);
         if let Some(tab) = self.tabs.get_mut(tab_idx) { tab.preview_audio_tool = Some(tool); }
         if let Some(tab) = self.tabs.get(tab_idx) { self.apply_loop_mode_for_tab(tab); }
+    }
+    fn refresh_tool_preview_for_tab(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get(tab_idx) else { return; };
+        if tab.view_mode != ViewMode::Waveform {
+            return;
+        }
+        if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
+            return;
+        }
+        if tab.samples_len > LIVE_PREVIEW_SAMPLE_LIMIT {
+            return;
+        }
+        if self.heavy_preview_rx.is_some() || self.heavy_overlay_rx.is_some() {
+            return;
+        }
+        let tool = tab.active_tool;
+        let st = tab.tool_state;
+        let fade_in_ms = st.fade_in_ms;
+        let fade_out_ms = st.fade_out_ms;
+        let fade_in_shape = tab.fade_in_shape;
+        let fade_out_shape = tab.fade_out_shape;
+        let gain_db = st.gain_db;
+        let normalize_db = st.normalize_target_db;
+        let semitones = st.pitch_semitones;
+        let stretch_rate = st.stretch_rate;
+        let ch_samples = tab.ch_samples.clone();
+        let samples_len = tab.samples_len;
+        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+        let decode_failed = self.is_decode_failed_path(&tab.path);
+        let _ = tab;
+
+        match tool {
+            ToolKind::PitchShift => {
+                if semitones.abs() > 0.0001 && !decode_failed {
+                    let mono = Self::mixdown_channels(&ch_samples, samples_len);
+                    if mono.is_empty() {
+                        return;
+                    }
+                    self.audio.stop();
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.preview_audio_tool = Some(ToolKind::PitchShift);
+                        tab.preview_overlay = None;
+                    }
+                    self.spawn_heavy_preview_owned(mono, ToolKind::PitchShift, semitones);
+                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::PitchShift, semitones);
+                }
+            }
+            ToolKind::TimeStretch => {
+                if (stretch_rate - 1.0).abs() > 0.0001 && !decode_failed {
+                    let mono = Self::mixdown_channels(&ch_samples, samples_len);
+                    if mono.is_empty() {
+                        return;
+                    }
+                    self.audio.stop();
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.preview_audio_tool = Some(ToolKind::TimeStretch);
+                        tab.preview_overlay = None;
+                    }
+                    self.spawn_heavy_preview_owned(mono, ToolKind::TimeStretch, stretch_rate);
+                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::TimeStretch, stretch_rate);
+                }
+            }
+            ToolKind::Fade => {
+                if fade_in_ms <= 0.0 && fade_out_ms <= 0.0 {
+                    return;
+                }
+                let mut overlay = ch_samples.clone();
+                let len = samples_len.max(1);
+                let n_in = ((fade_in_ms / 1000.0) * sr).round() as usize;
+                let n_out = ((fade_out_ms / 1000.0) * sr).round() as usize;
+                if n_in > 0 {
+                    for ch in overlay.iter_mut() {
+                        let nn = n_in.min(ch.len());
+                        for i in 0..nn {
+                            let t = i as f32 / nn.max(1) as f32;
+                            let w = Self::fade_weight(fade_in_shape, t);
+                            ch[i] *= w;
+                        }
+                    }
+                }
+                if n_out > 0 {
+                    for ch in overlay.iter_mut() {
+                        let len = ch.len();
+                        let nn = n_out.min(len);
+                        for i in 0..nn {
+                            let t = i as f32 / nn.max(1) as f32;
+                            let w = Self::fade_weight_out(fade_out_shape, t);
+                            let idx = len - nn + i;
+                            ch[idx] *= w;
+                        }
+                    }
+                }
+                let mono = Self::mixdown_channels(&overlay, len);
+                if mono.is_empty() {
+                    return;
+                }
+                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(PreviewOverlay {
+                        channels: overlay,
+                        source_tool: ToolKind::Fade,
+                        timeline_len,
+                    });
+                }
+                self.set_preview_mono(tab_idx, ToolKind::Fade, mono);
+            }
+            ToolKind::Gain => {
+                if gain_db.abs() <= 1e-6 {
+                    return;
+                }
+                let g = db_to_amp(gain_db);
+                let mut overlay = ch_samples.clone();
+                for ch in overlay.iter_mut() {
+                    for v in ch.iter_mut() {
+                        *v *= g;
+                    }
+                }
+                let mono = Self::mixdown_channels(&overlay, samples_len);
+                if mono.is_empty() {
+                    return;
+                }
+                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(PreviewOverlay {
+                        channels: overlay,
+                        source_tool: ToolKind::Gain,
+                        timeline_len,
+                    });
+                }
+                self.set_preview_mono(tab_idx, ToolKind::Gain, mono);
+            }
+            ToolKind::Normalize => {
+                const DEFAULT_NORMALIZE_DB: f32 = -6.0;
+                if (normalize_db - DEFAULT_NORMALIZE_DB).abs() <= 1e-6 {
+                    return;
+                }
+                let mut mono = Self::mixdown_channels(&ch_samples, samples_len);
+                if mono.is_empty() {
+                    return;
+                }
+                let mut peak = 0.0f32;
+                for &v in &mono {
+                    peak = peak.max(v.abs());
+                }
+                if peak <= 0.0 {
+                    return;
+                }
+                let g = db_to_amp(normalize_db) / peak.max(1e-12);
+                let mut overlay = ch_samples.clone();
+                for ch in overlay.iter_mut() {
+                    for v in ch.iter_mut() {
+                        *v *= g;
+                    }
+                }
+                for v in &mut mono {
+                    *v *= g;
+                }
+                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(PreviewOverlay {
+                        channels: overlay,
+                        source_tool: ToolKind::Normalize,
+                        timeline_len,
+                    });
+                }
+                self.set_preview_mono(tab_idx, ToolKind::Normalize, mono);
+            }
+            _ => {}
+        }
+    }
+
+    fn mixdown_channels(chs: &[Vec<f32>], len: usize) -> Vec<f32> {
+        if len == 0 {
+            return Vec::new();
+        }
+        if chs.is_empty() {
+            return vec![0.0; len];
+        }
+        let chn = chs.len() as f32;
+        let mut out = vec![0.0f32; len];
+        for ch in chs {
+            for i in 0..len {
+                if let Some(&v) = ch.get(i) {
+                    out[i] += v;
+                }
+            }
+        }
+        for v in &mut out {
+            *v /= chn;
+        }
+        out
     }
     fn clear_preview_if_any(&mut self, tab_idx: usize) {
         let had_preview_audio = self
@@ -717,9 +906,7 @@ args = ""
     }
     fn draw_spectrogram(
         painter: &egui::Painter,
-        rect: egui::Rect,
-        wave_left: f32,
-        wave_w: f32,
+        area: egui::Rect,
         tab: &EditorTab,
         spec: &SpectrogramData,
         view_mode: ViewMode,
@@ -727,14 +914,10 @@ args = ""
         if spec.frames == 0 || spec.bins == 0 {
             return;
         }
-        let area = egui::Rect::from_min_max(
-            egui::pos2(wave_left, rect.top()),
-            egui::pos2(rect.right(), rect.bottom()),
-        );
         let width_px = area.width().max(1.0);
         let height_px = area.height().max(1.0);
         let spp = tab.samples_per_px.max(0.0001);
-        let vis = (wave_w * spp).ceil() as usize;
+        let vis = (width_px * spp).ceil() as usize;
         let start = tab.view_offset.min(tab.samples_len);
         let end = (start + vis).min(tab.samples_len);
         let frame_step = spec.frame_step.max(1);
@@ -1699,6 +1882,9 @@ args = ""
 
     // --- Gain helpers ---
     fn clamp_gain_db(val: f32) -> f32 {
+        if !val.is_finite() {
+            return 0.0;
+        }
         let mut g = val.clamp(-24.0, 24.0);
         if g.abs() < 0.001 { g = 0.0; }
         g
@@ -1793,18 +1979,30 @@ args = ""
 
     fn ensure_spectro_channel(&mut self) {
         if self.spectro_tx.is_none() || self.spectro_rx.is_none() {
-            let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, SpectrogramData)>();
+            let (tx, rx) = std::sync::mpsc::channel::<(PathBuf, Vec<SpectrogramData>)>();
             self.spectro_tx = Some(tx);
             self.spectro_rx = Some(rx);
         }
     }
 
-    fn spawn_spectrogram_job(&mut self, path: PathBuf, mono: Vec<f32>, sample_rate: u32) {
+    fn spawn_spectrogram_job(
+        &mut self,
+        path: PathBuf,
+        channels: Vec<Vec<f32>>,
+        sample_rate: u32,
+    ) {
         self.ensure_spectro_channel();
         let Some(tx) = self.spectro_tx.as_ref().cloned() else { return; };
         std::thread::spawn(move || {
-            let data = crate::app::render::spectrogram::compute_spectrogram(&mono, sample_rate);
-            let _ = tx.send((path, data));
+            let mut specs = Vec::with_capacity(channels.len().max(1));
+            if channels.is_empty() {
+                specs.push(crate::app::render::spectrogram::compute_spectrogram(&[], sample_rate));
+            } else {
+                for ch in channels {
+                    specs.push(crate::app::render::spectrogram::compute_spectrogram(&ch, sample_rate));
+                }
+            }
+            let _ = tx.send((path, specs));
         });
     }
 
@@ -1819,10 +2017,10 @@ args = ""
         if self.spectro_cache.contains_key(&tab.path) || self.spectro_inflight.contains(&tab.path) {
             return;
         }
-        let mono = Self::editor_mixdown_mono(tab);
+        let channels = tab.ch_samples.clone();
         let sr = self.audio.shared.out_sample_rate;
         self.spectro_inflight.insert(tab.path.clone());
-        self.spawn_spectrogram_job(tab.path.clone(), mono, sr);
+        self.spawn_spectrogram_job(tab.path.clone(), channels, sr);
     }
 
     fn start_scan_folder(&mut self, dir: PathBuf) {
@@ -3173,9 +3371,8 @@ impl WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
-        let mono = Self::editor_mixdown_mono(tab);
         self.audio.stop();
-        self.audio.set_samples(std::sync::Arc::new(mono));
+        self.audio.set_samples_channels(tab.ch_samples.clone());
         self.apply_loop_mode_for_tab(tab);
         true
     }
@@ -3421,7 +3618,8 @@ impl eframe::App for WavesPreviewer {
             if let Ok(res) = rx.try_recv() {
                 if res.job_id == self.list_preview_job_id {
                     if self.active_tab.is_none() && self.playing_path.as_ref() == Some(&res.path) {
-                        self.audio.replace_samples_keep_pos(std::sync::Arc::new(res.samples));
+                        let buf = crate::audio::AudioBuffer::from_channels(res.channels);
+                        self.audio.replace_samples_keep_pos(std::sync::Arc::new(buf));
                     }
                 }
                 self.list_preview_rx = None;
@@ -3457,6 +3655,10 @@ impl eframe::App for WavesPreviewer {
         }
         if let Some((res, undo)) = apply_done {
             if res.tab_idx < self.tabs.len() {
+                let mut applied_channels = res.channels;
+                if applied_channels.is_empty() && !res.samples.is_empty() {
+                    applied_channels = vec![res.samples.clone()];
+                }
                 if let Some(tab) = self.tabs.get_mut(res.tab_idx) {
                     let old_len = tab.samples_len.max(1);
                     let old_view = tab.view_offset;
@@ -3466,7 +3668,7 @@ impl eframe::App for WavesPreviewer {
                     }
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
-                    tab.ch_samples = res.channels;
+                    tab.ch_samples = applied_channels;
                     tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
                     let new_len = tab.samples_len.max(1);
                     if old_len > 0 && new_len > 0 {
@@ -3486,9 +3688,11 @@ impl eframe::App for WavesPreviewer {
                 self.heavy_overlay_rx = None;
                 self.overlay_expected_tool = None;
                 self.audio.stop();
-                self.audio.set_samples(std::sync::Arc::new(res.samples));
                 if let Some(tab) = self.tabs.get(res.tab_idx) {
+                    self.audio.set_samples_channels(tab.ch_samples.clone());
                     self.apply_loop_mode_for_tab(tab);
+                } else if !res.samples.is_empty() {
+                    self.audio.set_samples_mono(res.samples);
                 }
             }
             self.editor_apply_state = None;
@@ -3624,20 +3828,30 @@ impl eframe::App for WavesPreviewer {
             }
         }
         if let Some((res, autoplay_when_ready)) = processing_done {
+            let ProcessingResult {
+                path,
+                samples,
+                waveform,
+                channels,
+            } = res;
             // Apply new buffer and waveform
-            self.audio.set_samples(std::sync::Arc::new(res.samples));
+            if channels.is_empty() {
+                self.audio.set_samples_mono(samples);
+            } else {
+                self.audio.set_samples_channels(channels);
+            }
             self.audio.stop();
-            if let Some(idx) = self.tabs.iter().position(|t| t.path == res.path) {
-                if let Some(tab) = self.tabs.get_mut(idx) { tab.waveform_minmax = res.waveform; }
+            if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
+                if let Some(tab) = self.tabs.get_mut(idx) { tab.waveform_minmax = waveform; }
             }
             // update current playing path (for effective volume using pending gains)
-            self.playing_path = Some(res.path.clone());
+            self.playing_path = Some(path.clone());
             // full-buffer loop region if needed
             if let Some(buf) = self.audio.shared.samples.load().as_ref() { self.audio.set_loop_region(0, buf.len()); }
             self.processing = None;
             if autoplay_when_ready
                 && self.auto_play_list_nav
-                && self.selected_path_buf().as_ref() == Some(&res.path)
+                && self.selected_path_buf().as_ref() == Some(&path)
             {
                 self.audio.play();
             }
@@ -3646,17 +3860,42 @@ impl eframe::App for WavesPreviewer {
 
         // Shortcuts
         if ctx.input(|i| i.key_pressed(Key::Space)) {
-            if let Some(tab_idx) = self.active_tab {
-                if self
-                    .tabs
-                    .get(tab_idx)
-                    .and_then(|t| t.preview_audio_tool)
-                    .is_some()
-                {
-                    self.clear_preview_if_any(tab_idx);
+            // Keep preview audio/overlay when toggling playback.
+            self.audio.toggle_play();
+        }
+        // Tab switching: Ctrl+1 = List, Ctrl+2.. = editor tabs
+        if !ctx.wants_keyboard_input() {
+            let mods = ctx.input(|i| i.modifiers);
+            if mods.ctrl {
+                let mut target: Option<usize> = None;
+                if ctx.input(|i| i.key_pressed(Key::Num1)) { target = Some(0); }
+                else if ctx.input(|i| i.key_pressed(Key::Num2)) { target = Some(1); }
+                else if ctx.input(|i| i.key_pressed(Key::Num3)) { target = Some(2); }
+                else if ctx.input(|i| i.key_pressed(Key::Num4)) { target = Some(3); }
+                else if ctx.input(|i| i.key_pressed(Key::Num5)) { target = Some(4); }
+                else if ctx.input(|i| i.key_pressed(Key::Num6)) { target = Some(5); }
+                else if ctx.input(|i| i.key_pressed(Key::Num7)) { target = Some(6); }
+                else if ctx.input(|i| i.key_pressed(Key::Num8)) { target = Some(7); }
+                else if ctx.input(|i| i.key_pressed(Key::Num9)) { target = Some(8); }
+                if let Some(idx) = target {
+                    if idx == 0 {
+                        if let Some(prev) = self.active_tab { self.clear_preview_if_any(prev); }
+                        self.active_tab = None;
+                        self.audio.stop();
+                        self.audio.set_loop_enabled(false);
+                    } else {
+                        let tab_idx = idx - 1;
+                        if tab_idx < self.tabs.len() {
+                            if let Some(prev) = self.active_tab { if prev != tab_idx { self.clear_preview_if_any(prev); } }
+                            if let Some(tab) = self.tabs.get(tab_idx) {
+                                self.active_tab = Some(tab_idx);
+                                self.audio.stop();
+                                self.pending_activate_path = Some(tab.path.clone());
+                            }
+                        }
+                    }
                 }
             }
-            self.audio.toggle_play();
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) { self.trigger_save_selected(); }
         // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
@@ -3852,6 +4091,7 @@ impl eframe::App for WavesPreviewer {
                 .show_tooltip_when_elided(true),
         );
     });
+    let mut discard_preview_for_view_change = false;
     ui.horizontal_wrapped(|ui| {
         let tab = &mut self.tabs[tab_idx];
         // Loop mode toggles (kept): Off / OnWhole / Marker
@@ -3864,14 +4104,23 @@ impl eframe::App for WavesPreviewer {
         }
         ui.separator();
         // View mode toggles
+        let prev_view = tab.view_mode;
         for (vm, label) in [ (ViewMode::Waveform, "Wave"), (ViewMode::Spectrogram, "Spec"), (ViewMode::Mel, "Mel") ] {
-            if ui.selectable_label(tab.view_mode == vm, label).clicked() { tab.view_mode = vm; }
+            if ui.selectable_label(tab.view_mode == vm, label).clicked() {
+                tab.view_mode = vm;
+                if prev_view == ViewMode::Waveform && vm != ViewMode::Waveform {
+                    discard_preview_for_view_change = true;
+                }
+            }
         }
         ui.separator();
         // Time HUD: play position (editable) / total length
-        let sr = sr_ctx; // restore local sample-rate alias after removing top-level Loop block
-        let mut pos_sec = playhead_display_now as f32 / sr as f32;
-        let len_sec = (tab.samples_len as f32 / sr as f32).max(0.0);
+        let sr = sr_ctx.max(1.0); // restore local sample-rate alias after removing top-level Loop block
+        let mut pos_sec = playhead_display_now as f32 / sr;
+        let mut len_sec = (tab.samples_len as f32 / sr).max(0.0);
+        if !pos_sec.is_finite() { pos_sec = 0.0; }
+        if !len_sec.is_finite() { len_sec = 0.0; }
+        if pos_sec > len_sec { pos_sec = len_sec; }
         ui.label("Pos:");
         let pos_resp = ui.add(
             egui::DragValue::new(&mut pos_sec)
@@ -3939,6 +4188,10 @@ impl eframe::App for WavesPreviewer {
                     let mut pending_heavy_preview: Option<(ToolKind, Vec<f32>, f32)> = None;
                     let mut pending_pitch_apply: Option<f32> = None;
                     let mut pending_stretch_apply: Option<f32> = None;
+                    if discard_preview_for_view_change {
+                        need_restore_preview = true;
+                        stop_playback = true;
+                    }
                     ui.vertical(|ui| {
                         let canvas_h = (canvas_w * 0.35).clamp(180.0, avail.y);
                         let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
@@ -4026,8 +4279,19 @@ impl eframe::App for WavesPreviewer {
                             fid,
                             Color32::GRAY,
                         );
-                    } else if let Some(spec) = spec_cache.as_ref() {
-                        Self::draw_spectrogram(&painter, rect, wave_left, wave_w, tab, spec, tab.view_mode);
+                    } else if let Some(specs) = spec_cache.as_ref() {
+                        let lane_count = ch_n.max(1);
+                        for ci in 0..lane_count {
+                            let lane_top = rect.top() + lane_h * ci as f32;
+                            let lane_rect = egui::Rect::from_min_size(
+                                egui::pos2(wave_left, lane_top),
+                                egui::vec2(wave_w, lane_h),
+                            );
+                            let spec = specs.get(ci).or_else(|| specs.get(0));
+                            if let Some(spec) = spec {
+                                Self::draw_spectrogram(&painter, lane_rect, tab, spec, tab.view_mode);
+                            }
+                        }
                     } else {
                         let fid = TextStyle::Monospace.resolve(ui.style());
                         let msg = if spec_loading { "Building spectrogram..." } else { "Spectrogram not ready" };
@@ -5232,8 +5496,10 @@ impl eframe::App for WavesPreviewer {
                                     });
                                 if tool != tab.active_tool {
                                     tab.active_tool_last = Some(tab.active_tool);
-                                    // Leaving a tool: if we had a runtime preview, restore original audio
-                                    if tab.preview_audio_tool.is_some() { need_restore_preview = true; }
+                                    // Leaving a tool: discard any preview overlay/audio
+                                    if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
+                                        need_restore_preview = true;
+                                    }
                                     stop_playback = true;
                                     tab.active_tool = tool;
                                 }
@@ -5453,7 +5719,8 @@ impl eframe::App for WavesPreviewer {
                                             ui.label(format!("Count: {}", tab.markers.len()));
                                             if !tab.markers.is_empty() {
                                                 let samples_len = tab.samples_len;
-                                                let len_sec = (samples_len as f32 / out_sr).max(0.0);
+                                                let mut len_sec = (samples_len as f32 / out_sr).max(0.0);
+                                                if !len_sec.is_finite() { len_sec = 0.0; }
                                                 let mut remove_idx: Option<usize> = None;
                                                 let mut resort = false;
                                                 let mut dirty = false;
@@ -5462,6 +5729,8 @@ impl eframe::App for WavesPreviewer {
                                                     .show(ui, |ui| {
                                                         for (idx, m) in tab.markers.iter_mut().enumerate() {
                                                             let mut secs = (m.sample as f32) / out_sr;
+                                                            if !secs.is_finite() { secs = 0.0; }
+                                                            if secs > len_sec { secs = len_sec; }
                                                             ui.horizontal(|ui| {
                                                                 let resp = ui.add(
                                                                     egui::TextEdit::singleline(&mut m.label)
@@ -5516,11 +5785,16 @@ ToolKind::Trim => {
                                             // Trim has its own A/B range (independent from loop)
                                             let mut range_opt = tab.trim_range;
                                             let sr = self.audio.shared.out_sample_rate.max(1) as f32;
-                                            let len_sec = (tab.samples_len as f32 / sr).max(0.0);
+                                            let mut len_sec = (tab.samples_len as f32 / sr).max(0.0);
+                                            if !len_sec.is_finite() { len_sec = 0.0; }
                                             if let Some((smp,emp)) = range_opt { ui.label(format!("Trim A?B: {}..{} samp", smp, emp)); } else { ui.label("Trim A?B: (set below)"); }
                                             ui.horizontal_wrapped(|ui| {
                                                 let mut s_sec = range_opt.map(|(s, _)| s as f32 / sr).unwrap_or(0.0);
                                                 let mut e_sec = range_opt.map(|(_, e)| e as f32 / sr).unwrap_or(0.0);
+                                                if !s_sec.is_finite() { s_sec = 0.0; }
+                                                if !e_sec.is_finite() { e_sec = 0.0; }
+                                                if s_sec > len_sec { s_sec = len_sec; }
+                                                if e_sec > len_sec { e_sec = len_sec; }
                                                 ui.label("Start (s):");
                                                 let chs = ui.add(egui::DragValue::new(&mut s_sec).range(0.0..=len_sec).speed(0.05).fixed_decimals(3)).changed();
                                                 ui.label("End (s):");
@@ -5617,6 +5891,7 @@ ToolKind::Trim => {
                                             ui.label("Fade In");
                                             ui.horizontal_wrapped(|ui| {
                                                 let mut secs = tab.tool_state.fade_in_ms / 1000.0;
+                                                if !secs.is_finite() { secs = 0.0; }
                                                 ui.label("duration (s)");
                                                 let mut changed = ui
                                                     .add(
@@ -5703,6 +5978,7 @@ ToolKind::Trim => {
                                             ui.label("Fade Out");
                                             ui.horizontal_wrapped(|ui| {
                                                 let mut secs = tab.tool_state.fade_out_ms / 1000.0;
+                                                if !secs.is_finite() { secs = 0.0; }
                                                 ui.label("duration (s)");
                                                 let mut changed = ui
                                                     .add(
@@ -5792,6 +6068,7 @@ ToolKind::Trim => {
                                                 ui.label(RichText::new("Preview disabled for large clips").weak());
                                             }
                                             let mut semi = tab.tool_state.pitch_semitones;
+                                            if !semi.is_finite() { semi = 0.0; }
                                             ui.label("Semitones");
                                             let changed = ui.add(egui::DragValue::new(&mut semi).range(-12.0..=12.0).speed(0.1).fixed_decimals(2)).changed();
                                             if changed {
@@ -5821,6 +6098,7 @@ ToolKind::Trim => {
                                                 ui.label(RichText::new("Preview disabled for large clips").weak());
                                             }
                                             let mut rate = tab.tool_state.stretch_rate;
+                                            if !rate.is_finite() { rate = 1.0; }
                                             ui.label("Rate");
                                             let changed = ui.add(egui::DragValue::new(&mut rate).range(0.25..=4.0).speed(0.02).fixed_decimals(2)).changed();
                                             if changed {
@@ -5849,6 +6127,7 @@ ToolKind::Trim => {
                                         }
                                         let st = tab.tool_state;
                                         let mut gain_db = st.gain_db;
+                                        if !gain_db.is_finite() { gain_db = 0.0; }
                                         ui.label("Gain (dB)"); ui.add(egui::DragValue::new(&mut gain_db).range(-24.0..=24.0).speed(0.1));
                                         tab.tool_state = ToolState{ gain_db, ..tab.tool_state };
                                         // live preview on change
@@ -5879,6 +6158,7 @@ ToolKind::Trim => {
                                         }
                                         let st = tab.tool_state;
                                         let mut target_db = st.normalize_target_db;
+                                        if !target_db.is_finite() { target_db = -6.0; }
                                         ui.label("Target dBFS"); ui.add(egui::DragValue::new(&mut target_db).range(-24.0..=0.0).speed(0.1));
                                         tab.tool_state = ToolState{ normalize_target_db: target_db, ..tab.tool_state };
                                         if preview_ok {
@@ -5936,6 +6216,11 @@ ToolKind::Trim => {
                             _ => { ui.label("Tools for this view will appear here."); }
                         }
                     }); // end inspector
+                    if need_restore_preview {
+                        pending_preview = None;
+                        pending_heavy_preview = None;
+                        pending_overlay_job = None;
+                    }
                     if let Some((tool, mono, p)) = pending_heavy_preview {
                         if self.is_decode_failed_path(&self.tabs[tab_idx].path) {
                             if let Some(tab) = self.tabs.get_mut(tab_idx) {
@@ -6198,6 +6483,7 @@ ToolKind::Trim => {
                             row.col(|ui| {
                                 let old = self.pending_gain_db_for_path(&path_owned);
                                 let mut g = old;
+                                if !g.is_finite() { g = 0.0; }
                                 let resp = ui.add(
                                     egui::DragValue::new(&mut g)
                                         .range(-24.0..=24.0)
@@ -6275,6 +6561,7 @@ ToolKind::Trim => {
             }
         });
         // When switching tabs, ensure the active tab's audio is loaded and loop state applied.
+        let mut activated_tab_idx: Option<usize> = None;
         if activate_path.is_none() {
             if let Some(pending) = self.pending_activate_path.take() { activate_path = Some(pending); }
         }
@@ -6304,6 +6591,10 @@ ToolKind::Trim => {
                 // Update effective volume to include per-file gain for the activated tab
                 self.apply_effective_volume();
             }
+            activated_tab_idx = self.active_tab;
+        }
+        if let Some(tab_idx) = activated_tab_idx {
+            self.refresh_tool_preview_for_tab(tab_idx);
         }
         // List auto-scroll flag is cleared by list view when consumed.
 
@@ -6312,7 +6603,8 @@ ToolKind::Trim => {
         }
 
         // Busy overlay (blocks input and shows loader)
-        if self.processing.is_some()
+        let list_processing = self.active_tab.is_none() && self.processing.is_some();
+        if (!list_processing && self.processing.is_some())
             || self.export_state.is_some()
             || self.heavy_preview_rx.is_some()
             || self.editor_apply_state.is_some()
@@ -6349,6 +6641,13 @@ ToolKind::Trim => {
                         ui.label(RichText::new(msg).strong());
                     });
                 });
+            });
+        }
+        if list_processing {
+            use egui::Order;
+            let screen = ctx.viewport_rect();
+            egui::Area::new("busy_block_input_list".into()).order(Order::Foreground).show(ctx, |ui| {
+                let _ = ui.allocate_rect(screen, Sense::click_and_drag());
             });
         }
         ctx.request_repaint_after(Duration::from_millis(16));

@@ -1,4 +1,5 @@
 use crate::app::types::RateMode;
+use std::time::Duration;
 use egui::{Align, Color32, Key, RichText, Sense};
 
 impl crate::app::WavesPreviewer {
@@ -175,6 +176,15 @@ impl crate::app::WavesPreviewer {
                             ui.label(RichText::new(format!("Unsaved Gains: {}", dirty_gains)).weak());
                         }
                     }
+                    if self.active_tab.is_none() {
+                        if let Some(proc) = &self.processing {
+                            if proc.started_at.elapsed() >= Duration::from_millis(120) {
+                                ui.separator();
+                                ui.add(egui::Spinner::new());
+                                ui.label(RichText::new(proc.msg.as_str()).weak());
+                            }
+                        }
+                    }
                     ui.separator();
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                         let db = self.meter_db;
@@ -300,7 +310,10 @@ impl crate::app::WavesPreviewer {
                     } else {
                         "Play (Space)"
                     };
-                    if ui.button(play_text).clicked() {
+                    if ui
+                        .add_sized(egui::vec2(110.0, 22.0), egui::Button::new(play_text))
+                        .clicked()
+                    {
                         self.audio.toggle_play();
                     }
                     ui.checkbox(&mut self.auto_play_list_nav, "Auto Play");

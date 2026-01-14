@@ -299,6 +299,94 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
     Ok((chans, sample_rate))
 }
 
+pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    if max_secs <= 0.0 {
+        let (chans, sr) = decode_audio_multi(path)?;
+        return Ok((chans, sr, false));
+    }
+    let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
+    let mut chans: Vec<Vec<f32>> = Vec::new();
+    let mut max_frames: Option<usize> = None;
+    let mut frames_read: usize = 0;
+    let mut reached_eof = false;
+    let mut decode_errors = 0u32;
+    if sample_rate > 0 {
+        let target = ((sample_rate as f32) * max_secs).ceil() as usize;
+        max_frames = Some(target.max(1));
+    }
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymphoniaError::DecodeError(_)) => {
+                decode_errors += 1;
+                if decode_errors > 8 {
+                    break;
+                }
+                continue;
+            }
+            Err(SymphoniaError::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                reached_eof = true;
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => break,
+            Err(err) => return Err(err.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(SymphoniaError::DecodeError(_)) => {
+                decode_errors += 1;
+                continue;
+            }
+            Err(SymphoniaError::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                reached_eof = true;
+                break;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if sample_rate == 0 {
+            sample_rate = decoded.spec().rate;
+            if sample_rate == 0 {
+                anyhow::bail!("unknown sample rate: {}", path.display());
+            }
+            let target = ((sample_rate as f32) * max_secs).ceil() as usize;
+            max_frames = Some(target.max(1));
+        }
+        let channels = decoded.spec().channels.count().max(1);
+        if chans.is_empty() {
+            chans = vec![Vec::new(); channels];
+            if let Some(limit) = max_frames {
+                for ch in chans.iter_mut() {
+                    ch.reserve(limit.max(1));
+                }
+            }
+        }
+        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        buf.copy_interleaved_ref(decoded);
+        for frame in buf.samples().chunks(channels) {
+            for (ci, &v) in frame.iter().enumerate() {
+                chans[ci].push(v);
+            }
+            frames_read += 1;
+            if let Some(limit) = max_frames {
+                if frames_read >= limit {
+                    return Ok((chans, sample_rate, !reached_eof));
+                }
+            }
+        }
+    }
+    if sample_rate == 0 {
+        anyhow::bail!("unknown sample rate: {}", path.display());
+    }
+    Ok((chans, sample_rate, !reached_eof))
+}
+
 pub fn decode_audio_mono_prefix_with_errors(
     path: &Path,
     max_secs: f32,
