@@ -1,5 +1,8 @@
 ﻿use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
 
 pub type MediaId = u64;
@@ -10,15 +13,25 @@ pub enum MediaStatus {
     DecodeFailed(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaSource {
+    File,
+    Virtual,
+}
+
 #[derive(Clone, Debug)]
 pub struct MediaItem {
     pub id: MediaId,
     pub path: PathBuf,
+    pub display_name: String,
+    pub display_folder: String,
+    pub source: MediaSource,
     pub meta: Option<FileMeta>,
     pub pending_gain_db: f32,
     pub status: MediaStatus,
     pub transcript: Option<Transcript>,
     pub external: HashMap<String, String>,
+    pub virtual_audio: Option<Arc<AudioBuffer>>,
 }
 
 #[derive(Clone, Debug)]
@@ -349,6 +362,21 @@ pub struct CachedEdit {
     pub active_tool: ToolKind,
 }
 
+#[derive(Clone)]
+pub struct ClipboardItem {
+    pub display_name: String,
+    pub source_path: Option<PathBuf>,
+    pub audio: Option<Arc<AudioBuffer>>,
+    pub sample_rate: u32,
+    pub bits_per_sample: u16,
+}
+
+#[derive(Clone)]
+pub struct ClipboardPayload {
+    pub items: Vec<ClipboardItem>,
+    pub created_at: Instant,
+}
+
 pub struct ListPreviewResult {
     pub path: PathBuf,
     pub channels: Vec<Vec<f32>>,
@@ -491,10 +519,32 @@ pub struct DebugState {
     pub cfg: DebugConfig,
     pub show_window: bool,
     pub logs: VecDeque<String>,
+    pub input_trace: VecDeque<String>,
+    pub input_trace_enabled: bool,
+    pub input_trace_max: usize,
+    pub event_trace: VecDeque<String>,
+    pub event_trace_enabled: bool,
+    pub event_trace_max: usize,
+    pub last_copy_at: Option<Instant>,
+    pub last_copy_count: usize,
+    pub last_paste_at: Option<Instant>,
+    pub last_paste_count: usize,
+    pub last_paste_source: Option<String>,
+    pub last_hotkey: Option<String>,
+    pub last_hotkey_at: Option<Instant>,
+    pub last_pointer_over_list: bool,
+    pub last_raw_focused: bool,
+    pub last_events_len: usize,
+    pub last_ctrl_down: bool,
+    pub last_key_c_pressed: bool,
+    pub last_key_v_pressed: bool,
+    pub last_key_c_down: bool,
+    pub last_key_v_down: bool,
     pub auto: Option<DebugAutomation>,
     pub check_counter: u32,
     pub overlay_trace: bool,
     pub dummy_list_count: u32,
+    pub started_at: Instant,
 }
 
 impl DebugState {
@@ -505,10 +555,32 @@ impl DebugState {
             cfg,
             show_window: show,
             logs: VecDeque::new(),
+            input_trace: VecDeque::new(),
+            input_trace_enabled: false,
+            input_trace_max: 200,
+            event_trace: VecDeque::new(),
+            event_trace_enabled: false,
+            event_trace_max: 200,
+            last_copy_at: None,
+            last_copy_count: 0,
+            last_paste_at: None,
+            last_paste_count: 0,
+            last_paste_source: None,
+            last_hotkey: None,
+            last_hotkey_at: None,
+            last_pointer_over_list: false,
+            last_raw_focused: true,
+            last_events_len: 0,
+            last_ctrl_down: false,
+            last_key_c_pressed: false,
+            last_key_v_pressed: false,
+            last_key_c_down: false,
+            last_key_v_down: false,
             auto: None,
             check_counter,
             overlay_trace: false,
             dummy_list_count: 300000,
+            started_at: Instant::now(),
         }
     }
 }

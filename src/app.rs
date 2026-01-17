@@ -121,6 +121,9 @@ pub struct WavesPreviewer {
     // multi-selection (list view)
     pub selected_multi: std::collections::BTreeSet<usize>,
     pub select_anchor: Option<usize>,
+    // clipboard (list copy/paste)
+    pub clipboard_payload: Option<ClipboardPayload>,
+    pub clipboard_temp_files: Vec<PathBuf>,
     // sorting
     sort_key: SortKey,
     sort_dir: SortDir,
@@ -168,8 +171,9 @@ pub struct WavesPreviewer {
     batch_rename_start: u32,
     batch_rename_pad: u32,
     batch_rename_error: Option<String>,
-        saving_sources: Vec<PathBuf>,
-        saving_mode: Option<SaveMode>,
+    saving_sources: Vec<PathBuf>,
+    saving_virtual: Vec<(PathBuf, PathBuf)>,
+    saving_mode: Option<SaveMode>,
 
         // LUFS with Gain recompute support
         lufs_override: HashMap<PathBuf, f32>,
@@ -1030,6 +1034,11 @@ args = ""
         self.items.get_mut(idx)
     }
 
+    fn item_for_row(&self, row_idx: usize) -> Option<&MediaItem> {
+        let id = *self.files.get(row_idx)?;
+        self.item_for_id(id)
+    }
+
     fn item_for_path(&self, path: &Path) -> Option<&MediaItem> {
         let id = *self.path_index.get(path)?;
         self.item_for_id(id)
@@ -1038,6 +1047,12 @@ args = ""
     fn item_for_path_mut(&mut self, path: &Path) -> Option<&mut MediaItem> {
         let id = *self.path_index.get(path)?;
         self.item_for_id_mut(id)
+    }
+
+    fn is_virtual_path(&self, path: &Path) -> bool {
+        self.item_for_path(path)
+            .map(|item| item.source == MediaSource::Virtual)
+            .unwrap_or(false)
     }
 
     fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
@@ -1108,24 +1123,252 @@ args = ""
         }
     }
 
+    fn display_name_for_path(path: &Path) -> String {
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("(invalid)")
+            .to_string()
+    }
+
+    fn display_folder_for_path(path: &Path) -> String {
+        path.parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
     fn make_media_item(&mut self, path: PathBuf) -> MediaItem {
         let id = self.next_media_id;
         self.next_media_id = self.next_media_id.wrapping_add(1);
+        let display_name = Self::display_name_for_path(&path);
+        let display_folder = Self::display_folder_for_path(&path);
         let mut item = MediaItem {
             id,
             path,
+            display_name,
+            display_folder,
+            source: MediaSource::File,
             meta: None,
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
             external: HashMap::new(),
+            virtual_audio: None,
         };
         self.fill_external_for_item(&mut item);
         item
     }
 
+    fn build_meta_from_audio(
+        channels: &[Vec<f32>],
+        sample_rate: u32,
+        bits_per_sample: u16,
+    ) -> FileMeta {
+        let frames = channels.get(0).map(|c| c.len()).unwrap_or(0);
+        let mut mono = Vec::with_capacity(frames);
+        if frames > 0 {
+            for i in 0..frames {
+                let mut acc = 0.0f32;
+                let mut c = 0usize;
+                for ch in channels.iter() {
+                    if let Some(&v) = ch.get(i) {
+                        acc += v;
+                        c += 1;
+                    }
+                }
+                mono.push(if c > 0 { acc / (c as f32) } else { 0.0 });
+            }
+        }
+        let mut sum_sq = 0.0f64;
+        for &v in &mono {
+            sum_sq += (v as f64) * (v as f64);
+        }
+        let n = mono.len().max(1) as f64;
+        let rms = (sum_sq / n).sqrt() as f32;
+        let rms_db = if rms > 0.0 { 20.0 * rms.log10() } else { -120.0 };
+        let mut peak_abs = 0.0f32;
+        for ch in channels {
+            for &v in ch {
+                let a = v.abs();
+                if a > peak_abs {
+                    peak_abs = a;
+                }
+            }
+        }
+        let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+        let peak_db = if peak_abs > silent_thresh {
+            20.0 * peak_abs.log10()
+        } else {
+            f32::NEG_INFINITY
+        };
+        let mut thumb = Vec::new();
+        build_minmax(&mut thumb, &mono, 128);
+        let lufs_i = crate::wave::lufs_integrated_from_multi(channels, sample_rate).ok();
+        let duration_secs = if sample_rate > 0 {
+            Some(frames as f32 / sample_rate as f32)
+        } else {
+            None
+        };
+        FileMeta {
+            channels: channels.len().max(1) as u16,
+            sample_rate,
+            bits_per_sample,
+            duration_secs,
+            rms_db: Some(rms_db),
+            peak_db: Some(peak_db),
+            lufs_i,
+            thumb,
+            decode_error: None,
+        }
+    }
+
+    fn make_virtual_item(
+        &mut self,
+        display_name: String,
+        audio: std::sync::Arc<crate::audio::AudioBuffer>,
+        sample_rate: u32,
+        bits_per_sample: u16,
+    ) -> MediaItem {
+        let id = self.next_media_id;
+        self.next_media_id = self.next_media_id.wrapping_add(1);
+        let safe = crate::app::helpers::sanitize_filename_component(&display_name);
+        let path = PathBuf::from("__virtual__").join(format!("{id}_{safe}"));
+        MediaItem {
+            id,
+            path,
+            display_name,
+            display_folder: "(virtual)".to_string(),
+            source: MediaSource::Virtual,
+            meta: Some(Self::build_meta_from_audio(
+                &audio.channels,
+                sample_rate,
+                bits_per_sample,
+            )),
+            pending_gain_db: 0.0,
+            status: MediaStatus::Ok,
+            transcript: None,
+            external: HashMap::new(),
+            virtual_audio: Some(audio),
+        }
+    }
+
+    fn add_virtual_item(&mut self, item: MediaItem, insert_idx: Option<usize>) {
+        let id = item.id;
+        let path = item.path.clone();
+        let idx = insert_idx.unwrap_or(self.items.len()).min(self.items.len());
+        self.items.insert(idx, item);
+        self.path_index.insert(path, id);
+        for i in idx..self.items.len() {
+            let id = self.items[i].id;
+            self.item_index.insert(id, i);
+        }
+    }
+
+    fn unique_virtual_display_name(&self, base: &str) -> String {
+        let existing: std::collections::HashSet<String> =
+            self.items.iter().map(|i| i.display_name.to_lowercase()).collect();
+        if !existing.contains(&base.to_lowercase()) {
+            return base.to_string();
+        }
+        let path = std::path::Path::new(base);
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(base);
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        for i in 1.. {
+            let name = if ext.is_empty() {
+                format!("{stem} ({i})")
+            } else {
+                format!("{stem} ({i}).{ext}")
+            };
+            if !existing.contains(&name.to_lowercase()) {
+                return name;
+            }
+        }
+        base.to_string()
+    }
+
+    fn clear_clipboard_temp_files(&mut self) {
+        for path in self.clipboard_temp_files.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn export_audio_to_temp_wav(
+        &mut self,
+        display_name: &str,
+        audio: &crate::audio::AudioBuffer,
+        sample_rate: u32,
+    ) -> Option<PathBuf> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let dir = std::env::temp_dir().join("NeoWaves").join("clipboard");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return None;
+        }
+        let safe = crate::app::helpers::sanitize_filename_component(display_name);
+        let base = std::path::Path::new(&safe)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip");
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let filename = format!("{base}_{ts}.wav");
+        let path = dir.join(filename);
+        let range = (0, audio.len());
+        if crate::wave::export_selection_wav(&audio.channels, sample_rate, range, &path).is_err() {
+            return None;
+        }
+        self.clipboard_temp_files.push(path.clone());
+        Some(path)
+    }
+
+    fn edited_audio_for_path(&self, path: &Path) -> Option<std::sync::Arc<crate::audio::AudioBuffer>> {
+        if let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|t| (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path)
+        {
+            return Some(std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
+                tab.ch_samples.clone(),
+            )));
+        }
+        if let Some(cached) = self.edited_cache.get(path) {
+            return Some(std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
+                cached.ch_samples.clone(),
+            )));
+        }
+        if let Some(item) = self.item_for_path(path) {
+            if item.source == MediaSource::Virtual {
+                return item.virtual_audio.clone();
+            }
+        }
+        None
+    }
+
+    fn decode_audio_for_virtual(
+        &self,
+        path: &Path,
+    ) -> Option<(std::sync::Arc<crate::audio::AudioBuffer>, u32, u16)> {
+        let (mut chans, in_sr) = crate::audio_io::decode_audio_multi(path).ok()?;
+        let out_sr = self.audio.shared.out_sample_rate;
+        if in_sr != out_sr {
+            for c in chans.iter_mut() {
+                *c = crate::wave::resample_linear(c, in_sr, out_sr);
+            }
+        }
+        let bits = crate::audio_io::read_audio_info(path)
+            .map(|info| info.bits_per_sample)
+            .unwrap_or(32);
+        let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(chans));
+        Some((audio, out_sr, bits))
+    }
+
     fn fill_external_for_item(&self, item: &mut MediaItem) {
-        item.external = self.external_row_for_path(&item.path).unwrap_or_default();
+        if item.source == MediaSource::File {
+            item.external = self.external_row_for_path(&item.path).unwrap_or_default();
+        } else {
+            item.external.clear();
+        }
     }
 
     fn external_row_for_path(&self, path: &Path) -> Option<HashMap<String, String>> {
@@ -1417,6 +1660,33 @@ args = ""
             .collect()
     }
 
+    fn selected_real_paths(&self) -> Vec<PathBuf> {
+        self.selected_paths()
+            .into_iter()
+            .filter(|p| !self.is_virtual_path(p))
+            .collect()
+    }
+
+    fn selected_item_ids(&self) -> Vec<MediaId> {
+        let mut rows: Vec<usize> = self.selected_multi.iter().copied().collect();
+        if rows.is_empty() {
+            if let Some(sel) = self.selected {
+                rows.push(sel);
+            } else if let Some(idx) = self.active_tab {
+                if let Some(tab) = self.tabs.get(idx) {
+                    if let Some(id) = self.path_index.get(&tab.path) {
+                        return vec![*id];
+                    }
+                }
+            }
+        }
+        rows.sort_unstable();
+        rows
+            .into_iter()
+            .filter_map(|row| self.files.get(row).copied())
+            .collect()
+    }
+
     fn ensure_sort_key_visible(&mut self) {
         let cols = self.list_columns;
         let external_visible = cols.external && !self.external_visible_columns.is_empty();
@@ -1534,6 +1804,10 @@ args = ""
         let external = self.external_row_for_path(&new_path);
         if let Some(item) = self.item_for_id_mut(id) {
             item.path = new_path.clone();
+            item.display_name = Self::display_name_for_path(&new_path);
+            item.display_folder = Self::display_folder_for_path(&new_path);
+            item.source = MediaSource::File;
+            item.virtual_audio = None;
             item.transcript = None;
             item.external = external.unwrap_or_default();
         }
@@ -1712,57 +1986,166 @@ args = ""
         Ok(())
     }
 
-    fn unique_copy_target(dest_dir: &std::path::Path, src: &PathBuf) -> PathBuf {
-        let name = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("copy");
-        let base = src
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("copy");
-        let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("");
-        let mut candidate = dest_dir.join(name);
-        if !candidate.exists() {
-            return candidate;
-        }
-        for i in 1.. {
-            let suffix = if i == 1 {
-                " (copy)".to_string()
-            } else {
-                format!(" (copy {i})")
-            };
-            let file = if ext.is_empty() {
-                format!("{base}{suffix}")
-            } else {
-                format!("{base}{suffix}.{ext}")
-            };
-            candidate = dest_dir.join(file);
-            if !candidate.exists() {
-                return candidate;
-            }
-        }
-        candidate
+    #[cfg(windows)]
+    fn set_clipboard_files(&self, paths: &[PathBuf]) -> Result<(), String> {
+        use clipboard_win::{Clipboard, Setter};
+        use clipboard_win::formats::FileList;
+        let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        let _clip = Clipboard::new_attempts(10).map_err(|e| e.to_string())?;
+        FileList.write_clipboard(&list).map_err(|e| e.to_string())
     }
 
-    fn copy_paths_to_folder(&mut self, paths: &[PathBuf], dest_dir: &PathBuf) {
-        if paths.is_empty() {
+    #[cfg(not(windows))]
+    fn set_clipboard_files(&self, _paths: &[PathBuf]) -> Result<(), String> {
+        Err("Clipboard file list is not supported on this platform".to_string())
+    }
+
+    #[cfg(windows)]
+    fn get_clipboard_files(&self) -> Vec<PathBuf> {
+        use clipboard_win::formats::FileList;
+        let list: Vec<String> = clipboard_win::get_clipboard(FileList).unwrap_or_default();
+        list.into_iter().map(PathBuf::from).collect()
+    }
+
+    #[cfg(not(windows))]
+    fn get_clipboard_files(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
+
+    fn copy_selected_to_clipboard(&mut self) {
+        let ids = self.selected_item_ids();
+        if ids.is_empty() {
             return;
         }
-        let mut added: Vec<PathBuf> = Vec::new();
-        for src in paths {
-            if !src.is_file() {
+        self.clear_clipboard_temp_files();
+        let out_sr = self.audio.shared.out_sample_rate;
+        let mut payload_items: Vec<ClipboardItem> = Vec::new();
+        let mut os_paths: Vec<PathBuf> = Vec::new();
+        for id in ids {
+            let Some(item) = self.item_for_id(id) else {
                 continue;
+            };
+            let display_name = item.display_name.clone();
+            let source_path = if item.source == MediaSource::File {
+                Some(item.path.clone())
+            } else {
+                None
+            };
+            let edited_audio = self.edited_audio_for_path(&item.path);
+            let (audio, sample_rate, bits_per_sample) = if let Some(audio) = edited_audio.clone() {
+                (Some(audio), out_sr, 32)
+            } else {
+                let meta = item.meta.as_ref();
+                (
+                    None,
+                    meta.map(|m| m.sample_rate).unwrap_or(0),
+                    meta.map(|m| m.bits_per_sample).unwrap_or(0),
+                )
+            };
+            if let Some(audio_ref) = edited_audio {
+                if audio_ref.len() > 0 {
+                    if let Some(tmp) = self.export_audio_to_temp_wav(&display_name, &audio_ref, out_sr) {
+                        os_paths.push(tmp);
+                    }
+                }
+            } else if let Some(path) = &source_path {
+                if path.is_file() {
+                    os_paths.push(path.clone());
+                }
             }
-            let dst = Self::unique_copy_target(dest_dir, src);
-            match std::fs::copy(src, &dst) {
-                Ok(_) => added.push(dst),
-                Err(e) => eprintln!("copy failed: {} -> {} ({})", src.display(), dst.display(), e),
+            payload_items.push(ClipboardItem {
+                display_name,
+                source_path,
+                audio,
+                sample_rate,
+                bits_per_sample,
+            });
+        }
+        self.clipboard_payload = Some(ClipboardPayload {
+            items: payload_items,
+            created_at: std::time::Instant::now(),
+        });
+        if self.debug.cfg.enabled {
+            let count = self.clipboard_payload.as_ref().map(|p| p.items.len()).unwrap_or(0);
+            self.debug.last_copy_at = Some(std::time::Instant::now());
+            self.debug.last_copy_count = count;
+            self.debug_trace_input(format!("copy_selected_to_clipboard items={count}"));
+        }
+        if !os_paths.is_empty() {
+            if let Err(err) = self.set_clipboard_files(&os_paths) {
+                self.debug_log(format!("clipboard error: {err}"));
             }
         }
-        if !added.is_empty() {
-            if self.add_files_merge(&added) > 0 {
+    }
+
+    fn paste_clipboard_to_list(&mut self) {
+        let payload = self.clipboard_payload.clone();
+        let mut added_any = false;
+        let mut added_paths: Vec<PathBuf> = Vec::new();
+        if let Some(payload) = payload {
+            let mut insert_idx = self.items.len();
+            if let Some(row) = self.selected_multi.iter().next_back().copied().or(self.selected) {
+                if let Some(id) = self.files.get(row) {
+                    if let Some(item_idx) = self.item_index.get(id) {
+                        insert_idx = (*item_idx + 1).min(self.items.len());
+                    }
+                }
+            }
+            for item in payload.items {
+                let mut audio = item.audio.clone();
+                let mut sample_rate = item.sample_rate;
+                let mut bits_per_sample = item.bits_per_sample;
+                if audio.is_none() {
+                    if let Some(path) = item.source_path.as_ref() {
+                        if let Some((decoded, sr, bits)) = self.decode_audio_for_virtual(path) {
+                            audio = Some(decoded);
+                            sample_rate = sr;
+                            bits_per_sample = bits;
+                        }
+                    }
+                }
+                let Some(audio) = audio else {
+                    continue;
+                };
+                let name = self.unique_virtual_display_name(&item.display_name);
+                let vitem = self.make_virtual_item(name, audio, sample_rate, bits_per_sample);
+                added_paths.push(vitem.path.clone());
+                self.add_virtual_item(vitem, Some(insert_idx));
+                insert_idx = insert_idx.saturating_add(1);
+                added_any = true;
+            }
+            if added_any {
                 self.after_add_refresh();
+                self.selected_multi.clear();
+                for p in &added_paths {
+                    if let Some(row) = self.row_for_path(p) {
+                        self.selected_multi.insert(row);
+                    }
+                }
+                self.selected = self.selected_multi.iter().next().copied();
+                if self.debug.cfg.enabled {
+                    self.debug.last_paste_at = Some(std::time::Instant::now());
+                    self.debug.last_paste_count = added_paths.len();
+                    self.debug.last_paste_source = Some("internal".to_string());
+                    self.debug_trace_input(format!(
+                        "paste_clipboard_to_list internal items={}",
+                        added_paths.len()
+                    ));
+                }
+            }
+            return;
+        }
+        let files = self.get_clipboard_files();
+        if !files.is_empty() {
+            let added = self.add_files_merge(&files);
+            if added > 0 {
+                self.after_add_refresh();
+                if self.debug.cfg.enabled {
+                    self.debug.last_paste_at = Some(std::time::Instant::now());
+                    self.debug.last_paste_count = added;
+                    self.debug.last_paste_source = Some("os".to_string());
+                    self.debug_trace_input(format!("paste_clipboard_to_list os files={added}"));
+                }
             }
         }
     }
@@ -1806,19 +2189,94 @@ args = ""
         use std::sync::mpsc;
         if indices.is_empty() { return; }
         let mut items: Vec<(PathBuf, f32)> = Vec::new();
+        let mut virtual_tasks: Vec<(
+            PathBuf,
+            PathBuf,
+            std::sync::Arc<crate::audio::AudioBuffer>,
+            f32,
+            u32,
+        )> = Vec::new();
         for i in indices {
-            if let Some(p) = self.path_for_row(i) {
-                let db = self.pending_gain_db_for_path(p);
-                if db.abs() > 0.0001 {
-                    items.push((p.clone(), db));
+            let Some(item) = self.item_for_row(i) else {
+                continue;
+            };
+            let p = item.path.clone();
+            let db = item.pending_gain_db;
+            if item.source == MediaSource::Virtual {
+                let audio = self
+                    .edited_audio_for_path(&p)
+                    .or_else(|| item.virtual_audio.clone());
+                let Some(audio) = audio else {
+                    continue;
+                };
+                let parent = self
+                    .export_cfg
+                    .dest_folder
+                    .clone()
+                    .or_else(|| self.root.clone())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let display_name = item.display_name.clone();
+                let stem = std::path::Path::new(&display_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("out");
+                let mut name = self.export_cfg.name_template.clone();
+                name = name.replace("{name}", stem);
+                name = name.replace("{gain:+.1}", &format!("{:+.1}", db));
+                name = name.replace("{gain:+0.0}", &format!("{:+.1}", db));
+                name = name.replace("{gain}", &format!("{:+.1}", db));
+                let name = crate::app::helpers::sanitize_filename_component(&name);
+                let mut dst = parent.join(name);
+                dst.set_extension("wav");
+                if dst.exists() {
+                    match self.export_cfg.conflict {
+                        ConflictPolicy::Overwrite => {}
+                        ConflictPolicy::Skip => continue,
+                        ConflictPolicy::Rename => {
+                            let orig = dst.clone();
+                            let orig_ext = orig.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+                            let mut idx = 1u32;
+                            loop {
+                                let stem2 = orig.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+                                let n = crate::app::helpers::sanitize_filename_component(&format!("{}_{:02}", stem2, idx));
+                                dst = orig.with_file_name(n);
+                                if !orig_ext.is_empty() {
+                                    dst.set_extension(orig_ext);
+                                }
+                                if !dst.exists() { break; }
+                                idx += 1;
+                                if idx > 999 { break; }
+                            }
+                        }
+                    }
                 }
+                let sr = item
+                    .meta
+                    .as_ref()
+                    .map(|m| m.sample_rate)
+                    .unwrap_or(self.audio.shared.out_sample_rate);
+                virtual_tasks.push((p, dst, audio, db, sr));
+            } else if db.abs() > 0.0001 {
+                items.push((p, db));
             }
         }
-        if items.is_empty() { return; }
+        if items.is_empty() && virtual_tasks.is_empty() { return; }
         let cfg = self.export_cfg.clone();
         // remember sources for post-save cleanup + reload
         self.saving_sources = items.iter().map(|(p,_)| p.clone()).collect();
-        self.saving_mode = Some(cfg.save_mode);
+        self.saving_virtual = virtual_tasks
+            .iter()
+            .map(|(src, dst, _, _, _)| (src.clone(), dst.clone()))
+            .collect();
+        self.saving_mode = Some(if items.is_empty() {
+            SaveMode::NewFile
+        } else {
+            cfg.save_mode
+        });
+        let virtual_jobs = virtual_tasks
+            .iter()
+            .map(|(src, dst, audio, db, sr)| (src.clone(), dst.clone(), audio.clone(), *db, *sr))
+            .collect::<Vec<_>>();
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
             let mut ok=0usize; let mut failed=0usize; let mut success_paths=Vec::new(); let mut failed_paths=Vec::new();
@@ -1873,6 +2331,33 @@ args = ""
                     }
                 }
             }
+            for (_src, dst, audio, db, sr) in virtual_jobs {
+                let mut channels = audio.channels.clone();
+                if db.abs() > 0.0001 {
+                    let gain = 10.0f32.powf(db / 20.0);
+                    for ch in channels.iter_mut() {
+                        for v in ch.iter_mut() {
+                            *v *= gain;
+                        }
+                    }
+                }
+                let res = crate::wave::export_selection_wav(
+                    &channels,
+                    sr.max(1),
+                    (0, channels.get(0).map(|c| c.len()).unwrap_or(0)),
+                    &dst,
+                );
+                match res {
+                    Ok(()) => {
+                        ok += 1;
+                        success_paths.push(dst.clone());
+                    }
+                    Err(_) => {
+                        failed += 1;
+                        failed_paths.push(dst.clone());
+                    }
+                }
+            }
             let _=tx.send(ExportResult{ ok, failed, success_paths, failed_paths });
         });
         self.export_state = Some(ExportState{ msg: "Saving...".into(), rx });
@@ -1908,6 +2393,9 @@ args = ""
 
     fn schedule_lufs_for_path(&mut self, path: PathBuf) {
         use std::time::{Duration, Instant};
+        if self.is_virtual_path(&path) {
+            return;
+        }
         let dl = Instant::now() + Duration::from_millis(400);
         self.lufs_recalc_deadline.insert(path, dl);
     }
@@ -1928,6 +2416,9 @@ args = ""
     }
 
     fn queue_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
+        if self.is_virtual_path(path) {
+            return;
+        }
         if self.meta_for_path(path).is_some() {
             return;
         }
@@ -1949,6 +2440,9 @@ args = ""
     }
 
     fn queue_transcript_for_path(&mut self, path: &PathBuf, priority: bool) {
+        if self.is_virtual_path(path) {
+            return;
+        }
         let Some(srt_path) = transcript::srt_path_for_audio(path) else {
             return;
         };
@@ -2409,6 +2903,11 @@ args = ""
         let query = query.trim().to_string();
         let use_regex = args.regex.unwrap_or(false);
         let mut ids: Vec<MediaId> = self.files.clone();
+        ids.retain(|id| {
+            self.item_for_id(*id)
+                .map(|item| item.source == MediaSource::File)
+                .unwrap_or(false)
+        });
         if !query.is_empty() {
             let re = if use_regex {
                 RegexBuilder::new(&query).case_insensitive(true).build().ok()
@@ -2420,16 +2919,8 @@ args = ""
             };
             ids.retain(|id| {
                 let Some(item) = self.item_for_id(*id) else { return false; };
-                let name = item
-                    .path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                let parent = item
-                    .path
-                    .parent()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let name = item.display_name.as_str();
+                let parent = item.display_folder.as_str();
                 let transcript = item
                     .transcript
                     .as_ref()
@@ -2460,18 +2951,8 @@ args = ""
         for id in ids.into_iter().skip(offset).take(limit) {
             let Some(item) = self.item_for_id(id) else { continue; };
             let path = item.path.display().to_string();
-            let name = item
-                .path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            let folder = item
-                .path
-                .parent()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
+            let name = item.display_name.clone();
+            let folder = item.display_folder.clone();
             let meta = if include_meta {
                 item.meta.as_ref()
             } else {
@@ -2751,6 +3232,30 @@ args = ""
         }
     }
 
+    fn debug_trace_input(&mut self, msg: impl Into<String>) {
+        if !self.debug.cfg.enabled || !self.debug.input_trace_enabled {
+            return;
+        }
+        let elapsed = self.debug.started_at.elapsed().as_secs_f32();
+        let entry = format!("{elapsed:>7.2}s {}", msg.into());
+        self.debug.input_trace.push_back(entry);
+        while self.debug.input_trace.len() > self.debug.input_trace_max.max(1) {
+            self.debug.input_trace.pop_front();
+        }
+    }
+
+    fn debug_trace_event(&mut self, msg: impl Into<String>) {
+        if !self.debug.cfg.enabled || !self.debug.event_trace_enabled {
+            return;
+        }
+        let elapsed = self.debug.started_at.elapsed().as_secs_f32();
+        let entry = format!("{elapsed:>7.2}s {}", msg.into());
+        self.debug.event_trace.push_back(entry);
+        while self.debug.event_trace.len() > self.debug.event_trace_max.max(1) {
+            self.debug.event_trace.pop_front();
+        }
+    }
+
     fn debug_summary(&self) -> String {
         let selected = self.selected_path_buf().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".to_string());
         let active_tab = self.active_tab.and_then(|i| self.tabs.get(i)).map(|t| t.display_name.clone()).unwrap_or_else(|| "(none)".to_string());
@@ -2979,6 +3484,50 @@ args = ""
             return;
         }
 
+        let raw_focused = ctx.input(|i| i.raw.focused);
+        let events_len = ctx.input(|i| i.raw.events.len());
+        let mods = ctx.input(|i| i.modifiers);
+        let ctrl = mods.ctrl || mods.command;
+        let pressed_c = ctx.input(|i| i.key_pressed(Key::C));
+        let pressed_v = ctx.input(|i| i.key_pressed(Key::V));
+        let down_c = ctx.input(|i| i.key_down(Key::C));
+        let down_v = ctx.input(|i| i.key_down(Key::V));
+        self.debug.last_raw_focused = raw_focused;
+        self.debug.last_events_len = events_len;
+        self.debug.last_ctrl_down = ctrl;
+        self.debug.last_key_c_pressed = pressed_c;
+        self.debug.last_key_v_pressed = pressed_v;
+        self.debug.last_key_c_down = down_c;
+        self.debug.last_key_v_down = down_v;
+        if self.debug.event_trace_enabled {
+            let events = ctx.input(|i| i.raw.events.clone());
+            for ev in events {
+                self.debug_trace_event(format!("event: {:?}", ev));
+            }
+        }
+        let wants_kb = ctx.wants_keyboard_input();
+        let wants_ptr = ctx.wants_pointer_input();
+        if ctrl && (pressed_c || pressed_v) {
+            let key = if pressed_c { "C" } else { "V" };
+            let pos = ctx.input(|i| i.pointer.hover_pos());
+            let pos_text = pos
+                .map(|p| format!("{:.1},{:.1}", p.x, p.y))
+                .unwrap_or_else(|| "(none)".to_string());
+            let msg = format!(
+                "hotkey Ctrl+{} (wants_kb={} wants_ptr={} pos={} mods=ctrl:{} shift:{} alt:{})",
+                key,
+                wants_kb,
+                wants_ptr,
+                pos_text,
+                mods.ctrl || mods.command,
+                mods.shift,
+                mods.alt
+            );
+            self.debug.last_hotkey = Some(format!("Ctrl+{}", key));
+            self.debug.last_hotkey_at = Some(std::time::Instant::now());
+            self.debug_trace_input(msg);
+        }
+
         if self.debug.check_counter > 0 {
             self.debug.check_counter = self.debug.check_counter.saturating_sub(1);
         } else {
@@ -3167,6 +3716,8 @@ impl WavesPreviewer {
             list_columns: ListColumnConfig::default(),
             selected_multi: std::collections::BTreeSet::new(),
             select_anchor: None,
+            clipboard_payload: None,
+            clipboard_temp_files: Vec::new(),
             sort_key: SortKey::File,
             sort_dir: SortDir::None,
             scroll_to_selected: false,
@@ -3210,6 +3761,7 @@ impl WavesPreviewer {
             batch_rename_pad: 2,
             batch_rename_error: None,
             saving_sources: Vec::new(),
+            saving_virtual: Vec::new(),
             saving_mode: None,
 
             lufs_override: HashMap::new(),
@@ -3759,6 +4311,19 @@ impl eframe::App for WavesPreviewer {
                         self.set_pending_gain_db_for_path(p, 0.0);
                         self.lufs_override.remove(p);
                     }
+                    let success_set: std::collections::HashSet<PathBuf> =
+                        res.success_paths.iter().cloned().collect();
+                    let mut virtual_success: Vec<(PathBuf, PathBuf)> = Vec::new();
+                    for (src, dst) in &self.saving_virtual {
+                        if success_set.contains(dst) {
+                            virtual_success.push((src.clone(), dst.clone()));
+                        }
+                    }
+                    for (src, dst) in &virtual_success {
+                        self.set_pending_gain_db_for_path(src, 0.0);
+                        self.lufs_override.remove(src);
+                        self.replace_path_in_state(src, dst);
+                    }
                     match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                         SaveMode::Overwrite => {
                             if !self.saving_sources.is_empty() {
@@ -3775,13 +4340,25 @@ impl eframe::App for WavesPreviewer {
                             }
                         }
                         SaveMode::NewFile => {
+                            let virtual_dests: std::collections::HashSet<PathBuf> = self
+                                .saving_virtual
+                                .iter()
+                                .map(|(_, dst)| dst.clone())
+                                .collect();
                             let mut added_any=false; let mut first_added=None;
-                            for p in &res.success_paths { if self.add_files_merge(&[p.clone()])>0 { if first_added.is_none(){ first_added=Some(p.clone()); } added_any=true; } }
+                            for p in &res.success_paths {
+                                if virtual_dests.contains(p) {
+                                    continue;
+                                }
+                                if self.add_files_merge(&[p.clone()])>0 { if first_added.is_none(){ first_added=Some(p.clone()); } added_any=true; }
+                            }
                             if added_any { self.after_add_refresh(); }
                             if let Some(p) = first_added { if let Some(idx) = self.row_for_path(&p) { self.select_and_load(idx, true); } }
                         }
                     }
-                    self.saving_sources.clear(); self.saving_mode=None;
+                    self.saving_sources.clear();
+                    self.saving_virtual.clear();
+                    self.saving_mode=None;
                 }
                 self.export_state = None;
                 ctx.request_repaint();
@@ -4082,9 +4659,14 @@ impl eframe::App for WavesPreviewer {
     let spec_cache = self.spectro_cache.get(&spec_path).cloned();
     let spec_loading = self.spectro_inflight.contains(&spec_path);
     ui.horizontal(|ui| {
-        let tab = &mut self.tabs[tab_idx];
+        let tab = &self.tabs[tab_idx];
         let dirty_mark = if tab.dirty || tab.loop_markers_dirty || tab.markers_dirty { " *" } else { "" };
-        let path_text = format!("{}{}", tab.path.display(), dirty_mark);
+        let base = if self.is_virtual_path(&tab.path) {
+            format!("{} (virtual)", tab.display_name)
+        } else {
+            tab.path.display().to_string()
+        };
+        let path_text = format!("{}{}", base, dirty_mark);
         ui.add(
             egui::Label::new(RichText::new(path_text).monospace())
                 .truncate()

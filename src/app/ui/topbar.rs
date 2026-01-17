@@ -47,24 +47,37 @@ impl crate::app::WavesPreviewer {
                         }
                         ui.separator();
                         let selected = self.selected_paths();
+                        let real_selected = self.selected_real_paths();
                         let has_selection = !selected.is_empty();
+                        let has_real_selection = !real_selected.is_empty();
                         if ui
-                            .add_enabled(has_selection, egui::Button::new("Copy Selected..."))
+                            .add_enabled(has_selection, egui::Button::new("Copy Selected to Clipboard"))
                             .clicked()
                         {
-                            if let Some(dir) = self.pick_folder_dialog() {
-                                self.copy_paths_to_folder(&selected, &dir);
-                            }
+                            self.copy_selected_to_clipboard();
+                            ui.close();
+                        }
+                        let can_paste = self
+                            .clipboard_payload
+                            .as_ref()
+                            .map(|p| !p.items.is_empty())
+                            .unwrap_or(false)
+                            || !self.get_clipboard_files().is_empty();
+                        if ui
+                            .add_enabled(can_paste, egui::Button::new("Paste"))
+                            .clicked()
+                        {
+                            self.paste_clipboard_to_list();
                             ui.close();
                         }
                         if ui
-                            .add_enabled(has_selection, egui::Button::new("Rename Selected..."))
+                            .add_enabled(has_real_selection, egui::Button::new("Rename Selected..."))
                             .clicked()
                         {
-                            if selected.len() == 1 {
-                                self.open_rename_dialog(selected[0].clone());
+                            if real_selected.len() == 1 {
+                                self.open_rename_dialog(real_selected[0].clone());
                             } else {
-                                self.open_batch_rename_dialog(selected.clone());
+                                self.open_batch_rename_dialog(real_selected.clone());
                             }
                             ui.close();
                         }

@@ -28,6 +28,17 @@ impl crate::app::WavesPreviewer {
         let pointer_over_list = ui
             .input(|i| i.pointer.hover_pos())
             .map_or(false, |p| list_rect.contains(p));
+        if self.debug.cfg.enabled {
+            self.debug.last_pointer_over_list = pointer_over_list;
+        }
+        let pressed_ctrl_c = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C));
+        let pressed_ctrl_v = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V));
+        let event_copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        let event_paste =
+            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+        let wants_kb_input = ctx.wants_keyboard_input();
+        let copy_trigger = pressed_ctrl_c || (!wants_kb_input && event_copy);
+        let paste_trigger = pressed_ctrl_v || (!wants_kb_input && event_paste);
         let mut dirty_paths: std::collections::HashSet<PathBuf> = self
             .tabs
             .iter()
@@ -38,6 +49,20 @@ impl crate::app::WavesPreviewer {
 
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
+        if copy_trigger {
+            if !self.selected_multi.is_empty() || self.selected.is_some() {
+                self.copy_selected_to_clipboard();
+                if self.debug.cfg.enabled && event_copy && !pressed_ctrl_c {
+                    self.debug_trace_input("copy triggered via Event::Copy");
+                }
+            }
+        }
+        if paste_trigger {
+            self.paste_clipboard_to_list();
+            if self.debug.cfg.enabled && event_paste && !pressed_ctrl_v {
+                self.debug_trace_input("paste triggered via Event::Paste");
+            }
+        }
         if self.active_tab.is_none() && !self.files.is_empty() && !ctx.wants_keyboard_input() {
             let pressed_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
             let pressed_up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
@@ -346,24 +371,26 @@ impl crate::app::WavesPreviewer {
                     let row_idx = row.index();
                     if row_idx < self.files.len() {
                         let id = self.files[row_idx];
-                        let path_owned = match self.item_for_id(id) {
-                            Some(item) => item.path.clone(),
+                        let (path_owned, file_name, parent, is_virtual) = match self.item_for_id(id) {
+                            Some(item) => (
+                                item.path.clone(),
+                                item.display_name.clone(),
+                                item.display_folder.clone(),
+                                item.source == crate::app::types::MediaSource::Virtual,
+                            ),
                             None => return,
                         };
-                        if !path_owned.is_file() {
+                        if !is_virtual && !path_owned.is_file() {
                             missing_paths.push(path_owned.clone());
                             return;
                         }
-                        self.queue_meta_for_path(&path_owned, true);
-                        self.queue_transcript_for_path(&path_owned, true);
+                        if !is_virtual {
+                            self.queue_meta_for_path(&path_owned, true);
+                            self.queue_transcript_for_path(&path_owned, true);
+                        }
                         let Some(item) = self.item_for_id(id) else {
                             return;
                         };
-                        let file_name = path_owned
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("");
-                        let parent = path_owned.parent().and_then(|p| p.to_str()).unwrap_or("");
                         let is_selected = self.selected_multi.contains(&row_idx);
                         row.set_selected(is_selected);
                         let mut clicked_to_load = false;
@@ -373,7 +400,7 @@ impl crate::app::WavesPreviewer {
                             ui.with_layout(
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
-                                    let mut display = file_name.to_string();
+                                    let mut display = file_name.clone();
                                     if dirty_paths.contains(&path_owned) {
                                         display.push_str(" *");
                                     }
@@ -402,7 +429,7 @@ impl crate::app::WavesPreviewer {
                                         to_open = Some(path_owned.clone());
                                     }
                                     if resp.hovered() {
-                                        resp.on_hover_text(file_name);
+                                        resp.on_hover_text(&file_name);
                                     }
                                 },
                             );
@@ -415,7 +442,7 @@ impl crate::app::WavesPreviewer {
                                     let resp = ui
                                         .add(
                                             egui::Label::new(
-                                                RichText::new(parent)
+                                                RichText::new(parent.as_str())
                                                     .monospace()
                                                     .size(text_height * 1.0),
                                             )
@@ -431,12 +458,14 @@ impl crate::app::WavesPreviewer {
                                     }
                                     if resp.double_clicked() {
                                         clicked_to_select = true;
-                                        let _ = crate::app::helpers::open_folder_with_file_selected(
-                                            &path_owned,
-                                        );
+                                        if !is_virtual {
+                                            let _ = crate::app::helpers::open_folder_with_file_selected(
+                                                &path_owned,
+                                            );
+                                        }
                                     }
                                     if resp.hovered() {
-                                        resp.on_hover_text(parent);
+                                        resp.on_hover_text(&parent);
                                     }
                                 },
                             );
@@ -760,17 +789,29 @@ impl crate::app::WavesPreviewer {
                             let selected = self.selected_paths();
                             let has_selection = !selected.is_empty();
                             if ui
-                                .add_enabled(has_selection, egui::Button::new("Copy..."))
+                                .add_enabled(has_selection, egui::Button::new("Copy to Clipboard"))
                                 .clicked()
                             {
-                                if let Some(dir) = self.pick_folder_dialog() {
-                                    self.copy_paths_to_folder(&selected, &dir);
-                                }
+                                self.copy_selected_to_clipboard();
                                 ui.close();
                             }
-                            if selected.len() == 1 {
+                            let can_paste = self
+                                .clipboard_payload
+                                .as_ref()
+                                .map(|p| !p.items.is_empty())
+                                .unwrap_or(false)
+                                || !self.get_clipboard_files().is_empty();
+                            if ui
+                                .add_enabled(can_paste, egui::Button::new("Paste"))
+                                .clicked()
+                            {
+                                self.paste_clipboard_to_list();
+                                ui.close();
+                            }
+                            let real_selected = self.selected_real_paths();
+                            if real_selected.len() == 1 {
                                 if ui.button("Rename...").clicked() {
-                                    self.open_rename_dialog(selected[0].clone());
+                                    self.open_rename_dialog(real_selected[0].clone());
                                     ui.close();
                                 }
                             }

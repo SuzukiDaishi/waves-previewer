@@ -42,3 +42,6 @@ kittest = ["egui_kittest"]
 
 [build-dependencies]
 windows_exe_info = "0.5.2"
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "4.5.0"

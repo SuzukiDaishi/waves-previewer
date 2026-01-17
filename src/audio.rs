@@ -5,6 +5,7 @@ use arc_swap::ArcSwapOption;
 use atomic_float::AtomicF32;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+#[derive(Debug)]
 pub struct AudioBuffer {
     pub channels: Vec<Vec<f32>>, // per-channel samples in [-1, 1]
 }
