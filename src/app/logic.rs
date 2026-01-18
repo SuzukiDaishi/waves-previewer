@@ -1,16 +1,20 @@
-﻿use std::collections::HashSet;
-use std::path::{Path, PathBuf};
 use crate::audio_io;
 use crate::loop_markers;
 use crate::wave::prepare_for_speed;
 use regex::RegexBuilder;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
 
 use super::helpers::num_order;
-use super::types::{EditorTab, ListPreviewResult, ProcessingResult, ProcessingState, RateMode, SortDir, SortKey, ScanMessage};
+use super::types::{
+    ChannelView, EditorDecodeResult, EditorDecodeState, EditorTab, ListPreviewResult,
+    ProcessingResult, ProcessingState, RateMode, ScanMessage, SortDir, SortKey,
+};
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 1.0;
+const EDITOR_PREVIEW_PREFIX_SECS: f32 = 8.0;
 
 impl super::WavesPreviewer {
     fn mixdown_channels_mono(chs: &[Vec<f32>], len: usize) -> Vec<f32> {
@@ -35,7 +39,7 @@ impl super::WavesPreviewer {
         out
     }
 
-    fn should_skip_path(&self, path: &Path) -> bool {
+    pub(super) fn should_skip_path(&self, path: &Path) -> bool {
         self.skip_dotfiles && Self::is_dotfile_path(path)
     }
 
@@ -76,6 +80,7 @@ impl super::WavesPreviewer {
                     snap_zero_cross: tab.snap_zero_cross,
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
+                    show_waveform_overlay: tab.show_waveform_overlay,
                 },
             )
         };
@@ -362,11 +367,17 @@ impl super::WavesPreviewer {
                 if let Ok((mono, _in_sr)) = crate::wave::decode_wav_mono(&path) {
                     crate::wave::build_minmax(&mut waveform, &mono, 2048);
                     if update_audio {
-                        let _ = prepare_for_speed(&path, &self.audio, &mut Vec::new(), self.playback_rate);
+                        let _ = prepare_for_speed(
+                            &path,
+                            &self.audio,
+                            &mut Vec::new(),
+                            self.playback_rate,
+                        );
                         self.audio.set_rate(self.playback_rate);
                     }
                 } else if update_audio {
-                    let _ = prepare_for_speed(&path, &self.audio, &mut Vec::new(), self.playback_rate);
+                    let _ =
+                        prepare_for_speed(&path, &self.audio, &mut Vec::new(), self.playback_rate);
                     self.audio.set_rate(self.playback_rate);
                 }
                 let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
@@ -445,7 +456,11 @@ impl super::WavesPreviewer {
                 affect_playing = true;
             }
             self.edited_cache.remove(p);
-            if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == p.as_path()) {
+            if let Some(idx) = self
+                .tabs
+                .iter()
+                .position(|t| t.path.as_path() == p.as_path())
+            {
                 let update_audio = self.active_tab == Some(idx);
                 if self.is_virtual_path(p) {
                     self.reset_tab_from_virtual(idx, update_audio);
@@ -470,7 +485,12 @@ impl super::WavesPreviewer {
     }
 
     /// Helper: read loop markers and map to given output SR, set tab.loop_region if valid
-    fn set_loop_region_from_file_markers(tab: &mut EditorTab, path: &Path, in_sr: u32, out_sr: u32) {
+    pub(super) fn set_loop_region_from_file_markers(
+        tab: &mut EditorTab,
+        path: &Path,
+        in_sr: u32,
+        out_sr: u32,
+    ) {
         let mut saved = None;
         if let Some((ls, le)) = loop_markers::read_loop_markers(path) {
             let ls = (ls.min(u32::MAX as u64)) as u32;
@@ -490,7 +510,7 @@ impl super::WavesPreviewer {
         tab.loop_markers_dirty = false;
     }
 
-    fn sample_rate_for_path(&self, path: &Path, fallback: u32) -> u32 {
+    pub(super) fn sample_rate_for_path(&self, path: &Path, fallback: u32) -> u32 {
         self.meta_for_path(path)
             .map(|m| m.sample_rate)
             .filter(|&sr| sr > 0)
@@ -498,7 +518,12 @@ impl super::WavesPreviewer {
             .unwrap_or(fallback)
     }
 
-    fn load_markers_for_tab(tab: &mut EditorTab, path: &Path, out_sr: u32, file_sr: u32) {
+    pub(super) fn load_markers_for_tab(
+        tab: &mut EditorTab,
+        path: &Path,
+        out_sr: u32,
+        file_sr: u32,
+    ) {
         let out_sr = out_sr.max(1);
         match crate::markers::read_markers(path, out_sr, file_sr) {
             Ok(mut markers) => {
@@ -518,7 +543,9 @@ impl super::WavesPreviewer {
 
     pub(super) fn write_markers_for_tab(&mut self, tab_idx: usize) -> bool {
         let (path, markers, file_sr) = {
-            let Some(tab) = self.tabs.get(tab_idx) else { return false; };
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
             let file_sr = self.sample_rate_for_path(&tab.path, self.audio.shared.out_sample_rate);
             (tab.path.clone(), tab.markers.clone(), file_sr)
         };
@@ -540,8 +567,14 @@ impl super::WavesPreviewer {
 
     pub(super) fn write_loop_markers_for_tab(&mut self, tab_idx: usize) -> bool {
         let (path, loop_region, out_sr) = {
-            let Some(tab) = self.tabs.get(tab_idx) else { return false; };
-            (tab.path.clone(), tab.loop_region, self.audio.shared.out_sample_rate)
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            (
+                tab.path.clone(),
+                tab.loop_region,
+                self.audio.shared.out_sample_rate,
+            )
         };
         if !path.is_file() {
             self.remove_missing_path(&path);
@@ -692,11 +725,8 @@ impl super::WavesPreviewer {
             1.0
         };
         self.audio.set_rate(rate);
-        match crate::wave::prepare_for_list_preview(
-            &p_owned,
-            &self.audio,
-            LIST_PREVIEW_PREFIX_SECS,
-        ) {
+        match crate::wave::prepare_for_list_preview(&p_owned, &self.audio, LIST_PREVIEW_PREFIX_SECS)
+        {
             Ok(truncated) => {
                 if truncated {
                     self.spawn_list_preview_full(p_owned.clone());
@@ -741,6 +771,208 @@ impl super::WavesPreviewer {
         self.list_preview_rx = Some(rx);
     }
 
+    fn spawn_editor_decode(&mut self, path: PathBuf) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc};
+        self.cancel_editor_decode();
+        self.editor_decode_job_id = self.editor_decode_job_id.wrapping_add(1);
+        let job_id = self.editor_decode_job_id;
+        let out_sr = self.audio.shared.out_sample_rate;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_thread = cancel.clone();
+        let path_for_thread = path.clone();
+        let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
+        std::thread::spawn(move || {
+            let prefix =
+                crate::wave::decode_wav_multi_prefix(&path_for_thread, EDITOR_PREVIEW_PREFIX_SECS);
+            let (mut chans, in_sr, truncated) = match prefix {
+                Ok(v) => v,
+                Err(err) => {
+                    let _ = tx.send(EditorDecodeResult {
+                        path: path_for_thread,
+                        channels: Vec::new(),
+                        is_final: true,
+                        job_id,
+                        error: Some(err.to_string()),
+                    });
+                    return;
+                }
+            };
+            if cancel_thread.load(Ordering::Relaxed) {
+                return;
+            }
+            if in_sr != out_sr {
+                for c in chans.iter_mut() {
+                    *c = crate::wave::resample_linear(c, in_sr, out_sr);
+                }
+            }
+            let _ = tx.send(EditorDecodeResult {
+                path: path_for_thread.clone(),
+                channels: chans,
+                is_final: !truncated,
+                job_id,
+                error: None,
+            });
+            if !truncated || cancel_thread.load(Ordering::Relaxed) {
+                return;
+            }
+            let full = crate::wave::decode_wav_multi(&path_for_thread);
+            let (mut chans, in_sr) = match full {
+                Ok(v) => v,
+                Err(err) => {
+                    let _ = tx.send(EditorDecodeResult {
+                        path: path_for_thread,
+                        channels: Vec::new(),
+                        is_final: true,
+                        job_id,
+                        error: Some(err.to_string()),
+                    });
+                    return;
+                }
+            };
+            if cancel_thread.load(Ordering::Relaxed) {
+                return;
+            }
+            if in_sr != out_sr {
+                for c in chans.iter_mut() {
+                    *c = crate::wave::resample_linear(c, in_sr, out_sr);
+                }
+            }
+            if cancel_thread.load(Ordering::Relaxed) {
+                return;
+            }
+            let _ = tx.send(EditorDecodeResult {
+                path: path_for_thread,
+                channels: chans,
+                is_final: true,
+                job_id,
+                error: None,
+            });
+        });
+        self.editor_decode_state = Some(EditorDecodeState {
+            path,
+            started_at: std::time::Instant::now(),
+            rx,
+            cancel,
+            job_id,
+            partial_ready: false,
+        });
+    }
+
+    pub(super) fn drain_editor_decode(&mut self) {
+        let mut decode_update_tab: Option<usize> = None;
+        let mut decode_refresh_preview: Option<usize> = None;
+        let mut decode_cancel_preview = false;
+        let mut decode_error: Option<(PathBuf, String)> = None;
+        let mut decode_done = false;
+        let mut marker_updates: Vec<(usize, PathBuf)> = Vec::new();
+        if let Some(state) = &mut self.editor_decode_state {
+            while let Ok(res) = state.rx.try_recv() {
+                if res.job_id != state.job_id {
+                    continue;
+                }
+                if let Some(err) = res.error {
+                    decode_error = Some((res.path.clone(), err));
+                    if let Some(idx) = self.tabs.iter().position(|t| t.path == res.path) {
+                        if let Some(tab) = self.tabs.get_mut(idx) {
+                            tab.loading = false;
+                        }
+                    }
+                    decode_done = true;
+                    continue;
+                }
+                if let Some(idx) = self.tabs.iter().position(|t| t.path == res.path) {
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        let had_preview =
+                            tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some();
+                        tab.preview_audio_tool = None;
+                        tab.preview_overlay = None;
+                        let old_len = tab.samples_len;
+                        let old_view = tab.view_offset;
+                        let old_spp = tab.samples_per_px;
+                        tab.ch_samples = res.channels;
+                        tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                        if res.is_final {
+                            marker_updates.push((idx, res.path.clone()));
+                        }
+                        if tab.samples_len == 0 {
+                            tab.samples_per_px = 0.0;
+                            tab.view_offset = 0;
+                        } else if old_len > 0 && tab.samples_len != old_len {
+                            let ratio = tab.samples_len as f32 / old_len as f32;
+                            if old_spp > 0.0 {
+                                tab.samples_per_px = (old_spp * ratio).max(0.0001);
+                            } else {
+                                tab.samples_per_px = 0.0;
+                            }
+                            tab.view_offset = ((old_view as f32) * ratio).round() as usize;
+                            tab.loop_xfade_samples =
+                                ((tab.loop_xfade_samples as f32) * ratio).round() as usize;
+                        } else if old_spp <= 0.0 {
+                            tab.samples_per_px = 0.0;
+                        }
+                        tab.loading = !res.is_final;
+                        decode_update_tab = Some(idx);
+                        decode_refresh_preview = Some(idx);
+                        if had_preview && self.active_tab == Some(idx) {
+                            decode_cancel_preview = true;
+                        }
+                    }
+                }
+                if res.is_final {
+                    decode_done = true;
+                } else {
+                    state.partial_ready = true;
+                }
+            }
+        }
+        if let Some((path, err)) = decode_error {
+            self.debug_log(format!("editor decode failed: {} ({err})", path.display()));
+        }
+        if decode_cancel_preview {
+            self.cancel_heavy_preview();
+        }
+        if !marker_updates.is_empty() {
+            let out_sr = self.audio.shared.out_sample_rate;
+            for (idx, path) in marker_updates {
+                let file_sr = self.sample_rate_for_path(&path, out_sr);
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    Self::set_loop_region_from_file_markers(tab, &path, file_sr, out_sr);
+                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+                }
+            }
+        }
+        if let Some(idx) = decode_update_tab {
+            if self.active_tab == Some(idx) {
+                if let Some(tab) = self.tabs.get(idx) {
+                    if !tab.ch_samples.is_empty() {
+                        let buf = crate::audio::AudioBuffer::from_channels(tab.ch_samples.clone());
+                        let playing = self
+                            .audio
+                            .shared
+                            .playing
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        if playing {
+                            self.audio
+                                .replace_samples_keep_pos(std::sync::Arc::new(buf));
+                        } else {
+                            self.audio.set_samples_channels(tab.ch_samples.clone());
+                        }
+                        self.apply_loop_mode_for_tab(tab);
+                    }
+                }
+            }
+        }
+        if let Some(idx) = decode_refresh_preview {
+            if self.active_tab == Some(idx) {
+                self.refresh_tool_preview_for_tab(idx);
+            }
+        }
+        if decode_done {
+            self.editor_decode_state = None;
+        }
+    }
+
     pub(super) fn remove_missing_path(&mut self, path: &Path) {
         if self.is_virtual_path(path) {
             return;
@@ -781,8 +1013,7 @@ impl super::WavesPreviewer {
 
         self.meta_inflight.remove(&path_buf);
         self.transcript_inflight.remove(&path_buf);
-        self.spectro_cache.remove(&path_buf);
-        self.spectro_inflight.remove(&path_buf);
+        self.purge_spectro_cache_entry(&path_buf);
         self.edited_cache.remove(&path_buf);
         self.lufs_override.remove(&path_buf);
         self.lufs_recalc_deadline.remove(&path_buf);
@@ -871,8 +1102,7 @@ impl super::WavesPreviewer {
         for path in unique.iter() {
             self.meta_inflight.remove(path);
             self.transcript_inflight.remove(path);
-            self.spectro_cache.remove(path);
-            self.spectro_inflight.remove(path);
+            self.purge_spectro_cache_entry(path);
             self.edited_cache.remove(path);
             self.lufs_override.remove(path);
             self.lufs_recalc_deadline.remove(path);
@@ -926,6 +1156,11 @@ impl super::WavesPreviewer {
         self.transcript_inflight.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
+        self.spectro_progress.clear();
+        self.spectro_cancel.clear();
+        self.spectro_cache_order.clear();
+        self.spectro_cache_sizes.clear();
+        self.spectro_cache_bytes = 0;
         self.scan_rx = None;
         self.scan_in_progress = false;
         if let Some(root) = &self.root {
@@ -961,6 +1196,7 @@ impl super::WavesPreviewer {
                     display_name: name,
                     waveform_minmax: cached.waveform_minmax,
                     loop_enabled: false,
+                    loading: false,
                     ch_samples: cached.ch_samples,
                     samples_len: cached.samples_len,
                     view_offset: 0,
@@ -984,6 +1220,8 @@ impl super::WavesPreviewer {
                     fade_in_shape: cached.fade_in_shape,
                     fade_out_shape: cached.fade_out_shape,
                     view_mode: crate::app::types::ViewMode::Waveform,
+                    show_waveform_overlay: cached.show_waveform_overlay,
+                    channel_view: ChannelView::mixdown(),
                     snap_zero_cross: cached.snap_zero_cross,
                     drag_select_anchor: None,
                     active_tool: cached.active_tool,
@@ -1023,6 +1261,7 @@ impl super::WavesPreviewer {
                 display_name: name,
                 waveform_minmax: wf,
                 loop_enabled: false,
+                loading: false,
                 ch_samples: chs.clone(),
                 samples_len,
                 view_offset: 0,
@@ -1046,6 +1285,8 @@ impl super::WavesPreviewer {
                 fade_in_shape: crate::app::types::FadeShape::SCurve,
                 fade_out_shape: crate::app::types::FadeShape::SCurve,
                 view_mode: crate::app::types::ViewMode::Waveform,
+                show_waveform_overlay: true,
+                channel_view: ChannelView::mixdown(),
                 snap_zero_cross: true,
                 drag_select_anchor: None,
                 active_tool: crate::app::types::ToolKind::LoopEdit,
@@ -1114,6 +1355,7 @@ impl super::WavesPreviewer {
                 display_name: name,
                 waveform_minmax: cached.waveform_minmax,
                 loop_enabled: false,
+                loading: false,
                 ch_samples: cached.ch_samples,
                 samples_len: cached.samples_len,
                 view_offset: 0,
@@ -1137,6 +1379,8 @@ impl super::WavesPreviewer {
                 fade_in_shape: cached.fade_in_shape,
                 fade_out_shape: cached.fade_out_shape,
                 view_mode: crate::app::types::ViewMode::Waveform,
+                show_waveform_overlay: cached.show_waveform_overlay,
+                channel_view: ChannelView::mixdown(),
                 snap_zero_cross: cached.snap_zero_cross,
                 drag_select_anchor: None,
                 active_tool: cached.active_tool,
@@ -1157,188 +1401,76 @@ impl super::WavesPreviewer {
             self.apply_dirty_tab_audio_with_mode(path);
             return;
         }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("(invalid)")
+            .to_string();
+        let loading = !decode_failed;
+        self.tabs.push(EditorTab {
+            path: path.to_path_buf(),
+            display_name: name,
+            waveform_minmax: Vec::new(),
+            loop_enabled: false,
+            loading,
+            ch_samples: Vec::new(),
+            samples_len: 0,
+            view_offset: 0,
+            samples_per_px: 0.0,
+            last_wave_w: 0.0,
+            dirty: false,
+            ops: Vec::new(),
+            selection: None,
+            markers: Vec::new(),
+            markers_saved: Vec::new(),
+            markers_dirty: false,
+            ab_loop: None,
+            loop_region: None,
+            loop_markers_saved: None,
+            loop_markers_dirty: false,
+            trim_range: None,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
+            fade_in_range: None,
+            fade_out_range: None,
+            fade_in_shape: crate::app::types::FadeShape::SCurve,
+            fade_out_shape: crate::app::types::FadeShape::SCurve,
+            view_mode: crate::app::types::ViewMode::Waveform,
+            show_waveform_overlay: true,
+            channel_view: ChannelView::mixdown(),
+            snap_zero_cross: true,
+            drag_select_anchor: None,
+            active_tool: crate::app::types::ToolKind::LoopEdit,
+            tool_state: crate::app::types::ToolState {
+                fade_in_ms: 0.0,
+                fade_out_ms: 0.0,
+                gain_db: 0.0,
+                normalize_target_db: -6.0,
+                pitch_semitones: 0.0,
+                stretch_rate: 1.0,
+            },
+            loop_mode: crate::app::types::LoopMode::Off,
+            dragging_marker: None,
+            preview_audio_tool: None,
+            active_tool_last: None,
+            preview_offset_samples: None,
+            preview_overlay: None,
+            undo_stack: Vec::new(),
+            undo_bytes: 0,
+            redo_stack: Vec::new(),
+            redo_bytes: 0,
+        });
+        self.active_tab = Some(self.tabs.len() - 1);
+        self.playing_path = Some(path.to_path_buf());
         match self.mode {
-            RateMode::Speed => {
-                let mut wf = Vec::new();
-                if let Err(e) =
-                    crate::wave::prepare_for_speed(path, &self.audio, &mut wf, self.playback_rate)
-                {
-                    eprintln!("load error: {e:?}")
-                }
-                self.audio.set_rate(self.playback_rate);
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("(invalid)")
-                    .to_string();
-                // Multi-channel visualization at device SR
-                let (mut chs, in_sr) = match crate::wave::decode_wav_multi(path) {
-                    Ok(v) => v,
-                    Err(_) => (Vec::new(), self.audio.shared.out_sample_rate),
-                };
-                if in_sr != self.audio.shared.out_sample_rate {
-                    for c in chs.iter_mut() {
-                        *c = crate::wave::resample_linear(
-                            c,
-                            in_sr,
-                            self.audio.shared.out_sample_rate,
-                        );
-                    }
-                }
-                let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                self.tabs.push(EditorTab {
-                    path: path.to_path_buf(),
-                    display_name: name,
-                    waveform_minmax: wf,
-                    loop_enabled: false,
-                    ch_samples: chs,
-                    samples_len,
-                    view_offset: 0,
-                    samples_per_px: 0.0,
-                    last_wave_w: 0.0,
-                    dirty: false,
-                    ops: Vec::new(),
-                    selection: None,
-                    markers: Vec::new(),
-                    markers_saved: Vec::new(),
-                    markers_dirty: false,
-                    ab_loop: None,
-                    loop_region: None,
-                    loop_markers_saved: None,
-                    loop_markers_dirty: false,
-                    trim_range: None,
-                    loop_xfade_samples: 0,
-                    loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
-                    fade_in_range: None,
-                    fade_out_range: None,
-                    fade_in_shape: crate::app::types::FadeShape::SCurve,
-                    fade_out_shape: crate::app::types::FadeShape::SCurve,
-                    view_mode: crate::app::types::ViewMode::Waveform,
-                    snap_zero_cross: true,
-                    drag_select_anchor: None,
-                    active_tool: crate::app::types::ToolKind::LoopEdit,
-                    tool_state: crate::app::types::ToolState {
-                        fade_in_ms: 0.0,
-                        fade_out_ms: 0.0,
-                        gain_db: 0.0,
-                        normalize_target_db: -6.0,
-                        pitch_semitones: 0.0,
-                        stretch_rate: 1.0,
-                    },
-                    loop_mode: crate::app::types::LoopMode::Off,
-                    dragging_marker: None,
-                    preview_audio_tool: None,
-                    active_tool_last: None,
-                    preview_offset_samples: None,
-                    preview_overlay: None,
-                    undo_stack: Vec::new(),
-                    undo_bytes: 0,
-                    redo_stack: Vec::new(),
-                    redo_bytes: 0,
-                });
-                self.active_tab = Some(self.tabs.len() - 1);
-                let out_sr = self.audio.shared.out_sample_rate;
-                let file_sr = self.sample_rate_for_path(path, in_sr);
-                // Load loop markers from file if available into loop_region
-                if let Some(tab) = self.tabs.last_mut() {
-                    Self::set_loop_region_from_file_markers(tab, path, in_sr, out_sr);
-                    Self::load_markers_for_tab(tab, path, out_sr, file_sr);
-                }
-                self.playing_path = Some(path.to_path_buf());
-            }
-            _ => {
-                // Heavy: create tab immediately with empty waveform, then spawn processing
-                self.audio.set_rate(1.0);
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("(invalid)")
-                    .to_string();
-                let (mut chs, in_sr) = match crate::wave::decode_wav_multi(path) {
-                    Ok(v) => v,
-                    Err(_) => (Vec::new(), self.audio.shared.out_sample_rate),
-                };
-                if in_sr != self.audio.shared.out_sample_rate {
-                    for c in chs.iter_mut() {
-                        *c = crate::wave::resample_linear(
-                            c,
-                            in_sr,
-                            self.audio.shared.out_sample_rate,
-                        );
-                    }
-                }
-                let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                self.tabs.push(EditorTab {
-                    path: path.to_path_buf(),
-                    display_name: name,
-                    waveform_minmax: Vec::new(),
-                    loop_enabled: false,
-                    ch_samples: chs,
-                    samples_len,
-                    view_offset: 0,
-                    samples_per_px: 0.0,
-                    last_wave_w: 0.0,
-                    dirty: false,
-                    ops: Vec::new(),
-                    selection: None,
-                    markers: Vec::new(),
-                    markers_saved: Vec::new(),
-                    markers_dirty: false,
-                    ab_loop: None,
-                    loop_region: None,
-                    loop_markers_saved: None,
-                    loop_markers_dirty: false,
-                    trim_range: None,
-                    loop_xfade_samples: 0,
-                    loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
-                    fade_in_range: None,
-                    fade_out_range: None,
-                    fade_in_shape: crate::app::types::FadeShape::SCurve,
-                    fade_out_shape: crate::app::types::FadeShape::SCurve,
-                    view_mode: crate::app::types::ViewMode::Waveform,
-                    snap_zero_cross: true,
-                    drag_select_anchor: None,
-                    active_tool: crate::app::types::ToolKind::LoopEdit,
-                    tool_state: crate::app::types::ToolState {
-                        fade_in_ms: 0.0,
-                        fade_out_ms: 0.0,
-                        gain_db: 0.0,
-                        normalize_target_db: -6.0,
-                        pitch_semitones: 0.0,
-                        stretch_rate: 1.0,
-                    },
-                    loop_mode: crate::app::types::LoopMode::Off,
-                    dragging_marker: None,
-                    preview_audio_tool: None,
-                    active_tool_last: None,
-                    preview_offset_samples: None,
-                    preview_overlay: None,
-                    undo_stack: Vec::new(),
-                    undo_bytes: 0,
-                    redo_stack: Vec::new(),
-                    redo_bytes: 0,
-                });
-                self.active_tab = Some(self.tabs.len() - 1);
-                let out_sr = self.audio.shared.out_sample_rate;
-                let file_sr = self.sample_rate_for_path(path, in_sr);
-                // Load loop markers into loop_region if present
-                if let Some(tab) = self.tabs.last_mut() {
-                    Self::set_loop_region_from_file_markers(tab, path, in_sr, out_sr);
-                    Self::load_markers_for_tab(tab, path, out_sr, file_sr);
-                }
-                if decode_failed {
-                    let _ = crate::wave::prepare_for_speed(
-                        path,
-                        &self.audio,
-                        &mut Vec::new(),
-                        1.0,
-                    );
-                    self.audio.set_rate(1.0);
-                } else {
-                    self.spawn_heavy_processing(path);
-                }
-                self.playing_path = Some(path.to_path_buf());
-            }
+            RateMode::Speed => self.audio.set_rate(self.playback_rate),
+            _ => self.audio.set_rate(1.0),
+        }
+        self.audio.set_samples_channels(Vec::new());
+        self.audio.stop();
+        self.apply_effective_volume();
+        if !decode_failed {
+            self.spawn_editor_decode(path.to_path_buf());
         }
     }
 
@@ -1348,113 +1480,6 @@ impl super::WavesPreviewer {
         }
     }
 
-    // Merge helper: add a folder recursively (supported audio only)
-    pub(super) fn add_folder_merge(&mut self, dir: &Path) -> usize {
-        let mut added = 0usize;
-        let skip_dotfiles = self.skip_dotfiles;
-        for entry in WalkDir::new(dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
-        {
-            if let Ok(e) = entry {
-                if e.file_type().is_file() {
-                    let p = e.into_path();
-                    if self.should_skip_path(&p) {
-                        continue;
-                    }
-                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                        if audio_io::is_supported_extension(ext) {
-                            if self.path_index.contains_key(&p) {
-                                continue;
-                            }
-                            let item = self.make_media_item(p.clone());
-                            let id = item.id;
-                            self.path_index.insert(p.clone(), id);
-                            self.item_index.insert(id, self.items.len());
-                            self.items.push(item);
-                            added += 1;
-                        }
-                    }
-                }
-            }
-        }
-        added
-    }
-
-    // Merge helper: add explicit files (supported audio only)
-    pub(super) fn add_files_merge(&mut self, paths: &[PathBuf]) -> usize {
-        let mut added = 0usize;
-        for p in paths {
-            if p.is_file() {
-                if self.should_skip_path(p) {
-                    continue;
-                }
-                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    if audio_io::is_supported_extension(ext) {
-                        if self.path_index.contains_key(p) {
-                            continue;
-                        }
-                        let item = self.make_media_item(p.clone());
-                        let id = item.id;
-                        self.path_index.insert(p.clone(), id);
-                        self.item_index.insert(id, self.items.len());
-                        self.items.push(item);
-                        added += 1;
-                    }
-                }
-            } else if p.is_dir() {
-                added += self.add_folder_merge(p.as_path());
-            }
-        }
-        added
-    }
-
-    pub(super) fn after_add_refresh(&mut self) {
-        if self.external_source.is_some() {
-            self.apply_external_mapping();
-        }
-        self.apply_filter_from_search();
-        self.apply_sort();
-        self.ensure_meta_pool();
-    }
-
-    // Replace current list with explicit files (supported audio only). Root is cleared.
-    pub(super) fn replace_with_files(&mut self, paths: &[PathBuf]) {
-        self.root = None;
-        self.files.clear();
-        self.items.clear();
-        self.item_index.clear();
-        self.path_index.clear();
-        self.original_files.clear();
-        self.meta_inflight.clear();
-        self.transcript_inflight.clear();
-        self.spectro_cache.clear();
-        self.spectro_inflight.clear();
-        self.scan_rx = None;
-        self.scan_in_progress = false;
-        let mut set: HashSet<PathBuf> = HashSet::new();
-        for p in paths {
-            if p.is_file() {
-                if self.should_skip_path(p) {
-                    continue;
-                }
-                if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                    if audio_io::is_supported_extension(ext) {
-                        if set.insert(p.clone()) {
-                            let item = self.make_media_item(p.clone());
-                            let id = item.id;
-                            self.path_index.insert(p.clone(), id);
-                            self.item_index.insert(id, self.items.len());
-                            self.items.push(item);
-                        }
-                    }
-                }
-            }
-        }
-        self.ensure_meta_pool();
-    }
-
     pub(super) fn apply_filter_from_search(&mut self) {
         // Preserve selection index if possible
         let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
@@ -1462,9 +1487,7 @@ impl super::WavesPreviewer {
         if query.is_empty() {
             self.files = self.items.iter().map(|item| item.id).collect();
         } else if self.search_use_regex {
-            let re = RegexBuilder::new(&query)
-                .case_insensitive(true)
-                .build();
+            let re = RegexBuilder::new(&query).case_insensitive(true).build();
             if let Ok(re) = re {
                 self.files = self
                     .items
@@ -1550,38 +1573,38 @@ impl super::WavesPreviewer {
                 .filter(|item| {
                     let name = item.display_name.to_lowercase();
                     let parent = item.display_folder.to_lowercase();
-                let transcript = item
-                    .transcript
-                    .as_ref()
-                    .map(|t| t.full_text.to_lowercase())
-                    .unwrap_or_default();
-                let meta_text = item
-                    .meta
-                    .as_ref()
-                    .map(|m| {
-                        format!(
-                            "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
-                            m.sample_rate,
-                            m.bits_per_sample,
-                            m.channels,
-                            m.duration_secs.unwrap_or(0.0),
-                            m.peak_db.unwrap_or(0.0),
-                            m.lufs_i.unwrap_or(0.0)
-                        )
-                    })
-                    .unwrap_or_default();
-                let external_hit = item
-                    .external
-                    .values()
-                    .any(|v| v.to_lowercase().contains(&q));
-                name.contains(&q)
-                    || parent.contains(&q)
-                    || transcript.contains(&q)
-                    || meta_text.to_lowercase().contains(&q)
-                    || external_hit
-            })
-            .map(|item| item.id)
-            .collect();
+                    let transcript = item
+                        .transcript
+                        .as_ref()
+                        .map(|t| t.full_text.to_lowercase())
+                        .unwrap_or_default();
+                    let meta_text = item
+                        .meta
+                        .as_ref()
+                        .map(|m| {
+                            format!(
+                                "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                                m.sample_rate,
+                                m.bits_per_sample,
+                                m.channels,
+                                m.duration_secs.unwrap_or(0.0),
+                                m.peak_db.unwrap_or(0.0),
+                                m.lufs_i.unwrap_or(0.0)
+                            )
+                        })
+                        .unwrap_or_default();
+                    let external_hit = item
+                        .external
+                        .values()
+                        .any(|v| v.to_lowercase().contains(&q));
+                    name.contains(&q)
+                        || parent.contains(&q)
+                        || transcript.contains(&q)
+                        || meta_text.to_lowercase().contains(&q)
+                        || external_hit
+                })
+                .map(|item| item.id)
+                .collect();
         }
         self.original_files = self.files.clone();
         // restore selected index
@@ -1619,12 +1642,8 @@ impl super::WavesPreviewer {
                 let ma = pa_item.meta.as_ref();
                 let mb = pb_item.meta.as_ref();
                 let ord = match key {
-                    SortKey::File => {
-                        pa_item.display_name.cmp(&pb_item.display_name)
-                    }
-                    SortKey::Folder => {
-                        pa_item.display_folder.cmp(&pb_item.display_folder)
-                    }
+                    SortKey::File => pa_item.display_name.cmp(&pb_item.display_name),
+                    SortKey::Folder => pa_item.display_folder.cmp(&pb_item.display_folder),
                     SortKey::Transcript => {
                         let sa = pa_item
                             .transcript
@@ -1639,10 +1658,8 @@ impl super::WavesPreviewer {
                         sa.cmp(sb)
                     }
                     SortKey::Length => num_order(
-                        ma.and_then(|m| m.duration_secs)
-                            .unwrap_or(0.0),
-                        mb.and_then(|m| m.duration_secs)
-                            .unwrap_or(0.0),
+                        ma.and_then(|m| m.duration_secs).unwrap_or(0.0),
+                        mb.and_then(|m| m.duration_secs).unwrap_or(0.0),
                     ),
                     SortKey::Channels => num_order(
                         ma.map(|m| m.channels as f32).unwrap_or(0.0),
@@ -1719,6 +1736,26 @@ impl super::WavesPreviewer {
                     }
                 }
             }
+            if let Some(tab) = self.tabs.get(tab_idx) {
+                if tab.loading {
+                    return;
+                }
+                if !tab.ch_samples.is_empty() {
+                    let channels = tab.ch_samples.clone();
+                    match self.mode {
+                        RateMode::Speed => {
+                            self.audio.set_samples_channels(channels);
+                            self.audio.set_rate(self.playback_rate);
+                        }
+                        _ => {
+                            self.audio.set_rate(1.0);
+                            self.spawn_heavy_processing_from_channels(tab.path.clone(), channels);
+                        }
+                    }
+                    self.apply_effective_volume();
+                    return;
+                }
+            }
         } else if let Some(sel) = self.selected {
             if let Some(path) = self.path_for_row(sel).cloned() {
                 if self.apply_dirty_tab_preview_for_list(&path) {
@@ -1757,7 +1794,8 @@ impl super::WavesPreviewer {
                 }
                 _ => {
                     if self.is_decode_failed_path(&p) {
-                        let _ = crate::wave::prepare_for_speed(&p, &self.audio, &mut Vec::new(), 1.0);
+                        let _ =
+                            crate::wave::prepare_for_speed(&p, &self.audio, &mut Vec::new(), 1.0);
                         self.audio.set_rate(1.0);
                     } else {
                         self.audio.set_rate(1.0);
@@ -1791,15 +1829,20 @@ impl super::WavesPreviewer {
                 };
                 let channels = match mode {
                     RateMode::PitchShift | RateMode::TimeStretch => {
-                        if let Ok((chs, multi_sr)) = crate::wave::decode_wav_multi(&path_for_thread) {
+                        if let Ok((chs, multi_sr)) = crate::wave::decode_wav_multi(&path_for_thread)
+                        {
                             let mut processed = Vec::with_capacity(chs.len());
                             for ch in chs {
                                 let out = match mode {
                                     RateMode::PitchShift => {
-                                        crate::wave::process_pitchshift_offline(&ch, multi_sr, out_sr, sem)
+                                        crate::wave::process_pitchshift_offline(
+                                            &ch, multi_sr, out_sr, sem,
+                                        )
                                     }
                                     RateMode::TimeStretch => {
-                                        crate::wave::process_timestretch_offline(&ch, multi_sr, out_sr, rate)
+                                        crate::wave::process_timestretch_offline(
+                                            &ch, multi_sr, out_sr, rate,
+                                        )
                                     }
                                     RateMode::Speed => ch,
                                 };
@@ -1835,7 +1878,11 @@ impl super::WavesPreviewer {
         });
     }
 
-    pub(super) fn spawn_scan_worker(&self, root: PathBuf, skip_dotfiles: bool) -> std::sync::mpsc::Receiver<ScanMessage> {
+    pub(super) fn spawn_scan_worker(
+        &self,
+        root: PathBuf,
+        skip_dotfiles: bool,
+    ) -> std::sync::mpsc::Receiver<ScanMessage> {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1854,7 +1901,10 @@ impl super::WavesPreviewer {
                                 }
                                 batch.push(e.into_path());
                                 if batch.len() >= 512 {
-                                    if tx.send(ScanMessage::Batch(std::mem::take(&mut batch))).is_err() {
+                                    if tx
+                                        .send(ScanMessage::Batch(std::mem::take(&mut batch)))
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }

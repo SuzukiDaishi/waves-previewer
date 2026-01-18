@@ -1,9 +1,9 @@
-﻿use std::collections::{HashMap, VecDeque};
+use crate::audio::AudioBuffer;
+use crate::markers::MarkerEntry;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
-use crate::audio::AudioBuffer;
-use crate::markers::MarkerEntry;
 
 pub type MediaId = u64;
 
@@ -131,6 +131,47 @@ pub enum ViewMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpectrogramScale {
+    Linear,
+    Log,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WindowFunction {
+    Hann,
+    BlackmanHarris,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpectrogramConfig {
+    pub fft_size: usize,
+    pub window: WindowFunction,
+    pub overlap: f32,     // 0.0..0.95 (fraction)
+    pub max_frames: usize,
+    pub scale: SpectrogramScale,
+    pub mel_scale: SpectrogramScale,
+    pub db_floor: f32,    // negative dBFS
+    pub max_freq_hz: f32, // 0 = Nyquist
+    pub show_note_labels: bool,
+}
+
+impl Default for SpectrogramConfig {
+    fn default() -> Self {
+        Self {
+            fft_size: 2048,
+            window: WindowFunction::BlackmanHarris,
+            overlap: 0.875,
+            max_frames: 4096,
+            scale: SpectrogramScale::Log,
+            mel_scale: SpectrogramScale::Linear,
+            db_floor: -120.0,
+            max_freq_hz: 0.0,
+            show_note_labels: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToolKind {
     LoopEdit,
     Markers,
@@ -156,6 +197,7 @@ pub struct ToolState {
 #[derive(Clone)]
 pub struct PreviewOverlay {
     pub channels: Vec<Vec<f32>>,
+    pub mixdown: Option<Vec<f32>>,
     #[allow(dead_code)]
     pub source_tool: ToolKind,
     pub timeline_len: usize,
@@ -200,12 +242,53 @@ pub enum LeaveIntent {
     CloseTab(usize),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChannelViewMode {
+    Mixdown,
+    All,
+    Custom,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChannelView {
+    pub mode: ChannelViewMode,
+    pub selected: Vec<usize>,
+}
+
+impl ChannelView {
+    pub fn mixdown() -> Self {
+        Self {
+            mode: ChannelViewMode::Mixdown,
+            selected: Vec::new(),
+        }
+    }
+
+    pub fn visible_indices(&self, total: usize) -> Vec<usize> {
+        match self.mode {
+            ChannelViewMode::Mixdown => Vec::new(),
+            ChannelViewMode::All => (0..total).collect(),
+            ChannelViewMode::Custom => {
+                let mut out: Vec<usize> = self
+                    .selected
+                    .iter()
+                    .copied()
+                    .filter(|&i| i < total)
+                    .collect();
+                out.sort_unstable();
+                out.dedup();
+                out
+            }
+        }
+    }
+}
+
 pub struct EditorTab {
     pub path: PathBuf,
     pub display_name: String,
     pub waveform_minmax: Vec<(f32, f32)>,
     #[allow(dead_code)]
     pub loop_enabled: bool,
+    pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (device SR)
     pub samples_len: usize,        // length in samples
     pub view_offset: usize,        // first visible sample index
@@ -213,7 +296,7 @@ pub struct EditorTab {
     pub last_wave_w: f32,          // last waveform width (for resize anchoring)
     pub dirty: bool,               // unsaved edits exist
     #[allow(dead_code)]
-    pub ops: Vec<EditOp>,          // non-destructive operations (skeleton)
+    pub ops: Vec<EditOp>, // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
     pub selection: Option<(usize, usize)>, // [start,end) in samples
     pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
@@ -236,6 +319,8 @@ pub struct EditorTab {
     pub fade_in_shape: FadeShape,
     pub fade_out_shape: FadeShape,
     pub view_mode: ViewMode,                 // which visualization panel
+    pub show_waveform_overlay: bool,         // draw waveform overlay in Spec/Mel views
+    pub channel_view: ChannelView,           // Mixdown / All / Custom
     pub snap_zero_cross: bool,               // enable zero-cross snapping
     pub drag_select_anchor: Option<usize>,   // transient during drag
     pub active_tool: ToolKind,               // current editing tool
@@ -268,6 +353,7 @@ pub struct FileMeta {
     pub decode_error: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SpectrogramData {
     pub frames: usize,
     pub bins: usize,
@@ -276,6 +362,28 @@ pub struct SpectrogramData {
     pub values_db: Vec<f32>,
 }
 
+pub struct SpectrogramTile {
+    pub path: PathBuf,
+    pub channel_index: usize,
+    pub channel_count: usize,
+    pub frames: usize,
+    pub bins: usize,
+    pub frame_step: usize,
+    pub sample_rate: u32,
+    pub start_frame: usize,
+    pub values_db: Vec<f32>,
+}
+
+pub enum SpectrogramJobMsg {
+    Tile(SpectrogramTile),
+    Done(PathBuf),
+}
+
+pub struct SpectrogramProgress {
+    pub done_tiles: usize,
+    pub total_tiles: usize,
+    pub started_at: std::time::Instant,
+}
 
 pub enum ScanMessage {
     Batch(Vec<PathBuf>),
@@ -313,6 +421,23 @@ pub struct EditorApplyResult {
     pub channels: Vec<Vec<f32>>,
 }
 
+pub struct EditorDecodeResult {
+    pub path: PathBuf,
+    pub channels: Vec<Vec<f32>>,
+    pub is_final: bool,
+    pub job_id: u64,
+    pub error: Option<String>,
+}
+
+pub struct EditorDecodeState {
+    pub path: PathBuf,
+    pub started_at: Instant,
+    pub rx: std::sync::mpsc::Receiver<EditorDecodeResult>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub job_id: u64,
+    pub partial_ready: bool,
+}
+
 #[derive(Clone)]
 pub struct EditorUndoState {
     pub ch_samples: Vec<Vec<f32>>,
@@ -333,6 +458,7 @@ pub struct EditorUndoState {
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
+    pub show_waveform_overlay: bool,
     pub dirty: bool,
     pub approx_bytes: usize,
 }
@@ -360,6 +486,7 @@ pub struct CachedEdit {
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
+    pub show_waveform_overlay: bool,
 }
 
 #[derive(Clone)]
@@ -431,9 +558,12 @@ pub struct ExportConfig {
 
 #[derive(Clone)]
 pub struct StartupConfig {
+    pub open_project: Option<PathBuf>,
     pub open_folder: Option<PathBuf>,
     pub open_files: Vec<PathBuf>,
     pub open_first: bool,
+    pub open_view_mode: Option<ViewMode>,
+    pub open_waveform_overlay: Option<bool>,
     pub screenshot_path: Option<PathBuf>,
     pub screenshot_delay_frames: u32,
     pub exit_after_screenshot: bool,
@@ -450,9 +580,12 @@ pub struct StartupConfig {
 impl Default for StartupConfig {
     fn default() -> Self {
         Self {
+            open_project: None,
             open_folder: None,
             open_files: Vec::new(),
             open_first: false,
+            open_view_mode: None,
+            open_waveform_overlay: None,
             screenshot_path: None,
             screenshot_delay_frames: 5,
             exit_after_screenshot: false,
@@ -474,6 +607,8 @@ pub struct StartupState {
     pub open_first_pending: bool,
     pub screenshot_pending: bool,
     pub screenshot_frames_left: u32,
+    pub view_mode_applied: bool,
+    pub waveform_overlay_applied: bool,
 }
 
 impl StartupState {
@@ -484,6 +619,8 @@ impl StartupState {
             open_first_pending: cfg.open_first,
             screenshot_pending,
             screenshot_frames_left,
+            view_mode_applied: false,
+            waveform_overlay_applied: false,
             cfg,
         }
     }
@@ -493,6 +630,7 @@ pub struct DebugConfig {
     pub enabled: bool,
     pub log_path: Option<PathBuf>,
     pub auto_run: bool,
+    pub auto_run_editor: bool,
     pub auto_run_pitch_shift_semitones: Option<f32>,
     pub auto_run_time_stretch_rate: Option<f32>,
     pub auto_run_delay_frames: u32,
@@ -506,6 +644,7 @@ impl Default for DebugConfig {
             enabled: false,
             log_path: None,
             auto_run: false,
+            auto_run_editor: false,
             auto_run_pitch_shift_semitones: None,
             auto_run_time_stretch_rate: None,
             auto_run_delay_frames: 8,
@@ -599,6 +738,41 @@ pub enum DebugAction {
     OpenFirst,
     ScreenshotAuto,
     ScreenshotPath(PathBuf),
+    SetActiveTool(ToolKind),
+    SetSelection { start_frac: f32, end_frac: f32 },
+    SetTrimRange { start_frac: f32, end_frac: f32 },
+    SetLoopRegion { start_frac: f32, end_frac: f32 },
+    SetLoopMode(LoopMode),
+    SetLoopXfade {
+        ms: f32,
+        shape: LoopXfadeShape,
+    },
+    AddMarker { frac: f32 },
+    ClearMarkers,
+    WriteMarkers,
+    WriteLoopMarkers,
+    ApplyTrim,
+    ApplyLoopXfade,
+    ApplyFadeIn {
+        ms: f32,
+        shape: FadeShape,
+    },
+    ApplyFadeOut {
+        ms: f32,
+        shape: FadeShape,
+    },
+    ApplyFadeRange {
+        in_ms: f32,
+        out_ms: f32,
+        shape: FadeShape,
+    },
+    ApplyGain { db: f32 },
+    ApplyNormalize { db: f32 },
+    ApplyReverse,
+    ApplyPitchShift(f32),
+    ApplyTimeStretch(f32),
+    SetViewMode(ViewMode),
+    SetWaveformOverlay(bool),
     ToggleMode,
     PlayPause,
     SelectNext,

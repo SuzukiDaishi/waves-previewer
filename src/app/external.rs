@@ -6,7 +6,11 @@ pub struct ExternalTable {
 }
 
 pub fn load_table(path: &Path) -> Option<ExternalTable> {
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match ext.as_str() {
         "csv" => load_csv(path),
         _ => None,
@@ -14,7 +18,10 @@ pub fn load_table(path: &Path) -> Option<ExternalTable> {
 }
 
 fn load_csv(path: &Path) -> Option<ExternalTable> {
-    let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_path(path).ok()?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(path)
+        .ok()?;
     let headers_record = rdr.headers().ok()?.clone();
     let mut headers: Vec<String> = headers_record
         .iter()
@@ -36,7 +43,9 @@ fn load_csv(path: &Path) -> Option<ExternalTable> {
         rows.push(row);
     }
     if headers.iter().all(|h| h.is_empty()) {
-        headers = (0..headers.len()).map(|i| format!("Column{}", i + 1)).collect();
+        headers = (0..headers.len())
+            .map(|i| format!("Column{}", i + 1))
+            .collect();
     }
     Some(ExternalTable { headers, rows })
 }

@@ -4,9 +4,7 @@ impl crate::app::WavesPreviewer {
         match shape {
             crate::app::types::FadeShape::Linear => x,
             crate::app::types::FadeShape::EqualPower => (core::f32::consts::FRAC_PI_2 * x).sin(),
-            crate::app::types::FadeShape::Cosine => {
-                (1.0 - (core::f32::consts::PI * x).cos()) * 0.5
-            }
+            crate::app::types::FadeShape::Cosine => (1.0 - (core::f32::consts::PI * x).cos()) * 0.5,
             crate::app::types::FadeShape::SCurve => x * x * (3.0 - 2.0 * x),
             crate::app::types::FadeShape::Quadratic => x * x,
             crate::app::types::FadeShape::Cubic => x * x * x,
@@ -17,12 +15,8 @@ impl crate::app::WavesPreviewer {
         let x = t.clamp(0.0, 1.0);
         match shape {
             crate::app::types::FadeShape::Linear => 1.0 - x,
-            crate::app::types::FadeShape::EqualPower => {
-                (core::f32::consts::FRAC_PI_2 * x).cos()
-            }
-            crate::app::types::FadeShape::Cosine => {
-                (1.0 + (core::f32::consts::PI * x).cos()) * 0.5
-            }
+            crate::app::types::FadeShape::EqualPower => (core::f32::consts::FRAC_PI_2 * x).cos(),
+            crate::app::types::FadeShape::Cosine => (1.0 + (core::f32::consts::PI * x).cos()) * 0.5,
             crate::app::types::FadeShape::SCurve => 1.0 - Self::fade_weight(shape, x),
             crate::app::types::FadeShape::Quadratic => {
                 let y = 1.0 - x;
@@ -119,8 +113,12 @@ impl crate::app::WavesPreviewer {
         let len = tab.samples_len;
         let clamp_range = |range: &mut Option<(usize, usize)>| {
             if let Some((mut s, mut e)) = *range {
-                if s > len { s = len; }
-                if e > len { e = len; }
+                if s > len {
+                    s = len;
+                }
+                if e > len {
+                    e = len;
+                }
                 if e <= s {
                     *range = None;
                 } else {

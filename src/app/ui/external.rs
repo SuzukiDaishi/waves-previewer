@@ -104,11 +104,17 @@ impl crate::app::WavesPreviewer {
                     ui.label(RichText::new("Match Rule").strong());
                     ui.horizontal(|ui| {
                         ui.label("Regex");
-                        if ui.text_edit_singleline(&mut self.external_match_regex).changed() {
+                        if ui
+                            .text_edit_singleline(&mut self.external_match_regex)
+                            .changed()
+                        {
                             regex_changed = true;
                         }
                         ui.label("Replace");
-                        if ui.text_edit_singleline(&mut self.external_match_replace).changed() {
+                        if ui
+                            .text_edit_singleline(&mut self.external_match_replace)
+                            .changed()
+                        {
                             regex_changed = true;
                         }
                     });

@@ -16,8 +16,8 @@ pub fn save_color_image_png(path: &Path, image: &egui::ColorImage) -> Result<()>
     }
     let width = image.size[0] as u32;
     let height = image.size[1] as u32;
-    let img = image::RgbaImage::from_raw(width, height, rgba)
-        .context("convert screenshot buffer")?;
+    let img =
+        image::RgbaImage::from_raw(width, height, rgba).context("convert screenshot buffer")?;
     img.save(path)
         .with_context(|| format!("save screenshot {}", path.display()))?;
     Ok(())

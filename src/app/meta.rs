@@ -1,7 +1,7 @@
-﻿use std::collections::VecDeque;
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use super::transcript;
 use super::types::{FileMeta, Transcript};
@@ -122,7 +122,11 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         }
         let n = mono.len().max(1) as f64;
         let rms = (sum_sq / n).sqrt() as f32;
-        let rms_db = if rms > 0.0 { 20.0 * rms.log10() } else { -120.0 };
+        let rms_db = if rms > 0.0 {
+            20.0 * rms.log10()
+        } else {
+            -120.0
+        };
         // Peak across channels (per-sample max of abs across all channels)
         let mut peak_abs = 0.0f32;
         if len > 0 {
@@ -131,10 +135,14 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
                 for ch in &chans {
                     if let Some(&v) = ch.get(i) {
                         let a = v.abs();
-                        if a > m { m = a; }
+                        if a > m {
+                            m = a;
+                        }
                     }
                 }
-                if m > peak_abs { peak_abs = m; }
+                if m > peak_abs {
+                    peak_abs = m;
+                }
             }
         }
         let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
@@ -149,7 +157,11 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         let (ch, bits) = audio_io::read_audio_info(path)
             .map(|info| (info.channels, info.bits_per_sample))
             .unwrap_or((chans.len() as u16, 0));
-        let length_secs = if sr > 0 { mono.len() as f32 / sr as f32 } else { f32::NAN };
+        let length_secs = if sr > 0 {
+            mono.len() as f32 / sr as f32
+        } else {
+            f32::NAN
+        };
         return Some(FileMeta {
             channels: ch,
             sample_rate: sr,
@@ -175,7 +187,11 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         }
         let n = mono.len().max(1) as f64;
         let rms = (sum_sq / n).sqrt() as f32;
-        let rms_db = if rms > 0.0 { 20.0 * rms.log10() } else { -120.0 };
+        let rms_db = if rms > 0.0 {
+            20.0 * rms.log10()
+        } else {
+            -120.0
+        };
         let mut peak_abs = 0.0f32;
         for &v in &mono {
             let a = v.abs();
@@ -194,7 +210,11 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         let info = audio_io::read_audio_info(path).ok();
         return Some(FileMeta {
             channels: info.map(|i| i.channels).unwrap_or(0),
-            sample_rate: if sr > 0 { sr } else { info.map(|i| i.sample_rate).unwrap_or(0) },
+            sample_rate: if sr > 0 {
+                sr
+            } else {
+                info.map(|i| i.sample_rate).unwrap_or(0)
+            },
             bits_per_sample: info.map(|i| i.bits_per_sample).unwrap_or(0),
             duration_secs: info.and_then(|i| i.duration_secs),
             rms_db: Some(rms_db),
@@ -237,7 +257,9 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                         guard = shared.cv.wait(guard).unwrap();
                     }
                 };
-                let Some(task) = task_opt else { break; };
+                let Some(task) = task_opt else {
+                    break;
+                };
 
                 let (p, do_header) = match task {
                     MetaTask::Header(path) => (path, true),

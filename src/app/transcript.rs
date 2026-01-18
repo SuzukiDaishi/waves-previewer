@@ -95,7 +95,10 @@ pub fn parse_srt(text: &str) -> Transcript {
             });
         }
     }
-    Transcript { segments, full_text }
+    Transcript {
+        segments,
+        full_text,
+    }
 }
 
 fn parse_timing_line(line: &str) -> Option<(u64, u64)> {

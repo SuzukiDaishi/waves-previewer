@@ -1,4 +1,4 @@
-﻿use egui::{Align, RichText, Sense};
+use egui::{Align, RichText, Sense};
 use egui_extras::TableBuilder;
 
 impl crate::app::WavesPreviewer {
@@ -86,7 +86,11 @@ impl crate::app::WavesPreviewer {
             }
             if pressed_home || pressed_end {
                 let len = self.files.len();
-                let target = if pressed_home { 0 } else { len.saturating_sub(1) };
+                let target = if pressed_home {
+                    0
+                } else {
+                    len.saturating_sub(1)
+                };
                 let mods = ctx.input(|i| i.modifiers);
                 self.update_selection_on_click(target, mods);
                 self.select_and_load(target, true);
@@ -157,9 +161,9 @@ impl crate::app::WavesPreviewer {
         }
         let allow_auto_scroll = self.scroll_to_selected
             && (key_moved
-                || self
-                    .last_list_scroll_at
-                    .map_or(true, |t| t.elapsed() > std::time::Duration::from_millis(300)));
+                || self.last_list_scroll_at.map_or(true, |t| {
+                    t.elapsed() > std::time::Duration::from_millis(300)
+                }));
         let mut filler_cols = 0usize;
         let mut table = TableBuilder::new(ui)
             .striped(true)

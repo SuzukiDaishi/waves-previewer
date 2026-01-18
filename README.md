@@ -147,6 +147,8 @@ Options:
 - --open-folder <dir>
 - --open-file <wav> (repeatable)
 - --open-first
+- --open-view-mode <wave|spec|mel>
+- --waveform-overlay <on|off>
 - --screenshot <path.png>
 - --screenshot-delay <frames>
 - --exit-after-screenshot
@@ -154,6 +156,7 @@ Options:
 - --debug
 - --debug-log <path>
 - --auto-run
+- --auto-run-pitch-shift <semitones>
 - --auto-run-time-stretch <rate>
 - --auto-run-delay <frames>
 - --auto-run-no-exit

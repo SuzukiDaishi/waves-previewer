@@ -7,6 +7,11 @@ fn parse_startup_config() -> app::StartupConfig {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--open-project" => {
+                if let Some(p) = args.next() {
+                    cfg.open_project = Some(std::path::PathBuf::from(p));
+                }
+            }
             "--open-folder" => {
                 if let Some(p) = args.next() {
                     cfg.open_folder = Some(std::path::PathBuf::from(p));
@@ -14,11 +19,46 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--open-file" => {
                 if let Some(p) = args.next() {
-                    cfg.open_files.push(std::path::PathBuf::from(p));
+                    let path = std::path::PathBuf::from(p);
+                    if path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("nwproj"))
+                        .unwrap_or(false)
+                    {
+                        cfg.open_project = Some(path);
+                    } else {
+                        cfg.open_files.push(path);
+                    }
                 }
             }
             "--open-first" => {
                 cfg.open_first = true;
+            }
+            "--open-view-mode" => {
+                if let Some(v) = args.next() {
+                    let mode = match v.to_lowercase().as_str() {
+                        "wave" | "waveform" => Some(app::ViewMode::Waveform),
+                        "spec" | "spectrogram" => Some(app::ViewMode::Spectrogram),
+                        "mel" => Some(app::ViewMode::Mel),
+                        _ => None,
+                    };
+                    if let Some(mode) = mode {
+                        cfg.open_view_mode = Some(mode);
+                    }
+                }
+            }
+            "--waveform-overlay" => {
+                if let Some(v) = args.next() {
+                    let flag = match v.to_lowercase().as_str() {
+                        "on" | "true" | "1" => Some(true),
+                        "off" | "false" | "0" => Some(false),
+                        _ => None,
+                    };
+                    if let Some(flag) = flag {
+                        cfg.open_waveform_overlay = Some(flag);
+                    }
+                }
             }
             "--screenshot" => {
                 if let Some(p) = args.next() {
@@ -54,6 +94,11 @@ fn parse_startup_config() -> app::StartupConfig {
             "--auto-run" => {
                 cfg.debug.enabled = true;
                 cfg.debug.auto_run = true;
+            }
+            "--auto-run-editor" => {
+                cfg.debug.enabled = true;
+                cfg.debug.auto_run = true;
+                cfg.debug.auto_run_editor = true;
             }
             "--auto-run-pitch-shift" => {
                 if let Some(v) = args.next() {
@@ -118,7 +163,7 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
+                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-project <project.nwproj>\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
                 );
                 std::process::exit(0);
             }
@@ -127,6 +172,15 @@ fn parse_startup_config() -> app::StartupConfig {
                     continue;
                 }
                 let path = std::path::PathBuf::from(&arg);
+                if path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("nwproj"))
+                    .unwrap_or(false)
+                {
+                    cfg.open_project = Some(path);
+                    continue;
+                }
                 if path.is_dir() {
                     if cfg.open_files.is_empty() {
                         cfg.open_folder = Some(path);

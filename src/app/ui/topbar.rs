@@ -1,6 +1,6 @@
-use crate::app::types::RateMode;
-use std::time::Duration;
+use crate::app::types::{RateMode, ToolKind};
 use egui::{Align, Color32, Key, RichText, Sense};
+use std::time::Duration;
 
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_top_bar(&mut self, ctx: &egui::Context) {
@@ -8,6 +8,43 @@ impl crate::app::WavesPreviewer {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.menu_button("File", |ui| {
+                        if ui.button("Project Open...").clicked() {
+                            if let Some(path) = self.pick_project_open_dialog() {
+                                self.queue_project_open(path);
+                            }
+                            ui.close();
+                        }
+                        let has_project = self.project_path.is_some();
+                        if ui
+                            .add_enabled(has_project, egui::Button::new("Project Save"))
+                            .clicked()
+                        {
+                            if let Err(err) = self.save_project() {
+                                self.debug_log(format!("project save error: {err}"));
+                            }
+                            ui.close();
+                        }
+                        if ui.button("Project Save As...").clicked() {
+                            if let Some(mut path) = self.pick_project_save_dialog() {
+                                let needs_ext = path
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| !s.eq_ignore_ascii_case("nwproj"))
+                                    .unwrap_or(true);
+                                if needs_ext {
+                                    path.set_extension("nwproj");
+                                }
+                                if let Err(err) = self.save_project_as(path) {
+                                    self.debug_log(format!("project save error: {err}"));
+                                }
+                            }
+                            ui.close();
+                        }
+                        if ui.button("Project Close").clicked() {
+                            self.close_project();
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button("Folder...").clicked() {
                             if let Some(dir) = self.pick_folder_dialog() {
                                 self.root = Some(dir);
@@ -51,7 +88,10 @@ impl crate::app::WavesPreviewer {
                         let has_selection = !selected.is_empty();
                         let has_real_selection = !real_selected.is_empty();
                         if ui
-                            .add_enabled(has_selection, egui::Button::new("Copy Selected to Clipboard"))
+                            .add_enabled(
+                                has_selection,
+                                egui::Button::new("Copy Selected to Clipboard"),
+                            )
                             .clicked()
                         {
                             self.copy_selected_to_clipboard();
@@ -71,7 +111,10 @@ impl crate::app::WavesPreviewer {
                             ui.close();
                         }
                         if ui
-                            .add_enabled(has_real_selection, egui::Button::new("Rename Selected..."))
+                            .add_enabled(
+                                has_real_selection,
+                                egui::Button::new("Rename Selected..."),
+                            )
                             .clicked()
                         {
                             if real_selected.len() == 1 {
@@ -93,10 +136,7 @@ impl crate::app::WavesPreviewer {
                         }
                         let has_edits = self.has_edits_for_paths(&selected);
                         if ui
-                            .add_enabled(
-                                has_edits,
-                                egui::Button::new("Clear Edits for Selected"),
-                            )
+                            .add_enabled(has_edits, egui::Button::new("Clear Edits for Selected"))
                             .clicked()
                         {
                             self.clear_edits_for_paths(&selected);
@@ -113,19 +153,21 @@ impl crate::app::WavesPreviewer {
                             ui.close();
                         }
                         ui.separator();
-                    let mcp_on = self.mcp_cmd_rx.is_some();
-                    if !mcp_on {
-                        if ui.button("Start MCP (stdio)").clicked() {
-                            self.start_mcp_from_ui();
-                            ui.close();
+                        let mcp_on = self.mcp_cmd_rx.is_some();
+                        if !mcp_on {
+                            if ui.button("Start MCP (stdio)").clicked() {
+                                self.start_mcp_from_ui();
+                                ui.close();
+                            }
+                            if ui.button("Start MCP (HTTP)").clicked() {
+                                self.start_mcp_http_from_ui();
+                                ui.close();
+                            }
+                        } else {
+                            ui.label(
+                                RichText::new("MCP: On").color(Color32::from_rgb(120, 220, 140)),
+                            );
                         }
-                        if ui.button("Start MCP (HTTP)").clicked() {
-                            self.start_mcp_http_from_ui();
-                            ui.close();
-                        }
-                    } else {
-                        ui.label(RichText::new("MCP: On").color(Color32::from_rgb(120, 220, 140)));
-                    }
                         ui.separator();
                         if ui.button("External Data...").clicked() {
                             self.show_external_dialog = true;
@@ -186,17 +228,130 @@ impl crate::app::WavesPreviewer {
                         }
                         if dirty_gains > 0 {
                             ui.separator();
-                            ui.label(RichText::new(format!("Unsaved Gains: {}", dirty_gains)).weak());
+                            ui.label(
+                                RichText::new(format!("Unsaved Gains: {}", dirty_gains)).weak(),
+                            );
                         }
                     }
-                    if self.active_tab.is_none() {
-                        if let Some(proc) = &self.processing {
-                            if proc.started_at.elapsed() >= Duration::from_millis(120) {
-                                ui.separator();
+                    let show_activity = self.scan_in_progress
+                        || self.processing.is_some()
+                        || self.editor_decode_state.is_some()
+                        || self.heavy_preview_rx.is_some()
+                        || self.heavy_overlay_rx.is_some()
+                        || self.editor_apply_state.is_some()
+                        || self.export_state.is_some()
+                        || !self.spectro_inflight.is_empty()
+                        || self.project_open_state.is_some();
+                    if show_activity {
+                        ui.separator();
+                        ui.horizontal_wrapped(|ui| {
+                            if self.scan_in_progress {
+                                let elapsed = self
+                                    .scan_started_at
+                                    .map(|t| t.elapsed().as_secs_f32())
+                                    .unwrap_or(0.0);
                                 ui.add(egui::Spinner::new());
-                                ui.label(RichText::new(proc.msg.as_str()).weak());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Scanning: {} files ({:.1}s)",
+                                        self.scan_found_count, elapsed
+                                    ))
+                                    .weak(),
+                                );
                             }
-                        }
+                            if let Some(proc) = &self.processing {
+                                if proc.started_at.elapsed() >= Duration::from_millis(120) {
+                                    ui.add(egui::Spinner::new());
+                                    ui.label(RichText::new(proc.msg.as_str()).weak());
+                                    if ui.button("Cancel").clicked() {
+                                        self.cancel_processing();
+                                    }
+                                }
+                            }
+                            if let Some(state) = &self.editor_decode_state {
+                                if state.started_at.elapsed() >= Duration::from_millis(120) {
+                                    let (msg, progress) = if state.partial_ready {
+                                        ("Loading full audio", 0.65f32)
+                                    } else {
+                                        ("Decoding preview", 0.25f32)
+                                    };
+                                    ui.add(egui::Spinner::new());
+                                    ui.label(RichText::new(msg).weak());
+                                    ui.add(
+                                        egui::ProgressBar::new(progress)
+                                            .desired_width(60.0)
+                                            .show_percentage(),
+                                    );
+                                    if ui.button("Cancel").clicked() {
+                                        self.cancel_editor_decode();
+                                    }
+                                }
+                            }
+                            if let Some(t) = &self.heavy_preview_tool {
+                                ui.add(egui::Spinner::new());
+                                let msg = match t {
+                                    ToolKind::PitchShift => "Previewing PitchShift",
+                                    ToolKind::TimeStretch => "Previewing TimeStretch",
+                                    _ => "Previewing",
+                                };
+                                ui.label(RichText::new(msg).weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_heavy_preview();
+                                }
+                            } else if self.heavy_preview_rx.is_some()
+                                || self.heavy_overlay_rx.is_some()
+                            {
+                                ui.add(egui::Spinner::new());
+                                ui.label(RichText::new("Previewing...").weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_heavy_preview();
+                                }
+                            }
+                            if let Some(apply) = &self.editor_apply_state {
+                                ui.add(egui::Spinner::new());
+                                ui.label(RichText::new(apply.msg.as_str()).weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_editor_apply();
+                                }
+                            }
+                            if let Some(exp) = &self.export_state {
+                                ui.add(egui::Spinner::new());
+                                ui.label(RichText::new(exp.msg.as_str()).weak());
+                            }
+                            if !self.spectro_inflight.is_empty() {
+                                ui.add(egui::Spinner::new());
+                                let mut done = 0usize;
+                                let mut total = 0usize;
+                                for progress in self.spectro_progress.values() {
+                                    done = done.saturating_add(progress.done_tiles);
+                                    total = total.saturating_add(progress.total_tiles);
+                                }
+                                let label = if total > 0 {
+                                    let pct =
+                                        ((done as f32 / total as f32) * 100.0).clamp(0.0, 100.0);
+                                    format!(
+                                        "Spectrogram: {} ({pct:.0}%)",
+                                        self.spectro_inflight.len()
+                                    )
+                                } else {
+                                    format!("Spectrogram: {}", self.spectro_inflight.len())
+                                };
+                                ui.label(RichText::new(label).weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_all_spectrograms();
+                                }
+                            }
+                            if let Some(state) = &self.project_open_state {
+                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                ui.add(egui::Spinner::new());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Opening project... ({elapsed:.1}s)"
+                                    ))
+                                    .weak(),
+                                );
+                            }
+                        });
                     }
                     ui.separator();
                     ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -217,7 +372,11 @@ impl crate::app::WavesPreviewer {
                             egui::vec2(bar_w * norm, bar_h),
                         );
                         painter.rect_filled(fill, 0.0, Color32::from_rgb(100, 220, 120));
-                        let db_label = if db <= -79.9 { "-inf dBFS".to_string() } else { format!("{db:.1} dBFS") };
+                        let db_label = if db <= -79.9 {
+                            "-inf dBFS".to_string()
+                        } else {
+                            format!("{db:.1} dBFS")
+                        };
                         ui.label(RichText::new(db_label).monospace());
                     });
                 });
@@ -332,7 +491,8 @@ impl crate::app::WavesPreviewer {
                     ui.checkbox(&mut self.auto_play_list_nav, "Auto Play");
                     ui.separator();
                     let regex_changed = ui.checkbox(&mut self.search_use_regex, "Regex").changed();
-                    let te = egui::TextEdit::singleline(&mut self.search_query).hint_text("Search...");
+                    let te =
+                        egui::TextEdit::singleline(&mut self.search_query).hint_text("Search...");
                     let resp = ui.add(te);
                     if resp.changed() {
                         self.schedule_search_refresh();

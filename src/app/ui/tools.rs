@@ -84,22 +84,25 @@ impl crate::app::WavesPreviewer {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.set_min_width(260.0);
-                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            for (group, list) in grouped.iter_mut() {
-                                egui::CollapsingHeader::new(group)
-                                    .default_open(true)
-                                    .show(ui, |ui| {
-                                        for tool in list {
-                                            let selected =
-                                                self.tool_selected.as_ref() == Some(&tool.name);
-                                            let label = RichText::new(&tool.name).strong();
-                                            if ui.selectable_label(selected, label).clicked() {
-                                                self.tool_selected = Some(tool.name.clone());
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                for (group, list) in grouped.iter_mut() {
+                                    egui::CollapsingHeader::new(group).default_open(true).show(
+                                        ui,
+                                        |ui| {
+                                            for tool in list {
+                                                let selected =
+                                                    self.tool_selected.as_ref() == Some(&tool.name);
+                                                let label = RichText::new(&tool.name).strong();
+                                                if ui.selectable_label(selected, label).clicked() {
+                                                    self.tool_selected = Some(tool.name.clone());
+                                                }
                                             }
-                                        }
-                                    });
-                            }
-                        });
+                                        },
+                                    );
+                                }
+                            });
                     });
                     ui.separator();
                     ui.vertical(|ui| {
@@ -144,28 +147,22 @@ impl crate::app::WavesPreviewer {
                                 ui.monospace(&tool.command);
                                 let preview_target = selected_paths.first().cloned();
                                 let preview_args = args.clone();
-                                let preview_cmd =
-                                    crate::app::WavesPreviewer::expand_tool_command(
-                                        &tool.command,
-                                        preview_target.as_deref(),
-                                        &preview_args,
-                                    );
+                                let preview_cmd = crate::app::WavesPreviewer::expand_tool_command(
+                                    &tool.command,
+                                    preview_target.as_deref(),
+                                    &preview_args,
+                                );
                                 ui.label("Preview");
                                 ui.monospace(preview_cmd);
                                 ui.separator();
-                                let can_run = if per_file {
-                                    has_selection
-                                } else {
-                                    true
-                                };
-                                if ui
-                                    .add_enabled(can_run, egui::Button::new("Run"))
-                                    .clicked()
-                                {
+                                let can_run = if per_file { has_selection } else { true };
+                                if ui.add_enabled(can_run, egui::Button::new("Run")).clicked() {
                                     run_args = Some(args.clone());
                                 }
                                 if per_file && !has_selection {
-                                    ui.label(RichText::new("Select files to run this tool.").weak());
+                                    ui.label(
+                                        RichText::new("Select files to run this tool.").weak(),
+                                    );
                                 }
                             }
                             if let Some(run_args) = run_args {
@@ -185,17 +182,19 @@ impl crate::app::WavesPreviewer {
                 }
                 ui.separator();
                 ui.label(RichText::new("History").strong());
-                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                    for entry in &self.tool_log {
-                        let status = if entry.ok { "OK" } else { "FAIL" };
-                        let target = entry
-                            .path
-                            .as_ref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "(none)".to_string());
-                        ui.label(format!("[{}] {} - {}", status, entry.tool_name, target));
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        for entry in &self.tool_log {
+                            let status = if entry.ok { "OK" } else { "FAIL" };
+                            let target = entry
+                                .path
+                                .as_ref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "(none)".to_string());
+                            ui.label(format!("[{}] {} - {}", status, entry.tool_name, target));
+                        }
+                    });
             });
         self.show_tool_palette = open;
     }

@@ -143,11 +143,7 @@ impl crate::app::WavesPreviewer {
                             ));
                         }
                         if let Some(t) = self.debug.last_paste_at {
-                            let src = self
-                                .debug
-                                .last_paste_source
-                                .as_deref()
-                                .unwrap_or("unknown");
+                            let src = self.debug.last_paste_source.as_deref().unwrap_or("unknown");
                             ui.monospace(format!(
                                 "last_paste: {:.2}s ago (items={}, source={})",
                                 t.elapsed().as_secs_f32(),
@@ -169,10 +165,7 @@ impl crate::app::WavesPreviewer {
                     .default_open(false)
                     .show(ui, |ui| {
                         ui.monospace(format!("selected_row: {:?}", self.selected));
-                        ui.monospace(format!(
-                            "selected_multi: {}",
-                            self.selected_multi.len()
-                        ));
+                        ui.monospace(format!("selected_multi: {}", self.selected_multi.len()));
                         if let Some(path) = self.selected_path_buf() {
                             ui.monospace(format!("selected_path: {}", path.display()));
                         }
@@ -189,7 +182,10 @@ impl crate::app::WavesPreviewer {
                     .show(ui, |ui| {
                         ui.monospace(format!(
                             "processing: {}",
-                            self.processing.as_ref().map(|p| p.msg.as_str()).unwrap_or("none")
+                            self.processing
+                                .as_ref()
+                                .map(|p| p.msg.as_str())
+                                .unwrap_or("none")
                         ));
                         if let Some(p) = self.processing.as_ref() {
                             let elapsed = p.started_at.elapsed().as_secs_f32();
@@ -201,9 +197,16 @@ impl crate::app::WavesPreviewer {
                             self.editor_apply_state.is_some()
                         ));
                         ui.monospace(format!(
-                            "export_state: {}",
-                            self.export_state.is_some()
+                            "editor_decode_state: {}",
+                            self.editor_decode_state.is_some()
                         ));
+                        if let Some(state) = self.editor_decode_state.as_ref() {
+                            let elapsed = state.started_at.elapsed().as_secs_f32();
+                            ui.monospace(format!("decode_path: {}", state.path.display()));
+                            ui.monospace(format!("decode_elapsed: {elapsed:.2}s"));
+                            ui.monospace(format!("decode_partial_ready: {}", state.partial_ready));
+                        }
+                        ui.monospace(format!("export_state: {}", self.export_state.is_some()));
                     });
                 ui.separator();
                 egui::CollapsingHeader::new("Search")
@@ -212,12 +215,15 @@ impl crate::app::WavesPreviewer {
                         ui.monospace(format!("query: {}", self.search_query));
                         ui.monospace(format!("regex: {}", self.search_use_regex));
                         ui.monospace(format!("search_dirty: {}", self.search_dirty));
-                        let deadline = self
-                            .search_deadline
-                            .map(|d| d.saturating_duration_since(std::time::Instant::now()).as_millis());
+                        let deadline = self.search_deadline.map(|d| {
+                            d.saturating_duration_since(std::time::Instant::now())
+                                .as_millis()
+                        });
                         ui.monospace(format!(
                             "search_deadline_ms: {}",
-                            deadline.map(|d| d.to_string()).unwrap_or_else(|| "none".to_string())
+                            deadline
+                                .map(|d| d.to_string())
+                                .unwrap_or_else(|| "none".to_string())
                         ));
                     });
                 ui.separator();
@@ -248,11 +254,13 @@ impl crate::app::WavesPreviewer {
                                 self.debug.logs.clear();
                             }
                         });
-                        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                            for line in &self.debug.logs {
-                                ui.monospace(line);
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(220.0)
+                            .show(ui, |ui| {
+                                for line in &self.debug.logs {
+                                    ui.monospace(line);
+                                }
+                            });
                     });
                 if let Some(auto) = &self.debug.auto {
                     ui.separator();

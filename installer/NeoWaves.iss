@@ -39,7 +39,7 @@ Name: "{commondesktop}\{#MyAppShort}"; Filename: "{app}\{#MyAppExeName}"; IconFi
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"
-Name: "assoc"; Description: "Associate .wav/.mp3/.m4a with {#MyAppShort}"; GroupDescription: "File associations:"; Flags: unchecked
+Name: "assoc"; Description: "Associate .wav/.mp3/.m4a/.nwproj with {#MyAppShort}"; GroupDescription: "File associations:"; Flags: unchecked
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Run {#MyAppShort}"; Flags: nowait postinstall skipifsilent
@@ -48,6 +48,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Run {#MyAppShort}"; Flags: nowa
 Root: HKCR; Subkey: ".wav"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".mp3"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".m4a"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".nwproj"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName}"; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}\\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\\icon.ico"; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}\\shell\\open\\command"; ValueType: string; ValueName: ""; ValueData: "\"{app}\\{#MyAppExeName}\" %*"; Flags: uninsdeletekey; Tasks: assoc
@@ -57,6 +58,8 @@ Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\shell\\open\\command"; Value
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".nwproj"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: ".wav\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".mp3\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: ".m4a\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
+Root: HKCR; Subkey: ".nwproj\\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssoc}"; ValueData: ""; Flags: uninsdeletevalue; Tasks: assoc
