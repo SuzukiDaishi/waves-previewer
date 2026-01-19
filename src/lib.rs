@@ -6,7 +6,7 @@ pub mod markers;
 pub mod wave;
 pub mod mcp;
 
-pub use app::{StartupConfig, WavesPreviewer};
+pub use app::{FadeShape, LoopMode, LoopXfadeShape, StartupConfig, ViewMode, WavesPreviewer};
 
 #[cfg(feature = "kittest")]
 pub mod kittest;

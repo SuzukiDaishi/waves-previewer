@@ -38,7 +38,7 @@ mod ui;
 use self::dialogs::TestDialogQueue;
 use self::project_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
-pub use self::types::{StartupConfig, ViewMode};
+pub use self::types::{FadeShape, LoopMode, LoopXfadeShape, StartupConfig, ViewMode};
 use self::{helpers::*, types::*};
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
@@ -153,6 +153,8 @@ pub struct WavesPreviewer {
     edited_cache: HashMap<PathBuf, CachedEdit>,
     // background export state (gains)
     export_state: Option<ExportState>,
+    // blocking CSV export (waits for full metadata)
+    csv_export_state: Option<CsvExportState>,
     // currently loaded/playing file path (for effective volume calc)
     playing_path: Option<PathBuf>,
     // export/save settings (simple, in-memory)
@@ -787,8 +789,18 @@ spectro_note_labels={}\n",
     }
 
     fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
+        let bpm_hint = meta
+            .bpm
+            .filter(|v| v.is_finite() && *v > 0.0);
         if let Some(item) = self.item_for_path_mut(path) {
             item.meta = Some(meta);
+            if let Some(bpm) = bpm_hint {
+                for tab in self.tabs.iter_mut() {
+                    if tab.path == path && !tab.bpm_user_set {
+                        tab.bpm_value = bpm;
+                    }
+                }
+            }
             return true;
         }
         false
@@ -936,6 +948,7 @@ spectro_note_labels={}\n",
         let mut thumb = Vec::new();
         build_minmax(&mut thumb, &mono, 128);
         let lufs_i = crate::wave::lufs_integrated_from_multi(channels, sample_rate).ok();
+        let bpm = None;
         let duration_secs = if sample_rate > 0 {
             Some(frames as f32 / sample_rate as f32)
         } else {
@@ -949,6 +962,7 @@ spectro_note_labels={}\n",
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i,
+            bpm,
             thumb,
             decode_error: None,
         }
@@ -1231,6 +1245,7 @@ spectro_note_labels={}\n",
             SortKey::Bits => cols.bits,
             SortKey::Level => cols.peak,
             SortKey::Lufs => cols.lufs,
+            SortKey::Bpm => cols.bpm,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),
         };
         if key_visible {
@@ -1256,6 +1271,8 @@ spectro_note_labels={}\n",
             SortKey::Level
         } else if cols.lufs {
             SortKey::Lufs
+        } else if cols.bpm {
+            SortKey::Bpm
         } else {
             SortKey::File
         };
@@ -1766,6 +1783,279 @@ spectro_note_labels={}\n",
         });
     }
 
+    fn export_list_csv(
+        &self,
+        path: &Path,
+        ids: &[MediaId],
+        cols: ListColumnConfig,
+        external_cols: &[String],
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("csv export mkdir failed: {e}"))?;
+            }
+        }
+        let mut writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_path(path)
+            .map_err(|e| format!("csv export open failed: {e}"))?;
+        let mut header: Vec<String> = Vec::new();
+        if cols.file {
+            header.push("File".to_string());
+        }
+        if cols.folder {
+            header.push("Folder".to_string());
+        }
+        if cols.transcript {
+            header.push("Transcript".to_string());
+        }
+        if cols.external {
+            for name in external_cols.iter() {
+                header.push(name.clone());
+            }
+        }
+        if cols.length {
+            header.push("Length".to_string());
+        }
+        if cols.channels {
+            header.push("Ch".to_string());
+        }
+        if cols.sample_rate {
+            header.push("SR".to_string());
+        }
+        if cols.bits {
+            header.push("Bits".to_string());
+        }
+        if cols.peak {
+            header.push("dBFS (Peak)".to_string());
+        }
+        if cols.lufs {
+            header.push("LUFS (I)".to_string());
+        }
+        if cols.bpm {
+            header.push("BPM".to_string());
+        }
+        if cols.gain {
+            header.push("Gain (dB)".to_string());
+        }
+        if !header.is_empty() {
+            writer
+                .write_record(header)
+                .map_err(|e| format!("csv export header failed: {e}"))?;
+        }
+
+        for id in ids.iter().copied() {
+            let Some(item) = self.item_for_id(id) else {
+                continue;
+            };
+            let meta = item.meta.as_ref();
+            let mut row: Vec<String> = Vec::new();
+            if cols.file {
+                row.push(item.display_name.clone());
+            }
+            if cols.folder {
+                row.push(item.display_folder.clone());
+            }
+            if cols.transcript {
+                row.push(
+                    item.transcript
+                        .as_ref()
+                        .map(|t| t.full_text.clone())
+                        .unwrap_or_default(),
+                );
+            }
+            if cols.external {
+                for name in external_cols.iter() {
+                    row.push(item.external.get(name).cloned().unwrap_or_default());
+                }
+            }
+            if cols.length {
+                let text = meta
+                    .and_then(|m| m.duration_secs)
+                    .map(crate::app::helpers::format_duration)
+                    .unwrap_or_default();
+                row.push(text);
+            }
+            if cols.channels {
+                row.push(
+                    meta.map(|m| m.channels.to_string())
+                        .unwrap_or_default(),
+                );
+            }
+            if cols.sample_rate {
+                row.push(
+                    meta.map(|m| m.sample_rate.to_string())
+                        .unwrap_or_default(),
+                );
+            }
+            if cols.bits {
+                row.push(
+                    meta.map(|m| m.bits_per_sample.to_string())
+                        .unwrap_or_default(),
+                );
+            }
+            if cols.peak {
+                let gain_db = item.pending_gain_db;
+                let adj = meta.and_then(|m| m.peak_db).map(|db| db + gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.lufs {
+                let gain_db = item.pending_gain_db;
+                let base = meta.and_then(|m| m.lufs_i);
+                let eff = self
+                    .lufs_override
+                    .get(&item.path)
+                    .copied()
+                    .or_else(|| base.map(|v| v + gain_db));
+                row.push(eff.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.bpm {
+                let bpm = meta
+                    .and_then(|m| m.bpm)
+                    .filter(|v| v.is_finite() && *v > 0.0);
+                row.push(
+                    bpm.map(|v| format!("{:.2}", v))
+                        .unwrap_or_else(|| "-".to_string()),
+                );
+            }
+            if cols.gain {
+                row.push(format!("{:.1}", item.pending_gain_db));
+            }
+            writer
+                .write_record(row)
+                .map_err(|e| format!("csv export row failed: {e}"))?;
+        }
+        writer
+            .flush()
+            .map_err(|e| format!("csv export flush failed: {e}"))?;
+        Ok(())
+    }
+
+    fn csv_meta_ready(&self, path: &Path, needs_peak: bool, needs_lufs: bool) -> bool {
+        let Some(meta) = self.meta_for_path(path) else {
+            return false;
+        };
+        if meta.decode_error.is_some() {
+            return true;
+        }
+        if needs_peak && meta.peak_db.is_none() {
+            return false;
+        }
+        if needs_lufs && meta.lufs_i.is_none() {
+            return false;
+        }
+        true
+    }
+
+    fn begin_export_list_csv(&mut self, path: PathBuf) {
+        if self.csv_export_state.is_some() {
+            self.debug_log("csv export already running".to_string());
+            return;
+        }
+        let ids = self.files.clone();
+        let cols = self.list_columns;
+        let external_cols = if cols.external {
+            self.external_visible_columns.clone()
+        } else {
+            Vec::new()
+        };
+        let needs_peak = cols.peak;
+        let needs_lufs = cols.lufs;
+        let needs_meta = cols.length
+            || cols.channels
+            || cols.sample_rate
+            || cols.bits
+            || needs_peak
+            || needs_lufs;
+        let mut pending = HashSet::new();
+        let mut total = 0usize;
+        let mut done = 0usize;
+        for id in ids.iter().copied() {
+            let Some(item) = self.item_for_id(id) else {
+                continue;
+            };
+            if item.source == MediaSource::Virtual {
+                total += 1;
+                done += 1;
+                continue;
+            }
+            if !item.path.is_file() {
+                total += 1;
+                done += 1;
+                continue;
+            }
+            total += 1;
+            if needs_meta && !self.csv_meta_ready(&item.path, needs_peak, needs_lufs) {
+                pending.insert(item.path.clone());
+            } else {
+                done += 1;
+            }
+        }
+
+        if !needs_meta || pending.is_empty() {
+            if let Err(err) = self.export_list_csv(&path, &ids, cols, &external_cols) {
+                self.debug_log(format!("csv export error: {err}"));
+            }
+            return;
+        }
+
+        for p in pending.iter() {
+            self.queue_full_meta_for_path(p, false);
+        }
+        self.csv_export_state = Some(CsvExportState {
+            path,
+            ids,
+            cols,
+            external_cols,
+            total,
+            done,
+            pending,
+            needs_peak,
+            needs_lufs,
+            started_at: std::time::Instant::now(),
+        });
+    }
+
+    fn update_csv_export_progress_for_path(&mut self, path: &Path) {
+        let (needs_peak, needs_lufs, pending) = match self.csv_export_state.as_ref() {
+            Some(state) => (
+                state.needs_peak,
+                state.needs_lufs,
+                state.pending.contains(path),
+            ),
+            None => return,
+        };
+        if !pending {
+            return;
+        }
+        let ready = self.csv_meta_ready(path, needs_peak, needs_lufs);
+        if ready {
+            if let Some(state) = &mut self.csv_export_state {
+                if state.pending.remove(path) {
+                    state.done = state.done.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn check_csv_export_completion(&mut self) {
+        let ready = self
+            .csv_export_state
+            .as_ref()
+            .map(|state| state.pending.is_empty())
+            .unwrap_or(false);
+        if !ready {
+            return;
+        }
+        let Some(state) = self.csv_export_state.take() else {
+            return;
+        };
+        if let Err(err) = self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols) {
+            self.debug_log(format!("csv export error: {err}"));
+        }
+    }
+
     fn trigger_save_selected(&mut self) {
         if self.export_cfg.first_prompt {
             self.show_first_save_prompt = true;
@@ -2103,6 +2393,28 @@ spectro_note_labels={}\n",
                 pool.enqueue_front(meta::MetaTask::Header(path.clone()));
             } else {
                 pool.enqueue(meta::MetaTask::Header(path.clone()));
+            }
+        }
+    }
+
+    fn queue_full_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
+        if self.is_virtual_path(path) {
+            return;
+        }
+        self.ensure_meta_pool();
+        if let Some(pool) = &self.meta_pool {
+            if self.meta_inflight.contains(path) {
+                if priority {
+                    pool.promote_path(path);
+                }
+                return;
+            }
+            self.meta_inflight.insert(path.clone());
+            let task = meta::MetaTask::Decode(path.clone());
+            if priority {
+                pool.enqueue_front(task);
+            } else {
+                pool.enqueue(task);
             }
         }
     }
@@ -2908,6 +3220,7 @@ impl WavesPreviewer {
             editor_decode_job_id: 0,
             edited_cache: HashMap::new(),
             export_state: None,
+            csv_export_state: None,
             playing_path: None,
 
             export_cfg: ExportConfig {
@@ -3198,6 +3511,44 @@ impl WavesPreviewer {
     }
 
     #[cfg(feature = "kittest")]
+    pub fn test_cycle_sort_file(&mut self) {
+        self.test_cycle_sort(SortKey::File, true);
+    }
+
+    #[cfg(feature = "kittest")]
+    fn test_cycle_sort(&mut self, key: SortKey, default_asc: bool) {
+        if self.sort_key != key {
+            self.sort_key = key;
+            self.sort_dir = if default_asc { SortDir::Asc } else { SortDir::Desc };
+        } else {
+            self.sort_dir = match self.sort_dir {
+                SortDir::Asc => {
+                    if default_asc {
+                        SortDir::Desc
+                    } else {
+                        SortDir::None
+                    }
+                }
+                SortDir::Desc => {
+                    if default_asc {
+                        SortDir::None
+                    } else {
+                        SortDir::Asc
+                    }
+                }
+                SortDir::None => {
+                    if default_asc {
+                        SortDir::Asc
+                    } else {
+                        SortDir::Desc
+                    }
+                }
+            };
+        }
+        self.apply_sort();
+    }
+
+    #[cfg(feature = "kittest")]
     pub fn test_set_search_query(&mut self, query: &str) {
         self.search_query = query.to_string();
         self.apply_filter_from_search();
@@ -3217,6 +3568,355 @@ impl WavesPreviewer {
         let added = self.add_files_merge(paths);
         self.after_add_refresh();
         added
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_open_first_tab(&mut self) -> bool {
+        if self.files.is_empty() {
+            return false;
+        }
+        let row = 0;
+        self.select_and_load(row, true);
+        let Some(path) = self.path_for_row(row).cloned() else {
+            return false;
+        };
+        self.open_or_activate_tab(&path);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_active_tool(&mut self, tool: ToolKind) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.active_tool = tool;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_selection_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let Some((s, e)) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        tab.selection = Some((s, e));
+        tab.drag_select_anchor = None;
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_trim_range_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let Some((s, e)) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        tab.trim_range = Some((s, e));
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_loop_region_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let Some((s, e)) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        tab.loop_region = Some((s, e));
+        Self::update_loop_markers_dirty(tab);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_loop_mode(&mut self, mode: LoopMode) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.loop_mode = mode;
+        }
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_loop_xfade_ms(&mut self, ms: f32, shape: LoopXfadeShape) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+        let samp = ((ms / 1000.0) * sr).round().max(0.0) as usize;
+        tab.loop_xfade_samples = samp.min(tab.samples_len / 2);
+        tab.loop_xfade_shape = shape;
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_add_marker_frac(&mut self, frac: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        if tab.samples_len == 0 {
+            return false;
+        }
+        let pos = ((tab.samples_len as f32) * frac)
+            .round()
+            .clamp(0.0, (tab.samples_len - 1) as f32) as usize;
+        let label = Self::next_marker_label(&tab.markers);
+        let entry = crate::markers::MarkerEntry { label, sample: pos };
+        match tab.markers.binary_search_by_key(&pos, |m| m.sample) {
+            Ok(idx) => tab.markers[idx] = entry,
+            Err(idx) => tab.markers.insert(idx, entry),
+        }
+        tab.markers_dirty = true;
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_clear_markers(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.markers.clear();
+            tab.markers_dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_marker_count(&self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.tabs.get(tab_idx).map(|t| t.markers.len()).unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_loop_region(&self) -> Option<(usize, usize)> {
+        let Some(tab_idx) = self.active_tab else {
+            return None;
+        };
+        self.tabs.get(tab_idx).and_then(|t| t.loop_region)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_write_markers(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.write_markers_for_tab(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_write_loop_markers(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.write_loop_markers_for_tab(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_trim_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_trim_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_fade_in(&mut self, start: f32, end: f32, shape: FadeShape) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_fade_in_explicit(tab_idx, range, shape);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_fade_out(&mut self, start: f32, end: f32, shape: FadeShape) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_fade_out_explicit(tab_idx, range, shape);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_gain(&mut self, start: f32, end: f32, db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_gain_range(tab_idx, range, db);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_normalize(&mut self, start: f32, end: f32, db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_normalize_range(tab_idx, range, db);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_reverse(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_reverse_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_pitch_shift(&mut self, semitones: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_editor_apply_for_tab(tab_idx, ToolKind::PitchShift, semitones);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_time_stretch(&mut self, rate: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_editor_apply_for_tab(tab_idx, ToolKind::TimeStretch, rate);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_view_mode(&mut self, mode: ViewMode) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.view_mode = mode;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_set_waveform_overlay(&mut self, enabled: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.show_waveform_overlay = enabled;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_apply_active(&self) -> bool {
+        self.editor_apply_state.is_some()
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_tab_samples_len(&self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.tabs.get(tab_idx).map(|t| t.samples_len).unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_tab_dirty(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs.get(tab_idx).map(|t| t.dirty).unwrap_or(false)
+    }
+
+    #[cfg(feature = "kittest")]
+    fn test_range_from_frac(tab: &EditorTab, start: f32, end: f32) -> Option<(usize, usize)> {
+        if tab.samples_len == 0 {
+            return None;
+        }
+        let mut s = (tab.samples_len as f32 * start.clamp(0.0, 1.0)).floor() as usize;
+        let mut e = (tab.samples_len as f32 * end.clamp(0.0, 1.0)).ceil() as usize;
+        if s > e {
+            std::mem::swap(&mut s, &mut e);
+        }
+        if e <= s {
+            e = (s + 1).min(tab.samples_len);
+        }
+        if s >= tab.samples_len {
+            return None;
+        }
+        Some((s, e.min(tab.samples_len)))
     }
 
 }
@@ -3406,12 +4106,14 @@ impl eframe::App for WavesPreviewer {
                             if self.set_meta_for_path(&p, m) {
                                 resort = true;
                             }
+                            self.update_csv_export_progress_for_path(&p);
                         }
                         meta::MetaUpdate::Full(p, m) => {
                             self.meta_inflight.remove(&p);
                             if self.set_meta_for_path(&p, m) {
                                 resort = true;
                             }
+                            self.update_csv_export_progress_for_path(&p);
                         }
                         meta::MetaUpdate::Transcript(p, t) => {
                             self.transcript_inflight.remove(&p);
@@ -3433,6 +4135,7 @@ impl eframe::App for WavesPreviewer {
                 }
             }
         }
+        self.check_csv_export_completion();
         // Drain spectrogram jobs (tiled)
         self.drain_spectrogram_jobs(ctx);
 
@@ -4011,6 +4714,7 @@ impl eframe::App for WavesPreviewer {
                                                     rms_db: None,
                                                     peak_db: None,
                                                     lufs_i: None,
+                                                    bpm: crate::audio_io::read_audio_bpm(&path_owned),
                                                     thumb: Vec::new(),
                                                     decode_error: None,
                                                 },
@@ -4431,7 +5135,9 @@ impl eframe::App for WavesPreviewer {
         }
 
         // Busy overlay (only for blocking operations like export/apply)
-        let block_busy = self.export_state.is_some() || self.editor_apply_state.is_some();
+        let block_busy = self.export_state.is_some()
+            || self.editor_apply_state.is_some()
+            || self.csv_export_state.is_some();
         if block_busy {
             use egui::{Id, LayerId, Order};
             let screen = ctx.viewport_rect();
@@ -4458,6 +5164,8 @@ impl eframe::App for WavesPreviewer {
                                 st.msg.as_str()
                             } else if let Some(st) = &self.export_state {
                                 st.msg.as_str()
+                            } else if self.csv_export_state.is_some() {
+                                "Preparing CSV..."
                             } else {
                                 "Working..."
                             };
@@ -4465,6 +5173,17 @@ impl eframe::App for WavesPreviewer {
                             if self.editor_apply_state.is_some() {
                                 if ui.button("Cancel").clicked() {
                                     self.cancel_editor_apply();
+                                }
+                            }
+                            if let Some(csv) = &self.csv_export_state {
+                                if csv.total > 0 {
+                                    let pct = (csv.done as f32 / csv.total as f32)
+                                        .clamp(0.0, 1.0);
+                                    ui.add(
+                                        egui::ProgressBar::new(pct)
+                                            .desired_width(180.0)
+                                            .show_percentage(),
+                                    );
                                 }
                             }
                         });

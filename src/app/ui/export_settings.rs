@@ -129,6 +129,7 @@ impl crate::app::WavesPreviewer {
                         ui.checkbox(&mut next_cols.bits, "Bits");
                         ui.checkbox(&mut next_cols.peak, "Peak");
                         ui.checkbox(&mut next_cols.lufs, "LUFS");
+                        ui.checkbox(&mut next_cols.bpm, "BPM");
                         ui.checkbox(&mut next_cols.gain, "Gain");
                         ui.checkbox(&mut next_cols.wave, "Wave");
                     });
@@ -143,6 +144,7 @@ impl crate::app::WavesPreviewer {
                         || next_cols.bits
                         || next_cols.peak
                         || next_cols.lufs
+                        || next_cols.bpm
                         || next_cols.gain
                         || next_cols.wave;
                     if !any_visible {

@@ -81,6 +81,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             rms_db: None,
             peak_db: None,
             lufs_i: None,
+            bpm: audio_io::read_audio_bpm(path),
             thumb: Vec::new(),
             decode_error: None,
         }),
@@ -92,6 +93,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             rms_db: None,
             peak_db: None,
             lufs_i: None,
+            bpm: None,
             thumb: Vec::new(),
             decode_error: Some("Decode failed".to_string()),
         }),
@@ -154,6 +156,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         let mut thumb = Vec::new();
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let lufs_i = crate::wave::lufs_integrated_from_multi(&chans, sr).ok();
+        let bpm = audio_io::read_audio_bpm(path);
         let (ch, bits) = audio_io::read_audio_info(path)
             .map(|info| (info.channels, info.bits_per_sample))
             .unwrap_or((chans.len() as u16, 0));
@@ -170,6 +173,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i,
+            bpm,
             thumb,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors}"))
@@ -208,6 +212,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         let mut thumb = Vec::new();
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let info = audio_io::read_audio_info(path).ok();
+        let bpm = audio_io::read_audio_bpm(path);
         return Some(FileMeta {
             channels: info.map(|i| i.channels).unwrap_or(0),
             sample_rate: if sr > 0 {
@@ -220,6 +225,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i: None,
+            bpm,
             thumb,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors} (prefix)"))

@@ -161,6 +161,23 @@ impl crate::app::WavesPreviewer {
                 }
             }
             ui.separator();
+            let mut bpm_enabled = tab.bpm_enabled;
+            if ui.checkbox(&mut bpm_enabled, "BPM").changed() {
+                tab.bpm_enabled = bpm_enabled;
+            }
+            let mut bpm_value = tab.bpm_value;
+            let bpm_resp = ui.add(
+                egui::DragValue::new(&mut bpm_value)
+                    .range(0.0..=300.0)
+                    .speed(0.1)
+                    .fixed_decimals(2)
+                    .suffix(" BPM"),
+            );
+            if bpm_resp.changed() {
+                tab.bpm_value = bpm_value.max(0.0);
+                tab.bpm_user_set = true;
+            }
+            ui.separator();
             // Time HUD: play position (editable) / total length
             let sr = sr_ctx.max(1.0); // restore local sample-rate alias after removing top-level Loop block
             let mut pos_sec = playhead_display_now as f32 / sr;
@@ -202,6 +219,154 @@ impl crate::app::WavesPreviewer {
             self.cancel_spectrogram_for_path(&path);
         }
         ui.separator();
+        let _len_sec = if sr_ctx > 0.0 {
+            (tab_samples_len as f32 / sr_ctx).max(0.0)
+        } else {
+            0.0
+        };
+        if !ctx.wants_keyboard_input() && tab_samples_len > 0 {
+            let mods = ctx.input(|i| i.modifiers);
+            let ctrl = mods.ctrl || mods.command;
+            let pressed_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+            let pressed_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
+            let left_down = ctx.input(|i| i.key_down(egui::Key::ArrowLeft));
+            let right_down = ctx.input(|i| i.key_down(egui::Key::ArrowRight));
+            let dir = if left_down ^ right_down {
+                if right_down { 1 } else { -1 }
+            } else {
+                0
+            };
+            let mut hold = self.tabs[tab_idx].seek_hold.take();
+            if dir != 0 {
+                let now = std::time::Instant::now();
+                let pressed = if dir > 0 { pressed_right } else { pressed_left };
+                let repeat_delay = std::time::Duration::from_millis(220);
+                let repeat_fast = std::time::Duration::from_millis(35);
+                let repeat_slow = std::time::Duration::from_millis(70);
+                let mut should_step = pressed;
+                let mut hold_state = match hold.take() {
+                    Some(mut state) => {
+                        if state.dir != dir {
+                            state = SeekHoldState {
+                                dir,
+                                started_at: now,
+                                last_step_at: now,
+                            };
+                            should_step = true;
+                        } else if !pressed {
+                            let elapsed = now.saturating_duration_since(state.started_at);
+                            let since = now.saturating_duration_since(state.last_step_at);
+                            let interval = if elapsed >= std::time::Duration::from_millis(650) {
+                                repeat_fast
+                            } else {
+                                repeat_slow
+                            };
+                            if elapsed >= repeat_delay && since >= interval {
+                                should_step = true;
+                            }
+                        }
+                        state
+                    }
+                    None => {
+                        should_step = true;
+                        SeekHoldState {
+                            dir,
+                            started_at: now,
+                            last_step_at: now,
+                        }
+                    }
+                };
+                if should_step {
+                    let spp = self.tabs[tab_idx].samples_per_px.max(0.0001);
+                    let sr_u32 = self.audio.shared.out_sample_rate.max(1);
+                    let sr = sr_u32 as f32;
+                    let px_per_sec = (1.0 / spp) * sr;
+                    let sample_step_sec = 1.0 / sr;
+                    let sample_step = 1usize;
+                    let time_grid_step = |min_px: f32| -> f32 {
+                        let steps: [f32; 18] = [
+                            0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
+                            5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+                        ];
+                        let mut step = steps[steps.len() - 1];
+                        for s in steps {
+                            if px_per_sec * s >= min_px {
+                                step = s;
+                                break;
+                            }
+                        }
+                        step
+                    };
+                    let tab_bpm_enabled = self.tabs[tab_idx].bpm_enabled;
+                    let bpm_value = self.tabs[tab_idx].bpm_value.max(1.0);
+                    let use_bpm = tab_bpm_enabled && bpm_value >= 20.0;
+                    let base_step_sec = if use_bpm {
+                        let beat_sec = 60.0 / bpm_value;
+                        let steps: [f32; 10] = [
+                            1.0 / 64.0,
+                            1.0 / 32.0,
+                            1.0 / 16.0,
+                            1.0 / 8.0,
+                            1.0 / 4.0,
+                            0.5,
+                            1.0,
+                            2.0,
+                            4.0,
+                            8.0,
+                        ];
+                        let px_per_beat = px_per_sec * beat_sec;
+                        let mut step_beats = steps[steps.len() - 1];
+                        for s in steps {
+                            if px_per_beat * s >= 90.0 {
+                                step_beats = s;
+                                break;
+                            }
+                        }
+                        (beat_sec * step_beats).max(sample_step_sec)
+                    } else {
+                        let mut base = time_grid_step(90.0);
+                        if spp <= 1.0 {
+                            base = sample_step_sec;
+                        }
+                        base.max(sample_step_sec)
+                    };
+                    let base_step_samples = ((base_step_sec * sr).round() as usize).max(sample_step);
+                    let fine_step_samples = (base_step_samples / 4).max(sample_step);
+                    let step_samples = if ctrl {
+                        base_step_samples
+                    } else if mods.shift {
+                        fine_step_samples
+                    } else {
+                        base_step_samples
+                    };
+                    let cur_display = playhead_display_now;
+                    let new_display = if ctrl {
+                        if dir > 0 {
+                            cur_display.saturating_add(step_samples)
+                        } else {
+                            cur_display.saturating_sub(step_samples)
+                        }
+                    } else if dir > 0 {
+                        let target = cur_display.saturating_add(step_samples);
+                        (target / step_samples) * step_samples
+                    } else if cur_display == 0 {
+                        0
+                    } else {
+                        let target = cur_display.saturating_sub(1);
+                        (target / step_samples) * step_samples
+                    };
+                    let new_display = new_display.min(tab_samples_len);
+                    if new_display != cur_display {
+                        request_seek = Some(map_display_to_audio(new_display));
+                    }
+                    hold_state.last_step_at = now;
+                }
+                hold = Some(hold_state);
+            }
+            self.tabs[tab_idx].seek_hold = hold;
+        } else if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.seek_hold = None;
+        }
 
         let avail = ui.available_size();
         // pending actions to perform after UI borrows end
@@ -214,6 +379,7 @@ impl crate::app::WavesPreviewer {
         // let mut do_silence: Option<(usize,usize)> = None; // removed
         let mut do_cutjoin: Option<(usize, usize)> = None;
         let mut do_apply_xfade: bool = false;
+        let mut do_unwrap_loop: Option<u32> = None;
         let mut do_write_loop_markers: bool = false;
         let mut do_write_markers: bool = false;
         let mut do_fade_in: Option<((usize, usize), crate::app::types::FadeShape)> = None;
@@ -368,25 +534,77 @@ impl crate::app::WavesPreviewer {
                     let t1 = end as f32 / sr;
                     let px_per_sec = (1.0 / spp) * sr;
                     let min_px = 90.0;
-                    let steps: [f32; 15] = [0.01,0.02,0.05,0.1,0.2,0.5,1.0,2.0,5.0,10.0,15.0,30.0,60.0,120.0,300.0];
-                    let mut step = steps[steps.len()-1];
-                    for s in steps { if px_per_sec * s >= min_px { step = s; break; } }
-                    let start_tick = (t0 / step).floor() * step;
                     let fid = TextStyle::Monospace.resolve(ui.style());
                     let grid_col = Color32::from_rgb(38,38,44);
                     let label_col = Color32::GRAY;
-                    let mut t = start_tick;
-                    while t <= t1 + step*0.5 {
-                        let s_idx = (t * sr).round() as isize;
-                        let rel = (s_idx.max(start as isize) - start as isize) as f32;
-                        let x = wave_left + (rel / spp).clamp(0.0, wave_w);
-                        painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.0, grid_col));
-                        // Label near top; avoid overcrowding by skipping when too dense
-                        if px_per_sec * step >= 70.0 {
-                            let label = crate::app::helpers::format_time_s(t);
-                            painter.text(egui::pos2(x + 2.0, rect.top() + 2.0), egui::Align2::LEFT_TOP, label, fid.clone(), label_col);
+                    if tab.bpm_enabled && tab.bpm_value >= 20.0 {
+                        let bpm = tab.bpm_value.max(1.0);
+                        let beat_sec = 60.0 / bpm;
+                        let px_per_beat = px_per_sec * beat_sec;
+                        let steps: [f32; 10] = [1.0/64.0, 1.0/32.0, 1.0/16.0, 1.0/8.0, 1.0/4.0, 0.5, 1.0, 2.0, 4.0, 8.0];
+                        let mut step_beats = steps[steps.len() - 1];
+                        for s in steps {
+                            if px_per_beat * s >= min_px {
+                                step_beats = s;
+                                break;
+                            }
                         }
-                        t += step;
+                        let b0 = t0 / beat_sec;
+                        let b1 = t1 / beat_sec;
+                        let start_beat = (b0 / step_beats).floor() * step_beats;
+                        let mut beat = start_beat;
+                        let label_every = if step_beats < 0.25 {
+                            1.0
+                        } else if step_beats < 1.0 {
+                            1.0
+                        } else {
+                            step_beats
+                        };
+                        while beat <= b1 + step_beats * 0.5 {
+                            let t = beat * beat_sec;
+                            let s_idx = (t * sr).round() as isize;
+                            let rel = (s_idx.max(start as isize) - start as isize) as f32;
+                            let x = wave_left + (rel / spp).clamp(0.0, wave_w);
+                            painter.line_segment(
+                                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                                egui::Stroke::new(1.0, grid_col),
+                            );
+                            if px_per_beat * step_beats >= 70.0
+                                && ((beat / label_every).round() * label_every - beat).abs() < 1e-6
+                            {
+                                let label = if label_every >= 1.0 {
+                                    format!("{:.0}b", beat)
+                                } else {
+                                    format!("{:.2}b", beat)
+                                };
+                                painter.text(
+                                    egui::pos2(x + 2.0, rect.top() + 2.0),
+                                    egui::Align2::LEFT_TOP,
+                                    label,
+                                    fid.clone(),
+                                    label_col,
+                                );
+                            }
+                            beat += step_beats;
+                        }
+                    } else {
+                        let steps: [f32; 15] = [0.01,0.02,0.05,0.1,0.2,0.5,1.0,2.0,5.0,10.0,15.0,30.0,60.0,120.0,300.0];
+                        let mut step = steps[steps.len()-1];
+                        for s in steps { if px_per_sec * s >= min_px { step = s; break; } }
+                        let start_tick = (t0 / step).floor() * step;
+                        let mut t = start_tick;
+                        while t <= t1 + step*0.5 {
+                            let s_idx = (t * sr).round() as isize;
+                            let rel = (s_idx.max(start as isize) - start as isize) as f32;
+                            let x = wave_left + (rel / spp).clamp(0.0, wave_w);
+                            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(1.0, grid_col));
+                            // Label near top; avoid overcrowding by skipping when too dense
+                            if px_per_sec * step >= 70.0 {
+                                let label = crate::app::helpers::format_time_s(t);
+                                painter.text(egui::pos2(x + 2.0, rect.top() + 2.0), egui::Align2::LEFT_TOP, label, fid.clone(), label_col);
+                            }
+                            t += step;
+                        }
                     }
                 }
             }
@@ -2029,6 +2247,43 @@ impl crate::app::WavesPreviewer {
                                             }
                                         });
                                         ui.horizontal_wrapped(|ui| {
+                                            let mut repeat = tab.tool_state.loop_repeat.max(2);
+                                            ui.label("Repeat:");
+                                            if ui
+                                                .add(
+                                                    egui::DragValue::new(&mut repeat)
+                                                        .range(2..=128)
+                                                        .speed(1),
+                                                )
+                                                .changed()
+                                            {
+                                                tab.tool_state =
+                                                    ToolState { loop_repeat: repeat, ..tab.tool_state };
+                                            }
+                                            let has_loop = tab
+                                                .loop_region
+                                                .map(|(a, b)| b > a)
+                                                .unwrap_or(false);
+                                            if ui
+                                                .add_enabled(
+                                                    has_loop && !apply_busy,
+                                                    egui::Button::new(format!(
+                                                        "Unwrap x{}",
+                                                        repeat
+                                                    )),
+                                                )
+                                                .on_hover_text(
+                                                    "Replace the loop with repeated copies and add loop markers",
+                                                )
+                                                .clicked()
+                                            {
+                                                do_unwrap_loop = Some(repeat);
+                                                stop_playback = true;
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
+                                            }
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
                                             let label = if tab.loop_region.is_some() {
                                                 "Write Markers to File"
                                             } else {
@@ -2810,6 +3065,9 @@ impl crate::app::WavesPreviewer {
         }
         if do_apply_xfade {
             self.editor_apply_loop_xfade(tab_idx);
+        }
+        if let Some(repeat) = do_unwrap_loop {
+            self.editor_apply_loop_unwrap(tab_idx, repeat);
         }
         if do_write_loop_markers {
             self.write_loop_markers_for_tab(tab_idx);

@@ -61,6 +61,12 @@ pub struct ProjectEdit {
     pub tool_state: ProjectToolState,
     pub active_tool: String,
     pub show_waveform_overlay: bool,
+    #[serde(default)]
+    pub bpm_enabled: bool,
+    #[serde(default = "default_bpm_value")]
+    pub bpm_value: f32,
+    #[serde(default)]
+    pub bpm_user_set: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,6 +91,8 @@ pub struct ProjectListColumns {
     pub bits: bool,
     pub peak: bool,
     pub lufs: bool,
+    #[serde(default)]
+    pub bpm: bool,
     pub gain: bool,
     pub wave: bool,
 }
@@ -110,6 +118,12 @@ pub struct ProjectTab {
     pub channel_view: ProjectChannelView,
     pub active_tool: String,
     pub tool_state: ProjectToolState,
+    #[serde(default)]
+    pub bpm_enabled: bool,
+    #[serde(default = "default_bpm_value")]
+    pub bpm_value: f32,
+    #[serde(default)]
+    pub bpm_user_set: bool,
     #[serde(default)]
     pub preview_tool: Option<String>,
     #[serde(default)]
@@ -142,6 +156,8 @@ pub struct ProjectToolState {
     pub normalize_target_db: f32,
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
+    #[serde(default = "default_loop_repeat")]
+    pub loop_repeat: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -179,6 +195,14 @@ fn project_sidecar_dir(path: &Path) -> PathBuf {
 
 fn project_data_dir(path: &Path) -> PathBuf {
     project_sidecar_dir(path).join("data")
+}
+
+fn default_loop_repeat() -> u32 {
+    2
+}
+
+fn default_bpm_value() -> f32 {
+    0.0
 }
 
 pub fn serialize_project(project: &ProjectFile) -> Result<String> {
@@ -269,7 +293,11 @@ pub fn project_tab_from_tab(
             normalize_target_db: tab.tool_state.normalize_target_db,
             pitch_semitones: tab.tool_state.pitch_semitones,
             stretch_rate: tab.tool_state.stretch_rate,
+            loop_repeat: tab.tool_state.loop_repeat,
         },
+        bpm_enabled: tab.bpm_enabled,
+        bpm_value: tab.bpm_value,
+        bpm_user_set: tab.bpm_user_set,
         preview_tool,
         preview_audio: preview_audio.map(|p| rel_path(&p, base)),
         loop_mode: format!("{:?}", tab.loop_mode),
@@ -326,6 +354,7 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         normalize_target_db: t.normalize_target_db,
         pitch_semitones: t.pitch_semitones,
         stretch_rate: t.stretch_rate,
+        loop_repeat: t.loop_repeat.max(2),
     }
 }
 
@@ -398,6 +427,7 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         rms_db: None,
         peak_db: None,
         lufs_i: None,
+        bpm: None,
         thumb: Vec::new(),
         decode_error: Some(format!("Missing: {}", path.display())),
     }
@@ -522,6 +552,7 @@ impl super::WavesPreviewer {
                 super::types::SortKey::Bits => "Bits",
                 super::types::SortKey::Level => "Level",
                 super::types::SortKey::Lufs => "Lufs",
+                super::types::SortKey::Bpm => "Bpm",
                 super::types::SortKey::External(_) => "External",
             }
             .to_string(),
@@ -544,6 +575,7 @@ impl super::WavesPreviewer {
                 bits: self.list_columns.bits,
                 peak: self.list_columns.peak,
                 lufs: self.list_columns.lufs,
+                bpm: self.list_columns.bpm,
                 gain: self.list_columns.gain,
                 wave: self.list_columns.wave,
             },
@@ -645,9 +677,13 @@ impl super::WavesPreviewer {
                     normalize_target_db: cached.tool_state.normalize_target_db,
                     pitch_semitones: cached.tool_state.pitch_semitones,
                     stretch_rate: cached.tool_state.stretch_rate,
+                    loop_repeat: cached.tool_state.loop_repeat,
                 },
                 active_tool: format!("{:?}", cached.active_tool),
                 show_waveform_overlay: cached.show_waveform_overlay,
+                bpm_enabled: cached.bpm_enabled,
+                bpm_value: cached.bpm_value,
+                bpm_user_set: cached.bpm_user_set,
             });
         }
 
@@ -708,6 +744,7 @@ impl super::WavesPreviewer {
             bits: project.app.list_columns.bits,
             peak: project.app.list_columns.peak,
             lufs: project.app.list_columns.lufs,
+            bpm: project.app.list_columns.bpm,
             gain: project.app.list_columns.gain,
             wave: project.app.list_columns.wave,
         };
@@ -720,6 +757,7 @@ impl super::WavesPreviewer {
             "Bits" => super::types::SortKey::Bits,
             "Level" => super::types::SortKey::Level,
             "Lufs" => super::types::SortKey::Lufs,
+            "Bpm" => super::types::SortKey::Bpm,
             _ => super::types::SortKey::File,
         };
         self.sort_dir = match project.app.sort_dir.as_str() {
@@ -794,6 +832,9 @@ impl super::WavesPreviewer {
                     tool_state: project_tool_state_to_tool_state(&edit.tool_state),
                     active_tool: tool_kind_from_str(&edit.active_tool),
                     show_waveform_overlay: edit.show_waveform_overlay,
+                    bpm_enabled: edit.bpm_enabled,
+                    bpm_value: edit.bpm_value,
+                    bpm_user_set: edit.bpm_user_set,
                 },
             );
         }
@@ -847,6 +888,9 @@ impl super::WavesPreviewer {
                         tool_state: project_tool_state_to_tool_state(&tab.tool_state),
                         active_tool: tool_kind_from_str(&tab.active_tool),
                         show_waveform_overlay: tab.show_waveform_overlay,
+                        bpm_enabled: tab.bpm_enabled,
+                        bpm_value: tab.bpm_value,
+                        bpm_user_set: tab.bpm_user_set,
                     },
                 );
             }
@@ -915,6 +959,9 @@ impl super::WavesPreviewer {
                     t.fade_in_shape = fade_shape_from_str(&tab.fade_in_shape);
                     t.fade_out_shape = fade_shape_from_str(&tab.fade_out_shape);
                     t.snap_zero_cross = tab.snap_zero_cross;
+                    t.bpm_enabled = tab.bpm_enabled;
+                    t.bpm_value = tab.bpm_value;
+                    t.bpm_user_set = tab.bpm_user_set;
                     t.view_offset = tab.view_offset;
                     t.samples_per_px = tab.samples_per_px;
                     t.dirty = tab.dirty;

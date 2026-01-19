@@ -76,6 +76,21 @@ impl crate::app::WavesPreviewer {
                             self.trigger_save_selected();
                             ui.close();
                         }
+                        ui.separator();
+                        if ui.button("Export List CSV...").clicked() {
+                            if let Some(mut path) = self.pick_list_csv_save_dialog() {
+                                let needs_ext = path
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| !s.eq_ignore_ascii_case("csv"))
+                                    .unwrap_or(true);
+                                if needs_ext {
+                                    path.set_extension("csv");
+                                }
+                                self.begin_export_list_csv(path);
+                            }
+                            ui.close();
+                        }
                     });
                     ui.menu_button("List", |ui| {
                         if ui.button("Open First in Editor").clicked() {
@@ -240,6 +255,7 @@ impl crate::app::WavesPreviewer {
                         || self.heavy_overlay_rx.is_some()
                         || self.editor_apply_state.is_some()
                         || self.export_state.is_some()
+                        || self.csv_export_state.is_some()
                         || !self.spectro_inflight.is_empty()
                         || self.project_open_state.is_some();
                     if show_activity {
@@ -317,6 +333,26 @@ impl crate::app::WavesPreviewer {
                             if let Some(exp) = &self.export_state {
                                 ui.add(egui::Spinner::new());
                                 ui.label(RichText::new(exp.msg.as_str()).weak());
+                            }
+                            if let Some(csv) = &self.csv_export_state {
+                                ui.add(egui::Spinner::new());
+                                if csv.total > 0 {
+                                    let elapsed = csv.started_at.elapsed().as_secs_f32();
+                                    let pct = (csv.done as f32 / csv.total as f32)
+                                        .clamp(0.0, 1.0);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "CSV: {}/{} ({:.0}%, {:.1}s)",
+                                            csv.done,
+                                            csv.total,
+                                            pct * 100.0,
+                                            elapsed
+                                        ))
+                                        .weak(),
+                                    );
+                                } else {
+                                    ui.label(RichText::new("CSV: preparing").weak());
+                                }
                             }
                             if !self.spectro_inflight.is_empty() {
                                 ui.add(egui::Spinner::new());

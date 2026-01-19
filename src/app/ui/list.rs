@@ -213,6 +213,10 @@ impl crate::app::WavesPreviewer {
             table = table.column(egui_extras::Column::initial(90.0).resizable(true));
             filler_cols += 1;
         }
+        if cols.bpm {
+            table = table.column(egui_extras::Column::initial(70.0).resizable(true));
+            filler_cols += 1;
+        }
         if cols.gain {
             table = table.column(egui_extras::Column::initial(80.0).resizable(true));
             filler_cols += 1;
@@ -354,6 +358,18 @@ impl crate::app::WavesPreviewer {
                             &mut self.sort_key,
                             &mut self.sort_dir,
                             SortKey::Lufs,
+                            false,
+                        );
+                    });
+                }
+                if cols.bpm {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "BPM",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::Bpm,
                             false,
                         );
                     });
@@ -682,6 +698,29 @@ impl crate::app::WavesPreviewer {
                                     egui::Color32::WHITE,
                                 );
                                 if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.bpm {
+                            row.col(|ui| {
+                                let bpm = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.bpm)
+                                    .filter(|v| v.is_finite() && *v > 0.0);
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                bpm.map(|v| format!("{:.2}", v))
+                                                    .unwrap_or_else(|| "-".into()),
+                                            )
+                                            .monospace(),
+                                        )
+                                        .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
                             });

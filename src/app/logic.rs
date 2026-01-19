@@ -77,6 +77,9 @@ impl super::WavesPreviewer {
                     fade_in_shape: tab.fade_in_shape,
                     fade_out_shape: tab.fade_out_shape,
                     loop_mode: tab.loop_mode,
+                    bpm_enabled: tab.bpm_enabled,
+                    bpm_value: tab.bpm_value,
+                    bpm_user_set: tab.bpm_user_set,
                     snap_zero_cross: tab.snap_zero_cross,
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
@@ -333,6 +336,7 @@ impl super::WavesPreviewer {
             normalize_target_db: -6.0,
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
+            loop_repeat: 2,
         };
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
@@ -1222,6 +1226,10 @@ impl super::WavesPreviewer {
                     view_mode: crate::app::types::ViewMode::Waveform,
                     show_waveform_overlay: cached.show_waveform_overlay,
                     channel_view: ChannelView::mixdown(),
+                    bpm_enabled: cached.bpm_enabled,
+                    bpm_value: cached.bpm_value,
+                    bpm_user_set: cached.bpm_user_set,
+                    seek_hold: None,
                     snap_zero_cross: cached.snap_zero_cross,
                     drag_select_anchor: None,
                     active_tool: cached.active_tool,
@@ -1251,6 +1259,11 @@ impl super::WavesPreviewer {
             let name = item.display_name.clone();
             let chs = audio.channels.clone();
             let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
+            let default_bpm = self
+                .meta_for_path(path)
+                .and_then(|m| m.bpm)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(0.0);
             let mut wf = Vec::new();
             if self.mode == RateMode::Speed {
                 let mono = Self::mixdown_channels_mono(&chs, samples_len);
@@ -1287,6 +1300,10 @@ impl super::WavesPreviewer {
                 view_mode: crate::app::types::ViewMode::Waveform,
                 show_waveform_overlay: true,
                 channel_view: ChannelView::mixdown(),
+                bpm_enabled: false,
+                bpm_value: default_bpm,
+                bpm_user_set: false,
+                seek_hold: None,
                 snap_zero_cross: true,
                 drag_select_anchor: None,
                 active_tool: crate::app::types::ToolKind::LoopEdit,
@@ -1297,6 +1314,7 @@ impl super::WavesPreviewer {
                     normalize_target_db: -6.0,
                     pitch_semitones: 0.0,
                     stretch_rate: 1.0,
+                    loop_repeat: 2,
                 },
                 loop_mode: crate::app::types::LoopMode::Off,
                 dragging_marker: None,
@@ -1381,6 +1399,10 @@ impl super::WavesPreviewer {
                 view_mode: crate::app::types::ViewMode::Waveform,
                 show_waveform_overlay: cached.show_waveform_overlay,
                 channel_view: ChannelView::mixdown(),
+                bpm_enabled: cached.bpm_enabled,
+                bpm_value: cached.bpm_value,
+                bpm_user_set: cached.bpm_user_set,
+                seek_hold: None,
                 snap_zero_cross: cached.snap_zero_cross,
                 drag_select_anchor: None,
                 active_tool: cached.active_tool,
@@ -1407,6 +1429,11 @@ impl super::WavesPreviewer {
             .unwrap_or("(invalid)")
             .to_string();
         let loading = !decode_failed;
+        let default_bpm = self
+            .meta_for_path(path)
+            .and_then(|m| m.bpm)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0);
         self.tabs.push(EditorTab {
             path: path.to_path_buf(),
             display_name: name,
@@ -1438,6 +1465,10 @@ impl super::WavesPreviewer {
             view_mode: crate::app::types::ViewMode::Waveform,
             show_waveform_overlay: true,
             channel_view: ChannelView::mixdown(),
+            bpm_enabled: false,
+            bpm_value: default_bpm,
+            bpm_user_set: false,
+            seek_hold: None,
             snap_zero_cross: true,
             drag_select_anchor: None,
             active_tool: crate::app::types::ToolKind::LoopEdit,
@@ -1448,6 +1479,7 @@ impl super::WavesPreviewer {
                 normalize_target_db: -6.0,
                 pitch_semitones: 0.0,
                 stretch_rate: 1.0,
+                loop_repeat: 2,
             },
             loop_mode: crate::app::types::LoopMode::Off,
             dragging_marker: None,
@@ -1505,13 +1537,14 @@ impl super::WavesPreviewer {
                             .as_ref()
                             .map(|m| {
                                 format!(
-                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
                                     m.sample_rate,
                                     m.bits_per_sample,
                                     m.channels,
                                     m.duration_secs.unwrap_or(0.0),
                                     m.peak_db.unwrap_or(0.0),
-                                    m.lufs_i.unwrap_or(0.0)
+                                    m.lufs_i.unwrap_or(0.0),
+                                    m.bpm.unwrap_or(0.0)
                                 )
                             })
                             .unwrap_or_default();
@@ -1542,13 +1575,14 @@ impl super::WavesPreviewer {
                             .as_ref()
                             .map(|m| {
                                 format!(
-                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
                                     m.sample_rate,
                                     m.bits_per_sample,
                                     m.channels,
                                     m.duration_secs.unwrap_or(0.0),
                                     m.peak_db.unwrap_or(0.0),
-                                    m.lufs_i.unwrap_or(0.0)
+                                    m.lufs_i.unwrap_or(0.0),
+                                    m.bpm.unwrap_or(0.0)
                                 )
                             })
                             .unwrap_or_default();
@@ -1583,13 +1617,14 @@ impl super::WavesPreviewer {
                         .as_ref()
                         .map(|m| {
                             format!(
-                                "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1}",
+                                "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
                                 m.sample_rate,
                                 m.bits_per_sample,
                                 m.channels,
                                 m.duration_secs.unwrap_or(0.0),
                                 m.peak_db.unwrap_or(0.0),
-                                m.lufs_i.unwrap_or(0.0)
+                                m.lufs_i.unwrap_or(0.0),
+                                m.bpm.unwrap_or(0.0)
                             )
                         })
                         .unwrap_or_default();
@@ -1695,6 +1730,10 @@ impl super::WavesPreviewer {
                         };
                         num_order(va, vb)
                     }
+                    SortKey::Bpm => num_order(
+                        ma.and_then(|m| m.bpm).unwrap_or(0.0),
+                        mb.and_then(|m| m.bpm).unwrap_or(0.0),
+                    ),
                     SortKey::External(idx) => {
                         let Some(col) = external_cols.get(idx) else {
                             return Ordering::Equal;

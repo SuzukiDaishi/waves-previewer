@@ -383,6 +383,108 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    pub(super) fn editor_apply_loop_unwrap(&mut self, tab_idx: usize, repeats: u32) {
+        if repeats < 2 {
+            return;
+        }
+        let channels = {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                let (s, e) = match tab.loop_region {
+                    Some((a, b)) if b > a => (a, b),
+                    _ => {
+                        return;
+                    }
+                };
+                let repeat_count = repeats as usize;
+                let loop_len = e - s;
+                if loop_len == 0 {
+                    return;
+                }
+                let shift = loop_len.saturating_mul(repeat_count.saturating_sub(1));
+                Self::push_undo_state(tab, true);
+                for ch in tab.ch_samples.iter_mut() {
+                    let mut out = Vec::with_capacity(ch.len().saturating_add(shift));
+                    out.extend_from_slice(&ch[..s]);
+                    let seg = &ch[s..e];
+                    for _ in 0..repeat_count {
+                        out.extend_from_slice(seg);
+                    }
+                    out.extend_from_slice(&ch[e..]);
+                    *ch = out;
+                }
+                let mut markers: Vec<crate::markers::MarkerEntry> = Vec::new();
+                for m in tab.markers.iter() {
+                    let label = m.label.as_str();
+                    if label.eq_ignore_ascii_case("loop_end")
+                        || label.starts_with("loop_")
+                    {
+                        continue;
+                    }
+                    let mut sample = m.sample;
+                    if sample >= e {
+                        sample = sample.saturating_add(shift);
+                    }
+                    markers.push(crate::markers::MarkerEntry {
+                        sample: sample.min(tab.samples_len.saturating_add(shift)),
+                        label: m.label.clone(),
+                    });
+                }
+                for i in 0..repeat_count {
+                    let sample = s.saturating_add(loop_len.saturating_mul(i));
+                    markers.push(crate::markers::MarkerEntry {
+                        sample: sample.min(tab.samples_len.saturating_add(shift)),
+                        label: format!("loop_{}", i + 1),
+                    });
+                }
+                let end_sample = s.saturating_add(loop_len.saturating_mul(repeat_count));
+                markers.push(crate::markers::MarkerEntry {
+                    sample: end_sample.min(tab.samples_len.saturating_add(shift)),
+                    label: "loop_end".to_string(),
+                });
+                markers.sort_by_key(|m| m.sample);
+                markers.dedup_by(|a, b| a.sample == b.sample && a.label == b.label);
+                tab.markers = markers;
+                tab.markers_dirty = true;
+                tab.samples_len = tab.samples_len.saturating_add(shift);
+                if tab.view_offset >= e {
+                    tab.view_offset = tab.view_offset.saturating_add(shift);
+                }
+                if let Some(off) = tab.preview_offset_samples {
+                    if off >= e {
+                        tab.preview_offset_samples = Some(off.saturating_add(shift));
+                    }
+                }
+                if let Some(anchor) = tab.drag_select_anchor {
+                    if anchor >= e {
+                        tab.drag_select_anchor = Some(anchor.saturating_add(shift));
+                    } else if anchor >= s {
+                        tab.drag_select_anchor = None;
+                    }
+                }
+                tab.loop_region = None;
+                tab.loop_mode = crate::app::types::LoopMode::Off;
+                tab.loop_xfade_samples = 0;
+                tab.selection = None;
+                tab.ab_loop = None;
+                tab.trim_range = None;
+                tab.fade_in_range = None;
+                tab.fade_out_range = None;
+                tab.preview_audio_tool = None;
+                tab.preview_overlay = None;
+                tab.dirty = true;
+                Self::editor_clamp_ranges(tab);
+                tab.ch_samples.clone()
+            } else {
+                return;
+            }
+        };
+        self.audio.set_samples_channels(channels);
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
+    }
+
     pub(super) fn editor_delete_range_and_join(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (channels, loop_mode, lr, len) = {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

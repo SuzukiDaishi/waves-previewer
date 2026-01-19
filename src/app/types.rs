@@ -1,6 +1,6 @@
 use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -58,6 +58,7 @@ pub enum SortKey {
     Bits,
     Level,
     Lufs,
+    Bpm,
     External(usize),
 }
 
@@ -80,6 +81,7 @@ pub struct ListColumnConfig {
     pub bits: bool,
     pub peak: bool,
     pub lufs: bool,
+    pub bpm: bool,
     pub gain: bool,
     pub wave: bool,
 }
@@ -97,6 +99,7 @@ impl Default for ListColumnConfig {
             bits: true,
             peak: true,
             lufs: true,
+            bpm: false,
             gain: true,
             wave: true,
         }
@@ -192,6 +195,7 @@ pub struct ToolState {
     pub normalize_target_db: f32,
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
+    pub loop_repeat: u32,
 }
 
 #[derive(Clone)]
@@ -321,6 +325,10 @@ pub struct EditorTab {
     pub view_mode: ViewMode,                 // which visualization panel
     pub show_waveform_overlay: bool,         // draw waveform overlay in Spec/Mel views
     pub channel_view: ChannelView,           // Mixdown / All / Custom
+    pub bpm_enabled: bool,                   // grid toggle in editor
+    pub bpm_value: f32,                      // current BPM for grid
+    pub bpm_user_set: bool,                  // user-overridden BPM
+    pub seek_hold: Option<SeekHoldState>,    // key repeat state for seek
     pub snap_zero_cross: bool,               // enable zero-cross snapping
     pub drag_select_anchor: Option<usize>,   // transient during drag
     pub active_tool: ToolKind,               // current editing tool
@@ -349,6 +357,7 @@ pub struct FileMeta {
     pub rms_db: Option<f32>,
     pub peak_db: Option<f32>,
     pub lufs_i: Option<f32>,
+    pub bpm: Option<f32>,
     pub thumb: Vec<(f32, f32)>,
     pub decode_error: Option<String>,
 }
@@ -483,10 +492,19 @@ pub struct CachedEdit {
     pub fade_in_shape: FadeShape,
     pub fade_out_shape: FadeShape,
     pub loop_mode: LoopMode,
+    pub bpm_enabled: bool,
+    pub bpm_value: f32,
+    pub bpm_user_set: bool,
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
     pub show_waveform_overlay: bool,
+}
+
+pub struct SeekHoldState {
+    pub dir: i32,
+    pub started_at: Instant,
+    pub last_step_at: Instant,
 }
 
 #[derive(Clone)]
@@ -531,6 +549,19 @@ pub struct ExportResult {
     pub success_paths: Vec<PathBuf>,
     #[allow(dead_code)]
     pub failed_paths: Vec<PathBuf>,
+}
+
+pub struct CsvExportState {
+    pub path: PathBuf,
+    pub ids: Vec<MediaId>,
+    pub cols: ListColumnConfig,
+    pub external_cols: Vec<String>,
+    pub total: usize,
+    pub done: usize,
+    pub pending: HashSet<PathBuf>,
+    pub needs_peak: bool,
+    pub needs_lufs: bool,
+    pub started_at: Instant,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

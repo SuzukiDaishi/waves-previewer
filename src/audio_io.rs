@@ -10,6 +10,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::default::{get_codecs, get_probe};
+use id3::TagLike;
 
 pub const SUPPORTED_EXTS: &[&str] = &["wav", "mp3", "m4a"];
 
@@ -66,6 +67,111 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         bits_per_sample,
         duration_secs,
     })
+}
+
+pub fn read_audio_bpm(path: &Path) -> Option<f32> {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    match ext.to_ascii_lowercase().as_str() {
+        "m4a" => read_bpm_m4a(path),
+        "mp3" => read_bpm_id3(path),
+        "wav" => read_bpm_wav(path),
+        _ => None,
+    }
+}
+
+fn parse_bpm_text(text: &str) -> Option<f32> {
+    let mut buf = String::new();
+    let mut started = false;
+    for ch in text.trim().chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            buf.push(ch);
+            started = true;
+        } else if started {
+            break;
+        }
+    }
+    if buf.is_empty() {
+        return None;
+    }
+    let v: f32 = buf.parse().ok()?;
+    if v.is_finite() && v > 0.0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+fn read_bpm_id3(path: &Path) -> Option<f32> {
+    let tag = id3::Tag::read_from_path(path).ok()?;
+    let text = tag
+        .get("TBPM")
+        .and_then(|f| f.content().text())
+        .or_else(|| tag.get("TBP").and_then(|f| f.content().text()));
+    text.and_then(parse_bpm_text)
+}
+
+fn read_bpm_m4a(path: &Path) -> Option<f32> {
+    let tag = mp4ameta::Tag::read_from_path(path).ok()?;
+    tag.bpm().map(|v| v as f32)
+}
+
+fn read_bpm_wav(path: &Path) -> Option<f32> {
+    if let Some(bpm) = read_bpm_wav_acid(path) {
+        return Some(bpm);
+    }
+    read_bpm_id3(path)
+}
+
+fn read_bpm_wav_acid(path: &Path) -> Option<f32> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+    loop {
+        let mut chunk_header = [0u8; 8];
+        if file.read_exact(&mut chunk_header).is_err() {
+            break;
+        }
+        let id = &chunk_header[0..4];
+        let size = u32::from_le_bytes([
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ]) as u64;
+        if id == b"acid" || id == b"ACID" {
+            let read_len = size.min(64) as usize;
+            let mut buf = vec![0u8; read_len];
+            if file.read_exact(&mut buf).is_err() {
+                return None;
+            }
+            if size > read_len as u64 {
+                let _ = file.seek(SeekFrom::Current((size - read_len as u64) as i64));
+            }
+            if buf.len() >= 24 {
+                let tempo_raw = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+                let mut candidates = Vec::new();
+                candidates.push(tempo_raw as f32);
+                candidates.push((tempo_raw as f32) / 100.0);
+                let tempo_f = f32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+                candidates.push(tempo_f);
+                for bpm in candidates {
+                    if bpm.is_finite() && bpm >= 20.0 && bpm <= 400.0 {
+                        return Some(bpm);
+                    }
+                }
+            }
+            return None;
+        }
+        let skip = size + (size & 1);
+        if file.seek(SeekFrom::Current(skip as i64)).is_err() {
+            break;
+        }
+    }
+    None
 }
 
 fn open_decoder(

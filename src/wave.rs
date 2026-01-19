@@ -105,6 +105,7 @@ pub fn build_minmax(out: &mut Vec<(f32, f32)>, samples: &[f32], bins: usize) {
     }
 }
 
+
 // Parse RIFF WAVE 'smpl' chunk and extract the first loop's start/end in samples (if present).
 pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
     use std::fs;
