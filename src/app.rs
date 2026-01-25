@@ -21,6 +21,7 @@ mod external;
 mod external_ops;
 mod helpers;
 mod list_ops;
+mod list_undo;
 mod logic;
 mod meta;
 mod preview;
@@ -120,6 +121,10 @@ pub struct WavesPreviewer {
     // clipboard (list copy/paste)
     pub clipboard_payload: Option<ClipboardPayload>,
     pub clipboard_temp_files: Vec<PathBuf>,
+    // list undo/redo
+    pub list_undo_stack: Vec<ListUndoAction>,
+    pub list_redo_stack: Vec<ListUndoAction>,
+    pub last_undo_scope: UndoScope,
     // sorting
     sort_key: SortKey,
     sort_dir: SortDir,
@@ -177,6 +182,7 @@ pub struct WavesPreviewer {
     batch_rename_error: Option<String>,
     saving_sources: Vec<PathBuf>,
     saving_virtual: Vec<(PathBuf, PathBuf)>,
+    saving_edit_sources: Vec<PathBuf>,
     saving_mode: Option<SaveMode>,
 
     // LUFS with Gain recompute support
@@ -738,7 +744,7 @@ spectro_note_labels={}\n",
     }
 
     fn update_loop_markers_dirty(tab: &mut EditorTab) {
-        tab.loop_markers_dirty = tab.loop_region != tab.loop_markers_saved;
+        tab.loop_markers_dirty = tab.loop_region_committed != tab.loop_markers_saved;
     }
 
     fn next_marker_label(markers: &[crate::markers::MarkerEntry]) -> String {
@@ -857,10 +863,30 @@ spectro_note_labels={}\n",
             .count()
     }
 
-    fn clear_all_pending_gains(&mut self) {
+    fn clear_all_pending_gains_with_undo(&mut self) {
+        let mut paths: Vec<PathBuf> = self
+            .items
+            .iter()
+            .filter(|item| {
+                item.pending_gain_db.abs() > 0.0001
+                    || self.lufs_override.contains_key(&item.path)
+                    || self.lufs_recalc_deadline.contains_key(&item.path)
+            })
+            .map(|item| item.path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            return;
+        }
+        let before = self.capture_list_selection_snapshot();
+        let before_items = self.capture_list_undo_items_by_paths(&paths);
         for item in &mut self.items {
             item.pending_gain_db = 0.0;
         }
+        self.lufs_override.clear();
+        self.lufs_recalc_deadline.clear();
+        self.record_list_update_from_paths(&paths, before_items, before);
     }
 
     fn display_name_for_path(path: &Path) -> String {
@@ -1656,6 +1682,7 @@ spectro_note_labels={}\n",
     }
 
     fn paste_clipboard_to_list(&mut self) {
+        let before = self.capture_list_selection_snapshot();
         let payload = self.clipboard_payload.clone();
         let mut added_any = false;
         let mut added_paths: Vec<PathBuf> = Vec::new();
@@ -1706,6 +1733,7 @@ spectro_note_labels={}\n",
                     }
                 }
                 self.selected = self.selected_multi.iter().next().copied();
+                self.record_list_insert_from_paths(&added_paths, before);
                 if self.debug.cfg.enabled {
                     self.debug.last_paste_at = Some(std::time::Instant::now());
                     self.debug.last_paste_count = added_paths.len();
@@ -1718,11 +1746,20 @@ spectro_note_labels={}\n",
             }
             return;
         }
+        let existing_paths: HashSet<PathBuf> =
+            self.items.iter().map(|item| item.path.clone()).collect();
         let files = self.get_clipboard_files();
         if !files.is_empty() {
             let added = self.add_files_merge(&files);
             if added > 0 {
                 self.after_add_refresh();
+                let new_paths: Vec<PathBuf> = self
+                    .items
+                    .iter()
+                    .filter(|item| !existing_paths.contains(&item.path))
+                    .map(|item| item.path.clone())
+                    .collect();
+                self.record_list_insert_from_paths(&new_paths, before);
                 if self.debug.cfg.enabled {
                     self.debug.last_paste_at = Some(std::time::Instant::now());
                     self.debug.last_paste_count = added;
@@ -1801,6 +1838,9 @@ spectro_note_labels={}\n",
             .from_path(path)
             .map_err(|e| format!("csv export open failed: {e}"))?;
         let mut header: Vec<String> = Vec::new();
+        if cols.edited {
+            header.push("Edited".to_string());
+        }
         if cols.file {
             header.push("File".to_string());
         }
@@ -1851,6 +1891,14 @@ spectro_note_labels={}\n",
             };
             let meta = item.meta.as_ref();
             let mut row: Vec<String> = Vec::new();
+            if cols.edited {
+                let edited = self.has_edits_for_paths(&[item.path.clone()]);
+                row.push(if edited {
+                    "\u{25CF}".to_string()
+                } else {
+                    "".to_string()
+                });
+            }
             if cols.file {
                 row.push(item.display_name.clone());
             }
@@ -2075,7 +2123,24 @@ spectro_note_labels={}\n",
         if indices.is_empty() {
             return;
         }
+        struct EditSaveTask {
+            src: PathBuf,
+            audio: Option<std::sync::Arc<crate::audio::AudioBuffer>>,
+            gain_db: f32,
+            out_sr: u32,
+            file_sr: u32,
+            max_file_samples: Option<u64>,
+            markers: Vec<crate::markers::MarkerEntry>,
+            loop_region: Option<(usize, usize)>,
+            write_audio: bool,
+            write_markers: bool,
+            write_loop_markers: bool,
+        }
+        let cfg = self.export_cfg.clone();
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
         let mut items: Vec<(PathBuf, f32)> = Vec::new();
+        let mut edit_tasks: Vec<EditSaveTask> = Vec::new();
+        let mut edit_sources: Vec<PathBuf> = Vec::new();
         let mut virtual_tasks: Vec<(
             PathBuf,
             PathBuf,
@@ -2152,29 +2217,113 @@ spectro_note_labels={}\n",
                     .map(|m| m.sample_rate)
                     .unwrap_or(self.audio.shared.out_sample_rate);
                 virtual_tasks.push((p, dst, audio, db, sr));
-            } else if db.abs() > 0.0001 {
-                items.push((p, db));
+            } else {
+                let mut dirty_audio = false;
+                let mut markers_dirty = false;
+                let mut loop_markers_dirty = false;
+                let mut markers: Vec<crate::markers::MarkerEntry> = Vec::new();
+                let mut loop_region: Option<(usize, usize)> = None;
+                let mut ch_samples: Option<Vec<Vec<f32>>> = None;
+                let mut max_file_samples: Option<u64> = None;
+                if let Some(tab) = self.tabs.iter().find(|t| t.path.as_path() == p.as_path()) {
+                    dirty_audio = tab.dirty;
+                    markers_dirty = tab.markers_dirty;
+                    loop_markers_dirty = tab.loop_markers_dirty;
+                    markers = tab.markers_committed.clone();
+                    loop_region = tab.loop_region_committed;
+                    if dirty_audio || markers_dirty || loop_markers_dirty {
+                        let needs_audio =
+                            cfg.save_mode == SaveMode::NewFile || dirty_audio || db.abs() > 0.0001;
+                        if needs_audio {
+                            ch_samples = Some(tab.ch_samples.clone());
+                            max_file_samples = Some(tab.samples_len as u64);
+                        } else {
+                            max_file_samples = self
+                                .meta_for_path(&p)
+                                .and_then(|m| m.duration_secs)
+                                .map(|secs| (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                    .round()
+                                    .max(0.0) as u64);
+                        }
+                    }
+                } else if let Some(cached) = self.edited_cache.get(&p) {
+                    dirty_audio = cached.dirty;
+                    markers_dirty = cached.markers_dirty;
+                    loop_markers_dirty = cached.loop_markers_dirty;
+                    markers = cached.markers_committed.clone();
+                    loop_region = cached.loop_region_committed;
+                    if dirty_audio || markers_dirty || loop_markers_dirty {
+                        let needs_audio =
+                            cfg.save_mode == SaveMode::NewFile || dirty_audio || db.abs() > 0.0001;
+                        if needs_audio {
+                            ch_samples = Some(cached.ch_samples.clone());
+                            max_file_samples = Some(cached.samples_len as u64);
+                        } else {
+                            max_file_samples = self
+                                .meta_for_path(&p)
+                                .and_then(|m| m.duration_secs)
+                                .map(|secs| (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                    .round()
+                                    .max(0.0) as u64);
+                        }
+                    }
+                }
+                let has_edits = dirty_audio || markers_dirty || loop_markers_dirty;
+                if has_edits {
+                    let write_audio =
+                        cfg.save_mode == SaveMode::NewFile || dirty_audio || db.abs() > 0.0001;
+                    let audio = ch_samples.map(crate::audio::AudioBuffer::from_channels).map(
+                        std::sync::Arc::new,
+                    );
+                    let file_sr = if write_audio {
+                        out_sr
+                    } else {
+                        self.sample_rate_for_path(&p, out_sr)
+                    };
+                    let write_markers = markers_dirty || (write_audio && !markers.is_empty());
+                    let write_loop_markers =
+                        loop_markers_dirty || (write_audio && loop_region.is_some());
+                    edit_tasks.push(EditSaveTask {
+                        src: p.clone(),
+                        audio,
+                        gain_db: db,
+                        out_sr,
+                        file_sr,
+                        max_file_samples,
+                        markers,
+                        loop_region,
+                        write_audio,
+                        write_markers,
+                        write_loop_markers,
+                    });
+                    edit_sources.push(p);
+                } else if db.abs() > 0.0001 {
+                    items.push((p, db));
+                }
             }
         }
-        if items.is_empty() && virtual_tasks.is_empty() {
+        if items.is_empty() && edit_tasks.is_empty() && virtual_tasks.is_empty() {
             return;
         }
-        let cfg = self.export_cfg.clone();
+        let save_mode = if items.is_empty() && edit_tasks.is_empty() {
+            SaveMode::NewFile
+        } else {
+            cfg.save_mode
+        };
         // remember sources for post-save cleanup + reload
         self.saving_sources = items.iter().map(|(p, _)| p.clone()).collect();
+        self.saving_sources.extend(edit_sources.clone());
+        self.saving_edit_sources = edit_sources;
         self.saving_virtual = virtual_tasks
             .iter()
             .map(|(src, dst, _, _, _)| (src.clone(), dst.clone()))
             .collect();
-        self.saving_mode = Some(if items.is_empty() {
-            SaveMode::NewFile
-        } else {
-            cfg.save_mode
-        });
+        self.saving_mode = Some(save_mode);
         let virtual_jobs = virtual_tasks
             .iter()
             .map(|(src, dst, audio, db, sr)| (src.clone(), dst.clone(), audio.clone(), *db, *sr))
             .collect::<Vec<_>>();
+        let edit_jobs = edit_tasks;
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
             let mut ok = 0usize;
@@ -2182,7 +2331,7 @@ spectro_note_labels={}\n",
             let mut success_paths = Vec::new();
             let mut failed_paths = Vec::new();
             for (src, db) in items {
-                match cfg.save_mode {
+                match save_mode {
                     SaveMode::Overwrite => {
                         match crate::wave::overwrite_gain_audio(&src, db, cfg.backup_bak) {
                             Ok(()) => {
@@ -2266,6 +2415,163 @@ spectro_note_labels={}\n",
                     }
                 }
             }
+            for task in edit_jobs {
+                let dst = match save_mode {
+                    SaveMode::Overwrite => task.src.clone(),
+                    SaveMode::NewFile => {
+                        let parent = cfg.dest_folder.clone().unwrap_or_else(|| {
+                            task.src
+                                .parent()
+                                .unwrap_or_else(|| std::path::Path::new("."))
+                                .to_path_buf()
+                        });
+                        let stem = task
+                            .src
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("out");
+                        let mut name = cfg.name_template.clone();
+                        name = name.replace("{name}", stem);
+                        name = name.replace("{gain:+.1}", &format!("{:+.1}", task.gain_db));
+                        name = name.replace("{gain:+0.0}", &format!("{:+.1}", task.gain_db));
+                        name = name.replace("{gain}", &format!("{:+.1}", task.gain_db));
+                        let name = crate::app::helpers::sanitize_filename_component(&name);
+                        let mut dst = parent.join(name);
+                        let src_ext = task
+                            .src
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("wav");
+                        let dst_ext = dst.extension().and_then(|e| e.to_str());
+                        let use_dst_ext = dst_ext
+                            .map(|e| crate::audio_io::is_supported_extension(e))
+                            .unwrap_or(false);
+                        if !use_dst_ext {
+                            dst.set_extension(src_ext);
+                        }
+                        if dst.exists() {
+                            match cfg.conflict {
+                                ConflictPolicy::Overwrite => {}
+                                ConflictPolicy::Skip => {
+                                    failed += 1;
+                                    failed_paths.push(task.src.clone());
+                                    continue;
+                                }
+                                ConflictPolicy::Rename => {
+                                    let orig = dst.clone();
+                                    let orig_ext =
+                                        orig.extension().and_then(|e| e.to_str()).unwrap_or("");
+                                    let mut idx = 1u32;
+                                    loop {
+                                        let stem2 = orig
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("out");
+                                        let n = crate::app::helpers::sanitize_filename_component(
+                                            &format!("{}_{:02}", stem2, idx),
+                                        );
+                                        dst = orig.with_file_name(n);
+                                        if !orig_ext.is_empty() {
+                                            dst.set_extension(orig_ext);
+                                        }
+                                        if !dst.exists() {
+                                            break;
+                                        }
+                                        idx += 1;
+                                        if idx > 999 {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        dst
+                    }
+                };
+                if task.write_audio {
+                    let Some(audio) = task.audio.as_ref() else {
+                        failed += 1;
+                        failed_paths.push(task.src.clone());
+                        continue;
+                    };
+                    let mut channels = audio.channels.clone();
+                    if task.gain_db.abs() > 0.0001 {
+                        let gain = 10.0f32.powf(task.gain_db / 20.0);
+                        for ch in channels.iter_mut() {
+                            for v in ch.iter_mut() {
+                                *v *= gain;
+                            }
+                        }
+                    }
+                    let res = match save_mode {
+                        SaveMode::Overwrite => crate::wave::overwrite_audio_from_channels(
+                            &channels,
+                            task.out_sr,
+                            &dst,
+                            cfg.backup_bak,
+                        ),
+                        SaveMode::NewFile => {
+                            crate::wave::export_channels_audio(&channels, task.out_sr, &dst)
+                        }
+                    };
+                    if res.is_err() {
+                        failed += 1;
+                        failed_paths.push(task.src.clone());
+                        continue;
+                    }
+                } else if !task.src.is_file() {
+                    failed += 1;
+                    failed_paths.push(task.src.clone());
+                    continue;
+                }
+                let mut marker_ok = true;
+                if task.write_markers {
+                    if let Err(err) = crate::markers::write_markers(
+                        &dst,
+                        task.out_sr,
+                        task.file_sr,
+                        &task.markers,
+                    ) {
+                        eprintln!("write markers failed {}: {err:?}", dst.display());
+                        marker_ok = false;
+                    }
+                }
+                if task.write_loop_markers {
+                    let mut loop_opt: Option<(u64, u64)> = None;
+                    if let Some((s, e)) = task.loop_region {
+                        if let Some((mut ls, mut le)) =
+                            crate::wave::map_loop_markers_to_file_sr(
+                                s,
+                                e,
+                                task.out_sr,
+                                task.file_sr,
+                            )
+                        {
+                            if let Some(max) = task.max_file_samples {
+                                if max > 0 {
+                                    let max = max.min(u32::MAX as u64);
+                                    ls = (ls as u64).min(max) as u32;
+                                    le = (le as u64).min(max) as u32;
+                                }
+                            }
+                            if le > ls {
+                                loop_opt = Some((ls as u64, le as u64));
+                            }
+                        }
+                    }
+                    if let Err(err) = crate::loop_markers::write_loop_markers(&dst, loop_opt) {
+                        eprintln!("write loop markers failed {}: {err:?}", dst.display());
+                        marker_ok = false;
+                    }
+                }
+                if marker_ok {
+                    ok += 1;
+                    success_paths.push(dst.clone());
+                } else {
+                    failed += 1;
+                    failed_paths.push(dst.clone());
+                }
+            }
             for (_src, dst, audio, db, sr) in virtual_jobs {
                 let mut channels = audio.channels.clone();
                 if db.abs() > 0.0001 {
@@ -2328,6 +2634,14 @@ spectro_note_labels={}\n",
         if indices.is_empty() {
             return;
         }
+        let mut paths: Vec<PathBuf> = indices
+            .iter()
+            .filter_map(|&i| self.path_for_row(i).cloned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        let before = self.capture_list_selection_snapshot();
+        let before_items = self.capture_list_undo_items_by_paths(&paths);
         let mut affect_playing = false;
         for &i in indices {
             if let Some(p) = self.path_for_row(i).cloned() {
@@ -2344,6 +2658,7 @@ spectro_note_labels={}\n",
         if affect_playing {
             self.apply_effective_volume();
         }
+        self.record_list_update_from_paths(&paths, before_items, before);
     }
 
     fn schedule_lufs_for_path(&mut self, path: PathBuf) {
@@ -3199,6 +3514,9 @@ impl WavesPreviewer {
             select_anchor: None,
             clipboard_payload: None,
             clipboard_temp_files: Vec::new(),
+            list_undo_stack: Vec::new(),
+            list_redo_stack: Vec::new(),
+            last_undo_scope: UndoScope::Editor,
             sort_key: SortKey::File,
             sort_dir: SortDir::None,
             scroll_to_selected: false,
@@ -3249,6 +3567,7 @@ impl WavesPreviewer {
             batch_rename_error: None,
             saving_sources: Vec::new(),
             saving_virtual: Vec::new(),
+            saving_edit_sources: Vec::new(),
             saving_mode: None,
 
             lufs_override: HashMap::new(),
@@ -3315,6 +3634,11 @@ impl WavesPreviewer {
             show_waveform_overlay: tab.show_waveform_overlay,
             dirty: tab.dirty,
             approx_bytes,
+            markers: tab.markers.clone(),
+            markers_committed: tab.markers_committed.clone(),
+            markers_applied: tab.markers_applied.clone(),
+            loop_region_applied: tab.loop_region_applied,
+            loop_region_committed: tab.loop_region_committed,
         }
     }
 
@@ -3345,9 +3669,16 @@ impl WavesPreviewer {
         state
     }
 
-    fn push_undo_state(tab: &mut EditorTab, clear_redo: bool) {
-        let state = Self::capture_undo_state(tab);
-        Self::push_undo_state_from(tab, state, clear_redo);
+    fn push_editor_undo_state(
+        &mut self,
+        tab_idx: usize,
+        state: EditorUndoState,
+        clear_redo: bool,
+    ) {
+        self.last_undo_scope = UndoScope::Editor;
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            Self::push_undo_state_from(tab, state, clear_redo);
+        }
     }
 
     fn push_undo_state_from(tab: &mut EditorTab, state: EditorUndoState, clear_redo: bool) {
@@ -3388,6 +3719,11 @@ impl WavesPreviewer {
             tab.tool_state = state.tool_state;
             tab.active_tool = state.active_tool;
             tab.show_waveform_overlay = state.show_waveform_overlay;
+            tab.markers = state.markers;
+            tab.markers_committed = state.markers_committed;
+            tab.markers_applied = state.markers_applied;
+            tab.loop_region_applied = state.loop_region_applied;
+            tab.loop_region_committed = state.loop_region_committed;
             tab.drag_select_anchor = None;
             tab.dragging_marker = None;
             tab.preview_offset_samples = None;
@@ -3961,7 +4297,7 @@ impl eframe::App for WavesPreviewer {
         self.run_startup_actions(ctx);
         // Debug automation + checks
         self.debug_tick(ctx);
-        // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z) in editor
+        // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z) for editor/list
         if !ctx.wants_keyboard_input() {
             let (undo, redo) = ctx.input(|i| {
                 let redo = i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::Z);
@@ -3969,17 +4305,31 @@ impl eframe::App for WavesPreviewer {
                 (undo, redo)
             });
             if undo || redo {
-                if let Some(tab_idx) = self.active_tab {
-                    self.clear_preview_if_any(tab_idx);
-                    self.editor_apply_state = None;
-                    let changed = if redo {
-                        self.redo_in_tab(tab_idx)
-                    } else {
-                        self.undo_in_tab(tab_idx)
-                    };
-                    if changed {
-                        ctx.request_repaint();
+                let mut handled = false;
+                let prefer_list = self.last_undo_scope == UndoScope::List;
+                if prefer_list {
+                    handled = if redo { self.list_redo() } else { self.list_undo() };
+                }
+                if !handled {
+                    if let Some(tab_idx) = self.active_tab {
+                        self.clear_preview_if_any(tab_idx);
+                        self.editor_apply_state = None;
+                        let changed = if redo {
+                            self.redo_in_tab(tab_idx)
+                        } else {
+                            self.undo_in_tab(tab_idx)
+                        };
+                        if changed {
+                            self.last_undo_scope = UndoScope::Editor;
+                            handled = true;
+                        }
                     }
+                }
+                if !handled {
+                    handled = if redo { self.list_redo() } else { self.list_undo() };
+                }
+                if handled {
+                    ctx.request_repaint();
                 }
             }
         }
@@ -4145,12 +4495,20 @@ impl eframe::App for WavesPreviewer {
                 eprintln!("save/export done: ok={}, failed={}", res.ok, res.failed);
                 if state.msg.starts_with("Saving") {
                     let sources = self.saving_sources.clone();
+                    let edit_sources = self.saving_edit_sources.clone();
                     for p in &sources {
                         self.set_pending_gain_db_for_path(p, 0.0);
                         self.lufs_override.remove(p);
                     }
                     let success_set: std::collections::HashSet<PathBuf> =
                         res.success_paths.iter().cloned().collect();
+                    if matches!(self.saving_mode, Some(SaveMode::Overwrite)) {
+                        for p in &edit_sources {
+                            if success_set.contains(p) {
+                                self.mark_edit_saved_for_path(p);
+                            }
+                        }
+                    }
                     let mut virtual_success: Vec<(PathBuf, PathBuf)> = Vec::new();
                     for (src, dst) in &self.saving_virtual {
                         if success_set.contains(dst) {
@@ -4210,6 +4568,7 @@ impl eframe::App for WavesPreviewer {
                     }
                     self.saving_sources.clear();
                     self.saving_virtual.clear();
+                    self.saving_edit_sources.clear();
                     self.saving_mode = None;
                 }
                 self.export_state = None;
@@ -4505,8 +4864,8 @@ impl eframe::App for WavesPreviewer {
                     let active = self.active_tab == Some(i);
                     let tab = &self.tabs[i];
                     let mut display = tab.display_name.clone();
-                    if tab.dirty || tab.loop_markers_dirty {
-                        display.push_str(" *");
+                    if tab.dirty || tab.loop_markers_dirty || tab.markers_dirty {
+                        display = format!("\u{25CF} {display}");
                     }
                     let path_for_activate = tab.path.clone();
                     let text = if active {

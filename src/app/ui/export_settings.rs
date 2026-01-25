@@ -112,6 +112,7 @@ impl crate::app::WavesPreviewer {
                     ui.label("List Columns:");
                     let mut next_cols = self.list_columns;
                     ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut next_cols.edited, "Edited");
                         ui.checkbox(&mut next_cols.file, "File");
                         ui.checkbox(&mut next_cols.folder, "Folder");
                         ui.checkbox(&mut next_cols.transcript, "Transcript");
@@ -134,7 +135,8 @@ impl crate::app::WavesPreviewer {
                         ui.checkbox(&mut next_cols.wave, "Wave");
                     });
                     let external_available = !self.external_visible_columns.is_empty();
-                    let any_visible = next_cols.file
+                    let any_visible = next_cols.edited
+                        || next_cols.file
                         || next_cols.folder
                         || next_cols.transcript
                         || (next_cols.external && external_available)

@@ -81,6 +81,8 @@ pub struct ProjectApp {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectListColumns {
+    #[serde(default)]
+    pub edited: bool,
     pub file: bool,
     pub folder: bool,
     pub transcript: bool,
@@ -565,6 +567,7 @@ impl super::WavesPreviewer {
             search_query: self.search_query.clone(),
             search_regex: self.search_use_regex,
             list_columns: ProjectListColumns {
+                edited: self.list_columns.edited,
                 file: self.list_columns.file,
                 folder: self.list_columns.folder,
                 transcript: self.list_columns.transcript,
@@ -734,6 +737,7 @@ impl super::WavesPreviewer {
         self.search_query = project.app.search_query.clone();
         self.search_use_regex = project.app.search_regex;
         self.list_columns = super::types::ListColumnConfig {
+            edited: project.app.list_columns.edited,
             file: project.app.list_columns.file,
             folder: project.app.list_columns.folder,
             transcript: project.app.list_columns.transcript,
@@ -811,9 +815,13 @@ impl super::WavesPreviewer {
                     waveform_minmax: waveform,
                     dirty: edit.dirty,
                     loop_region: edit.loop_region.map(|v| (v[0], v[1])),
+                    loop_region_committed: edit.loop_region.map(|v| (v[0], v[1])),
+                    loop_region_applied: edit.loop_region.map(|v| (v[0], v[1])),
                     loop_markers_saved: edit.loop_markers_saved.map(|v| (v[0], v[1])),
                     loop_markers_dirty: edit.loop_markers_dirty,
                     markers: edit.markers.iter().map(project_marker_to_entry).collect(),
+                    markers_committed: edit.markers.iter().map(project_marker_to_entry).collect(),
+                    markers_applied: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_saved: edit
                         .markers_saved
                         .iter()
@@ -863,9 +871,21 @@ impl super::WavesPreviewer {
                         waveform_minmax: waveform,
                         dirty: tab.dirty,
                         loop_region: tab.loop_region.map(|v| (v[0], v[1])),
+                        loop_region_committed: tab.loop_region.map(|v| (v[0], v[1])),
+                        loop_region_applied: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_markers_saved: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_markers_dirty: tab.loop_markers_dirty,
                         markers: tab
+                            .markers
+                            .iter()
+                            .map(project_marker_to_entry)
+                            .collect(),
+                        markers_committed: tab
+                            .markers
+                            .iter()
+                            .map(project_marker_to_entry)
+                            .collect(),
+                        markers_applied: tab
                             .markers
                             .iter()
                             .map(project_marker_to_entry)

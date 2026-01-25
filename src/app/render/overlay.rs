@@ -97,6 +97,60 @@ pub fn compute_overlay_bins_for_base_columns(
     minmax_over_ranges(overlay_samples, &ranges_overlay)
 }
 
+/// Compute overlay bins for loop-unwrap preview with an anchor at loop_start.
+/// Pre-loop region is 1:1 aligned; the tail is stretched to the overlay length.
+pub fn compute_overlay_bins_for_unwrap(
+    start: usize,
+    visible_len: usize,
+    base_total: usize,
+    loop_start: usize,
+    overlay_samples: &[f32],
+    overlay_total: usize,
+    bins: usize,
+) -> Vec<(f32, f32)> {
+    if visible_len == 0 || bins == 0 || overlay_total == 0 || base_total == 0 {
+        return Vec::new();
+    }
+    if overlay_total <= base_total || loop_start >= base_total {
+        return compute_overlay_bins_for_base_columns(
+            start,
+            visible_len,
+            start.min(overlay_total),
+            visible_len.min(overlay_total.saturating_sub(start)),
+            overlay_samples,
+            bins,
+        );
+    }
+    let anchor = loop_start.min(base_total);
+    let tail_base = base_total.saturating_sub(anchor).max(1) as f32;
+    let tail_overlay = overlay_total.saturating_sub(anchor).max(1) as f32;
+    let tail_ratio = tail_overlay / tail_base;
+    let map_point = |x: usize| -> usize {
+        if x <= anchor {
+            x.min(overlay_total)
+        } else {
+            let mapped = anchor as f32 + (x.saturating_sub(anchor) as f32) * tail_ratio;
+            mapped.round().clamp(0.0, overlay_total as f32) as usize
+        }
+    };
+    let ranges_base = base_ranges_for_bins(start, visible_len, bins);
+    let mut ranges_overlay = Vec::with_capacity(ranges_base.len());
+    for (i0, i1) in ranges_base {
+        let mut o0 = map_point(i0);
+        let mut o1 = map_point(i1);
+        if o1 <= o0 {
+            o1 = o0.saturating_add(1);
+        }
+        o0 = o0.min(overlay_total);
+        o1 = o1.min(overlay_total);
+        if o1 <= o0 {
+            o1 = (o0 + 1).min(overlay_total.max(o0 + 1));
+        }
+        ranges_overlay.push((o0, o1));
+    }
+    minmax_over_ranges(overlay_samples, &ranges_overlay)
+}
+
 /// Given an overlay-visible window [startb, startb+over_vis) and total `bins` columns,
 /// return the pixel-column range [p0,p1) which corresponds to an overlay segment [seg_start, seg_end).
 /// Returns None if the intersection is empty.

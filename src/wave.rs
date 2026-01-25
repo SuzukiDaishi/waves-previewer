@@ -735,6 +735,50 @@ pub fn export_selection_wav(chans: &[Vec<f32>], sample_rate: u32, range: (usize,
     Ok(())
 }
 
+// Export full in-memory audio to a supported format (wav/mp3/m4a) based on dst extension.
+pub fn export_channels_audio(chans: &[Vec<f32>], sample_rate: u32, dst: &Path) -> Result<()> {
+    let ext = dst.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "wav" => {
+            let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
+            export_selection_wav(chans, sample_rate, (0, len), dst)
+        }
+        "mp3" => {
+            let data = encode_mp3(chans, sample_rate)?;
+            std::fs::write(dst, data)?;
+            Ok(())
+        }
+        "m4a" => encode_aac_to_mp4(dst, chans, sample_rate),
+        _ => anyhow::bail!("unsupported export format: {}", ext),
+    }
+}
+
+// Overwrite: export in-memory audio and replace the source file safely with optional .bak
+pub fn overwrite_audio_from_channels(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    src: &Path,
+    backup: bool,
+) -> Result<()> {
+    use std::fs;
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
+    let tmp = parent.join(format!("._wvp_tmp.{}", ext));
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
+    export_channels_audio(chans, sample_rate, &tmp)?;
+    if backup {
+        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
+        let bak = src.with_file_name(format!("{}.bak", fname));
+        let _ = fs::remove_file(&bak);
+        let _ = fs::copy(src, &bak);
+    }
+    let _ = fs::remove_file(src);
+    fs::rename(&tmp, src)?;
+    Ok(())
+}
+
 
 // Overwrite: apply gain and replace the source file safely with optional .bak
 pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> {

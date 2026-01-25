@@ -64,10 +64,14 @@ impl super::WavesPreviewer {
                     waveform_minmax: waveform,
                     dirty: tab.dirty,
                     loop_region: tab.loop_region,
+                    loop_region_committed: tab.loop_region_committed,
+                    loop_region_applied: tab.loop_region_applied,
                     loop_markers_saved: tab.loop_markers_saved,
                     loop_markers_dirty: tab.loop_markers_dirty,
                     markers: tab.markers.clone(),
+                    markers_committed: tab.markers_committed.clone(),
                     markers_saved: tab.markers_saved.clone(),
+                    markers_applied: tab.markers_applied.clone(),
                     markers_dirty: tab.markers_dirty,
                     trim_range: tab.trim_range,
                     loop_xfade_samples: tab.loop_xfade_samples,
@@ -95,7 +99,9 @@ impl super::WavesPreviewer {
         let idx = match self
             .tabs
             .iter()
-            .position(|t| (t.dirty || t.loop_markers_dirty) && t.path.as_path() == path)
+            .position(|t| {
+                (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
+            })
         {
             Some(i) => i,
             None => {
@@ -194,7 +200,9 @@ impl super::WavesPreviewer {
         let idx = match self
             .tabs
             .iter()
-            .position(|t| (t.dirty || t.loop_markers_dirty) && t.path.as_path() == path)
+            .position(|t| {
+                (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
+            })
         {
             Some(i) => i,
             None => {
@@ -312,10 +320,14 @@ impl super::WavesPreviewer {
         tab.ops.clear();
         tab.selection = None;
         tab.markers.clear();
+        tab.markers_committed.clear();
         tab.markers_saved.clear();
+        tab.markers_applied.clear();
         tab.markers_dirty = false;
         tab.ab_loop = None;
         tab.loop_region = None;
+        tab.loop_region_committed = None;
+        tab.loop_region_applied = None;
         tab.loop_markers_saved = None;
         tab.loop_markers_dirty = false;
         tab.trim_range = None;
@@ -344,6 +356,7 @@ impl super::WavesPreviewer {
         tab.active_tool_last = None;
         tab.preview_offset_samples = None;
         tab.preview_overlay = None;
+        tab.pending_loop_unwrap = None;
         tab.undo_stack.clear();
         tab.undo_bytes = 0;
         tab.redo_stack.clear();
@@ -447,12 +460,20 @@ impl super::WavesPreviewer {
             return;
         }
         let mut unique: HashSet<PathBuf> = HashSet::new();
+        let mut unique_paths: Vec<PathBuf> = Vec::new();
         let mut reload_playing = false;
         let mut affect_playing = false;
         for p in paths {
             if !unique.insert(p.clone()) {
                 continue;
             }
+            unique_paths.push(p.clone());
+        }
+        unique_paths.sort();
+        unique_paths.dedup();
+        let before = self.capture_list_selection_snapshot();
+        let before_items = self.capture_list_undo_items_by_paths(&unique_paths);
+        for p in &unique_paths {
             self.set_pending_gain_db_for_path(p, 0.0);
             self.lufs_override.remove(p);
             self.lufs_recalc_deadline.remove(p);
@@ -486,6 +507,7 @@ impl super::WavesPreviewer {
         if affect_playing {
             self.apply_effective_volume();
         }
+        self.record_list_update_from_paths(&unique_paths, before_items, before);
     }
 
     /// Helper: read loop markers and map to given output SR, set tab.loop_region if valid
@@ -503,13 +525,17 @@ impl super::WavesPreviewer {
                 crate::wave::map_loop_markers_between_sr(ls, le, in_sr, out_sr, tab.samples_len)
             {
                 tab.loop_region = Some((s, e));
+                tab.loop_region_applied = Some((s, e));
                 saved = Some((s, e));
             } else {
                 tab.loop_region = None;
+                tab.loop_region_applied = None;
             }
         } else {
             tab.loop_region = None;
+            tab.loop_region_applied = None;
         }
+        tab.loop_region_committed = tab.loop_region;
         tab.loop_markers_saved = saved;
         tab.loop_markers_dirty = false;
     }
@@ -533,91 +559,67 @@ impl super::WavesPreviewer {
             Ok(mut markers) => {
                 markers.retain(|m| m.sample <= tab.samples_len);
                 tab.markers = markers.clone();
+                tab.markers_committed = markers.clone();
                 tab.markers_saved = markers;
+                tab.markers_applied = tab.markers_committed.clone();
                 tab.markers_dirty = false;
             }
             Err(err) => {
                 eprintln!("read markers failed {}: {err:?}", path.display());
                 tab.markers.clear();
+                tab.markers_committed.clear();
                 tab.markers_saved.clear();
+                tab.markers_applied.clear();
                 tab.markers_dirty = false;
             }
         }
     }
 
     pub(super) fn write_markers_for_tab(&mut self, tab_idx: usize) -> bool {
-        let (path, markers, file_sr) = {
-            let Some(tab) = self.tabs.get(tab_idx) else {
-                return false;
-            };
-            let file_sr = self.sample_rate_for_path(&tab.path, self.audio.shared.out_sample_rate);
-            (tab.path.clone(), tab.markers.clone(), file_sr)
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
         };
+        let path = tab.path.clone();
         if !path.is_file() {
             self.remove_missing_path(&path);
             return false;
         }
-        let out_sr = self.audio.shared.out_sample_rate.max(1);
-        if let Err(err) = crate::markers::write_markers(&path, out_sr, file_sr, &markers) {
-            eprintln!("write markers failed {}: {err:?}", path.display());
-            return false;
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.markers_saved = tab.markers.clone();
-            tab.markers_dirty = false;
-        }
+        // Non-destructive: keep in memory and defer file writes until Save Selected.
+        self.debug_log(format!(
+            "markers queued for save (path: {})",
+            path.display()
+        ));
         true
     }
 
     pub(super) fn write_loop_markers_for_tab(&mut self, tab_idx: usize) -> bool {
-        let (path, loop_region, out_sr) = {
-            let Some(tab) = self.tabs.get(tab_idx) else {
-                return false;
-            };
-            (
-                tab.path.clone(),
-                tab.loop_region,
-                self.audio.shared.out_sample_rate,
-            )
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
         };
+        let path = tab.path.clone();
         if !path.is_file() {
             self.remove_missing_path(&path);
             return false;
         }
-        let file_sr = self
-            .meta_for_path(&path)
-            .map(|m| m.sample_rate)
-            .filter(|&sr| sr > 0)
-            .or_else(|| audio_io::read_audio_info(&path).ok().map(|i| i.sample_rate))
-            .unwrap_or(out_sr);
-        let mut loop_opt: Option<(u64, u64)> = None;
-        if let Some((s, e)) = loop_region {
-            if let Some((mut ls, mut le)) =
-                crate::wave::map_loop_markers_to_file_sr(s, e, out_sr, file_sr)
-            {
-                if let Some(meta) = self.meta_for_path(&path) {
-                    if let Some(secs) = meta.duration_secs {
-                        let max = (secs * file_sr as f32).round().max(0.0) as u64;
-                        if max > 0 {
-                            ls = (ls as u64).min(max) as u32;
-                            le = (le as u64).min(max) as u32;
-                        }
-                    }
-                }
-                if le > ls {
-                    loop_opt = Some((ls as u64, le as u64));
-                }
-            }
-        }
-        if let Err(err) = loop_markers::write_loop_markers(&path, loop_opt) {
-            eprintln!("write loop markers failed {}: {err:?}", path.display());
-            return false;
-        }
-        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.loop_markers_saved = tab.loop_region;
+        // Non-destructive: keep in memory and defer file writes until Save Selected.
+        self.debug_log(format!(
+            "loop markers queued for save (path: {})",
+            path.display()
+        ));
+        true
+    }
+
+    pub(super) fn mark_edit_saved_for_path(&mut self, path: &Path) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.path.as_path() == path) {
+            tab.dirty = false;
+            tab.markers_saved = tab.markers_committed.clone();
+            tab.markers_applied = tab.markers_committed.clone();
+            tab.markers_dirty = false;
+            tab.loop_markers_saved = tab.loop_region_committed;
+            tab.loop_region_applied = tab.loop_region_committed;
             tab.loop_markers_dirty = false;
         }
-        true
+        self.edited_cache.remove(path);
     }
     // multi-select aware selection update for list clicks (moved from app.rs)
     pub(super) fn update_selection_on_click(&mut self, row_idx: usize, mods: egui::Modifiers) {
@@ -1210,10 +1212,14 @@ impl super::WavesPreviewer {
                     ops: Vec::new(),
                     selection: None,
                     markers: cached.markers,
+                    markers_committed: cached.markers_committed,
                     markers_saved: cached.markers_saved,
+                    markers_applied: cached.markers_applied,
                     markers_dirty: cached.markers_dirty,
                     ab_loop: None,
                     loop_region: cached.loop_region,
+                    loop_region_committed: cached.loop_region_committed,
+                    loop_region_applied: cached.loop_region_applied,
                     loop_markers_saved: cached.loop_markers_saved,
                     loop_markers_dirty: cached.loop_markers_dirty,
                     trim_range: cached.trim_range,
@@ -1240,6 +1246,7 @@ impl super::WavesPreviewer {
                     active_tool_last: None,
                     preview_offset_samples: None,
                     preview_overlay: None,
+                    pending_loop_unwrap: None,
                     undo_stack: Vec::new(),
                     undo_bytes: 0,
                     redo_stack: Vec::new(),
@@ -1284,10 +1291,14 @@ impl super::WavesPreviewer {
                 ops: Vec::new(),
                 selection: None,
                 markers: Vec::new(),
+                markers_committed: Vec::new(),
                 markers_saved: Vec::new(),
+                markers_applied: Vec::new(),
                 markers_dirty: false,
                 ab_loop: None,
                 loop_region: None,
+                loop_region_committed: None,
+                loop_region_applied: None,
                 loop_markers_saved: None,
                 loop_markers_dirty: false,
                 trim_range: None,
@@ -1322,6 +1333,7 @@ impl super::WavesPreviewer {
                 active_tool_last: None,
                 preview_offset_samples: None,
                 preview_overlay: None,
+                pending_loop_unwrap: None,
                 undo_stack: Vec::new(),
                 undo_bytes: 0,
                 redo_stack: Vec::new(),
@@ -1383,10 +1395,14 @@ impl super::WavesPreviewer {
                 ops: Vec::new(),
                 selection: None,
                 markers: cached.markers,
+                markers_committed: cached.markers_committed,
                 markers_saved: cached.markers_saved,
+                markers_applied: cached.markers_applied,
                 markers_dirty: cached.markers_dirty,
                 ab_loop: None,
                 loop_region: cached.loop_region,
+                loop_region_committed: cached.loop_region_committed,
+                loop_region_applied: cached.loop_region_applied,
                 loop_markers_saved: cached.loop_markers_saved,
                 loop_markers_dirty: cached.loop_markers_dirty,
                 trim_range: cached.trim_range,
@@ -1413,6 +1429,7 @@ impl super::WavesPreviewer {
                 active_tool_last: None,
                 preview_offset_samples: None,
                 preview_overlay: None,
+                pending_loop_unwrap: None,
                 undo_stack: Vec::new(),
                 undo_bytes: 0,
                 redo_stack: Vec::new(),
@@ -1449,10 +1466,14 @@ impl super::WavesPreviewer {
             ops: Vec::new(),
             selection: None,
             markers: Vec::new(),
+            markers_committed: Vec::new(),
             markers_saved: Vec::new(),
+            markers_applied: Vec::new(),
             markers_dirty: false,
             ab_loop: None,
             loop_region: None,
+            loop_region_committed: None,
+            loop_region_applied: None,
             loop_markers_saved: None,
             loop_markers_dirty: false,
             trim_range: None,
@@ -1487,6 +1508,7 @@ impl super::WavesPreviewer {
             active_tool_last: None,
             preview_offset_samples: None,
             preview_overlay: None,
+            pending_loop_unwrap: None,
             undo_stack: Vec::new(),
             undo_bytes: 0,
             redo_stack: Vec::new(),

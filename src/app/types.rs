@@ -69,8 +69,49 @@ pub enum SortDir {
     None,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UndoScope {
+    Editor,
+    List,
+}
+
+#[derive(Clone, Debug)]
+pub struct ListSelectionSnapshot {
+    pub selected_path: Option<PathBuf>,
+    pub selected_paths: Vec<PathBuf>,
+    pub anchor_path: Option<PathBuf>,
+    pub playing_path: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+pub struct ListUndoItem {
+    pub item: MediaItem,
+    pub item_index: usize,
+    pub edited_cache: Option<CachedEdit>,
+    pub lufs_override: Option<f32>,
+    pub lufs_deadline: Option<Instant>,
+}
+
+#[derive(Clone)]
+pub enum ListUndoActionKind {
+    Remove { items: Vec<ListUndoItem> },
+    Insert { items: Vec<ListUndoItem> },
+    Update {
+        before: Vec<ListUndoItem>,
+        after: Vec<ListUndoItem>,
+    },
+}
+
+#[derive(Clone)]
+pub struct ListUndoAction {
+    pub kind: ListUndoActionKind,
+    pub before: ListSelectionSnapshot,
+    pub after: ListSelectionSnapshot,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListColumnConfig {
+    pub edited: bool,
     pub file: bool,
     pub folder: bool,
     pub transcript: bool,
@@ -89,6 +130,7 @@ pub struct ListColumnConfig {
 impl Default for ListColumnConfig {
     fn default() -> Self {
         Self {
+            edited: true,
             file: true,
             folder: true,
             transcript: false,
@@ -305,11 +347,15 @@ pub struct EditorTab {
     pub selection: Option<(usize, usize)>, // [start,end) in samples
     pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
     pub markers_saved: Vec<MarkerEntry>,   // last saved markers
+    pub markers_committed: Vec<MarkerEntry>, // New field
+    pub markers_applied: Vec<MarkerEntry>, // last applied markers
     pub markers_dirty: bool,
     // Deprecated: ab_loop (A/B) is no longer used as loop region; kept for transition
     pub ab_loop: Option<(usize, usize)>,
     // Playback loop region (independent from editing selection)
     pub loop_region: Option<(usize, usize)>,
+    pub loop_region_applied: Option<(usize, usize)>,
+    pub loop_region_committed: Option<(usize, usize)>,
     // Loop markers baseline (device SR) for dirty tracking
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
@@ -341,6 +387,7 @@ pub struct EditorTab {
     pub preview_offset_samples: Option<usize>,
     // Per-channel non-destructive preview overlay (green waveform)
     pub preview_overlay: Option<PreviewOverlay>,
+    pub pending_loop_unwrap: Option<u32>,
     pub undo_stack: Vec<EditorUndoState>,
     pub undo_bytes: usize,
     pub redo_stack: Vec<EditorUndoState>,
@@ -456,6 +503,7 @@ pub struct EditorUndoState {
     pub selection: Option<(usize, usize)>,
     pub ab_loop: Option<(usize, usize)>,
     pub loop_region: Option<(usize, usize)>,
+    pub loop_region_committed: Option<(usize, usize)>,
     pub trim_range: Option<(usize, usize)>,
     pub loop_xfade_samples: usize,
     pub loop_xfade_shape: LoopXfadeShape,
@@ -470,6 +518,10 @@ pub struct EditorUndoState {
     pub show_waveform_overlay: bool,
     pub dirty: bool,
     pub approx_bytes: usize,
+    pub markers: Vec<MarkerEntry>,
+    pub markers_committed: Vec<MarkerEntry>,
+    pub markers_applied: Vec<MarkerEntry>,
+    pub loop_region_applied: Option<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -479,10 +531,14 @@ pub struct CachedEdit {
     pub waveform_minmax: Vec<(f32, f32)>,
     pub dirty: bool,
     pub loop_region: Option<(usize, usize)>,
+    pub loop_region_committed: Option<(usize, usize)>,
+    pub loop_region_applied: Option<(usize, usize)>,
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
     pub markers: Vec<MarkerEntry>,
     pub markers_saved: Vec<MarkerEntry>,
+    pub markers_committed: Vec<MarkerEntry>,
+    pub markers_applied: Vec<MarkerEntry>,
     pub markers_dirty: bool,
     pub trim_range: Option<(usize, usize)>,
     pub loop_xfade_samples: usize,

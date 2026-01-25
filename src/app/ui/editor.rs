@@ -12,6 +12,10 @@ impl crate::app::WavesPreviewer {
         tab_idx: usize,
     ) {
         let mut apply_pending_loop = false;
+        let mut do_commit_loop = false;
+        let mut do_preview_unwrap: Option<u32> = None;
+        let mut do_commit_markers = false;
+        let mut pending_edit_undo: Option<EditorUndoState> = None;
         // Pre-read audio values to avoid borrowing self while editing tab
         let sr_ctx = self.audio.shared.out_sample_rate.max(1) as f32;
         let pos_audio_now = self
@@ -57,19 +61,13 @@ impl crate::app::WavesPreviewer {
         let mut touch_spectro_cache = false;
         ui.horizontal(|ui| {
             let tab = &self.tabs[tab_idx];
-            let dirty_mark = if tab.dirty || tab.loop_markers_dirty || tab.markers_dirty {
-                " *"
-            } else {
-                ""
-            };
             let base = if self.is_virtual_path(&tab.path) {
                 format!("{} (virtual)", tab.display_name)
             } else {
                 tab.path.display().to_string()
             };
-            let path_text = format!("{}{}", base, dirty_mark);
             ui.add(
-                egui::Label::new(RichText::new(path_text).monospace())
+                egui::Label::new(RichText::new(base).monospace())
                     .truncate()
                     .show_tooltip_when_elided(true),
             );
@@ -140,7 +138,7 @@ impl crate::app::WavesPreviewer {
                             } else {
                                 view.selected.retain(|&v| v != idx);
                             }
-                        }
+                            }
                     }
                     if ui.button("Clear").clicked() {
                         view.selected.clear();
@@ -378,10 +376,7 @@ impl crate::app::WavesPreviewer {
         let mut do_reverse: Option<(usize, usize)> = None;
         // let mut do_silence: Option<(usize,usize)> = None; // removed
         let mut do_cutjoin: Option<(usize, usize)> = None;
-        let mut do_apply_xfade: bool = false;
-        let mut do_unwrap_loop: Option<u32> = None;
-        let mut do_write_loop_markers: bool = false;
-        let mut do_write_markers: bool = false;
+        // Loop/marker apply handled via commit flags below.
         let mut do_fade_in: Option<((usize, usize), crate::app::types::FadeShape)> = None;
         let mut do_fade_out: Option<((usize, usize), crate::app::types::FadeShape)> = None;
         let mut stop_playback = false;
@@ -895,8 +890,14 @@ impl crate::app::WavesPreviewer {
                                         let ax = to_x(a);
                                         let bx = to_x(b);
                                         if (x - ax).abs() <= hit_radius {
+                                            if pending_edit_undo.is_none() {
+                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                            }
                                             tab.dragging_marker = Some(MarkerKind::A);
                                         } else if (x - bx).abs() <= hit_radius {
+                                            if pending_edit_undo.is_none() {
+                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                            }
                                             tab.dragging_marker = Some(MarkerKind::B);
                                         }
                                     }
@@ -907,8 +908,14 @@ impl crate::app::WavesPreviewer {
                                         let ax = to_x(a);
                                         let bx = to_x(b);
                                         if (x - ax).abs() <= hit_radius {
+                                            if pending_edit_undo.is_none() {
+                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                            }
                                             tab.dragging_marker = Some(MarkerKind::A);
                                         } else if (x - bx).abs() <= hit_radius {
+                                            if pending_edit_undo.is_none() {
+                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                            }
                                             tab.dragging_marker = Some(MarkerKind::B);
                                         }
                                     }
@@ -924,6 +931,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::LoopEdit => {
                                     if let Some((a0, b0)) = tab.loop_region {
                                         let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                        if pending_edit_undo.is_none() {
+                                            pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                        }
                                         match marker {
                                             MarkerKind::A => a = samp.min(b),
                                             MarkerKind::B => b = samp.max(a),
@@ -936,6 +946,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Trim => {
                                     if let Some((a0, b0)) = tab.trim_range {
                                         let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                        if pending_edit_undo.is_none() {
+                                            pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                        }
                                         match marker {
                                             MarkerKind::A => a = samp.min(b),
                                             MarkerKind::B => b = samp.max(a),
@@ -1138,6 +1151,10 @@ impl crate::app::WavesPreviewer {
                                     let base_total = tab.samples_len.max(1);
                                     let overlay_total = overlay.timeline_len.max(1);
                                     let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
+                                    let unwrap_preview = matches!(overlay.source_tool, ToolKind::LoopEdit)
+                                        && overlay_total > base_total
+                                        && tab.pending_loop_unwrap.is_some()
+                                        && tab.loop_region.is_some();
                                     let ratio = if is_time_stretch {
                                         1.0
                                     } else if base_total == 0 {
@@ -1151,11 +1168,24 @@ impl crate::app::WavesPreviewer {
                                     let (startb, _endb, over_vis) = ov::map_visible_overlay(start_scaled, vis_scaled, overlay_total, buf.len());
                                     if over_vis > 0 {
                                         let bins = wave_w as usize;
-                                        let bins_values = ov::compute_overlay_bins_for_base_columns(start, visible_len, startb, over_vis, buf, bins);
+                                        let bins_values = if unwrap_preview {
+                                            let loop_start = tab.loop_region.map(|(a, _)| a).unwrap_or(0);
+                                            ov::compute_overlay_bins_for_unwrap(
+                                                start,
+                                                visible_len,
+                                                base_total,
+                                                loop_start,
+                                                buf,
+                                                overlay_total,
+                                                bins,
+                                            )
+                                        } else {
+                                            ov::compute_overlay_bins_for_base_columns(start, visible_len, startb, over_vis, buf, bins)
+                                        };
                                         // Draw full overlay
                                         ov::draw_bins_locked(&painter, lane_rect, wave_w, &bins_values, scale, OVERLAY_COLOR, OVERLAY_STROKE_BASE);
                                         // Emphasize LoopEdit boundary segments if applicable
-                                        if tab.active_tool == ToolKind::LoopEdit {
+                                        if tab.active_tool == ToolKind::LoopEdit && !unwrap_preview {
                                             if let Some((a, b)) = tab.loop_region {
                                                 let cf = Self::effective_loop_xfade_samples(
                                                     a,
@@ -1273,19 +1303,49 @@ impl crate::app::WavesPreviewer {
                                 .or_else(|| overlay.channels.get(0).map(|v| v.as_slice()))
                         };
                         if let Some(buf) = och {
-                            // Map original-visible [start,end) to overlay domain using length ratio.
-                            // This keeps overlays visible at any zoom, even when length differs (e.g. TimeStretch).
-                            let lenb = buf.len();
-                                    let base_total = tab.samples_len.max(1);
-                                    let overlay_total = overlay.timeline_len.max(1);
-                                    let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
-                                    let ratio = if is_time_stretch {
-                                        1.0
-                                    } else if base_total > 0 {
-                                        (overlay_total as f32) / (base_total as f32)
-                                    } else {
-                                        1.0
-                                    };
+                            use crate::app::render::overlay as ov;
+                            let base_total = tab.samples_len.max(1);
+                            let overlay_total = overlay.timeline_len.max(1);
+                            let unwrap_preview = matches!(overlay.source_tool, ToolKind::LoopEdit)
+                                && overlay_total > base_total
+                                && tab.pending_loop_unwrap.is_some()
+                                && tab.loop_region.is_some();
+                            if unwrap_preview {
+                                if let Some((loop_start, _)) = tab.loop_region {
+                                    let bins = wave_w as usize;
+                                    if bins > 0 {
+                                        let values = ov::compute_overlay_bins_for_unwrap(
+                                            start,
+                                            visible_len.max(1),
+                                            base_total,
+                                            loop_start,
+                                            buf,
+                                            overlay_total,
+                                            bins,
+                                        );
+                                        ov::draw_bins_locked(
+                                            &painter,
+                                            lane_rect,
+                                            wave_w,
+                                            &values,
+                                            scale,
+                                            egui::Color32::from_rgb(80, 240, 160),
+                                            1.3,
+                                        );
+                                    }
+                                }
+                            } else {
+                                // Map original-visible [start,end) to overlay domain using length ratio.
+                                // This keeps overlays visible at any zoom, even when length differs (e.g. TimeStretch).
+                                let lenb = buf.len();
+                                let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
+                                let ratio = if is_time_stretch {
+                                    1.0
+                                } else if base_total > 0 {
+                                    (overlay_total as f32) / (base_total as f32)
+                                } else {
+                                    1.0
+                                };
                             let orig_vis = visible_len.max(1);
                             // Map visible window [start .. start+orig_vis) into overlay domain using total-length ratio
                             // Align overlay start to original start using nearest sample to minimize off-by-one drift
@@ -1493,6 +1553,7 @@ impl crate::app::WavesPreviewer {
                                     }
                                 }
                             }
+                            }
                         }
                     }
                 }
@@ -1557,7 +1618,12 @@ impl crate::app::WavesPreviewer {
                     let vis = (wave_w * spp).ceil() as usize;
                     let start = tab.view_offset.min(tab.samples_len);
                     let end = (start + vis).min(tab.samples_len);
-                    let col = Color32::from_rgb(255, 200, 80);
+                    let pending = tab.markers != tab.markers_committed;
+                    let col = if pending {
+                        Color32::from_rgb(120, 220, 120)
+                    } else {
+                        Color32::from_rgb(255, 200, 80)
+                    };
                     for m in tab.markers.iter() {
                         if m.sample < start || m.sample > end {
                             continue;
@@ -2168,14 +2234,26 @@ impl crate::app::WavesPreviewer {
                                         let max_i = tab.samples_len as i64;
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label("Start:");
-                                            let chs = ui.add(egui::DragValue::new(&mut s_i).range(0..=max_i).speed(64.0)).changed();
+                                            let resp_s = ui.add(egui::DragValue::new(&mut s_i).range(0..=max_i).speed(64.0));
                                             ui.label("End:");
-                                            let che = ui.add(egui::DragValue::new(&mut e_i).range(0..=max_i).speed(64.0)).changed();
+                                            let resp_e = ui.add(egui::DragValue::new(&mut e_i).range(0..=max_i).speed(64.0));
+                                            if (resp_s.gained_focus() || resp_s.drag_started()
+                                                || resp_e.gained_focus()
+                                                || resp_e.drag_started())
+                                                && pending_edit_undo.is_none()
+                                            {
+                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                            }
+                                            let chs = resp_s.changed();
+                                            let che = resp_e.changed();
                                             if chs || che {
                                                 let mut s = s_i.clamp(0, max_i) as usize;
                                                 let mut e = e_i.clamp(0, max_i) as usize;
                                                 if e < s { std::mem::swap(&mut s, &mut e); }
                                                 tab.loop_region = Some((s,e));
+                                                tab.pending_loop_unwrap = None;
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
                                                 Self::update_loop_markers_dirty(tab);
                                                 apply_pending_loop = true;
                                             }
@@ -2185,7 +2263,11 @@ impl crate::app::WavesPreviewer {
                                         let mut x_ms = (tab.loop_xfade_samples as f32 / sr) * 1000.0;
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label("Xfade (ms):");
-                                            if ui.add(egui::DragValue::new(&mut x_ms).range(0.0..=5000.0).speed(5.0).fixed_decimals(1)).changed() {
+                                            let resp_x = ui.add(egui::DragValue::new(&mut x_ms).range(0.0..=5000.0).speed(5.0).fixed_decimals(1));
+                                            if (resp_x.gained_focus() || resp_x.drag_started()) && pending_edit_undo.is_none() {
+                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                            }
+                                            if resp_x.changed() {
                                                 let samp = ((x_ms / 1000.0) * sr).round().clamp(0.0, tab.samples_len as f32) as usize;
                                                 tab.loop_xfade_samples = samp;
                                                 apply_pending_loop = true;
@@ -2196,56 +2278,54 @@ impl crate::app::WavesPreviewer {
                                                 ui.selectable_value(&mut shp, crate::app::types::LoopXfadeShape::Linear, "Linear");
                                                 ui.selectable_value(&mut shp, crate::app::types::LoopXfadeShape::EqualPower, "Equal");
                                             });
-                                            if shp != tab.loop_xfade_shape { tab.loop_xfade_shape = shp; apply_pending_loop = true; }
+                                            if shp != tab.loop_xfade_shape {
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
+                                                tab.loop_xfade_shape = shp;
+                                                apply_pending_loop = true;
+                                            }
                                         });
                                         ui.horizontal_wrapped(|ui| {
                                             if ui.button("Set Start").on_hover_text("Set Start at playhead").clicked() {
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
                                                 let pos = playhead_display_now;
                                                 let end = tab.loop_region.map(|(_,e)| e).unwrap_or(pos);
                                                 let (mut s, mut e) = (pos, end);
                                                 if e < s { std::mem::swap(&mut s, &mut e); }
                                                 tab.loop_region = Some((s,e));
+                                                tab.pending_loop_unwrap = None;
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
                                                 Self::update_loop_markers_dirty(tab);
                                                 apply_pending_loop = true;
                                             }
                                             if ui.button("Set End").on_hover_text("Set End at playhead").clicked() {
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
                                                 let pos = playhead_display_now;
                                                 let start = tab.loop_region.map(|(s,_)| s).unwrap_or(pos);
                                                 let (mut s, mut e) = (start, pos);
                                                 if e < s { std::mem::swap(&mut s, &mut e); }
                                                 tab.loop_region = Some((s,e));
+                                                tab.pending_loop_unwrap = None;
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
                                                 Self::update_loop_markers_dirty(tab);
                                                 apply_pending_loop = true;
                                             }
-                                            if ui.button("Clear").clicked() { do_set_loop_from = Some((0,0)); }
+                                            if ui.button("Clear").clicked() {
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
+                                                do_set_loop_from = Some((0,0));
+                                            }
                                         });
 
                                         // Crossfade controls already above; add Apply button to destructively bake Xfade
-                                        ui.horizontal_wrapped(|ui| {
-                                            let effective_cf = tab
-                                                .loop_region
-                                                .map(|(a, b)| {
-                                                    Self::effective_loop_xfade_samples(
-                                                        a,
-                                                        b,
-                                                        tab.samples_len,
-                                                        tab.loop_xfade_samples,
-                                                    )
-                                                })
-                                                .unwrap_or(0);
-                                            if ui
-                                                .add_enabled(
-                                                    effective_cf > 0,
-                                                    egui::Button::new("Apply Xfade"),
-                                                )
-                                                .on_hover_text(
-                                                    "Bake crossfade into data at loop boundary",
-                                                )
-                                                .clicked()
-                                            {
-                                                do_apply_xfade = true;
-                                            }
-                                        });
                                         ui.horizontal_wrapped(|ui| {
                                             let mut repeat = tab.tool_state.loop_repeat.max(2);
                                             ui.label("Repeat:");
@@ -2267,40 +2347,49 @@ impl crate::app::WavesPreviewer {
                                             if ui
                                                 .add_enabled(
                                                     has_loop && !apply_busy,
-                                                    egui::Button::new(format!(
-                                                        "Unwrap x{}",
-                                                        repeat
-                                                    )),
+                                                    egui::Button::new(format!("Unwrap x{}", repeat)),
                                                 )
-                                                .on_hover_text(
-                                                    "Replace the loop with repeated copies and add loop markers",
-                                                )
+                                                .on_hover_text("Preview loop unwrap (non-destructive until Apply)")
                                                 .clicked()
                                             {
-                                                do_unwrap_loop = Some(repeat);
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
+                                                do_preview_unwrap = Some(repeat);
                                                 stop_playback = true;
+                                                tab.pending_loop_unwrap = Some(repeat);
                                                 tab.preview_audio_tool = None;
                                                 tab.preview_overlay = None;
-                                            }
-                                        });
-                                        ui.horizontal_wrapped(|ui| {
-                                            let label = if tab.loop_region.is_some() {
-                                                "Write Markers to File"
-                                            } else {
-                                                "Clear Markers in File"
-                                            };
+                                            }                                        ui.horizontal_wrapped(|ui| {
+                                            let effective_cf = tab
+                                                .loop_region
+                                                .map(|(a, b)| {
+                                                    Self::effective_loop_xfade_samples(
+                                                        a,
+                                                        b,
+                                                        tab.samples_len,
+                                                        tab.loop_xfade_samples,
+                                                    )
+                                                })
+                                                .unwrap_or(0);
+                                            let is_loop_dirty = tab.loop_region != tab.loop_region_committed;
+                                            let unwrap_pending = tab.pending_loop_unwrap.is_some();
+                                            let can_apply = (is_loop_dirty || effective_cf > 0 || unwrap_pending) && !apply_busy;
                                             if ui
                                                 .add_enabled(
-                                                    tab.loop_markers_dirty,
-                                                    egui::Button::new(label),
+                                                    can_apply,
+                                                    egui::Button::new("Apply"),
                                                 )
                                                 .on_hover_text(
-                                                    "Write loop markers into file metadata",
+                                                    "Commit loop changes and bake crossfade",
                                                 )
                                                 .clicked()
                                             {
-                                                do_write_loop_markers = true;
+                                                do_commit_loop = true;
                                             }
+                                        });
+
+
                                         });
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):
@@ -2362,6 +2451,9 @@ impl crate::app::WavesPreviewer {
                                         let out_sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                         ui.horizontal_wrapped(|ui| {
                                             if ui.button("Add at Playhead").clicked() {
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
                                                 let pos = playhead_display_now;
                                                 let label = Self::next_marker_label(&tab.markers);
                                                 let entry = crate::markers::MarkerEntry {
@@ -2376,7 +2468,6 @@ impl crate::app::WavesPreviewer {
                                                         tab.markers.insert(idx, entry);
                                                     }
                                                 }
-                                                tab.markers_dirty = true;
                                             }
                                             if ui
                                                 .add_enabled(
@@ -2385,24 +2476,20 @@ impl crate::app::WavesPreviewer {
                                                 )
                                                 .clicked()
                                             {
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
                                                 tab.markers.clear();
-                                                tab.markers_dirty = true;
                                             }
                                         });
                                         ui.horizontal_wrapped(|ui| {
-                                            let label = if tab.markers.is_empty() {
-                                                "Clear Markers File"
-                                            } else {
-                                                "Write Markers to File"
-                                            };
+                                            let can_apply = tab.markers != tab.markers_committed && !apply_busy;
                                             if ui
-                                                .add_enabled(
-                                                    tab.markers_dirty,
-                                                    egui::Button::new(label),
-                                                )
+                                                .add_enabled(can_apply, egui::Button::new("Apply"))
+                                                .on_hover_text("Commit markers (written on Save Selected)")
                                                 .clicked()
                                             {
-                                                do_write_markers = true;
+                                                do_commit_markers = true;
                                             }
                                         });
                                         ui.label(format!("Count: {}", tab.markers.len()));
@@ -2410,13 +2497,14 @@ impl crate::app::WavesPreviewer {
                                             let samples_len = tab.samples_len;
                                             let mut len_sec = (samples_len as f32 / out_sr).max(0.0);
                                             if !len_sec.is_finite() { len_sec = 0.0; }
+                                            let mut markers_local = tab.markers.clone();
                                             let mut remove_idx: Option<usize> = None;
                                             let mut resort = false;
                                             let mut dirty = false;
                                             egui::ScrollArea::vertical()
                                                 .max_height(160.0)
                                                 .show(ui, |ui| {
-                                                    for (idx, m) in tab.markers.iter_mut().enumerate() {
+                                                    for (idx, m) in markers_local.iter_mut().enumerate() {
                                                         let mut secs = (m.sample as f32) / out_sr;
                                                         if !secs.is_finite() { secs = 0.0; }
                                                         if secs > len_sec { secs = len_sec; }
@@ -2428,14 +2516,13 @@ impl crate::app::WavesPreviewer {
                                                             if resp.changed() {
                                                                 dirty = true;
                                                             }
-                                                            let time_changed = ui
-                                                                .add(
-                                                                    egui::DragValue::new(&mut secs)
-                                                                        .range(0.0..=len_sec)
-                                                                        .speed(0.01)
-                                                                        .fixed_decimals(3),
-                                                                )
-                                                                .changed();
+                                                            let resp_time = ui.add(
+                                                                egui::DragValue::new(&mut secs)
+                                                                    .range(0.0..=len_sec)
+                                                                    .speed(0.01)
+                                                                    .fixed_decimals(3),
+                                                            );
+                                                            let time_changed = resp_time.changed();
                                                             if time_changed {
                                                                 let sample = ((secs.max(0.0)) * out_sr)
                                                                     .round() as usize;
@@ -2451,14 +2538,19 @@ impl crate::app::WavesPreviewer {
                                                     }
                                                 });
                                             if let Some(idx) = remove_idx {
-                                                tab.markers.remove(idx);
+                                                if idx < markers_local.len() {
+                                                    markers_local.remove(idx);
+                                                }
                                                 dirty = true;
                                             }
                                             if resort {
-                                                tab.markers.sort_by_key(|m| m.sample);
+                                                markers_local.sort_by_key(|m| m.sample);
                                             }
                                             if dirty {
-                                                tab.markers_dirty = true;
+                                                if pending_edit_undo.is_none() {
+                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                }
+                                                tab.markers = markers_local;
                                             }
                                         }
                                     });
@@ -3026,6 +3118,9 @@ impl crate::app::WavesPreviewer {
                 Self::update_loop_markers_dirty(tab);
             }
         }
+        if let Some(state) = pending_edit_undo.take() {
+            self.push_editor_undo_state(tab_idx, state, true);
+        }
         if let Some((s, e)) = do_trim {
             self.editor_apply_trim_range(tab_idx, (s, e));
         }
@@ -3063,17 +3158,88 @@ impl crate::app::WavesPreviewer {
         if let Some((s, e)) = do_cutjoin {
             self.editor_delete_range_and_join(tab_idx, (s, e));
         }
-        if do_apply_xfade {
-            self.editor_apply_loop_xfade(tab_idx);
+        if do_commit_loop {
+            let mut apply_xfade = false;
+            let mut do_unwrap: Option<u32> = None;
+            let mut undo_state = None;
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                if let Some(repeat) = tab.pending_loop_unwrap {
+                    do_unwrap = Some(repeat);
+                } else {
+                    let will_change = tab.loop_region_committed != tab.loop_region
+                        || tab.loop_region_applied != tab.loop_region
+                        || tab.loop_xfade_samples > 0;
+                    if will_change {
+                        undo_state = Some(Self::capture_undo_state(tab));
+                    }
+                    tab.loop_region_committed = tab.loop_region;
+                    tab.loop_region_applied = tab.loop_region_committed;
+                    apply_xfade = tab.loop_xfade_samples > 0;
+                }
+                tab.pending_loop_unwrap = None;
+                tab.preview_audio_tool = None;
+                tab.preview_overlay = None;
+            }
+            if let Some(state) = undo_state {
+                self.push_editor_undo_state(tab_idx, state, true);
+            }
+            if let Some(repeat) = do_unwrap {
+                self.editor_apply_loop_unwrap(tab_idx, repeat);
+            } else {
+                if apply_xfade {
+                    self.editor_apply_loop_xfade(tab_idx);
+                }
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    Self::update_loop_markers_dirty(tab);
+                }
+            }
         }
-        if let Some(repeat) = do_unwrap_loop {
-            self.editor_apply_loop_unwrap(tab_idx, repeat);
+        if let Some(repeat) = do_preview_unwrap {
+            let preview_ok = self
+                .tabs
+                .get(tab_idx)
+                .map(|t| t.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT)
+                .unwrap_or(false);
+            if preview_ok {
+                if let Some(tab) = self.tabs.get(tab_idx) {
+                    if let Some(chans) = self.editor_preview_loop_unwrap(tab, repeat) {
+                        let timeline_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
+                        let mono = Self::mixdown_channels(&chans, timeline_len);
+                        let markers = Self::build_loop_unwrap_markers(
+                            &tab.markers,
+                            tab.loop_region.map(|v| v.0).unwrap_or(0),
+                            tab.loop_region.map(|v| v.1).unwrap_or(0),
+                            tab.samples_len,
+                            repeat as usize,
+                        );
+                        if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
+                            tab_mut.markers = markers;
+                            tab_mut.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                chans,
+                                ToolKind::LoopEdit,
+                                timeline_len,
+                            ));
+                        }
+                        if !mono.is_empty() {
+                            self.set_preview_mono(tab_idx, ToolKind::LoopEdit, mono);
+                        }
+                    }
+                }
+            }
         }
-        if do_write_loop_markers {
-            self.write_loop_markers_for_tab(tab_idx);
-        }
-        if do_write_markers {
-            self.write_markers_for_tab(tab_idx);
+        if do_commit_markers {
+            let mut undo_state = None;
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                if tab.markers != tab.markers_committed {
+                    undo_state = Some(Self::capture_undo_state(tab));
+                }
+                tab.markers_committed = tab.markers.clone();
+                tab.markers_applied = tab.markers_committed.clone();
+                tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+            }
+            if let Some(state) = undo_state {
+                self.push_editor_undo_state(tab_idx, state, true);
+            }
         }
         if apply_pending_loop {
             if let Some(tab_ro) = self.tabs.get(tab_idx) {

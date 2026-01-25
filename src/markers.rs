@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const MARKER_FILE_VERSION: u32 = 1;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkerEntry {
     pub sample: usize,
     pub label: String,

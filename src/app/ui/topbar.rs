@@ -66,9 +66,7 @@ impl crate::app::WavesPreviewer {
                             ui.close();
                         }
                         if ui.button("Clear All Gains").clicked() {
-                            self.clear_all_pending_gains();
-                            self.lufs_override.clear();
-                            self.lufs_recalc_deadline.clear();
+                            self.clear_all_pending_gains_with_undo();
                             ui.close();
                         }
                         ui.separator();
@@ -146,7 +144,7 @@ impl crate::app::WavesPreviewer {
                             )
                             .clicked()
                         {
-                            self.remove_paths_from_list(&selected);
+                            self.remove_paths_from_list_with_undo(&selected);
                             ui.close();
                         }
                         let has_edits = self.has_edits_for_paths(&selected);

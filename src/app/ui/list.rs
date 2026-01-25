@@ -1,4 +1,4 @@
-use egui::{Align, RichText, Sense};
+use egui::{Align, Color32, RichText, Sense};
 use egui_extras::TableBuilder;
 
 impl crate::app::WavesPreviewer {
@@ -39,14 +39,6 @@ impl crate::app::WavesPreviewer {
         let wants_kb_input = ctx.wants_keyboard_input();
         let copy_trigger = pressed_ctrl_c || (!wants_kb_input && event_copy);
         let paste_trigger = pressed_ctrl_v || (!wants_kb_input && event_paste);
-        let mut dirty_paths: std::collections::HashSet<PathBuf> = self
-            .tabs
-            .iter()
-            .filter(|t| t.dirty || t.loop_markers_dirty || t.markers_dirty)
-            .map(|t| t.path.clone())
-            .collect();
-        dirty_paths.extend(self.edited_cache.keys().cloned());
-
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
         if copy_trigger {
@@ -129,7 +121,7 @@ impl crate::app::WavesPreviewer {
             if pressed_delete {
                 let selected = self.selected_paths();
                 if !selected.is_empty() {
-                    self.remove_paths_from_list(&selected);
+                    self.remove_paths_from_list_with_undo(&selected);
                 }
             }
             if key_moved && self.auto_play_list_nav {
@@ -164,6 +156,18 @@ impl crate::app::WavesPreviewer {
                 || self.last_list_scroll_at.map_or(true, |t| {
                     t.elapsed() > std::time::Duration::from_millis(300)
                 }));
+        let header_dirty = self
+            .tabs
+            .iter()
+            .any(|t| t.dirty || t.loop_markers_dirty || t.markers_dirty)
+            || self
+                .edited_cache
+                .values()
+                .any(|c| c.dirty || c.loop_markers_dirty || c.markers_dirty)
+            || self
+                .items
+                .iter()
+                .any(|item| item.pending_gain_db.abs() > 0.0001);
         let mut filler_cols = 0usize;
         let mut table = TableBuilder::new(ui)
             .striped(true)
@@ -171,6 +175,11 @@ impl crate::app::WavesPreviewer {
             .auto_shrink([false, true])
             .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
+        if cols.edited {
+            table = table.column(egui_extras::Column::initial(30.0).resizable(false)); // Status column
+            filler_cols += 1;
+        }
+
         if cols.file {
             table = table.column(egui_extras::Column::initial(200.0).resizable(true));
             filler_cols += 1;
@@ -240,6 +249,18 @@ impl crate::app::WavesPreviewer {
 
         table
             .header(header_h, |mut header| {
+                if cols.edited {
+                    header.col(|ui| {
+                        let mut dot = RichText::new("\u{25CF}");
+                        if header_dirty {
+                            dot = dot.color(Color32::from_rgb(255, 180, 60));
+                        } else {
+                            dot = dot.weak();
+                        }
+                        ui.label(dot);
+                    });
+                }
+
                 if cols.file {
                     header.col(|ui| {
                         sort_changed |= sortable_header(
@@ -415,83 +436,89 @@ impl crate::app::WavesPreviewer {
                         row.set_selected(is_selected);
                         let mut clicked_to_load = false;
                         let mut clicked_to_select = false;
+                        let is_dirty = self.has_edits_for_paths(&[path_owned.clone()]);
+                        if cols.edited {
+                            row.col(|ui| {
+                                if is_dirty {
+                                    ui.label(
+                                        RichText::new("\u{25CF}")
+                                            .color(Color32::from_rgb(255, 180, 60))
+                                            .size(text_height * 1.05),
+                                    );
+                                }
+                            });
+                        }
                         if cols.file {
                             row.col(|ui| {
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    let mut display = file_name.clone();
-                                    if dirty_paths.contains(&path_owned) {
-                                        display.push_str(" *");
-                                    }
-                                    if self.has_pending_gain(&path_owned) {
-                                        display.push_str(" •");
-                                    }
-                                    let resp = ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(display)
-                                                    .monospace()
-                                                    .size(text_height * 1.0),
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let display = file_name.clone();
+                                        let resp = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new(display)
+                                                        .monospace()
+                                                        .size(text_height * 1.0),
+                                                )
+                                                .sense(Sense::click())
+                                                .truncate()
+                                                .show_tooltip_when_elided(false),
                                             )
-                                            .sense(Sense::click())
-                                            .truncate()
-                                            .show_tooltip_when_elided(false),
-                                        )
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked_by(egui::PointerButton::Primary)
-                                        && !resp.double_clicked()
-                                    {
-                                        clicked_to_load = true;
-                                    }
-                                    if resp.double_clicked() {
-                                        clicked_to_select = true;
-                                        to_open = Some(path_owned.clone());
-                                    }
-                                    if resp.hovered() {
-                                        resp.on_hover_text(&file_name);
-                                    }
-                                },
-                            );
-                        });
-                        if cols.wave {
-                            row.col(|ui| {
-                            ui.with_layout(
-                                egui::Layout::left_to_right(egui::Align::Center),
-                                |ui| {
-                                    let resp = ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(parent.as_str())
-                                                    .monospace()
-                                                    .size(text_height * 1.0),
-                                            )
-                                            .sense(Sense::click())
-                                            .truncate()
-                                            .show_tooltip_when_elided(false),
-                                        )
-                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked_by(egui::PointerButton::Primary)
-                                        && !resp.double_clicked()
-                                    {
-                                        clicked_to_load = true;
-                                    }
-                                    if resp.double_clicked() {
-                                        clicked_to_select = true;
-                                        if !is_virtual {
-                                            let _ = crate::app::helpers::open_folder_with_file_selected(
-                                                &path_owned,
-                                            );
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        if resp.clicked_by(egui::PointerButton::Primary)
+                                            && !resp.double_clicked()
+                                        {
+                                            clicked_to_load = true;
                                         }
-                                    }
-                                    if resp.hovered() {
-                                        resp.on_hover_text(&parent);
-                                    }
-                                },
-                            );
+                                        if resp.double_clicked() {
+                                            clicked_to_select = true;
+                                            to_open = Some(path_owned.clone());
+                                        }
+                                        if resp.hovered() {
+                                            resp.on_hover_text(&file_name);
+                                        }
+                                    },
+                                );
                             });
                         }
                         if cols.folder {
+                            row.col(|ui| {
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        let resp = ui
+                                            .add(
+                                                egui::Label::new(
+                                                    RichText::new(parent.as_str())
+                                                        .monospace()
+                                                        .size(text_height * 1.0),
+                                                )
+                                                .sense(Sense::click())
+                                                .truncate()
+                                                .show_tooltip_when_elided(false),
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        if resp.clicked_by(egui::PointerButton::Primary)
+                                            && !resp.double_clicked()
+                                        {
+                                            clicked_to_load = true;
+                                        }
+                                        if resp.double_clicked() {
+                                            clicked_to_select = true;
+                                            if !is_virtual {
+                                                let _ = crate::app::helpers::open_folder_with_file_selected(
+                                                    &path_owned,
+                                                );
+                                            }
+                                        }
+                                        if resp.hovered() {
+                                            resp.on_hover_text(&parent);
+                                        }
+                                    },
+                                );
+                            });
+                        }
                         if cols.transcript {
                             row.col(|ui| {
                                 let transcript_text = item
@@ -532,7 +559,6 @@ impl crate::app::WavesPreviewer {
                                     resp.on_hover_text(transcript_text);
                                 }
                             });
-                        }
                         }
                         if cols.external {
                             for name in external_cols.iter() {
@@ -745,80 +771,91 @@ impl crate::app::WavesPreviewer {
                                         let indices = self.selected_multi.clone();
                                         self.adjust_gain_for_indices(&indices, delta);
                                     } else {
+                                        let path_list = vec![path_owned.clone()];
+                                        let before = self.capture_list_selection_snapshot();
+                                        let before_items =
+                                            self.capture_list_undo_items_by_paths(&path_list);
                                         self.set_pending_gain_db_for_path(&path_owned, new);
                                         if self.playing_path.as_ref() == Some(&path_owned) {
                                             self.apply_effective_volume();
                                         }
                                         self.schedule_lufs_for_path(path_owned.clone());
+                                        self.record_list_update_from_paths(
+                                            &path_list,
+                                            before_items,
+                                            before,
+                                        );
                                     }
                                 }
                             });
                         }
-                        row.col(|ui| {
-                            let (rect2, _resp2) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), row_h * 0.9),
-                                Sense::hover(),
-                            );
-                            let error_text = self
-                                .meta_for_path(&path_owned)
-                                .and_then(|m| m.decode_error.as_deref());
-                            let (wave_rect, error_rect) = if error_text.is_some() {
-                                let err_max = (rect2.height() * 0.45).max(8.0);
-                                let mut err_h = (row_h * 0.36).max(8.0);
-                                if err_h > err_max {
-                                    err_h = err_max;
+                        if cols.wave {
+                            row.col(|ui| {
+                                let (rect2, _resp2) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), row_h * 0.9),
+                                    Sense::hover(),
+                                );
+                                let error_text = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.decode_error.as_deref());
+                                let (wave_rect, error_rect) = if error_text.is_some() {
+                                    let err_max = (rect2.height() * 0.45).max(8.0);
+                                    let mut err_h = (row_h * 0.36).max(8.0);
+                                    if err_h > err_max {
+                                        err_h = err_max;
+                                    }
+                                    let wave_h = (rect2.height() - err_h).max(1.0);
+                                    let wave_rect = egui::Rect::from_min_size(
+                                        rect2.min,
+                                        egui::vec2(rect2.width(), wave_h),
+                                    );
+                                    let error_rect = egui::Rect::from_min_size(
+                                        egui::pos2(rect2.min.x, rect2.max.y - err_h),
+                                        egui::vec2(rect2.width(), err_h),
+                                    );
+                                    (wave_rect, Some(error_rect))
+                                } else {
+                                    (rect2, None)
+                                };
+                                if let Some(m) = self.meta_for_path(&path_owned) {
+                                    let w = wave_rect.width();
+                                    let h = wave_rect.height();
+                                    let n = m.thumb.len().max(1) as f32;
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let scale = db_to_amp(gain_db);
+                                    for (idx, &(mn0, mx0)) in m.thumb.iter().enumerate() {
+                                        let mn = (mn0 * scale).clamp(-1.0, 1.0);
+                                        let mx = (mx0 * scale).clamp(-1.0, 1.0);
+                                        let x = wave_rect.left() + (idx as f32 / n) * w;
+                                        let y0 = wave_rect.center().y - mx * (h * 0.45);
+                                        let y1 = wave_rect.center().y - mn * (h * 0.45);
+                                        let a = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
+                                        let col = amp_to_color(a);
+                                        ui.painter().line_segment(
+                                            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
+                                            egui::Stroke::new(1.0, col),
+                                        );
+                                    }
                                 }
-                                let wave_h = (rect2.height() - err_h).max(1.0);
-                                let wave_rect = egui::Rect::from_min_size(
-                                    rect2.min,
-                                    egui::vec2(rect2.width(), wave_h),
-                                );
-                                let error_rect = egui::Rect::from_min_size(
-                                    egui::pos2(rect2.min.x, rect2.max.y - err_h),
-                                    egui::vec2(rect2.width(), err_h),
-                                );
-                                (wave_rect, Some(error_rect))
-                            } else {
-                                (rect2, None)
-                            };
-                            if let Some(m) = self.meta_for_path(&path_owned) {
-                                let w = wave_rect.width();
-                                let h = wave_rect.height();
-                                let n = m.thumb.len().max(1) as f32;
-                                let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let scale = db_to_amp(gain_db);
-                                for (idx, &(mn0, mx0)) in m.thumb.iter().enumerate() {
-                                    let mn = (mn0 * scale).clamp(-1.0, 1.0);
-                                    let mx = (mx0 * scale).clamp(-1.0, 1.0);
-                                    let x = wave_rect.left() + (idx as f32 / n) * w;
-                                    let y0 = wave_rect.center().y - mx * (h * 0.45);
-                                    let y1 = wave_rect.center().y - mn * (h * 0.45);
-                                    let a = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
-                                    let col = amp_to_color(a);
-                                    ui.painter().line_segment(
-                                        [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-                                        egui::Stroke::new(1.0, col),
+                                if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
+                                    let text_pos =
+                                        egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
+                                    let mut font_size = text_height * 0.85;
+                                    if font_size < 10.0 {
+                                        font_size = 10.0;
+                                    }
+                                    if font_size > err_rect.height() {
+                                        font_size = err_rect.height();
+                                    }
+                                    let font = egui::FontId::proportional(font_size);
+                                    ui.painter().text(
+                                        text_pos,
+                                        egui::Align2::LEFT_CENTER,
+                                        text,
+                                        font,
+                                        egui::Color32::from_rgb(220, 90, 90),
                                     );
                                 }
-                            }
-                            if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
-                                let text_pos = egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
-                                let mut font_size = text_height * 0.85;
-                                if font_size < 10.0 {
-                                    font_size = 10.0;
-                                }
-                                if font_size > err_rect.height() {
-                                    font_size = err_rect.height();
-                                }
-                                let font = egui::FontId::proportional(font_size);
-                                ui.painter().text(
-                                    text_pos,
-                                    egui::Align2::LEFT_CENTER,
-                                    text,
-                                    font,
-                                    egui::Color32::from_rgb(220, 90, 90),
-                                );
-                            }
                             });
                         }
                         row.col(|_ui| {});
@@ -862,7 +899,7 @@ impl crate::app::WavesPreviewer {
                                 .add_enabled(has_selection, egui::Button::new("Remove from List"))
                                 .clicked()
                             {
-                                self.remove_paths_from_list(&selected);
+                                self.remove_paths_from_list_with_undo(&selected);
                                 ui.close();
                             }
                             let has_edits = self.has_edits_for_paths(&selected);
