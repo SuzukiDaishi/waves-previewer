@@ -99,7 +99,7 @@ impl WavesPreviewer {
         #[cfg(not(feature = "kittest"))]
         {
             rfd::FileDialog::new()
-                .add_filter("CSV", &["csv"])
+                .add_filter("CSV/Excel", &["csv", "xlsx", "xls"])
                 .pick_file()
         }
     }

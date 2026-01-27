@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use neowaves::app;
+use neowaves::{app, ipc};
 
 fn parse_startup_config() -> app::StartupConfig {
     let mut cfg = app::StartupConfig::default();
@@ -304,7 +304,16 @@ fn parse_startup_config() -> app::StartupConfig {
 }
 
 fn main() -> eframe::Result<()> {
-    let startup = parse_startup_config();
+    let mut startup = parse_startup_config();
+    let mut request = ipc::IpcRequest::empty();
+    request.project = startup.open_project.clone();
+    request.files = startup.open_files.clone();
+    if request.has_payload() && ipc::try_send_request(&request) {
+        return Ok(());
+    }
+    if let Ok(rx) = ipc::start_listener() {
+        startup.ipc_rx = Some(std::sync::Arc::new(std::sync::Mutex::new(rx)));
+    }
     let mut viewport = egui::ViewportBuilder::default()
         .with_min_inner_size([960.0, 600.0])
         .with_inner_size([1280.0, 720.0]);

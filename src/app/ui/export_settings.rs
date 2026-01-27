@@ -164,6 +164,21 @@ impl crate::app::WavesPreviewer {
                         self.apply_sort();
                     }
                     ui.separator();
+                    ui.label("Editor:");
+                    let mut eps = self.zero_cross_epsilon;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut eps)
+                                .range(0.0..=0.1)
+                                .speed(0.00001)
+                                .fixed_decimals(6),
+                        )
+                        .changed()
+                    {
+                        self.zero_cross_epsilon = eps.max(0.0);
+                        self.save_prefs();
+                    }
+                    ui.separator();
                     ui.label("Spectrogram:");
                     let mut next_cfg = self.spectro_cfg.clone();
                     ui.horizontal_wrapped(|ui| {

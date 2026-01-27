@@ -2,7 +2,7 @@ use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 pub type MediaId = u64;
@@ -700,6 +700,7 @@ pub struct StartupConfig {
     pub mcp_allow_export: bool,
     pub mcp_read_only: bool,
     pub mcp_http_addr: Option<String>,
+    pub ipc_rx: Option<Arc<Mutex<std::sync::mpsc::Receiver<crate::ipc::IpcRequest>>>>,
 }
 
 impl Default for StartupConfig {
@@ -739,6 +740,7 @@ impl Default for StartupConfig {
             mcp_allow_export: false,
             mcp_read_only: true,
             mcp_http_addr: None,
+            ipc_rx: None,
         }
     }
 }

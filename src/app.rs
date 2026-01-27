@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::audio::AudioEngine;
 use crate::mcp;
+use crate::ipc;
 use crate::wave::{build_minmax, prepare_for_speed};
 use anyhow::Result;
 use egui::{
@@ -161,6 +162,7 @@ pub struct WavesPreviewer {
     search_deadline: Option<std::time::Instant>,
     // list filtering
     skip_dotfiles: bool,
+    zero_cross_epsilon: f32,
     // processing mode
     mode: RateMode,
     // heavy processing state (overlay)
@@ -232,6 +234,7 @@ pub struct WavesPreviewer {
     // debug/automation
     debug: DebugState,
     debug_summary_seq: u64,
+    ipc_rx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ipc::IpcRequest>>>>,
     mcp_cmd_rx: Option<std::sync::mpsc::Receiver<crate::mcp::UiCommand>>,
     mcp_resp_tx: Option<std::sync::mpsc::Sender<crate::mcp::UiCommandResult>>,
     #[cfg(feature = "kittest")]
@@ -384,6 +387,12 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("skip_dotfiles=") {
                 let v = matches!(rest.trim(), "1" | "true" | "yes" | "on");
                 self.skip_dotfiles = v;
+            } else if let Some(rest) = line.strip_prefix("zero_cross_eps=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.zero_cross_epsilon = v.max(0.0);
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("spectro_fft=") {
                 if let Ok(v) = rest.trim().parse::<usize>() {
                     self.spectro_cfg.fft_size = v;
@@ -453,6 +462,7 @@ impl WavesPreviewer {
             path,
             format!(
                 "theme={}\nskip_dotfiles={}\n\
+zero_cross_eps={:.6}\n\
 spectro_fft={}\n\
 spectro_window={}\n\
 spectro_overlap={:.4}\n\
@@ -464,6 +474,7 @@ spectro_max_hz={:.1}\n\
 spectro_note_labels={}\n",
                 theme,
                 skip,
+                self.zero_cross_epsilon,
                 self.spectro_cfg.fft_size,
                 window,
                 self.spectro_cfg.overlap,
@@ -2974,6 +2985,33 @@ spectro_note_labels={}\n",
         }
     }
 
+    fn process_ipc_requests(&mut self) {
+        let Some(rx) = &self.ipc_rx else {
+            return;
+        };
+        let mut pending: Vec<ipc::IpcRequest> = Vec::new();
+        {
+            let Ok(rx) = rx.lock() else {
+                return;
+            };
+            while let Ok(req) = rx.try_recv() {
+                pending.push(req);
+            }
+        }
+        for req in pending {
+            if let Some(project) = req.project {
+                self.queue_project_open(project);
+                continue;
+            }
+            if !req.files.is_empty() {
+                let added = self.add_files_merge(&req.files);
+                if added > 0 {
+                    self.after_add_refresh();
+                }
+            }
+        }
+    }
+
     fn handle_mcp_command(
         &mut self,
         cmd: mcp::UiCommand,
@@ -3524,6 +3562,7 @@ impl WavesPreviewer {
     fn build_app(startup: StartupConfig, audio: AudioEngine) -> Self {
         // Disable loop in list view at startup.
         audio.set_loop_enabled(false);
+        let ipc_rx = startup.ipc_rx.clone();
         let startup_state = StartupState::new(startup.clone());
         let debug_state = DebugState::new(startup.debug.clone());
         let mut app = Self {
@@ -3623,6 +3662,7 @@ impl WavesPreviewer {
             search_dirty: false,
             search_deadline: None,
             skip_dotfiles: true,
+            zero_cross_epsilon: 1.0e-4,
             mode: RateMode::Speed,
             processing: None,
             list_preview_rx: None,
@@ -3685,6 +3725,7 @@ impl WavesPreviewer {
 
             debug: debug_state,
             debug_summary_seq: 0,
+            ipc_rx,
             mcp_cmd_rx: None,
             mcp_resp_tx: None,
             #[cfg(feature = "kittest")]
@@ -4378,6 +4419,7 @@ impl eframe::App for WavesPreviewer {
         self.apply_effective_volume();
         // Drain scan results (background folder scan)
         self.process_scan_messages();
+        self.process_ipc_requests();
         self.process_mcp_commands(ctx);
         self.apply_pending_transcript_seek();
         self.process_tool_results();
@@ -4950,6 +4992,7 @@ impl eframe::App for WavesPreviewer {
             let dropped: Vec<egui::DroppedFile> = ctx.input(|i| i.raw.dropped_files.clone());
             if !dropped.is_empty() {
                 let mut project_path: Option<std::path::PathBuf> = None;
+                let mut external_path: Option<std::path::PathBuf> = None;
                 let mut paths: Vec<std::path::PathBuf> = Vec::new();
                 for f in dropped {
                     if let Some(p) = f.path {
@@ -4958,8 +5001,18 @@ impl eframe::App for WavesPreviewer {
                             .and_then(|s| s.to_str())
                             .map(|s| s.eq_ignore_ascii_case("nwproj"))
                             .unwrap_or(false);
+                        let is_external = p
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| {
+                                let s = s.to_ascii_lowercase();
+                                s == "csv" || s == "xlsx" || s == "xls"
+                            })
+                            .unwrap_or(false);
                         if is_project && project_path.is_none() {
                             project_path = Some(p);
+                        } else if is_external && external_path.is_none() {
+                            external_path = Some(p);
                         } else if !is_project {
                             paths.push(p);
                         }
@@ -4967,10 +5020,19 @@ impl eframe::App for WavesPreviewer {
                 }
                 if let Some(project) = project_path {
                     self.queue_project_open(project);
-                } else if !paths.is_empty() {
-                    let added = self.add_files_merge(&paths);
-                    if added > 0 {
-                        self.after_add_refresh();
+                } else {
+                    if let Some(data_path) = external_path {
+                        self.external_sheet_selected = None;
+                        self.external_sheet_names.clear();
+                        self.external_settings_dirty = false;
+                        self.show_external_dialog = true;
+                        self.begin_external_load(data_path);
+                    }
+                    if !paths.is_empty() {
+                        let added = self.add_files_merge(&paths);
+                        if added > 0 {
+                            self.after_add_refresh();
+                        }
                     }
                 }
             }

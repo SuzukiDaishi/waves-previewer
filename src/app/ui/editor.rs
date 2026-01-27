@@ -5,6 +5,128 @@ use crate::wave::build_minmax;
 use egui::*;
 
 impl crate::app::WavesPreviewer {
+    fn find_zero_cross_display(&self, tab_idx: usize, cur: usize, dir: i32) -> usize {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return cur;
+        };
+        let channel_count = tab.ch_samples.len();
+        if channel_count == 0 {
+            return cur;
+        }
+        let eps = self.zero_cross_epsilon.max(0.0);
+        let mut visible = tab.channel_view.visible_indices(channel_count);
+        let use_mixdown = tab.channel_view.mode == ChannelViewMode::Mixdown || visible.len() <= 1;
+        let require_all = tab.channel_view.mode == ChannelViewMode::All;
+        if require_all {
+            visible = (0..channel_count).collect();
+        }
+        let min_len = tab
+            .ch_samples
+            .iter()
+            .map(|c| c.len())
+            .min()
+            .unwrap_or(0);
+        if min_len == 0 {
+            return cur;
+        }
+        let cur = cur.min(min_len.saturating_sub(1));
+        let is_cross = |prev: f32, cur: f32| -> bool {
+            cur.abs() <= eps
+                || prev.abs() <= eps
+                || (prev > 0.0 && cur < 0.0)
+                || (prev < 0.0 && cur > 0.0)
+        };
+        if use_mixdown {
+            let mix_at = |idx: usize| -> f32 {
+                let mut sum = 0.0f32;
+                for ch in &tab.ch_samples {
+                    if idx < ch.len() {
+                        sum += ch[idx];
+                    }
+                }
+                sum / channel_count as f32
+            };
+            if dir > 0 {
+                if cur + 1 >= min_len {
+                    return cur;
+                }
+                let mut prev = mix_at(cur);
+                let mut i = cur + 1;
+                while i < min_len {
+                    let s = mix_at(i);
+                    if is_cross(prev, s) {
+                        return i;
+                    }
+                    prev = s;
+                    i += 1;
+                }
+            } else if cur > 0 {
+                let mut prev = mix_at(cur);
+                let mut i = cur.saturating_sub(1);
+                loop {
+                    let s = mix_at(i);
+                    if is_cross(prev, s) {
+                        return i;
+                    }
+                    prev = s;
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                }
+            }
+            return cur;
+        }
+
+        let mut prevs: Vec<f32> = Vec::with_capacity(visible.len());
+        for &ch_idx in &visible {
+            let ch = &tab.ch_samples[ch_idx];
+            prevs.push(ch.get(cur).copied().unwrap_or(0.0));
+        }
+        if dir > 0 {
+            if cur + 1 >= min_len {
+                return cur;
+            }
+            let mut i = cur + 1;
+            while i < min_len {
+                let mut all_ok = true;
+                for (slot, &ch_idx) in visible.iter().enumerate() {
+                    let ch = &tab.ch_samples[ch_idx];
+                    let s = ch.get(i).copied().unwrap_or(0.0);
+                    if !is_cross(prevs[slot], s) {
+                        all_ok = false;
+                    }
+                    prevs[slot] = s;
+                }
+                if all_ok {
+                    return i;
+                }
+                i += 1;
+            }
+        } else if cur > 0 {
+            let mut i = cur.saturating_sub(1);
+            loop {
+                let mut all_ok = true;
+                for (slot, &ch_idx) in visible.iter().enumerate() {
+                    let ch = &tab.ch_samples[ch_idx];
+                    let s = ch.get(i).copied().unwrap_or(0.0);
+                    if !is_cross(prevs[slot], s) {
+                        all_ok = false;
+                    }
+                    prevs[slot] = s;
+                }
+                if all_ok {
+                    return i;
+                }
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
+            }
+        }
+        cur
+    }
+
     pub(in crate::app) fn ui_editor_view(
         &mut self,
         ui: &mut egui::Ui,
@@ -225,6 +347,7 @@ impl crate::app::WavesPreviewer {
         if !ctx.wants_keyboard_input() && tab_samples_len > 0 {
             let mods = ctx.input(|i| i.modifiers);
             let ctrl = mods.ctrl || mods.command;
+            let alt = mods.alt;
             let pressed_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
             let pressed_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
             let left_down = ctx.input(|i| i.key_down(egui::Key::ArrowLeft));
@@ -275,85 +398,90 @@ impl crate::app::WavesPreviewer {
                     }
                 };
                 if should_step {
-                    let spp = self.tabs[tab_idx].samples_per_px.max(0.0001);
-                    let sr_u32 = self.audio.shared.out_sample_rate.max(1);
-                    let sr = sr_u32 as f32;
-                    let px_per_sec = (1.0 / spp) * sr;
-                    let sample_step_sec = 1.0 / sr;
-                    let sample_step = 1usize;
-                    let time_grid_step = |min_px: f32| -> f32 {
-                        let steps: [f32; 18] = [
-                            0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
-                            5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
-                        ];
-                        let mut step = steps[steps.len() - 1];
-                        for s in steps {
-                            if px_per_sec * s >= min_px {
-                                step = s;
-                                break;
-                            }
-                        }
-                        step
-                    };
-                    let tab_bpm_enabled = self.tabs[tab_idx].bpm_enabled;
-                    let bpm_value = self.tabs[tab_idx].bpm_value.max(1.0);
-                    let use_bpm = tab_bpm_enabled && bpm_value >= 20.0;
-                    let base_step_sec = if use_bpm {
-                        let beat_sec = 60.0 / bpm_value;
-                        let steps: [f32; 10] = [
-                            1.0 / 64.0,
-                            1.0 / 32.0,
-                            1.0 / 16.0,
-                            1.0 / 8.0,
-                            1.0 / 4.0,
-                            0.5,
-                            1.0,
-                            2.0,
-                            4.0,
-                            8.0,
-                        ];
-                        let px_per_beat = px_per_sec * beat_sec;
-                        let mut step_beats = steps[steps.len() - 1];
-                        for s in steps {
-                            if px_per_beat * s >= 90.0 {
-                                step_beats = s;
-                                break;
-                            }
-                        }
-                        (beat_sec * step_beats).max(sample_step_sec)
-                    } else {
-                        let mut base = time_grid_step(90.0);
-                        if spp <= 1.0 {
-                            base = sample_step_sec;
-                        }
-                        base.max(sample_step_sec)
-                    };
-                    let base_step_samples = ((base_step_sec * sr).round() as usize).max(sample_step);
-                    let fine_step_samples = (base_step_samples / 4).max(sample_step);
-                    let step_samples = if ctrl {
-                        base_step_samples
-                    } else if mods.shift {
-                        fine_step_samples
-                    } else {
-                        base_step_samples
-                    };
                     let cur_display = playhead_display_now;
-                    let new_display = if ctrl {
-                        if dir > 0 {
-                            cur_display.saturating_add(step_samples)
-                        } else {
-                            cur_display.saturating_sub(step_samples)
-                        }
-                    } else if dir > 0 {
-                        let target = cur_display.saturating_add(step_samples);
-                        (target / step_samples) * step_samples
-                    } else if cur_display == 0 {
-                        0
+                    let new_display = if alt {
+                        self.find_zero_cross_display(tab_idx, cur_display, dir)
                     } else {
-                        let target = cur_display.saturating_sub(1);
-                        (target / step_samples) * step_samples
+                        let spp = self.tabs[tab_idx].samples_per_px.max(0.0001);
+                        let sr_u32 = self.audio.shared.out_sample_rate.max(1);
+                        let sr = sr_u32 as f32;
+                        let px_per_sec = (1.0 / spp) * sr;
+                        let sample_step_sec = 1.0 / sr;
+                        let sample_step = 1usize;
+                        let time_grid_step = |min_px: f32| -> f32 {
+                            let steps: [f32; 18] = [
+                                0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
+                                2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+                            ];
+                            let mut step = steps[steps.len() - 1];
+                            for s in steps {
+                                if px_per_sec * s >= min_px {
+                                    step = s;
+                                    break;
+                                }
+                            }
+                            step
+                        };
+                        let tab_bpm_enabled = self.tabs[tab_idx].bpm_enabled;
+                        let bpm_value = self.tabs[tab_idx].bpm_value.max(1.0);
+                        let use_bpm = tab_bpm_enabled && bpm_value >= 20.0;
+                        let base_step_sec = if use_bpm {
+                            let beat_sec = 60.0 / bpm_value;
+                            let steps: [f32; 10] = [
+                                1.0 / 64.0,
+                                1.0 / 32.0,
+                                1.0 / 16.0,
+                                1.0 / 8.0,
+                                1.0 / 4.0,
+                                0.5,
+                                1.0,
+                                2.0,
+                                4.0,
+                                8.0,
+                            ];
+                            let px_per_beat = px_per_sec * beat_sec;
+                            let mut step_beats = steps[steps.len() - 1];
+                            for s in steps {
+                                if px_per_beat * s >= 90.0 {
+                                    step_beats = s;
+                                    break;
+                                }
+                            }
+                            (beat_sec * step_beats).max(sample_step_sec)
+                        } else {
+                            let mut base = time_grid_step(90.0);
+                            if spp <= 1.0 {
+                                base = sample_step_sec;
+                            }
+                            base.max(sample_step_sec)
+                        };
+                        let base_step_samples =
+                            ((base_step_sec * sr).round() as usize).max(sample_step);
+                        let fine_step_samples = (base_step_samples / 4).max(sample_step);
+                        let step_samples = if ctrl {
+                            base_step_samples
+                        } else if mods.shift {
+                            fine_step_samples
+                        } else {
+                            base_step_samples
+                        };
+                        let new_display = if ctrl {
+                            if dir > 0 {
+                                cur_display.saturating_add(step_samples)
+                            } else {
+                                cur_display.saturating_sub(step_samples)
+                            }
+                        } else if dir > 0 {
+                            let target = cur_display.saturating_add(step_samples);
+                            (target / step_samples) * step_samples
+                        } else if cur_display == 0 {
+                            0
+                        } else {
+                            let target = cur_display.saturating_sub(1);
+                            (target / step_samples) * step_samples
+                        };
+                        new_display.min(tab_samples_len)
                     };
-                    let new_display = new_display.min(tab_samples_len);
                     if new_display != cur_display {
                         request_seek = Some(map_display_to_audio(new_display));
                     }
