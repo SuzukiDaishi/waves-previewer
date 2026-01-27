@@ -16,12 +16,26 @@ impl crate::app::WavesPreviewer {
                     ui.label("No data source loaded.");
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Load CSV/Excel...").clicked() {
+                    if ui
+                        .add_enabled(!self.external_load_inflight, egui::Button::new("Load CSV/Excel..."))
+                        .clicked()
+                    {
                         if let Some(path) = self.pick_external_file_dialog() {
-                            match self.load_external_source(path) {
-                                Ok(()) => self.external_load_error = None,
-                                Err(err) => self.external_load_error = Some(err),
-                            }
+                            self.external_sheet_selected = None;
+                            self.external_sheet_names.clear();
+                            self.external_settings_dirty = false;
+                            self.begin_external_load(path);
+                        }
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.external_load_inflight && self.external_source.is_some(),
+                            egui::Button::new("Reload"),
+                        )
+                        .clicked()
+                    {
+                        if let Some(path) = self.external_source.clone() {
+                            self.begin_external_load(path);
                         }
                     }
                     if ui
@@ -34,8 +48,99 @@ impl crate::app::WavesPreviewer {
                         self.show_external_dialog = false;
                     }
                 });
+                if self.external_load_inflight {
+                    let elapsed = self
+                        .external_load_started_at
+                        .map(|t| t.elapsed().as_secs_f32())
+                        .unwrap_or(0.0);
+                    ui.label(format!(
+                        "Loading external data... rows: {}  ({:.1}s)",
+                        self.external_load_rows, elapsed
+                    ));
+                }
                 if let Some(err) = self.external_load_error.as_ref() {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
+                }
+                if self.external_source.is_some() {
+                    ui.separator();
+                    ui.label(RichText::new("Import Settings").strong());
+                    if !self.external_sheet_names.is_empty() {
+                        let mut selected = self
+                            .external_sheet_selected
+                            .clone()
+                            .unwrap_or_else(|| self.external_sheet_names[0].clone());
+                        egui::ComboBox::from_label("Sheet")
+                            .selected_text(&selected)
+                            .show_ui(ui, |ui| {
+                                for name in &self.external_sheet_names {
+                                    ui.selectable_value(&mut selected, name.clone(), name);
+                                }
+                            });
+                        if Some(selected.clone()) != self.external_sheet_selected {
+                            self.external_sheet_selected = Some(selected);
+                            self.external_settings_dirty = true;
+                        }
+                    }
+                    let mut has_header = self.external_has_header;
+                    if ui.checkbox(&mut has_header, "Header row").changed() {
+                        self.external_has_header = has_header;
+                        if !has_header {
+                            self.external_header_row = None;
+                        }
+                        self.external_settings_dirty = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Header row (1-based, 0=auto)");
+                        let mut header_row = self
+                            .external_header_row
+                            .map(|v| v as i32 + 1)
+                            .unwrap_or(0);
+                        if ui
+                            .add_enabled(
+                                self.external_has_header,
+                                egui::DragValue::new(&mut header_row).range(0..=1_000_000),
+                            )
+                            .changed()
+                        {
+                            self.external_header_row = if header_row <= 0 {
+                                None
+                            } else {
+                                Some((header_row - 1) as usize)
+                            };
+                            self.external_settings_dirty = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Data row (1-based, 0=auto)");
+                        let mut data_row = self
+                            .external_data_row
+                            .map(|v| v as i32 + 1)
+                            .unwrap_or(0);
+                        if ui
+                            .add(egui::DragValue::new(&mut data_row).range(0..=1_000_000))
+                            .changed()
+                        {
+                            self.external_data_row = if data_row <= 0 {
+                                None
+                            } else {
+                                Some((data_row - 1) as usize)
+                            };
+                            self.external_settings_dirty = true;
+                        }
+                    });
+                    if self.external_settings_dirty {
+                        ui.horizontal(|ui| {
+                            ui.label("Settings changed.");
+                            if ui
+                                .add_enabled(!self.external_load_inflight, egui::Button::new("Reload with settings"))
+                                .clicked()
+                            {
+                                if let Some(path) = self.external_source.clone() {
+                                    self.begin_external_load(path);
+                                }
+                            }
+                        });
+                    }
                 }
                 if self.external_headers.is_empty() {
                     return;
@@ -73,7 +178,7 @@ impl crate::app::WavesPreviewer {
                     .selected_text(match rule {
                         crate::app::types::ExternalKeyRule::FileName => "File Name",
                         crate::app::types::ExternalKeyRule::Stem => "File Stem",
-                        crate::app::types::ExternalKeyRule::Regex => "Regex (Stem)",
+                        crate::app::types::ExternalKeyRule::Regex => "Regex",
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
@@ -89,7 +194,7 @@ impl crate::app::WavesPreviewer {
                         ui.selectable_value(
                             &mut rule,
                             crate::app::types::ExternalKeyRule::Regex,
-                            "Regex (Stem)",
+                            "Regex",
                         );
                     });
                 if rule != self.external_key_rule {
@@ -102,6 +207,43 @@ impl crate::app::WavesPreviewer {
                     ui.separator();
                     let mut regex_changed = false;
                     ui.label(RichText::new("Match Rule").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Input");
+                        let mut input = self.external_match_input;
+                        egui::ComboBox::from_id_salt("external_regex_input")
+                            .selected_text(match input {
+                                crate::app::types::ExternalRegexInput::FileName => "File Name",
+                                crate::app::types::ExternalRegexInput::Stem => "File Stem",
+                                crate::app::types::ExternalRegexInput::Path => "Full Path",
+                                crate::app::types::ExternalRegexInput::Dir => "Directory",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut input,
+                                    crate::app::types::ExternalRegexInput::FileName,
+                                    "File Name",
+                                );
+                                ui.selectable_value(
+                                    &mut input,
+                                    crate::app::types::ExternalRegexInput::Stem,
+                                    "File Stem",
+                                );
+                                ui.selectable_value(
+                                    &mut input,
+                                    crate::app::types::ExternalRegexInput::Path,
+                                    "Full Path",
+                                );
+                                ui.selectable_value(
+                                    &mut input,
+                                    crate::app::types::ExternalRegexInput::Dir,
+                                    "Directory",
+                                );
+                            });
+                        if input != self.external_match_input {
+                            self.external_match_input = input;
+                            regex_changed = true;
+                        }
+                    });
                     ui.horizontal(|ui| {
                         ui.label("Regex");
                         if ui
@@ -123,6 +265,23 @@ impl crate::app::WavesPreviewer {
                         self.apply_filter_from_search();
                         self.apply_sort();
                     }
+                }
+                ui.separator();
+                ui.label(RichText::new("Scope (optional)").strong());
+                let mut scope_changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Path regex");
+                    if ui
+                        .text_edit_singleline(&mut self.external_scope_regex)
+                        .changed()
+                    {
+                        scope_changed = true;
+                    }
+                });
+                if scope_changed {
+                    self.apply_external_mapping();
+                    self.apply_filter_from_search();
+                    self.apply_sort();
                 }
                 ui.separator();
                 ui.label(RichText::new("Visible Columns").strong());
@@ -149,6 +308,11 @@ impl crate::app::WavesPreviewer {
                     self.apply_sort();
                 }
                 ui.separator();
+                let mut show_unmatched = self.external_show_unmatched;
+                if ui.checkbox(&mut show_unmatched, "Show unmatched rows in list").changed() {
+                    self.external_show_unmatched = show_unmatched;
+                    self.refresh_external_unmatched_items();
+                }
                 ui.label(format!(
                     "Matched: {}  Unmatched: {}",
                     self.external_match_count, self.external_unmatched_count

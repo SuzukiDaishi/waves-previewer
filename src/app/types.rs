@@ -3,7 +3,7 @@ use crate::markers::MarkerEntry;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 pub type MediaId = u64;
 
@@ -17,6 +17,7 @@ pub enum MediaStatus {
 pub enum MediaSource {
     File,
     Virtual,
+    External,
 }
 
 #[derive(Clone, Debug)]
@@ -56,9 +57,12 @@ pub enum SortKey {
     Channels,
     SampleRate,
     Bits,
+    BitRate,
     Level,
     Lufs,
     Bpm,
+    CreatedAt,
+    ModifiedAt,
     External(usize),
 }
 
@@ -120,9 +124,12 @@ pub struct ListColumnConfig {
     pub channels: bool,
     pub sample_rate: bool,
     pub bits: bool,
+    pub bit_rate: bool,
     pub peak: bool,
     pub lufs: bool,
     pub bpm: bool,
+    pub created_at: bool,
+    pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
 }
@@ -139,9 +146,12 @@ impl Default for ListColumnConfig {
             channels: true,
             sample_rate: true,
             bits: true,
+            bit_rate: true,
             peak: true,
             lufs: true,
             bpm: false,
+            created_at: false,
+            modified_at: false,
             gain: true,
             wave: true,
         }
@@ -153,6 +163,14 @@ pub enum ExternalKeyRule {
     FileName,
     Stem,
     Regex,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExternalRegexInput {
+    FileName,
+    Stem,
+    Path,
+    Dir,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -399,12 +417,15 @@ pub struct FileMeta {
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
+    pub bit_rate_bps: Option<u32>,
     pub duration_secs: Option<f32>,
     #[allow(dead_code)]
     pub rms_db: Option<f32>,
     pub peak_db: Option<f32>,
     pub lufs_i: Option<f32>,
     pub bpm: Option<f32>,
+    pub created_at: Option<SystemTime>,
+    pub modified_at: Option<SystemTime>,
     pub thumb: Vec<(f32, f32)>,
     pub decode_error: Option<String>,
 }
@@ -655,6 +676,23 @@ pub struct StartupConfig {
     pub screenshot_delay_frames: u32,
     pub exit_after_screenshot: bool,
     pub dummy_list_count: Option<usize>,
+    pub external_path: Option<PathBuf>,
+    pub external_dummy_rows: Option<usize>,
+    pub external_dummy_cols: usize,
+    pub external_dummy_path: Option<PathBuf>,
+    pub external_sheet: Option<String>,
+    pub external_has_header: Option<bool>,
+    pub external_header_row: Option<usize>,
+    pub external_data_row: Option<usize>,
+    pub external_key_rule: Option<ExternalKeyRule>,
+    pub external_key_input: Option<ExternalRegexInput>,
+    pub external_key_regex: Option<String>,
+    pub external_key_replace: Option<String>,
+    pub external_scope_regex: Option<String>,
+    pub external_show_unmatched: bool,
+    pub external_show_dialog: bool,
+    pub debug_summary_path: Option<PathBuf>,
+    pub debug_summary_delay_frames: u32,
     pub debug: DebugConfig,
     pub mcp_stdio: bool,
     pub mcp_allow_paths: Vec<PathBuf>,
@@ -677,6 +715,23 @@ impl Default for StartupConfig {
             screenshot_delay_frames: 5,
             exit_after_screenshot: false,
             dummy_list_count: None,
+            external_path: None,
+            external_dummy_rows: None,
+            external_dummy_cols: 6,
+            external_dummy_path: None,
+            external_sheet: None,
+            external_has_header: None,
+            external_header_row: None,
+            external_data_row: None,
+            external_key_rule: None,
+            external_key_input: None,
+            external_key_regex: None,
+            external_key_replace: None,
+            external_scope_regex: None,
+            external_show_unmatched: false,
+            external_show_dialog: false,
+            debug_summary_path: None,
+            debug_summary_delay_frames: 10,
             debug: DebugConfig::default(),
             mcp_stdio: false,
             mcp_allow_paths: Vec::new(),
@@ -694,6 +749,8 @@ pub struct StartupState {
     pub open_first_pending: bool,
     pub screenshot_pending: bool,
     pub screenshot_frames_left: u32,
+    pub debug_summary_pending: bool,
+    pub debug_summary_frames_left: u32,
     pub view_mode_applied: bool,
     pub waveform_overlay_applied: bool,
 }
@@ -702,10 +759,14 @@ impl StartupState {
     pub fn new(cfg: StartupConfig) -> Self {
         let screenshot_pending = cfg.screenshot_path.is_some();
         let screenshot_frames_left = cfg.screenshot_delay_frames;
+        let debug_summary_pending = cfg.debug_summary_path.is_some();
+        let debug_summary_frames_left = cfg.debug_summary_delay_frames;
         Self {
             open_first_pending: cfg.open_first,
             screenshot_pending,
             screenshot_frames_left,
+            debug_summary_pending,
+            debug_summary_frames_left,
             view_mode_applied: false,
             waveform_overlay_applied: false,
             cfg,

@@ -669,6 +669,11 @@ impl super::WavesPreviewer {
             return;
         };
         let p_owned = item_snapshot.path.clone();
+        if item_snapshot.source == crate::app::types::MediaSource::External {
+            self.selected = Some(row_idx);
+            self.scroll_to_selected = auto_scroll;
+            return;
+        }
         let is_virtual = item_snapshot.source == crate::app::types::MediaSource::Virtual;
         if !is_virtual && !p_owned.is_file() {
             self.remove_missing_path(&p_owned);
@@ -1178,6 +1183,11 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn open_or_activate_tab(&mut self, path: &Path) {
+        if let Some(item) = self.item_for_path(path) {
+            if item.source == crate::app::types::MediaSource::External {
+                return;
+            }
+        }
         if self.is_virtual_path(path) {
             self.audio.stop();
             if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
@@ -1530,6 +1540,11 @@ impl super::WavesPreviewer {
 
     pub(super) fn open_paths_in_tabs(&mut self, paths: &[PathBuf]) {
         for path in paths {
+            if let Some(item) = self.item_for_path(path) {
+                if item.source == crate::app::types::MediaSource::External {
+                    continue;
+                }
+            }
             self.open_or_activate_tab(path);
         }
     }
@@ -1559,9 +1574,10 @@ impl super::WavesPreviewer {
                             .as_ref()
                             .map(|m| {
                                 format!(
-                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
+                                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
                                     m.sample_rate,
                                     m.bits_per_sample,
+                                    m.bit_rate_bps.unwrap_or(0),
                                     m.channels,
                                     m.duration_secs.unwrap_or(0.0),
                                     m.peak_db.unwrap_or(0.0),
@@ -1597,9 +1613,10 @@ impl super::WavesPreviewer {
                             .as_ref()
                             .map(|m| {
                                 format!(
-                                    "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
+                                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
                                     m.sample_rate,
                                     m.bits_per_sample,
+                                    m.bit_rate_bps.unwrap_or(0),
                                     m.channels,
                                     m.duration_secs.unwrap_or(0.0),
                                     m.peak_db.unwrap_or(0.0),
@@ -1639,9 +1656,10 @@ impl super::WavesPreviewer {
                         .as_ref()
                         .map(|m| {
                             format!(
-                                "sr:{} bits:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
+                                "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
                                 m.sample_rate,
                                 m.bits_per_sample,
+                                m.bit_rate_bps.unwrap_or(0),
                                 m.channels,
                                 m.duration_secs.unwrap_or(0.0),
                                 m.peak_db.unwrap_or(0.0),
@@ -1680,12 +1698,13 @@ impl super::WavesPreviewer {
         if dir == SortDir::None {
             self.files = self.original_files.clone();
         } else {
-            let items = &self.items;
-            let item_index = &self.item_index;
-            let lufs_override = &self.lufs_override;
-            let external_cols = &self.external_visible_columns;
-            self.files.sort_by(|a, b| {
-                use std::cmp::Ordering;
+        let items = &self.items;
+        let item_index = &self.item_index;
+        let lufs_override = &self.lufs_override;
+        let external_cols = &self.external_visible_columns;
+        self.files.sort_by(|a, b| {
+            use std::cmp::Ordering;
+            use std::time::UNIX_EPOCH;
                 let pa_idx = match item_index.get(a) {
                     Some(idx) => *idx,
                     None => return Ordering::Equal,
@@ -1730,6 +1749,14 @@ impl super::WavesPreviewer {
                         ma.map(|m| m.bits_per_sample as f32).unwrap_or(0.0),
                         mb.map(|m| m.bits_per_sample as f32).unwrap_or(0.0),
                     ),
+                    SortKey::BitRate => num_order(
+                        ma.and_then(|m| m.bit_rate_bps)
+                            .map(|v| v as f32)
+                            .unwrap_or(0.0),
+                        mb.and_then(|m| m.bit_rate_bps)
+                            .map(|v| v as f32)
+                            .unwrap_or(0.0),
+                    ),
                     SortKey::Level => num_order(
                         ma.and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
                         mb.and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
@@ -1755,6 +1782,26 @@ impl super::WavesPreviewer {
                     SortKey::Bpm => num_order(
                         ma.and_then(|m| m.bpm).unwrap_or(0.0),
                         mb.and_then(|m| m.bpm).unwrap_or(0.0),
+                    ),
+                    SortKey::CreatedAt => num_order(
+                        ma.and_then(|m| m.created_at)
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs_f64() as f32)
+                            .unwrap_or(0.0),
+                        mb.and_then(|m| m.created_at)
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs_f64() as f32)
+                            .unwrap_or(0.0),
+                    ),
+                    SortKey::ModifiedAt => num_order(
+                        ma.and_then(|m| m.modified_at)
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs_f64() as f32)
+                            .unwrap_or(0.0),
+                        mb.and_then(|m| m.modified_at)
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs_f64() as f32)
+                            .unwrap_or(0.0),
                     ),
                     SortKey::External(idx) => {
                         let Some(col) = external_cols.get(idx) else {

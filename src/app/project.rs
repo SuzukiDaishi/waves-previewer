@@ -91,10 +91,16 @@ pub struct ProjectListColumns {
     pub ch: bool,
     pub sr: bool,
     pub bits: bool,
+    #[serde(default)]
+    pub bit_rate: bool,
     pub peak: bool,
     pub lufs: bool,
     #[serde(default)]
     pub bpm: bool,
+    #[serde(default)]
+    pub created_at: bool,
+    #[serde(default)]
+    pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
 }
@@ -425,11 +431,14 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         channels: 0,
         sample_rate: 0,
         bits_per_sample: 0,
+        bit_rate_bps: None,
         duration_secs: None,
         rms_db: None,
         peak_db: None,
         lufs_i: None,
         bpm: None,
+        created_at: None,
+        modified_at: None,
         thumb: Vec::new(),
         decode_error: Some(format!("Missing: {}", path.display())),
     }
@@ -552,9 +561,12 @@ impl super::WavesPreviewer {
                 super::types::SortKey::Channels => "Channels",
                 super::types::SortKey::SampleRate => "SampleRate",
                 super::types::SortKey::Bits => "Bits",
+                super::types::SortKey::BitRate => "BitRate",
                 super::types::SortKey::Level => "Level",
                 super::types::SortKey::Lufs => "Lufs",
                 super::types::SortKey::Bpm => "Bpm",
+                super::types::SortKey::CreatedAt => "CreatedAt",
+                super::types::SortKey::ModifiedAt => "ModifiedAt",
                 super::types::SortKey::External(_) => "External",
             }
             .to_string(),
@@ -576,9 +588,12 @@ impl super::WavesPreviewer {
                 ch: self.list_columns.channels,
                 sr: self.list_columns.sample_rate,
                 bits: self.list_columns.bits,
+                bit_rate: self.list_columns.bit_rate,
                 peak: self.list_columns.peak,
                 lufs: self.list_columns.lufs,
                 bpm: self.list_columns.bpm,
+                created_at: self.list_columns.created_at,
+                modified_at: self.list_columns.modified_at,
                 gain: self.list_columns.gain,
                 wave: self.list_columns.wave,
             },
@@ -746,9 +761,12 @@ impl super::WavesPreviewer {
             channels: project.app.list_columns.ch,
             sample_rate: project.app.list_columns.sr,
             bits: project.app.list_columns.bits,
+            bit_rate: project.app.list_columns.bit_rate,
             peak: project.app.list_columns.peak,
             lufs: project.app.list_columns.lufs,
             bpm: project.app.list_columns.bpm,
+            created_at: project.app.list_columns.created_at,
+            modified_at: project.app.list_columns.modified_at,
             gain: project.app.list_columns.gain,
             wave: project.app.list_columns.wave,
         };
@@ -759,9 +777,12 @@ impl super::WavesPreviewer {
             "Channels" => super::types::SortKey::Channels,
             "SampleRate" => super::types::SortKey::SampleRate,
             "Bits" => super::types::SortKey::Bits,
+            "BitRate" => super::types::SortKey::BitRate,
             "Level" => super::types::SortKey::Level,
             "Lufs" => super::types::SortKey::Lufs,
             "Bpm" => super::types::SortKey::Bpm,
+            "CreatedAt" => super::types::SortKey::CreatedAt,
+            "ModifiedAt" => super::types::SortKey::ModifiedAt,
             _ => super::types::SortKey::File,
         };
         self.sort_dir = match project.app.sort_dir.as_str() {

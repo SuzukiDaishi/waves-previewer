@@ -21,6 +21,23 @@ CLI Arguments (src/main.rs)
 - `--screenshot-delay <frames>`
 - `--exit-after-screenshot`
 - `--dummy-list <count>`
+- `--external-dialog`
+- `--debug-summary <path>`
+- `--debug-summary-delay <frames>`
+- `--external-file <path>`
+- `--external-dummy <rows>`
+- `--external-dummy-cols <count>`
+- `--external-dummy-path <path>`
+- `--external-sheet <name>`
+- `--external-has-header <on|off>`
+- `--external-header-row <n>` (1-based, 0=auto)
+- `--external-data-row <n>` (1-based, 0=auto)
+- `--external-key-rule <file|stem|regex>`
+- `--external-key-input <file|stem|path|dir>`
+- `--external-key-regex <pattern>`
+- `--external-key-replace <text>`
+- `--external-scope-regex <pattern>`
+- `--external-show-unmatched`
 - `--debug`
 - `--debug-log <path>`
 - `--auto-run`

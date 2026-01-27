@@ -147,6 +147,11 @@ pub fn format_time_s(secs: f32) -> String {
     }
 }
 
+pub fn format_system_time_local(st: std::time::SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = st.into();
+    dt.format("%Y-%m-%d %H:%M").to_string()
+}
+
 pub fn highlight_text_job(
     text: &str,
     query: &str,

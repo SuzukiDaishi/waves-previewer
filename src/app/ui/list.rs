@@ -4,8 +4,8 @@ use egui_extras::TableBuilder;
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
-            amp_to_color, db_to_amp, db_to_color, format_duration, highlight_text_job,
-            sortable_header,
+            amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
+            highlight_text_job, sortable_header,
         };
         use crate::app::types::SortKey;
         use std::path::PathBuf;
@@ -112,7 +112,7 @@ impl crate::app::WavesPreviewer {
                 self.select_and_load(target, true);
                 key_moved = true;
             }
-            if pressed_enter && pointer_over_list && !self.suppress_list_enter {
+            if pressed_enter && !self.suppress_list_enter {
                 let selected = self.selected_paths();
                 if !selected.is_empty() {
                     self.open_paths_in_tabs(&selected);
@@ -214,6 +214,10 @@ impl crate::app::WavesPreviewer {
             table = table.column(egui_extras::Column::initial(50.0).resizable(true));
             filler_cols += 1;
         }
+        if cols.bit_rate {
+            table = table.column(egui_extras::Column::initial(70.0).resizable(true));
+            filler_cols += 1;
+        }
         if cols.peak {
             table = table.column(egui_extras::Column::initial(90.0).resizable(true));
             filler_cols += 1;
@@ -224,6 +228,14 @@ impl crate::app::WavesPreviewer {
         }
         if cols.bpm {
             table = table.column(egui_extras::Column::initial(70.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.created_at {
+            table = table.column(egui_extras::Column::initial(120.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.modified_at {
+            table = table.column(egui_extras::Column::initial(120.0).resizable(true));
             filler_cols += 1;
         }
         if cols.gain {
@@ -359,6 +371,18 @@ impl crate::app::WavesPreviewer {
                         );
                     });
                 }
+                if cols.bit_rate {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Bitrate",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::BitRate,
+                            true,
+                        );
+                    });
+                }
                 if cols.peak {
                     header.col(|ui| {
                         sort_changed |= sortable_header(
@@ -392,6 +416,30 @@ impl crate::app::WavesPreviewer {
                             &mut self.sort_dir,
                             SortKey::Bpm,
                             false,
+                        );
+                    });
+                }
+                if cols.created_at {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Created",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::CreatedAt,
+                            true,
+                        );
+                    });
+                }
+                if cols.modified_at {
+                    header.col(|ui| {
+                        sort_changed |= sortable_header(
+                            ui,
+                            "Modified",
+                            &mut self.sort_key,
+                            &mut self.sort_dir,
+                            SortKey::ModifiedAt,
+                            true,
                         );
                     });
                 }
@@ -616,11 +664,15 @@ impl crate::app::WavesPreviewer {
                                 let ch = self
                                     .meta_for_path(&path_owned)
                                     .map(|m| m.channels)
-                                    .unwrap_or(0);
+                                    .filter(|v| *v > 0);
                                 let resp = ui
                                     .add(
                                         egui::Label::new(
-                                            RichText::new(format!("{}", ch)).monospace(),
+                                            RichText::new(
+                                                ch.map(|v| format!("{v}"))
+                                                    .unwrap_or_else(|| "-".into()),
+                                            )
+                                            .monospace(),
                                         )
                                         .sense(Sense::click()),
                                     )
@@ -635,11 +687,15 @@ impl crate::app::WavesPreviewer {
                                 let sr = self
                                     .meta_for_path(&path_owned)
                                     .map(|m| m.sample_rate)
-                                    .unwrap_or(0);
+                                    .filter(|v| *v > 0);
                                 let resp = ui
                                     .add(
                                         egui::Label::new(
-                                            RichText::new(format!("{}", sr)).monospace(),
+                                            RichText::new(
+                                                sr.map(|v| format!("{v}"))
+                                                    .unwrap_or_else(|| "-".into()),
+                                            )
+                                            .monospace(),
                                         )
                                         .sense(Sense::click()),
                                     )
@@ -654,13 +710,37 @@ impl crate::app::WavesPreviewer {
                                 let bits = self
                                     .meta_for_path(&path_owned)
                                     .map(|m| m.bits_per_sample)
-                                    .unwrap_or(0);
+                                    .filter(|v| *v > 0);
                                 let resp = ui
                                     .add(
                                         egui::Label::new(
-                                            RichText::new(format!("{}", bits)).monospace(),
+                                            RichText::new(
+                                                bits.map(|v| format!("{v}"))
+                                                    .unwrap_or_else(|| "-".into()),
+                                            )
+                                            .monospace(),
                                         )
                                         .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.bit_rate {
+                            row.col(|ui| {
+                                let br = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.bit_rate_bps)
+                                    .filter(|v| *v > 0);
+                                let text = br
+                                    .map(|v| format!("{:.0}k", (v as f32) / 1000.0))
+                                    .unwrap_or_else(|| "-".into());
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(RichText::new(text).monospace())
+                                            .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
@@ -744,6 +824,44 @@ impl crate::app::WavesPreviewer {
                                             .monospace(),
                                         )
                                         .sense(Sense::click()),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.created_at {
+                            row.col(|ui| {
+                                let text = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.created_at)
+                                    .map(format_system_time_local)
+                                    .unwrap_or_else(|| "-".into());
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(RichText::new(text).monospace())
+                                            .sense(Sense::click())
+                                            .truncate(),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.modified_at {
+                            row.col(|ui| {
+                                let text = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.modified_at)
+                                    .map(format_system_time_local)
+                                    .unwrap_or_else(|| "-".into());
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(RichText::new(text).monospace())
+                                            .sense(Sense::click())
+                                            .truncate(),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                                 if resp.clicked_by(egui::PointerButton::Primary) {

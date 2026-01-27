@@ -182,6 +182,20 @@ impl WavesPreviewer {
             processing, export, decoding
         ));
         lines.push(format!("meta_pending: {}", meta_pending));
+        if let Some(path) = self.external_source.as_ref() {
+            lines.push(format!("external_source: {}", path.display()));
+            lines.push(format!(
+                "external_rows: {} headers: {}",
+                self.external_rows.len(),
+                self.external_headers.len()
+            ));
+            lines.push(format!(
+                "external_match: {} unmatched: {} show_unmatched: {}",
+                self.external_match_count,
+                self.external_unmatched_count,
+                self.external_show_unmatched
+            ));
+        }
         lines.join("\n")
     }
 

@@ -39,7 +39,10 @@ mod ui;
 use self::dialogs::TestDialogQueue;
 use self::project_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
-pub use self::types::{FadeShape, LoopMode, LoopXfadeShape, StartupConfig, ViewMode};
+pub use self::types::{
+    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, StartupConfig,
+    ViewMode,
+};
 use self::{helpers::*, types::*};
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
@@ -78,14 +81,30 @@ pub struct WavesPreviewer {
     pub external_rows: Vec<Vec<String>>,
     pub external_key_index: Option<usize>,
     pub external_key_rule: ExternalKeyRule,
+    pub external_match_input: ExternalRegexInput,
     pub external_visible_columns: Vec<String>,
     pub external_lookup: HashMap<String, HashMap<String, String>>,
+    pub external_key_row_index: HashMap<String, usize>,
     pub external_match_count: usize,
     pub external_unmatched_count: usize,
+    pub external_show_unmatched: bool,
+    pub external_unmatched_rows: Vec<usize>,
+    pub external_sheet_names: Vec<String>,
+    pub external_sheet_selected: Option<String>,
+    pub external_has_header: bool,
+    pub external_header_row: Option<usize>,
+    pub external_data_row: Option<usize>,
+    pub external_scope_regex: String,
+    pub external_settings_dirty: bool,
     pub show_external_dialog: bool,
     pub external_load_error: Option<String>,
     pub external_match_regex: String,
     pub external_match_replace: String,
+    pub external_load_rx: Option<std::sync::mpsc::Receiver<external::ExternalLoadMsg>>,
+    pub external_load_inflight: bool,
+    pub external_load_rows: usize,
+    pub external_load_started_at: Option<std::time::Instant>,
+    pub external_load_path: Option<PathBuf>,
     pub tool_defs: Vec<ToolDef>,
     pub tool_queue: std::collections::VecDeque<ToolJob>,
     pub tool_run_rx: Option<std::sync::mpsc::Receiver<ToolRunResult>>,
@@ -786,7 +805,7 @@ spectro_note_labels={}\n",
 
     fn is_virtual_path(&self, path: &Path) -> bool {
         self.item_for_path(path)
-            .map(|item| item.source == MediaSource::Virtual)
+            .map(|item| matches!(item.source, MediaSource::Virtual | MediaSource::External))
             .unwrap_or(false)
     }
 
@@ -984,11 +1003,14 @@ spectro_note_labels={}\n",
             channels: channels.len().max(1) as u16,
             sample_rate,
             bits_per_sample,
+            bit_rate_bps: None,
             duration_secs,
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i,
             bpm,
+            created_at: None,
+            modified_at: None,
             thumb,
             decode_error: None,
         }
@@ -1269,9 +1291,12 @@ spectro_note_labels={}\n",
             SortKey::Channels => cols.channels,
             SortKey::SampleRate => cols.sample_rate,
             SortKey::Bits => cols.bits,
+            SortKey::BitRate => cols.bit_rate,
             SortKey::Level => cols.peak,
             SortKey::Lufs => cols.lufs,
             SortKey::Bpm => cols.bpm,
+            SortKey::CreatedAt => cols.created_at,
+            SortKey::ModifiedAt => cols.modified_at,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),
         };
         if key_visible {
@@ -1293,12 +1318,18 @@ spectro_note_labels={}\n",
             SortKey::SampleRate
         } else if cols.bits {
             SortKey::Bits
+        } else if cols.bit_rate {
+            SortKey::BitRate
         } else if cols.peak {
             SortKey::Level
         } else if cols.lufs {
             SortKey::Lufs
         } else if cols.bpm {
             SortKey::Bpm
+        } else if cols.created_at {
+            SortKey::CreatedAt
+        } else if cols.modified_at {
+            SortKey::ModifiedAt
         } else {
             SortKey::File
         };
@@ -1867,6 +1898,9 @@ spectro_note_labels={}\n",
         if cols.bits {
             header.push("Bits".to_string());
         }
+        if cols.bit_rate {
+            header.push("Bitrate (kbps)".to_string());
+        }
         if cols.peak {
             header.push("dBFS (Peak)".to_string());
         }
@@ -1875,6 +1909,12 @@ spectro_note_labels={}\n",
         }
         if cols.bpm {
             header.push("BPM".to_string());
+        }
+        if cols.created_at {
+            header.push("Created".to_string());
+        }
+        if cols.modified_at {
+            header.push("Modified".to_string());
         }
         if cols.gain {
             header.push("Gain (dB)".to_string());
@@ -1926,22 +1966,36 @@ spectro_note_labels={}\n",
                 row.push(text);
             }
             if cols.channels {
-                row.push(
-                    meta.map(|m| m.channels.to_string())
-                        .unwrap_or_default(),
-                );
+                let text = meta
+                    .map(|m| m.channels)
+                    .filter(|v| *v > 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                row.push(text);
             }
             if cols.sample_rate {
-                row.push(
-                    meta.map(|m| m.sample_rate.to_string())
-                        .unwrap_or_default(),
-                );
+                let text = meta
+                    .map(|m| m.sample_rate)
+                    .filter(|v| *v > 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                row.push(text);
             }
             if cols.bits {
-                row.push(
-                    meta.map(|m| m.bits_per_sample.to_string())
-                        .unwrap_or_default(),
-                );
+                let text = meta
+                    .map(|m| m.bits_per_sample)
+                    .filter(|v| *v > 0)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                row.push(text);
+            }
+            if cols.bit_rate {
+                let text = meta
+                    .and_then(|m| m.bit_rate_bps)
+                    .filter(|v| *v > 0)
+                    .map(|v| format!("{:.0}", (v as f32) / 1000.0))
+                    .unwrap_or_else(|| "-".to_string());
+                row.push(text);
             }
             if cols.peak {
                 let gain_db = item.pending_gain_db;
@@ -1966,6 +2020,20 @@ spectro_note_labels={}\n",
                     bpm.map(|v| format!("{:.2}", v))
                         .unwrap_or_else(|| "-".to_string()),
                 );
+            }
+            if cols.created_at {
+                let text = meta
+                    .and_then(|m| m.created_at)
+                    .map(crate::app::helpers::format_system_time_local)
+                    .unwrap_or_else(|| "-".to_string());
+                row.push(text);
+            }
+            if cols.modified_at {
+                let text = meta
+                    .and_then(|m| m.modified_at)
+                    .map(crate::app::helpers::format_system_time_local)
+                    .unwrap_or_else(|| "-".to_string());
+                row.push(text);
             }
             if cols.gain {
                 row.push(format!("{:.1}", item.pending_gain_db));
@@ -2010,12 +2078,16 @@ spectro_note_labels={}\n",
         };
         let needs_peak = cols.peak;
         let needs_lufs = cols.lufs;
+        let needs_full_decode = needs_peak || needs_lufs;
         let needs_meta = cols.length
             || cols.channels
             || cols.sample_rate
             || cols.bits
+            || cols.bit_rate
             || needs_peak
-            || needs_lufs;
+            || needs_lufs
+            || cols.created_at
+            || cols.modified_at;
         let mut pending = HashSet::new();
         let mut total = 0usize;
         let mut done = 0usize;
@@ -2049,7 +2121,11 @@ spectro_note_labels={}\n",
         }
 
         for p in pending.iter() {
-            self.queue_full_meta_for_path(p, false);
+            if needs_full_decode {
+                self.queue_full_meta_for_path(p, false);
+            } else {
+                self.queue_meta_for_path(p, false);
+            }
         }
         self.csv_export_state = Some(CsvExportState {
             path,
@@ -3373,7 +3449,9 @@ spectro_note_labels={}\n",
         for i in 0..count {
             let name = format!("wav_{:06}.wav", i);
             let path = PathBuf::from(prefix).join(name);
-            let item = self.make_media_item(path.clone());
+            let mut item = self.make_media_item(path.clone());
+            // Keep dummy entries from being removed as missing files.
+            item.source = MediaSource::Virtual;
             self.path_index.insert(path, item.id);
             self.item_index.insert(item.id, self.items.len());
             self.items.push(item);
@@ -3474,14 +3552,30 @@ impl WavesPreviewer {
             external_rows: Vec::new(),
             external_key_index: None,
             external_key_rule: ExternalKeyRule::FileName,
+            external_match_input: ExternalRegexInput::FileName,
             external_visible_columns: Vec::new(),
             external_lookup: HashMap::new(),
+            external_key_row_index: HashMap::new(),
             external_match_count: 0,
             external_unmatched_count: 0,
+            external_show_unmatched: false,
+            external_unmatched_rows: Vec::new(),
+            external_sheet_names: Vec::new(),
+            external_sheet_selected: None,
+            external_has_header: true,
+            external_header_row: None,
+            external_data_row: None,
+            external_scope_regex: String::new(),
+            external_settings_dirty: false,
             show_external_dialog: false,
             external_load_error: None,
             external_match_regex: String::new(),
             external_match_replace: String::new(),
+            external_load_rx: None,
+            external_load_inflight: false,
+            external_load_rows: 0,
+            external_load_started_at: None,
+            external_load_path: None,
             tool_defs: Vec::new(),
             tool_queue: std::collections::VecDeque::new(),
             tool_run_rx: None,
@@ -3831,8 +3925,12 @@ impl WavesPreviewer {
             SortKey::Channels => "Channels",
             SortKey::SampleRate => "SampleRate",
             SortKey::Bits => "Bits",
+            SortKey::BitRate => "BitRate",
             SortKey::Level => "Level",
             SortKey::Lufs => "Lufs",
+            SortKey::Bpm => "Bpm",
+            SortKey::CreatedAt => "CreatedAt",
+            SortKey::ModifiedAt => "ModifiedAt",
             SortKey::External(_) => "External",
         }
     }
@@ -4485,6 +4583,44 @@ impl eframe::App for WavesPreviewer {
                 }
             }
         }
+        if let Some(rx) = self.external_load_rx.take() {
+            let mut done = false;
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    external::ExternalLoadMsg::Progress { rows } => {
+                        self.external_load_rows = rows;
+                        ctx.request_repaint();
+                    }
+                    external::ExternalLoadMsg::Done(res) => {
+                        done = true;
+                        self.external_load_inflight = false;
+                        self.external_load_started_at = None;
+                        let path = self.external_load_path.take();
+                        match res {
+                            Ok(table) => {
+                                if let Some(p) = path {
+                                    if let Err(err) = self.apply_external_table(p, table) {
+                                        self.external_load_error = Some(err);
+                                    } else {
+                                        self.external_load_error = None;
+                                    }
+                                } else {
+                                    self.external_load_error =
+                                        Some("External load path missing.".to_string());
+                                }
+                            }
+                            Err(err) => {
+                                self.external_load_error = Some(err);
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+            }
+            if !done {
+                self.external_load_rx = Some(rx);
+            }
+        }
         self.check_csv_export_completion();
         // Drain spectrogram jobs (tiled)
         self.drain_spectrogram_jobs(ctx);
@@ -5069,11 +5205,14 @@ impl eframe::App for WavesPreviewer {
                                                     channels: info.channels,
                                                     sample_rate: info.sample_rate,
                                                     bits_per_sample: info.bits_per_sample,
+                                                    bit_rate_bps: info.bit_rate_bps,
                                                     duration_secs: info.duration_secs,
                                                     rms_db: None,
                                                     peak_db: None,
                                                     lufs_i: None,
                                                     bpm: crate::audio_io::read_audio_bpm(&path_owned),
+                                                    created_at: info.created_at,
+                                                    modified_at: info.modified_at,
                                                     thumb: Vec::new(),
                                                     decode_error: None,
                                                 },

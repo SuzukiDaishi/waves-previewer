@@ -82,6 +82,115 @@ fn parse_startup_config() -> app::StartupConfig {
                     }
                 }
             }
+            "--external-dialog" => {
+                cfg.external_show_dialog = true;
+            }
+            "--debug-summary" => {
+                if let Some(p) = args.next() {
+                    cfg.debug_summary_path = Some(std::path::PathBuf::from(p));
+                }
+            }
+            "--debug-summary-delay" => {
+                if let Some(v) = args.next() {
+                    if let Ok(n) = v.parse::<u32>() {
+                        cfg.debug_summary_delay_frames = n;
+                    }
+                }
+            }
+            "--external-file" => {
+                if let Some(p) = args.next() {
+                    cfg.external_path = Some(std::path::PathBuf::from(p));
+                }
+            }
+            "--external-dummy" => {
+                if let Some(v) = args.next() {
+                    if let Ok(n) = v.parse::<usize>() {
+                        cfg.external_dummy_rows = Some(n);
+                    }
+                }
+            }
+            "--external-dummy-cols" => {
+                if let Some(v) = args.next() {
+                    if let Ok(n) = v.parse::<usize>() {
+                        cfg.external_dummy_cols = n.max(1);
+                    }
+                }
+            }
+            "--external-dummy-path" => {
+                if let Some(p) = args.next() {
+                    cfg.external_dummy_path = Some(std::path::PathBuf::from(p));
+                }
+            }
+            "--external-sheet" => {
+                if let Some(v) = args.next() {
+                    cfg.external_sheet = Some(v);
+                }
+            }
+            "--external-has-header" => {
+                if let Some(v) = args.next() {
+                    let flag = match v.to_lowercase().as_str() {
+                        "on" | "true" | "1" => Some(true),
+                        "off" | "false" | "0" => Some(false),
+                        _ => None,
+                    };
+                    if let Some(flag) = flag {
+                        cfg.external_has_header = Some(flag);
+                    }
+                }
+            }
+            "--external-header-row" => {
+                if let Some(v) = args.next() {
+                    if let Ok(n) = v.parse::<usize>() {
+                        cfg.external_header_row = if n == 0 { None } else { Some(n - 1) };
+                    }
+                }
+            }
+            "--external-data-row" => {
+                if let Some(v) = args.next() {
+                    if let Ok(n) = v.parse::<usize>() {
+                        cfg.external_data_row = if n == 0 { None } else { Some(n - 1) };
+                    }
+                }
+            }
+            "--external-key-rule" => {
+                if let Some(v) = args.next() {
+                    cfg.external_key_rule = match v.to_lowercase().as_str() {
+                        "file" | "filename" => Some(app::ExternalKeyRule::FileName),
+                        "stem" => Some(app::ExternalKeyRule::Stem),
+                        "regex" => Some(app::ExternalKeyRule::Regex),
+                        _ => None,
+                    };
+                }
+            }
+            "--external-key-input" => {
+                if let Some(v) = args.next() {
+                    cfg.external_key_input = match v.to_lowercase().as_str() {
+                        "file" | "filename" => Some(app::ExternalRegexInput::FileName),
+                        "stem" => Some(app::ExternalRegexInput::Stem),
+                        "path" => Some(app::ExternalRegexInput::Path),
+                        "dir" | "directory" => Some(app::ExternalRegexInput::Dir),
+                        _ => None,
+                    };
+                }
+            }
+            "--external-key-regex" => {
+                if let Some(v) = args.next() {
+                    cfg.external_key_regex = Some(v);
+                }
+            }
+            "--external-key-replace" => {
+                if let Some(v) = args.next() {
+                    cfg.external_key_replace = Some(v);
+                }
+            }
+            "--external-scope-regex" => {
+                if let Some(v) = args.next() {
+                    cfg.external_scope_regex = Some(v);
+                }
+            }
+            "--external-show-unmatched" => {
+                cfg.external_show_unmatched = true;
+            }
             "--debug" => {
                 cfg.debug.enabled = true;
             }
@@ -163,7 +272,7 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-project <project.nwproj>\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
+                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-project <project.nwproj>\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --external-dialog\n  --debug-summary <path>\n  --debug-summary-delay <frames>\n  --external-file <path>\n  --external-dummy <rows>\n  --external-dummy-cols <count>\n  --external-dummy-path <path>\n  --external-sheet <name>\n  --external-has-header <on|off>\n  --external-header-row <n> (1-based, 0=auto)\n  --external-data-row <n> (1-based, 0=auto)\n  --external-key-rule <file|stem|regex>\n  --external-key-input <file|stem|path|dir>\n  --external-key-regex <pattern>\n  --external-key-replace <text>\n  --external-scope-regex <pattern>\n  --external-show-unmatched\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
                 );
                 std::process::exit(0);
             }

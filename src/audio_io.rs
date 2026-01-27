@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use symphonia::core::audio::SampleBuffer;
@@ -19,7 +20,10 @@ pub struct AudioInfo {
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
+    pub bit_rate_bps: Option<u32>,
     pub duration_secs: Option<f32>,
+    pub created_at: Option<SystemTime>,
+    pub modified_at: Option<SystemTime>,
 }
 
 pub fn is_supported_extension(ext: &str) -> bool {
@@ -34,6 +38,10 @@ pub fn is_supported_audio_path(path: &Path) -> bool {
 }
 
 pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
+    let metadata = std::fs::metadata(path).ok();
+    let created_at = metadata.as_ref().and_then(|m| m.created().ok());
+    let modified_at = metadata.as_ref().and_then(|m| m.modified().ok());
+    let file_size = metadata.as_ref().map(|m| m.len());
     let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -61,11 +69,23 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         }
         _ => None,
     };
+    let mut bit_rate_bps = None;
+    if let (Some(secs), Some(bytes)) = (duration_secs, file_size) {
+        if secs.is_finite() && secs > 0.0 {
+            let bps = ((bytes as f64) * 8.0 / secs as f64).round();
+            if bps.is_finite() && bps > 0.0 {
+                bit_rate_bps = Some(bps as u32);
+            }
+        }
+    }
     Ok(AudioInfo {
         channels,
         sample_rate,
         bits_per_sample,
+        bit_rate_bps,
         duration_secs,
+        created_at,
+        modified_at,
     })
 }
 

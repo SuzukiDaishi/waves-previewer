@@ -77,11 +77,14 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             channels: info.channels,
             sample_rate: info.sample_rate,
             bits_per_sample: info.bits_per_sample,
+            bit_rate_bps: info.bit_rate_bps,
             duration_secs: info.duration_secs,
             rms_db: None,
             peak_db: None,
             lufs_i: None,
             bpm: audio_io::read_audio_bpm(path),
+            created_at: info.created_at,
+            modified_at: info.modified_at,
             thumb: Vec::new(),
             decode_error: None,
         }),
@@ -89,11 +92,14 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             channels: 0,
             sample_rate: 0,
             bits_per_sample: 0,
+            bit_rate_bps: None,
             duration_secs: None,
             rms_db: None,
             peak_db: None,
             lufs_i: None,
             bpm: None,
+            created_at: None,
+            modified_at: None,
             thumb: Vec::new(),
             decode_error: Some("Decode failed".to_string()),
         }),
@@ -101,6 +107,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
 }
 
 fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
+    let info = audio_io::read_audio_info(path).ok();
     if let Ok((chans, sr, decode_errors)) = audio_io::decode_audio_multi_with_errors(path) {
         // Mono mixdown for RMS/thumbnail
         let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
@@ -157,7 +164,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let lufs_i = crate::wave::lufs_integrated_from_multi(&chans, sr).ok();
         let bpm = audio_io::read_audio_bpm(path);
-        let (ch, bits) = audio_io::read_audio_info(path)
+        let (ch, bits) = info
+            .as_ref()
             .map(|info| (info.channels, info.bits_per_sample))
             .unwrap_or((chans.len() as u16, 0));
         let length_secs = if sr > 0 {
@@ -169,11 +177,14 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             channels: ch,
             sample_rate: sr,
             bits_per_sample: bits,
+            bit_rate_bps: info.as_ref().and_then(|i| i.bit_rate_bps),
             duration_secs: Some(length_secs),
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i,
             bpm,
+            created_at: info.as_ref().and_then(|i| i.created_at),
+            modified_at: info.as_ref().and_then(|i| i.modified_at),
             thumb,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors}"))
@@ -211,21 +222,23 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         };
         let mut thumb = Vec::new();
         crate::wave::build_minmax(&mut thumb, &mono, 128);
-        let info = audio_io::read_audio_info(path).ok();
         let bpm = audio_io::read_audio_bpm(path);
         return Some(FileMeta {
-            channels: info.map(|i| i.channels).unwrap_or(0),
+            channels: info.as_ref().map(|i| i.channels).unwrap_or(0),
             sample_rate: if sr > 0 {
                 sr
             } else {
-                info.map(|i| i.sample_rate).unwrap_or(0)
+                info.as_ref().map(|i| i.sample_rate).unwrap_or(0)
             },
-            bits_per_sample: info.map(|i| i.bits_per_sample).unwrap_or(0),
-            duration_secs: info.and_then(|i| i.duration_secs),
+            bits_per_sample: info.as_ref().map(|i| i.bits_per_sample).unwrap_or(0),
+            bit_rate_bps: info.as_ref().and_then(|i| i.bit_rate_bps),
+            duration_secs: info.as_ref().and_then(|i| i.duration_secs),
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i: None,
             bpm,
+            created_at: info.as_ref().and_then(|i| i.created_at),
+            modified_at: info.as_ref().and_then(|i| i.modified_at),
             thumb,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors} (prefix)"))
