@@ -52,6 +52,10 @@ const UNDO_STACK_MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_EDITOR_TABS: usize = 12;
 const SPECTRO_TILE_FRAMES: usize = 64;
 const SPECTRO_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+const BULK_RESAMPLE_THRESHOLD: usize = 10_000;
+const BULK_RESAMPLE_CHUNK: usize = 200;
+const BULK_RESAMPLE_BLOCK_SECS: u64 = 2;
+const BULK_RESAMPLE_FRAME_BUDGET_MS: u64 = 3;
 
 // moved to types.rs
 
@@ -77,6 +81,8 @@ pub struct WavesPreviewer {
     pub transcript_inflight: HashSet<PathBuf>,
     pub show_transcript_window: bool,
     pub pending_transcript_seek: Option<(PathBuf, u64)>,
+    pub external_sources: Vec<ExternalSource>,
+    pub external_active_source: Option<usize>,
     pub external_source: Option<PathBuf>,
     pub external_headers: Vec<String>,
     pub external_rows: Vec<Vec<String>>,
@@ -106,6 +112,8 @@ pub struct WavesPreviewer {
     pub external_load_rows: usize,
     pub external_load_started_at: Option<std::time::Instant>,
     pub external_load_path: Option<PathBuf>,
+    external_load_target: Option<external_ops::ExternalLoadTarget>,
+    pub external_load_queue: VecDeque<PathBuf>,
     pub tool_defs: Vec<ToolDef>,
     pub tool_queue: std::collections::VecDeque<ToolJob>,
     pub tool_run_rx: Option<std::sync::mpsc::Receiver<ToolRunResult>>,
@@ -141,6 +149,9 @@ pub struct WavesPreviewer {
     // clipboard (list copy/paste)
     pub clipboard_payload: Option<ClipboardPayload>,
     pub clipboard_temp_files: Vec<PathBuf>,
+    clipboard_c_was_down: bool,
+    clipboard_v_was_down: bool,
+    undo_z_was_down: bool,
     // list undo/redo
     pub list_undo_stack: Vec<ListUndoAction>,
     pub list_redo_stack: Vec<ListUndoAction>,
@@ -153,6 +164,8 @@ pub struct WavesPreviewer {
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,
     suppress_list_enter: bool,
+    list_has_focus: bool,
+    search_has_focus: bool,
     // original order snapshot for tri-state sort
     original_files: Vec<MediaId>,
     // search
@@ -211,6 +224,13 @@ pub struct WavesPreviewer {
     lufs_recalc_deadline: HashMap<PathBuf, std::time::Instant>,
     lufs_rx2: Option<std::sync::mpsc::Receiver<(PathBuf, f32)>>,
     lufs_worker_busy: bool,
+    // Sample rate conversion (non-destructive)
+    sample_rate_override: HashMap<PathBuf, u32>,
+    show_resample_dialog: bool,
+    resample_targets: Vec<PathBuf>,
+    resample_target_sr: u32,
+    resample_error: Option<String>,
+    bulk_resample_state: Option<BulkResampleState>,
     // leaving dirty editor confirmation
     leave_intent: Option<LeaveIntent>,
     show_leave_prompt: bool,
@@ -242,6 +262,18 @@ pub struct WavesPreviewer {
 }
 
 impl WavesPreviewer {
+    fn list_focus_id() -> egui::Id {
+        egui::Id::new("list_focus")
+    }
+
+    fn request_list_focus(&mut self, ctx: &egui::Context) {
+        self.list_has_focus = true;
+        self.search_has_focus = false;
+        ctx.memory_mut(|m| {
+            m.request_focus(Self::list_focus_id());
+        });
+    }
+
     fn theme_visuals(theme: ThemeMode) -> Visuals {
         let mut visuals = match theme {
             ThemeMode::Dark => Visuals::dark(),
@@ -540,17 +572,43 @@ spectro_note_labels={}\n",
         let (tx, rx) = mpsc::channel::<EditorApplyResult>();
         std::thread::spawn(move || {
             let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
-            for chan in ch.iter() {
-                let processed = match tool {
-                    ToolKind::PitchShift => {
-                        crate::wave::process_pitchshift_offline(chan, sr, sr, param)
+            let mut lufs_override = None;
+            match tool {
+                ToolKind::PitchShift | ToolKind::TimeStretch => {
+                    for chan in ch.iter() {
+                        let processed = match tool {
+                            ToolKind::PitchShift => {
+                                crate::wave::process_pitchshift_offline(chan, sr, sr, param)
+                            }
+                            ToolKind::TimeStretch => {
+                                crate::wave::process_timestretch_offline(chan, sr, sr, param)
+                            }
+                            _ => chan.clone(),
+                        };
+                        out.push(processed);
                     }
-                    ToolKind::TimeStretch => {
-                        crate::wave::process_timestretch_offline(chan, sr, sr, param)
+                }
+                ToolKind::Loudness => {
+                    let lufs = crate::wave::lufs_integrated_from_multi(&ch, sr)
+                        .unwrap_or(f32::NEG_INFINITY);
+                    if lufs.is_finite() {
+                        let gain_db = param - lufs;
+                        let gain = 10.0f32.powf(gain_db / 20.0);
+                        for chan in ch.iter() {
+                            let mut processed = chan.clone();
+                            for v in processed.iter_mut() {
+                                *v = (*v * gain).clamp(-1.0, 1.0);
+                            }
+                            out.push(processed);
+                        }
+                        lufs_override = Some(param);
+                    } else {
+                        out = ch.clone();
                     }
-                    _ => chan.clone(),
-                };
-                out.push(processed);
+                }
+                _ => {
+                    out = ch.clone();
+                }
             }
             let len = out.get(0).map(|c| c.len()).unwrap_or(0);
             let mut mono = vec![0.0f32; len];
@@ -571,11 +629,13 @@ spectro_note_labels={}\n",
                 tab_idx,
                 samples: mono,
                 channels: out,
+                lufs_override,
             });
         });
         let msg = match tool {
             ToolKind::PitchShift => "Applying PitchShift...".to_string(),
             ToolKind::TimeStretch => "Applying TimeStretch...".to_string(),
+            ToolKind::Loudness => "Applying Loudness Normalize...".to_string(),
             _ => "Applying...".to_string(),
         };
         self.editor_apply_state = Some(EditorApplyState {
@@ -623,6 +683,7 @@ spectro_note_labels={}\n",
             max_freq = cfg.max_freq_hz.min(max_freq).max(1.0);
         }
         let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
+        let mel_min = 1.0_f32;
         let log_min = 20.0_f32.min(max_freq).max(1.0);
         for x in 0..target_w {
             let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
@@ -647,20 +708,18 @@ spectro_note_labels={}\n",
                         (pos * max_bin as f32).round() as usize
                     }
                     ViewMode::Mel => {
-                        let freq = match cfg.mel_scale {
-                            SpectrogramScale::Linear => {
-                                let mel = frac * mel_max;
-                                700.0 * (10.0_f32.powf(mel / 2595.0) - 1.0)
-                            }
+                        let mel = match cfg.mel_scale {
+                            SpectrogramScale::Linear => mel_max * frac,
                             SpectrogramScale::Log => {
-                                if max_freq <= log_min {
-                                    frac * max_freq
+                                if mel_max <= mel_min {
+                                    mel_max * frac
                                 } else {
-                                    let ratio = max_freq / log_min;
-                                    log_min * ratio.powf(frac)
+                                    let ratio = mel_max / mel_min;
+                                    mel_min * ratio.powf(frac)
                                 }
                             }
                         };
+                        let freq = 700.0 * (10.0_f32.powf(mel / 2595.0) - 1.0);
                         let pos = (freq / max_freq).clamp(0.0, 1.0);
                         (pos * max_bin as f32).round() as usize
                     }
@@ -822,6 +881,14 @@ spectro_note_labels={}\n",
 
     fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
         self.item_for_path(path).and_then(|item| item.meta.as_ref())
+    }
+
+    fn effective_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
+        self.sample_rate_override
+            .get(path)
+            .copied()
+            .or_else(|| self.meta_for_path(path).map(|m| m.sample_rate))
+            .filter(|v| *v > 0)
     }
 
     fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
@@ -1419,6 +1486,94 @@ spectro_note_labels={}\n",
         self.show_batch_rename_dialog = true;
     }
 
+    fn open_resample_dialog(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let mut picked: Option<u32> = None;
+        for p in &paths {
+            let sr = self.effective_sample_rate_for_path(p).unwrap_or(out_sr);
+            match picked {
+                None => picked = Some(sr),
+                Some(prev) if prev == sr => {}
+                _ => {
+                    picked = Some(out_sr);
+                    break;
+                }
+            }
+        }
+        self.resample_target_sr = picked.unwrap_or(out_sr).max(1);
+        self.resample_targets = paths;
+        self.resample_error = None;
+        self.show_resample_dialog = true;
+    }
+
+    fn apply_resample_dialog(&mut self) -> Result<(), String> {
+        if self.resample_targets.is_empty() {
+            return Ok(());
+        }
+        let target = self.resample_target_sr.max(1);
+        if target < 8000 || target > 384_000 {
+            return Err("Sample rate must be between 8000 and 384000 Hz.".to_string());
+        }
+        let targets = self.resample_targets.clone();
+        if targets.len() >= BULK_RESAMPLE_THRESHOLD {
+            let before = self.capture_list_selection_snapshot();
+            self.bulk_resample_state = Some(BulkResampleState {
+                targets,
+                target_sr: target,
+                index: 0,
+                before,
+                before_items: Vec::new(),
+                started_at: std::time::Instant::now(),
+                chunk: BULK_RESAMPLE_CHUNK,
+                cancel_requested: false,
+                finalizing: false,
+                after_items: Vec::new(),
+                after_index: 0,
+            });
+            return Ok(());
+        }
+        let before = self.capture_list_selection_snapshot();
+        let before_items = self.capture_list_undo_items_by_paths(&targets);
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        for p in &targets {
+            let file_sr = self.sample_rate_for_path(p, out_sr);
+            if target == file_sr {
+                self.sample_rate_override.remove(p);
+            } else {
+                self.sample_rate_override.insert(p.clone(), target);
+            }
+        }
+        self.record_list_update_from_paths(&targets, before_items, before);
+        self.refresh_audio_after_sample_rate_change(&targets);
+        Ok(())
+    }
+
+    fn refresh_audio_after_sample_rate_change(&mut self, targets: &[PathBuf]) {
+        if targets.is_empty() {
+            return;
+        }
+        if let Some(tab_idx) = self.active_tab {
+            if let Some(tab) = self.tabs.get(tab_idx) {
+                if targets.iter().any(|p| p == &tab.path) {
+                    self.rebuild_current_buffer_with_mode();
+                    return;
+                }
+            }
+        }
+        if self.active_tab.is_none() {
+            if let Some(row_idx) = self.selected {
+                if let Some(item) = self.item_for_row(row_idx) {
+                    if targets.iter().any(|p| p == &item.path) {
+                        self.select_and_load(row_idx, false);
+                    }
+                }
+            }
+        }
+    }
+
     fn replace_path_in_state(&mut self, from: &std::path::Path, to: &std::path::Path) {
         let Some(id) = self.path_index.get(from).copied() else {
             return;
@@ -1466,6 +1621,9 @@ spectro_note_labels={}\n",
         }
         if let Some(v) = self.lufs_recalc_deadline.remove(from) {
             self.lufs_recalc_deadline.insert(new_path.clone(), v);
+        }
+        if let Some(v) = self.sample_rate_override.remove(from) {
+            self.sample_rate_override.insert(new_path.clone(), v);
         }
         for p in self.saving_sources.iter_mut() {
             if p.as_path() == from {
@@ -1651,6 +1809,18 @@ spectro_note_labels={}\n",
         Vec::new()
     }
 
+    #[cfg(windows)]
+    fn os_key_down(vk: i32) -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        let state = unsafe { GetAsyncKeyState(vk) } as u16;
+        (state & 0x8000) != 0
+    }
+
+    #[cfg(not(windows))]
+    fn os_key_down(_vk: i32) -> bool {
+        false
+    }
+
     fn copy_selected_to_clipboard(&mut self) {
         let ids = self.selected_item_ids();
         if ids.is_empty() {
@@ -1671,7 +1841,7 @@ spectro_note_labels={}\n",
                 None
             };
             let edited_audio = self.edited_audio_for_path(&item.path);
-            let (audio, sample_rate, bits_per_sample) = if let Some(audio) = edited_audio.clone() {
+            let (mut audio, mut sample_rate, mut bits_per_sample) = if let Some(audio) = edited_audio.clone() {
                 (Some(audio), out_sr, 32)
             } else {
                 let meta = item.meta.as_ref();
@@ -1681,6 +1851,20 @@ spectro_note_labels={}\n",
                     meta.map(|m| m.bits_per_sample).unwrap_or(0),
                 )
             };
+            if audio.is_none() {
+                if let Some(path) = source_path.as_ref() {
+                    if let Some((decoded, sr, bits)) = self.decode_audio_for_virtual(path) {
+                        audio = Some(decoded);
+                        sample_rate = sr;
+                        bits_per_sample = bits;
+                    } else if self.debug.cfg.enabled {
+                        self.debug_trace_input(format!(
+                            "copy_selected_to_clipboard decode failed: {}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
             if let Some(audio_ref) = edited_audio {
                 if audio_ref.len() > 0 {
                     if let Some(tmp) =
@@ -1728,6 +1912,15 @@ spectro_note_labels={}\n",
         let payload = self.clipboard_payload.clone();
         let mut added_any = false;
         let mut added_paths: Vec<PathBuf> = Vec::new();
+        if self.debug.cfg.enabled {
+            let payload_items = payload.as_ref().map(|p| p.items.len()).unwrap_or(0);
+            self.debug_trace_input(format!(
+                "paste start payload_items={} selected={:?} selected_multi={}",
+                payload_items,
+                self.selected,
+                self.selected_multi.len()
+            ));
+        }
         if let Some(payload) = payload {
             let mut insert_idx = self.items.len();
             if let Some(row) = self
@@ -1743,6 +1936,11 @@ spectro_note_labels={}\n",
                     }
                 }
             }
+            if self.debug.cfg.enabled {
+                self.debug_trace_input(format!("paste insert_idx={insert_idx}"));
+            }
+            let mut skipped_missing_audio = 0usize;
+            let mut decoded_from_source = 0usize;
             for item in payload.items {
                 let mut audio = item.audio.clone();
                 let mut sample_rate = item.sample_rate;
@@ -1753,10 +1951,17 @@ spectro_note_labels={}\n",
                             audio = Some(decoded);
                             sample_rate = sr;
                             bits_per_sample = bits;
+                            decoded_from_source += 1;
+                        } else if self.debug.cfg.enabled {
+                            self.debug_trace_input(format!(
+                                "paste decode failed: {}",
+                                path.display()
+                            ));
                         }
                     }
                 }
                 let Some(audio) = audio else {
+                    skipped_missing_audio += 1;
                     continue;
                 };
                 let name = self.unique_virtual_display_name(&item.display_name);
@@ -1784,13 +1989,27 @@ spectro_note_labels={}\n",
                         "paste_clipboard_to_list internal items={}",
                         added_paths.len()
                     ));
+                    self.debug_trace_input(format!(
+                        "paste internal decoded_from_source={} skipped_missing_audio={}",
+                        decoded_from_source, skipped_missing_audio
+                    ));
                 }
+                return;
             }
-            return;
+            if self.debug.cfg.enabled {
+                self.debug_trace_input("paste_clipboard_to_list internal empty");
+                self.debug_trace_input(format!(
+                    "paste internal decoded_from_source={} skipped_missing_audio={}",
+                    decoded_from_source, skipped_missing_audio
+                ));
+            }
         }
         let existing_paths: HashSet<PathBuf> =
             self.items.iter().map(|item| item.path.clone()).collect();
         let files = self.get_clipboard_files();
+        if self.debug.cfg.enabled {
+            self.debug_trace_input(format!("paste os files={}", files.len()));
+        }
         if !files.is_empty() {
             let added = self.add_files_merge(&files);
             if added > 0 {
@@ -1809,6 +2028,221 @@ spectro_note_labels={}\n",
                     self.debug_trace_input(format!("paste_clipboard_to_list os files={added}"));
                 }
             }
+        } else if self.debug.cfg.enabled {
+            self.debug_trace_input("paste_clipboard_to_list os empty");
+        }
+    }
+
+    fn handle_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
+        if self.active_tab.is_some() {
+            return;
+        }
+        let mods = ctx.input(|i| i.modifiers);
+        let mut ctrl = mods.ctrl || mods.command;
+        let pressed_c = ctx.input(|i| i.key_pressed(egui::Key::C));
+        let pressed_v = ctx.input(|i| i.key_pressed(egui::Key::V));
+        let mut down_c = ctx.input(|i| i.key_down(egui::Key::C));
+        let mut down_v = ctx.input(|i| i.key_down(egui::Key::V));
+        let mut os_ctrl = false;
+        let mut os_down_c = false;
+        let mut os_down_v = false;
+        if ctx.input(|i| i.raw.focused) {
+            #[cfg(windows)]
+            {
+                const VK_CONTROL: i32 = 0x11;
+                const VK_C: i32 = 0x43;
+                const VK_V: i32 = 0x56;
+                os_ctrl = Self::os_key_down(VK_CONTROL);
+                os_down_c = Self::os_key_down(VK_C);
+                os_down_v = Self::os_key_down(VK_V);
+            }
+        }
+        if os_ctrl {
+            ctrl = true;
+        }
+        if os_down_c {
+            down_c = true;
+        }
+        if os_down_v {
+            down_v = true;
+        }
+        let edge_c = down_c && !self.clipboard_c_was_down;
+        let edge_v = down_v && !self.clipboard_v_was_down;
+        self.clipboard_c_was_down = down_c;
+        self.clipboard_v_was_down = down_v;
+        let event_copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        let event_paste =
+            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+        let raw_key_c = ctx.input(|i| {
+            i.raw.events.iter().any(|e| match e {
+                egui::Event::Key {
+                    key: egui::Key::C,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => modifiers.ctrl || modifiers.command,
+                _ => false,
+            })
+        });
+        let raw_key_v = ctx.input(|i| {
+            i.raw.events.iter().any(|e| match e {
+                egui::Event::Key {
+                    key: egui::Key::V,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => modifiers.ctrl || modifiers.command,
+                _ => false,
+            })
+        });
+        let wants_kb = ctx.wants_keyboard_input();
+        let allow = !self.search_has_focus
+            && (self.list_has_focus || self.selected.is_some() || !wants_kb);
+        let mut consumed_copy = false;
+        let mut consumed_paste = false;
+        if allow && ctrl {
+            consumed_copy = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::CTRL, egui::Key::C)
+                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
+            });
+            consumed_paste = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::CTRL, egui::Key::V)
+                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)
+            });
+        }
+
+        if (pressed_c || event_copy) && !allow && self.debug.cfg.enabled {
+            self.debug_trace_input(format!(
+                "copy blocked (list_focus={} wants_kb={} ctrl={})",
+                self.list_has_focus, wants_kb, ctrl
+            ));
+        }
+        if (pressed_v || event_paste) && !allow && self.debug.cfg.enabled {
+            self.debug_trace_input(format!(
+                "paste blocked (list_focus={} wants_kb={} ctrl={})",
+                self.list_has_focus, wants_kb, ctrl
+            ));
+        }
+
+        let copy_trigger =
+            allow && (ctrl && (pressed_c || edge_c) || event_copy || consumed_copy || raw_key_c);
+        let paste_trigger =
+            allow && (ctrl && (pressed_v || edge_v) || event_paste || consumed_paste || raw_key_v);
+        if self.debug.cfg.enabled {
+            self.debug.last_clip_allow = allow;
+            self.debug.last_clip_wants_kb = wants_kb;
+            self.debug.last_clip_ctrl = ctrl;
+            self.debug.last_clip_event_copy = event_copy;
+            self.debug.last_clip_event_paste = event_paste;
+            self.debug.last_clip_raw_key_c = raw_key_c;
+            self.debug.last_clip_raw_key_v = raw_key_v;
+            self.debug.last_clip_os_ctrl = os_ctrl;
+            self.debug.last_clip_os_key_c = os_down_c;
+            self.debug.last_clip_os_key_v = os_down_v;
+            self.debug.last_clip_consumed_copy = consumed_copy;
+            self.debug.last_clip_consumed_paste = consumed_paste;
+            self.debug.last_clip_copy_trigger = copy_trigger;
+            self.debug.last_clip_paste_trigger = paste_trigger;
+            if allow && ctrl && !paste_trigger && self.clipboard_payload.is_some() {
+                self.debug_trace_input(format!(
+                    "paste not triggered despite allow: pressed_v={} edge_v={} raw_v={} event_paste={} consumed_paste={} down_v={} list_focus={} search_focus={} wants_kb={} sel={:?}",
+                    pressed_v,
+                    edge_v,
+                    raw_key_v,
+                    event_paste,
+                    consumed_paste,
+                    down_v,
+                    self.list_has_focus,
+                    self.search_has_focus,
+                    wants_kb,
+                    self.selected
+                ));
+            }
+        }
+
+        if copy_trigger {
+            if !self.selected_multi.is_empty() || self.selected.is_some() {
+                self.copy_selected_to_clipboard();
+                if self.debug.cfg.enabled && event_copy && !(ctrl && pressed_c) {
+                    self.debug_trace_input("copy triggered via Event::Copy");
+                }
+            } else if self.debug.cfg.enabled {
+                self.debug_trace_input("copy triggered with no selection");
+            }
+        }
+        if paste_trigger {
+            self.paste_clipboard_to_list();
+            if self.debug.cfg.enabled && event_paste && !(ctrl && pressed_v) {
+                self.debug_trace_input("paste triggered via Event::Paste");
+            }
+        }
+    }
+
+    fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
+        let wants_kb = ctx.wants_keyboard_input();
+        let allow = !self.search_has_focus
+            && (self.list_has_focus || self.active_tab.is_some() || self.selected.is_some() || !wants_kb);
+        if !allow {
+            return;
+        }
+        let mods = ctx.input(|i| i.modifiers);
+        let mut ctrl = mods.ctrl || mods.command;
+        let mut shift = mods.shift;
+        let pressed_z = ctx.input(|i| i.key_pressed(Key::Z));
+        let mut down_z = ctx.input(|i| i.key_down(Key::Z));
+        if ctx.input(|i| i.raw.focused) {
+            #[cfg(windows)]
+            {
+                const VK_CONTROL: i32 = 0x11;
+                const VK_SHIFT: i32 = 0x10;
+                const VK_Z: i32 = 0x5A;
+                if Self::os_key_down(VK_CONTROL) {
+                    ctrl = true;
+                }
+                if Self::os_key_down(VK_SHIFT) {
+                    shift = true;
+                }
+                if Self::os_key_down(VK_Z) {
+                    down_z = true;
+                }
+            }
+        }
+        let edge_z = down_z && !self.undo_z_was_down;
+        self.undo_z_was_down = down_z;
+        let undo = ctrl && !shift && (pressed_z || edge_z);
+        let redo = ctrl && shift && (pressed_z || edge_z);
+        if !(undo || redo) {
+            return;
+        }
+        let mut handled = false;
+        let prefer_list = self.last_undo_scope == UndoScope::List;
+        if prefer_list {
+            handled = if redo { self.list_redo() } else { self.list_undo() };
+        }
+        if !handled {
+            if let Some(tab_idx) = self.active_tab {
+                self.clear_preview_if_any(tab_idx);
+                self.editor_apply_state = None;
+                let changed = if redo {
+                    self.redo_in_tab(tab_idx)
+                } else {
+                    self.undo_in_tab(tab_idx)
+                };
+                if changed {
+                    self.last_undo_scope = UndoScope::Editor;
+                    handled = true;
+                }
+            }
+        }
+        if !handled {
+            handled = if redo { self.list_redo() } else { self.list_undo() };
+        }
+        if handled {
+            if self.debug.cfg.enabled && self.debug.input_trace_enabled {
+                let tag = if redo { "redo" } else { "undo" };
+                self.debug_trace_input(format!("{tag} triggered via hotkey"));
+            }
+            ctx.request_repaint();
         }
     }
 
@@ -1985,9 +2419,8 @@ spectro_note_labels={}\n",
                 row.push(text);
             }
             if cols.sample_rate {
-                let text = meta
-                    .map(|m| m.sample_rate)
-                    .filter(|v| *v > 0)
+                let text = self
+                    .effective_sample_rate_for_path(&item.path)
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string());
                 row.push(text);
@@ -2191,6 +2624,72 @@ spectro_note_labels={}\n",
         }
     }
 
+    fn tick_bulk_resample(&mut self) {
+        let Some(mut state) = self.bulk_resample_state.take() else {
+            return;
+        };
+        if state.cancel_requested {
+            for entry in &state.before_items {
+                match entry.sample_rate_override {
+                    Some(v) => {
+                        self.sample_rate_override.insert(entry.item.path.clone(), v);
+                    }
+                    None => {
+                        self.sample_rate_override.remove(&entry.item.path);
+                    }
+                }
+            }
+            self.refresh_audio_after_sample_rate_change(&state.targets);
+            return;
+        }
+        let total = state.targets.len();
+        if total == 0 {
+            return;
+        }
+        let budget = std::time::Duration::from_millis(BULK_RESAMPLE_FRAME_BUDGET_MS);
+        let start = std::time::Instant::now();
+        if !state.finalizing {
+            let out_sr = self.audio.shared.out_sample_rate.max(1);
+            while state.index < total && start.elapsed() < budget {
+                let end = (state.index + state.chunk).min(total);
+                let slice = &state.targets[state.index..end];
+                let before_chunk = self.capture_list_undo_items_by_paths(slice);
+                state.before_items.extend(before_chunk);
+                for p in slice {
+                    let file_sr = self.sample_rate_for_path(p, out_sr);
+                    if state.target_sr == file_sr {
+                        self.sample_rate_override.remove(p);
+                    } else {
+                        self.sample_rate_override.insert(p.clone(), state.target_sr);
+                    }
+                }
+                state.index = end;
+            }
+            if state.index >= total {
+                state.finalizing = true;
+            }
+        }
+        if state.finalizing {
+            while state.after_index < total && start.elapsed() < budget {
+                let end = (state.after_index + state.chunk).min(total);
+                let slice = &state.targets[state.after_index..end];
+                let after_chunk = self.capture_list_undo_items_by_paths(slice);
+                state.after_items.extend(after_chunk);
+                state.after_index = end;
+            }
+            if state.after_index >= total {
+                let targets = state.targets.clone();
+                let before_items = std::mem::take(&mut state.before_items);
+                let after_items = std::mem::take(&mut state.after_items);
+                let before = state.before.clone();
+                self.record_list_update_from_paths_with_after(before_items, after_items, before);
+                self.refresh_audio_after_sample_rate_change(&targets);
+                return;
+            }
+        }
+        self.bulk_resample_state = Some(state);
+    }
+
     fn trigger_save_selected(&mut self) {
         if self.export_cfg.first_prompt {
             self.show_first_save_prompt = true;
@@ -2215,6 +2714,7 @@ spectro_note_labels={}\n",
             audio: Option<std::sync::Arc<crate::audio::AudioBuffer>>,
             gain_db: f32,
             out_sr: u32,
+            target_sr: u32,
             file_sr: u32,
             max_file_samples: Option<u64>,
             markers: Vec<crate::markers::MarkerEntry>,
@@ -2233,6 +2733,7 @@ spectro_note_labels={}\n",
             PathBuf,
             std::sync::Arc<crate::audio::AudioBuffer>,
             f32,
+            u32,
             u32,
         )> = Vec::new();
         for i in indices {
@@ -2303,7 +2804,13 @@ spectro_note_labels={}\n",
                     .as_ref()
                     .map(|m| m.sample_rate)
                     .unwrap_or(self.audio.shared.out_sample_rate);
-                virtual_tasks.push((p, dst, audio, db, sr));
+                let target_sr = self
+                    .sample_rate_override
+                    .get(&p)
+                    .copied()
+                    .unwrap_or(sr)
+                    .max(1);
+                virtual_tasks.push((p, dst, audio, db, sr.max(1), target_sr));
             } else {
                 let mut dirty_audio = false;
                 let mut markers_dirty = false;
@@ -2312,18 +2819,24 @@ spectro_note_labels={}\n",
                 let mut loop_region: Option<(usize, usize)> = None;
                 let mut ch_samples: Option<Vec<Vec<f32>>> = None;
                 let mut max_file_samples: Option<u64> = None;
+                let sr_override = self.sample_rate_override.get(&p).copied();
                 if let Some(tab) = self.tabs.iter().find(|t| t.path.as_path() == p.as_path()) {
                     dirty_audio = tab.dirty;
                     markers_dirty = tab.markers_dirty;
                     loop_markers_dirty = tab.loop_markers_dirty;
                     markers = tab.markers_committed.clone();
                     loop_region = tab.loop_region_committed;
-                    if dirty_audio || markers_dirty || loop_markers_dirty {
-                        let needs_audio =
-                            cfg.save_mode == SaveMode::NewFile || dirty_audio || db.abs() > 0.0001;
+                    if dirty_audio || markers_dirty || loop_markers_dirty || sr_override.is_some() {
+                        let needs_audio = cfg.save_mode == SaveMode::NewFile
+                            || dirty_audio
+                            || db.abs() > 0.0001
+                            || sr_override.is_some();
                         if needs_audio {
                             ch_samples = Some(tab.ch_samples.clone());
-                            max_file_samples = Some(tab.samples_len as u64);
+                            let target_sr = sr_override.unwrap_or(out_sr);
+                            let scaled = (tab.samples_len as f64)
+                                * (target_sr as f64 / out_sr as f64);
+                            max_file_samples = Some(scaled.round().max(0.0) as u64);
                         } else {
                             max_file_samples = self
                                 .meta_for_path(&p)
@@ -2339,12 +2852,17 @@ spectro_note_labels={}\n",
                     loop_markers_dirty = cached.loop_markers_dirty;
                     markers = cached.markers_committed.clone();
                     loop_region = cached.loop_region_committed;
-                    if dirty_audio || markers_dirty || loop_markers_dirty {
-                        let needs_audio =
-                            cfg.save_mode == SaveMode::NewFile || dirty_audio || db.abs() > 0.0001;
+                    if dirty_audio || markers_dirty || loop_markers_dirty || sr_override.is_some() {
+                        let needs_audio = cfg.save_mode == SaveMode::NewFile
+                            || dirty_audio
+                            || db.abs() > 0.0001
+                            || sr_override.is_some();
                         if needs_audio {
                             ch_samples = Some(cached.ch_samples.clone());
-                            max_file_samples = Some(cached.samples_len as u64);
+                            let target_sr = sr_override.unwrap_or(out_sr);
+                            let scaled = (cached.samples_len as f64)
+                                * (target_sr as f64 / out_sr as f64);
+                            max_file_samples = Some(scaled.round().max(0.0) as u64);
                         } else {
                             max_file_samples = self
                                 .meta_for_path(&p)
@@ -2355,15 +2873,18 @@ spectro_note_labels={}\n",
                         }
                     }
                 }
-                let has_edits = dirty_audio || markers_dirty || loop_markers_dirty;
+                let has_edits = dirty_audio || markers_dirty || loop_markers_dirty || sr_override.is_some();
                 if has_edits {
-                    let write_audio =
-                        cfg.save_mode == SaveMode::NewFile || dirty_audio || db.abs() > 0.0001;
+                    let write_audio = cfg.save_mode == SaveMode::NewFile
+                        || dirty_audio
+                        || db.abs() > 0.0001
+                        || sr_override.is_some();
                     let audio = ch_samples.map(crate::audio::AudioBuffer::from_channels).map(
                         std::sync::Arc::new,
                     );
+                    let target_sr = sr_override.unwrap_or(out_sr).max(1);
                     let file_sr = if write_audio {
-                        out_sr
+                        target_sr
                     } else {
                         self.sample_rate_for_path(&p, out_sr)
                     };
@@ -2375,6 +2896,7 @@ spectro_note_labels={}\n",
                         audio,
                         gain_db: db,
                         out_sr,
+                        target_sr,
                         file_sr,
                         max_file_samples,
                         markers,
@@ -2403,12 +2925,14 @@ spectro_note_labels={}\n",
         self.saving_edit_sources = edit_sources;
         self.saving_virtual = virtual_tasks
             .iter()
-            .map(|(src, dst, _, _, _)| (src.clone(), dst.clone()))
+            .map(|(src, dst, _, _, _, _)| (src.clone(), dst.clone()))
             .collect();
         self.saving_mode = Some(save_mode);
         let virtual_jobs = virtual_tasks
             .iter()
-            .map(|(src, dst, audio, db, sr)| (src.clone(), dst.clone(), audio.clone(), *db, *sr))
+            .map(|(src, dst, audio, db, sr, target_sr)| {
+                (src.clone(), dst.clone(), audio.clone(), *db, *sr, *target_sr)
+            })
             .collect::<Vec<_>>();
         let edit_jobs = edit_tasks;
         let (tx, rx) = mpsc::channel::<ExportResult>();
@@ -2575,13 +3099,20 @@ spectro_note_labels={}\n",
                         dst
                     }
                 };
+                let mut max_file_samples = task.max_file_samples;
                 if task.write_audio {
-                    let Some(audio) = task.audio.as_ref() else {
-                        failed += 1;
-                        failed_paths.push(task.src.clone());
-                        continue;
+                    let (mut channels, src_sr) = if let Some(audio) = task.audio.as_ref() {
+                        (audio.channels.clone(), task.out_sr)
+                    } else {
+                        match crate::audio_io::decode_audio_multi(&task.src) {
+                            Ok((decoded, decoded_sr)) => (decoded, decoded_sr.max(1)),
+                            Err(_) => {
+                                failed += 1;
+                                failed_paths.push(task.src.clone());
+                                continue;
+                            }
+                        }
                     };
-                    let mut channels = audio.channels.clone();
                     if task.gain_db.abs() > 0.0001 {
                         let gain = 10.0f32.powf(task.gain_db / 20.0);
                         for ch in channels.iter_mut() {
@@ -2590,15 +3121,20 @@ spectro_note_labels={}\n",
                             }
                         }
                     }
+                    if src_sr != task.target_sr {
+                        for ch in channels.iter_mut() {
+                            *ch = crate::wave::resample_linear(ch, src_sr, task.target_sr);
+                        }
+                    }
                     let res = match save_mode {
                         SaveMode::Overwrite => crate::wave::overwrite_audio_from_channels(
                             &channels,
-                            task.out_sr,
+                            task.target_sr,
                             &dst,
                             cfg.backup_bak,
                         ),
                         SaveMode::NewFile => {
-                            crate::wave::export_channels_audio(&channels, task.out_sr, &dst)
+                            crate::wave::export_channels_audio(&channels, task.target_sr, &dst)
                         }
                     };
                     if res.is_err() {
@@ -2606,6 +3142,8 @@ spectro_note_labels={}\n",
                         failed_paths.push(task.src.clone());
                         continue;
                     }
+                    max_file_samples = max_file_samples
+                        .or_else(|| channels.get(0).map(|c| c.len() as u64));
                 } else if !task.src.is_file() {
                     failed += 1;
                     failed_paths.push(task.src.clone());
@@ -2634,7 +3172,7 @@ spectro_note_labels={}\n",
                                 task.file_sr,
                             )
                         {
-                            if let Some(max) = task.max_file_samples {
+                            if let Some(max) = max_file_samples {
                                 if max > 0 {
                                     let max = max.min(u32::MAX as u64);
                                     ls = (ls as u64).min(max) as u32;
@@ -2659,7 +3197,7 @@ spectro_note_labels={}\n",
                     failed_paths.push(dst.clone());
                 }
             }
-            for (_src, dst, audio, db, sr) in virtual_jobs {
+            for (_src, dst, audio, db, sr, target_sr) in virtual_jobs {
                 let mut channels = audio.channels.clone();
                 if db.abs() > 0.0001 {
                     let gain = 10.0f32.powf(db / 20.0);
@@ -2669,9 +3207,16 @@ spectro_note_labels={}\n",
                         }
                     }
                 }
+                let mut out_sr = sr.max(1);
+                if out_sr != target_sr.max(1) {
+                    for ch in channels.iter_mut() {
+                        *ch = crate::wave::resample_linear(ch, out_sr, target_sr.max(1));
+                    }
+                    out_sr = target_sr.max(1);
+                }
                 let res = crate::wave::export_selection_wav(
                     &channels,
-                    sr.max(1),
+                    out_sr,
                     (0, channels.get(0).map(|c| c.len()).unwrap_or(0)),
                     &dst,
                 );
@@ -2960,7 +3505,7 @@ spectro_note_labels={}\n",
             self.scan_rx = None;
             self.scan_in_progress = false;
             self.scan_started_at = None;
-            if self.external_source.is_some() {
+            if !self.external_sources.is_empty() {
                 self.apply_external_mapping();
             }
             self.apply_filter_from_search();
@@ -3586,6 +4131,8 @@ impl WavesPreviewer {
             transcript_inflight: HashSet::new(),
             show_transcript_window: false,
             pending_transcript_seek: None,
+            external_sources: Vec::new(),
+            external_active_source: None,
             external_source: None,
             external_headers: Vec::new(),
             external_rows: Vec::new(),
@@ -3615,6 +4162,8 @@ impl WavesPreviewer {
             external_load_rows: 0,
             external_load_started_at: None,
             external_load_path: None,
+            external_load_target: None,
+            external_load_queue: VecDeque::new(),
             tool_defs: Vec::new(),
             tool_queue: std::collections::VecDeque::new(),
             tool_run_rx: None,
@@ -3647,6 +4196,9 @@ impl WavesPreviewer {
             select_anchor: None,
             clipboard_payload: None,
             clipboard_temp_files: Vec::new(),
+            clipboard_c_was_down: false,
+            clipboard_v_was_down: false,
+            undo_z_was_down: false,
             list_undo_stack: Vec::new(),
             list_redo_stack: Vec::new(),
             last_undo_scope: UndoScope::Editor,
@@ -3656,6 +4208,8 @@ impl WavesPreviewer {
             last_list_scroll_at: None,
             auto_play_list_nav: false,
             suppress_list_enter: false,
+            list_has_focus: false,
+            search_has_focus: false,
             original_files: Vec::new(),
             search_query: String::new(),
             search_use_regex: false,
@@ -3708,6 +4262,12 @@ impl WavesPreviewer {
             lufs_recalc_deadline: HashMap::new(),
             lufs_rx2: None,
             lufs_worker_busy: false,
+            sample_rate_override: HashMap::new(),
+            show_resample_dialog: false,
+            resample_targets: Vec::new(),
+            resample_target_sr: 48_000,
+            resample_error: None,
+            bulk_resample_state: None,
             leave_intent: None,
             show_leave_prompt: false,
             pending_activate_path: None,
@@ -4437,42 +4997,12 @@ impl eframe::App for WavesPreviewer {
         self.run_startup_actions(ctx);
         // Debug automation + checks
         self.debug_tick(ctx);
-        // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z) for editor/list
-        if !ctx.wants_keyboard_input() {
-            let (undo, redo) = ctx.input(|i| {
-                let redo = i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::Z);
-                let undo = i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(Key::Z);
-                (undo, redo)
-            });
-            if undo || redo {
-                let mut handled = false;
-                let prefer_list = self.last_undo_scope == UndoScope::List;
-                if prefer_list {
-                    handled = if redo { self.list_redo() } else { self.list_undo() };
-                }
-                if !handled {
-                    if let Some(tab_idx) = self.active_tab {
-                        self.clear_preview_if_any(tab_idx);
-                        self.editor_apply_state = None;
-                        let changed = if redo {
-                            self.redo_in_tab(tab_idx)
-                        } else {
-                            self.undo_in_tab(tab_idx)
-                        };
-                        if changed {
-                            self.last_undo_scope = UndoScope::Editor;
-                            handled = true;
-                        }
-                    }
-                }
-                if !handled {
-                    handled = if redo { self.list_redo() } else { self.list_undo() };
-                }
-                if handled {
-                    ctx.request_repaint();
-                }
-            }
+        // Clipboard hotkeys: handle before UI to avoid text edit consuming Ctrl+V/C
+        if self.active_tab.is_none() {
+            self.handle_clipboard_hotkeys(ctx);
         }
+        // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z) for editor/list
+        self.handle_undo_redo_hotkeys(ctx);
         // Drain heavy preview results
         if let Some(rx) = &self.heavy_preview_rx {
             if let Ok(mono) = rx.try_recv() {
@@ -4565,6 +5095,9 @@ impl eframe::App for WavesPreviewer {
                     }
                     tab.dirty = true;
                     Self::editor_clamp_ranges(tab);
+                    if let Some(v) = res.lufs_override {
+                        self.lufs_override.insert(tab.path.clone(), v);
+                    }
                 }
                 self.heavy_preview_rx = None;
                 self.heavy_preview_tool = None;
@@ -4645,6 +5178,11 @@ impl eframe::App for WavesPreviewer {
                                         self.external_load_error = Some(err);
                                     } else {
                                         self.external_load_error = None;
+                                        if let Some(next_path) = self.external_load_queue.pop_front() {
+                                            self.external_load_target =
+                                                Some(external_ops::ExternalLoadTarget::New);
+                                            self.begin_external_load(next_path);
+                                        }
                                     }
                                 } else {
                                     self.external_load_error =
@@ -4664,6 +5202,10 @@ impl eframe::App for WavesPreviewer {
             }
         }
         self.check_csv_export_completion();
+        self.tick_bulk_resample();
+        if self.bulk_resample_state.is_some() {
+            ctx.request_repaint();
+        }
         // Drain spectrogram jobs (tiled)
         self.drain_spectrogram_jobs(ctx);
 
@@ -4677,6 +5219,7 @@ impl eframe::App for WavesPreviewer {
                     for p in &sources {
                         self.set_pending_gain_db_for_path(p, 0.0);
                         self.lufs_override.remove(p);
+                        self.sample_rate_override.remove(p);
                     }
                     let success_set: std::collections::HashSet<PathBuf> =
                         res.success_paths.iter().cloned().collect();
@@ -4696,7 +5239,9 @@ impl eframe::App for WavesPreviewer {
                     for (src, dst) in &virtual_success {
                         self.set_pending_gain_db_for_path(src, 0.0);
                         self.lufs_override.remove(src);
+                        self.sample_rate_override.remove(src);
                         self.replace_path_in_state(src, dst);
+                        self.sample_rate_override.remove(dst);
                     }
                     match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                         SaveMode::Overwrite => {
@@ -4817,12 +5362,17 @@ impl eframe::App for WavesPreviewer {
                 path,
                 samples,
                 waveform,
-                channels,
+                mut channels,
             } = res;
             // Apply new buffer and waveform
             if channels.is_empty() {
                 self.audio.set_samples_mono(samples);
             } else {
+                self.apply_sample_rate_preview_for_path(
+                    &path,
+                    &mut channels,
+                    self.audio.shared.out_sample_rate,
+                );
                 self.audio.set_samples_channels(channels);
             }
             self.audio.stop();
@@ -4884,6 +5434,7 @@ impl eframe::App for WavesPreviewer {
                         self.active_tab = None;
                         self.audio.stop();
                         self.audio.set_loop_enabled(false);
+                        self.request_list_focus(ctx);
                     } else {
                         let tab_idx = idx - 1;
                         if tab_idx < self.tabs.len() {
@@ -4981,6 +5532,7 @@ impl eframe::App for WavesPreviewer {
                     self.active_tab = Some(new_active);
                 } else {
                     self.active_tab = None;
+                    self.request_list_focus(ctx);
                 }
             }
         }
@@ -5025,6 +5577,9 @@ impl eframe::App for WavesPreviewer {
                         self.external_sheet_selected = None;
                         self.external_sheet_names.clear();
                         self.external_settings_dirty = false;
+                        self.external_load_queue.clear();
+                        self.external_load_target =
+                            Some(external_ops::ExternalLoadTarget::New);
                         self.show_external_dialog = true;
                         self.begin_external_load(data_path);
                     }
@@ -5054,6 +5609,7 @@ impl eframe::App for WavesPreviewer {
                     self.active_tab = None;
                     self.audio.stop();
                     self.audio.set_loop_enabled(false);
+                    self.request_list_focus(ctx);
                 }
                 let mut to_close: Option<usize> = None;
                 let tabs_len = self.tabs.len();
@@ -5095,7 +5651,10 @@ impl eframe::App for WavesPreviewer {
                     self.cache_dirty_tab_at(i);
                     self.tabs.remove(i);
                     match self.active_tab {
-                        Some(ai) if ai == i => self.active_tab = None,
+                        Some(ai) if ai == i => {
+                            self.active_tab = None;
+                            self.request_list_focus(ctx);
+                        }
                         Some(ai) if ai > i => self.active_tab = Some(ai - 1),
                         _ => {}
                     }
@@ -5695,9 +6254,15 @@ impl eframe::App for WavesPreviewer {
         }
 
         // Busy overlay (only for blocking operations like export/apply)
+        let bulk_blocking = self
+            .bulk_resample_state
+            .as_ref()
+            .map(|s| s.started_at.elapsed().as_secs() >= BULK_RESAMPLE_BLOCK_SECS)
+            .unwrap_or(false);
         let block_busy = self.export_state.is_some()
             || self.editor_apply_state.is_some()
-            || self.csv_export_state.is_some();
+            || self.csv_export_state.is_some()
+            || bulk_blocking;
         if block_busy {
             use egui::{Id, LayerId, Order};
             let screen = ctx.viewport_rect();
@@ -5726,6 +6291,8 @@ impl eframe::App for WavesPreviewer {
                                 st.msg.as_str()
                             } else if self.csv_export_state.is_some() {
                                 "Preparing CSV..."
+                            } else if self.bulk_resample_state.is_some() {
+                                "Applying sample rate..."
                             } else {
                                 "Working..."
                             };
@@ -5733,6 +6300,19 @@ impl eframe::App for WavesPreviewer {
                             if self.editor_apply_state.is_some() {
                                 if ui.button("Cancel").clicked() {
                                     self.cancel_editor_apply();
+                                }
+                            }
+                            if let Some(state) = &mut self.bulk_resample_state {
+                                let total = state.targets.len().max(1);
+                                let pct =
+                                    (state.index as f32 / total as f32).clamp(0.0, 1.0);
+                                ui.add(
+                                    egui::ProgressBar::new(pct)
+                                        .desired_width(180.0)
+                                        .show_percentage(),
+                                );
+                                if ui.button("Cancel").clicked() {
+                                    state.cancel_requested = true;
                                 }
                             }
                             if let Some(csv) = &self.csv_export_state {
@@ -5770,6 +6350,7 @@ impl eframe::App for WavesPreviewer {
                                         if let Some(ai) = self.active_tab {
                                             if ai == i {
                                                 self.active_tab = None;
+                                                self.request_list_focus(ctx);
                                             } else if ai > i {
                                                 self.active_tab = Some(ai - 1);
                                             }
@@ -5789,6 +6370,7 @@ impl eframe::App for WavesPreviewer {
                                     self.active_tab = None;
                                     self.audio.stop();
                                     self.audio.set_loop_enabled(false);
+                                    self.request_list_focus(ctx);
                                 }
                                 None => {}
                             }
@@ -5956,6 +6538,49 @@ impl eframe::App for WavesPreviewer {
                     }
                     Err(err) => {
                         self.batch_rename_error = Some(err);
+                    }
+                }
+            }
+        }
+        if self.show_resample_dialog {
+            let mut do_apply = false;
+            egui::Window::new("Sample Rate Convert")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(format!("{} files", self.resample_targets.len()));
+                    ui.horizontal(|ui| {
+                        ui.label("Target sample rate (Hz):");
+                        ui.add(
+                            egui::DragValue::new(&mut self.resample_target_sr)
+                                .range(8000..=384_000)
+                                .speed(100.0),
+                        );
+                    });
+                    if let Some(err) = self.resample_error.as_ref() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, err);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            do_apply = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_resample_dialog = false;
+                            self.resample_targets.clear();
+                            self.resample_error = None;
+                        }
+                    });
+                });
+            if do_apply {
+                match self.apply_resample_dialog() {
+                    Ok(()) => {
+                        self.show_resample_dialog = false;
+                        self.resample_targets.clear();
+                        self.resample_error = None;
+                    }
+                    Err(err) => {
+                        self.resample_error = Some(err);
                     }
                 }
             }

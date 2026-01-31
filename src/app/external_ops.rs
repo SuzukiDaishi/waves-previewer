@@ -1,17 +1,28 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{ExternalKeyRule, MediaItem, MediaSource, WavesPreviewer};
+use super::{ExternalKeyRule, ExternalSource, MediaItem, MediaSource, WavesPreviewer};
+
+#[derive(Clone, Debug)]
+pub(crate) enum ExternalLoadTarget {
+    New,
+    Reload(usize),
+}
 
 impl WavesPreviewer {
     fn external_unmatched_path_for_row(&self, row_idx: usize) -> PathBuf {
-        let base = self
-            .external_source
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .and_then(|s| s.to_str())
-            .unwrap_or("external");
-        PathBuf::from(format!("external://{}/{}", base, row_idx))
+        let key_idx = self.external_key_index.unwrap_or(0);
+        let key = self
+            .external_rows
+            .get(row_idx)
+            .and_then(|row| row.get(key_idx))
+            .map(|v| v.trim())
+            .unwrap_or("");
+        if key.is_empty() {
+            PathBuf::from(format!("external://row/{}", row_idx))
+        } else {
+            PathBuf::from(format!("external://row/{}", key))
+        }
     }
 
     fn clear_external_unmatched_items(&mut self) {
@@ -214,7 +225,7 @@ impl WavesPreviewer {
         self.external_match_count = 0;
         self.external_unmatched_count = 0;
         self.external_unmatched_rows.clear();
-        if self.external_source.is_none() {
+        if self.external_sources.is_empty() {
             for item in &mut self.items {
                 item.external.clear();
             }
@@ -319,17 +330,6 @@ impl WavesPreviewer {
             .collect()
     }
 
-    #[allow(dead_code)]
-    pub(super) fn load_external_source(
-        &mut self,
-        path: PathBuf,
-    ) -> std::result::Result<(), String> {
-        let Some(table) = super::external::load_table(&path) else {
-            return Err("Unsupported or empty data source.".to_string());
-        };
-        self.apply_external_table(path, table)
-    }
-
     pub(super) fn begin_external_load(&mut self, path: PathBuf) {
         if self.external_load_inflight {
             return;
@@ -359,20 +359,34 @@ impl WavesPreviewer {
         if table.headers.is_empty() {
             return Err("No headers found in data source.".to_string());
         }
-        self.external_source = Some(path);
-        self.external_headers = table.headers;
-        self.external_rows = table.rows;
-        self.external_sheet_names = table.sheet_names;
-        self.external_sheet_selected = table.sheet_name;
+        let source = ExternalSource {
+            path: path.clone(),
+            headers: table.headers,
+            rows: table.rows,
+            sheet_names: table.sheet_names,
+            sheet_name: table.sheet_name,
+            has_header: self.external_has_header,
+            header_row: self.external_header_row,
+            data_row: self.external_data_row,
+        };
+        match self.external_load_target.take() {
+            Some(ExternalLoadTarget::Reload(idx)) => {
+                if idx < self.external_sources.len() {
+                    self.external_sources[idx] = source;
+                    self.external_active_source = Some(idx);
+                } else {
+                    self.external_sources.push(source);
+                    self.external_active_source = Some(self.external_sources.len() - 1);
+                }
+            }
+            _ => {
+                self.external_sources.push(source);
+                self.external_active_source = Some(self.external_sources.len() - 1);
+            }
+        }
+        self.sync_active_external_source();
+        self.rebuild_external_merged();
         self.external_settings_dirty = false;
-        let key_idx = self
-            .external_key_index
-            .filter(|&idx| idx < self.external_headers.len())
-            .unwrap_or(0);
-        self.external_key_index = Some(key_idx);
-        self.external_visible_columns =
-            Self::default_external_columns(&self.external_headers, key_idx);
-        self.rebuild_external_lookup();
         self.apply_external_mapping();
         self.apply_filter_from_search();
         self.apply_sort();
@@ -380,6 +394,8 @@ impl WavesPreviewer {
     }
 
     pub(super) fn clear_external_data(&mut self) {
+        self.external_sources.clear();
+        self.external_active_source = None;
         self.external_source = None;
         self.external_headers.clear();
         self.external_rows.clear();
@@ -394,11 +410,110 @@ impl WavesPreviewer {
         self.external_sheet_names.clear();
         self.external_sheet_selected = None;
         self.external_settings_dirty = false;
+        self.external_load_target = None;
+        self.external_load_queue.clear();
         self.clear_external_unmatched_items();
         for item in &mut self.items {
             item.external.clear();
         }
         self.apply_filter_from_search();
         self.apply_sort();
+    }
+
+    pub(super) fn sync_active_external_source(&mut self) {
+        let Some(idx) = self.external_active_source else {
+            self.external_source = None;
+            self.external_sheet_names.clear();
+            self.external_sheet_selected = None;
+            return;
+        };
+        let Some(source) = self.external_sources.get(idx) else {
+            self.external_source = None;
+            self.external_sheet_names.clear();
+            self.external_sheet_selected = None;
+            return;
+        };
+        self.external_source = Some(source.path.clone());
+        self.external_sheet_names = source.sheet_names.clone();
+        self.external_sheet_selected = source.sheet_name.clone();
+        self.external_has_header = source.has_header;
+        self.external_header_row = source.header_row;
+        self.external_data_row = source.data_row;
+    }
+
+    pub(super) fn rebuild_external_merged(&mut self) {
+        self.external_headers.clear();
+        self.external_rows.clear();
+        self.external_key_row_index.clear();
+        self.external_lookup.clear();
+        if self.external_sources.is_empty() {
+            self.external_visible_columns.clear();
+            return;
+        }
+        let mut header_map: HashMap<String, usize> = HashMap::new();
+        for source in &self.external_sources {
+            for header in &source.headers {
+                if !header_map.contains_key(header) {
+                    let idx = self.external_headers.len();
+                    self.external_headers.push(header.clone());
+                    header_map.insert(header.clone(), idx);
+                }
+            }
+        }
+        if self.external_headers.is_empty() {
+            return;
+        }
+        let key_idx = self
+            .external_key_index
+            .filter(|&idx| idx < self.external_headers.len())
+            .unwrap_or(0);
+        self.external_key_index = Some(key_idx);
+        let key_name = self.external_headers[key_idx].clone();
+        let mut key_to_row: HashMap<String, usize> = HashMap::new();
+        for source in &self.external_sources {
+            let Some(src_key_idx) = source.headers.iter().position(|h| h == &key_name) else {
+                continue;
+            };
+            for row in &source.rows {
+                let key_raw = row.get(src_key_idx).map(|v| v.trim()).unwrap_or("");
+                if key_raw.is_empty() {
+                    continue;
+                }
+                let key = key_raw.to_ascii_lowercase();
+                let row_idx = if let Some(&idx) = key_to_row.get(&key) {
+                    idx
+                } else {
+                    let idx = self.external_rows.len();
+                    self.external_rows
+                        .push(vec![String::new(); self.external_headers.len()]);
+                    key_to_row.insert(key.clone(), idx);
+                    self.external_rows[idx][key_idx] = key_raw.to_string();
+                    idx
+                };
+                for (col_idx, header) in source.headers.iter().enumerate() {
+                    let Some(&dst_idx) = header_map.get(header) else {
+                        continue;
+                    };
+                    if let Some(val) = row.get(col_idx) {
+                        let trimmed = val.trim();
+                        if !trimmed.is_empty() {
+                            self.external_rows[row_idx][dst_idx] = trimmed.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        if self.external_visible_columns.is_empty() {
+            self.external_visible_columns =
+                Self::default_external_columns(&self.external_headers, key_idx);
+        } else {
+            self.external_visible_columns
+                .retain(|c| header_map.contains_key(c));
+            if self.external_visible_columns.is_empty() {
+                self.external_visible_columns =
+                    Self::default_external_columns(&self.external_headers, key_idx);
+            }
+        }
+        self.rebuild_external_lookup();
     }
 }

@@ -121,6 +121,9 @@ fn parse_startup_config() -> app::StartupConfig {
                     cfg.external_dummy_path = Some(std::path::PathBuf::from(p));
                 }
             }
+            "--external-dummy-merge" => {
+                cfg.external_dummy_merge = true;
+            }
             "--external-sheet" => {
                 if let Some(v) = args.next() {
                     cfg.external_sheet = Some(v);
@@ -272,7 +275,7 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-project <project.nwproj>\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --external-dialog\n  --debug-summary <path>\n  --debug-summary-delay <frames>\n  --external-file <path>\n  --external-dummy <rows>\n  --external-dummy-cols <count>\n  --external-dummy-path <path>\n  --external-sheet <name>\n  --external-has-header <on|off>\n  --external-header-row <n> (1-based, 0=auto)\n  --external-data-row <n> (1-based, 0=auto)\n  --external-key-rule <file|stem|regex>\n  --external-key-input <file|stem|path|dir>\n  --external-key-regex <pattern>\n  --external-key-replace <text>\n  --external-scope-regex <pattern>\n  --external-show-unmatched\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
+                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-project <project.nwproj>\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --external-dialog\n  --debug-summary <path>\n  --debug-summary-delay <frames>\n  --external-file <path>\n  --external-dummy <rows>\n  --external-dummy-cols <count>\n  --external-dummy-path <path>\n  --external-dummy-merge\n  --external-sheet <name>\n  --external-has-header <on|off>\n  --external-header-row <n> (1-based, 0=auto)\n  --external-data-row <n> (1-based, 0=auto)\n  --external-key-rule <file|stem|regex>\n  --external-key-input <file|stem|path|dir>\n  --external-key-regex <pattern>\n  --external-key-replace <text>\n  --external-scope-regex <pattern>\n  --external-show-unmatched\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
                 );
                 std::process::exit(0);
             }

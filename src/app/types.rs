@@ -36,6 +36,18 @@ pub struct MediaItem {
 }
 
 #[derive(Clone, Debug)]
+pub struct ExternalSource {
+    pub path: PathBuf,
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    pub sheet_names: Vec<String>,
+    pub sheet_name: Option<String>,
+    pub has_header: bool,
+    pub header_row: Option<usize>,
+    pub data_row: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
 pub struct TranscriptSegment {
     pub start_ms: u64,
     pub end_ms: u64,
@@ -94,6 +106,7 @@ pub struct ListUndoItem {
     pub edited_cache: Option<CachedEdit>,
     pub lufs_override: Option<f32>,
     pub lufs_deadline: Option<Instant>,
+    pub sample_rate_override: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -244,6 +257,7 @@ pub enum ToolKind {
     TimeStretch,
     Gain,
     Normalize,
+    Loudness,
     Reverse,
 }
 
@@ -253,6 +267,7 @@ pub struct ToolState {
     pub fade_out_ms: f32,
     pub gain_db: f32,
     pub normalize_target_db: f32,
+    pub loudness_target_lufs: f32,
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
     pub loop_repeat: u32,
@@ -496,6 +511,7 @@ pub struct EditorApplyResult {
     pub tab_idx: usize,
     pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
+    pub lufs_override: Option<f32>,
 }
 
 pub struct EditorDecodeResult {
@@ -641,6 +657,20 @@ pub struct CsvExportState {
     pub started_at: Instant,
 }
 
+pub struct BulkResampleState {
+    pub targets: Vec<PathBuf>,
+    pub target_sr: u32,
+    pub index: usize,
+    pub before: ListSelectionSnapshot,
+    pub before_items: Vec<ListUndoItem>,
+    pub started_at: Instant,
+    pub chunk: usize,
+    pub cancel_requested: bool,
+    pub finalizing: bool,
+    pub after_items: Vec<ListUndoItem>,
+    pub after_index: usize,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SaveMode {
     Overwrite,
@@ -680,6 +710,7 @@ pub struct StartupConfig {
     pub external_dummy_rows: Option<usize>,
     pub external_dummy_cols: usize,
     pub external_dummy_path: Option<PathBuf>,
+    pub external_dummy_merge: bool,
     pub external_sheet: Option<String>,
     pub external_has_header: Option<bool>,
     pub external_header_row: Option<usize>,
@@ -720,6 +751,7 @@ impl Default for StartupConfig {
             external_dummy_rows: None,
             external_dummy_cols: 6,
             external_dummy_path: None,
+            external_dummy_merge: false,
             external_sheet: None,
             external_has_header: None,
             external_header_row: None,
@@ -779,6 +811,7 @@ impl StartupState {
 pub struct DebugConfig {
     pub enabled: bool,
     pub log_path: Option<PathBuf>,
+    pub input_trace_to_console: bool,
     pub auto_run: bool,
     pub auto_run_editor: bool,
     pub auto_run_pitch_shift_semitones: Option<f32>,
@@ -793,6 +826,7 @@ impl Default for DebugConfig {
         Self {
             enabled: false,
             log_path: None,
+            input_trace_to_console: false,
             auto_run: false,
             auto_run_editor: false,
             auto_run_pitch_shift_semitones: None,
@@ -829,6 +863,20 @@ pub struct DebugState {
     pub last_key_v_pressed: bool,
     pub last_key_c_down: bool,
     pub last_key_v_down: bool,
+    pub last_clip_allow: bool,
+    pub last_clip_wants_kb: bool,
+    pub last_clip_ctrl: bool,
+    pub last_clip_event_copy: bool,
+    pub last_clip_event_paste: bool,
+    pub last_clip_raw_key_c: bool,
+    pub last_clip_raw_key_v: bool,
+    pub last_clip_os_ctrl: bool,
+    pub last_clip_os_key_c: bool,
+    pub last_clip_os_key_v: bool,
+    pub last_clip_consumed_copy: bool,
+    pub last_clip_consumed_paste: bool,
+    pub last_clip_copy_trigger: bool,
+    pub last_clip_paste_trigger: bool,
     pub auto: Option<DebugAutomation>,
     pub check_counter: u32,
     pub overlay_trace: bool,
@@ -865,6 +913,20 @@ impl DebugState {
             last_key_v_pressed: false,
             last_key_c_down: false,
             last_key_v_down: false,
+            last_clip_allow: false,
+            last_clip_wants_kb: false,
+            last_clip_ctrl: false,
+            last_clip_event_copy: false,
+            last_clip_event_paste: false,
+            last_clip_raw_key_c: false,
+            last_clip_raw_key_v: false,
+            last_clip_os_ctrl: false,
+            last_clip_os_key_c: false,
+            last_clip_os_key_v: false,
+            last_clip_consumed_copy: false,
+            last_clip_consumed_paste: false,
+            last_clip_copy_trigger: false,
+            last_clip_paste_trigger: false,
             auto: None,
             check_counter,
             overlay_trace: false,

@@ -36,6 +36,11 @@ impl crate::app::WavesPreviewer {
                         for line in summary.lines() {
                             ui.monospace(line);
                         }
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("External Merge Test").clicked() {
+                                self.debug_start_external_merge_test(6, 6);
+                            }
+                        });
                     });
                 ui.separator();
                 egui::CollapsingHeader::new("Input")
@@ -53,6 +58,10 @@ impl crate::app::WavesPreviewer {
                         ui.monospace(format!("wants_keyboard_input: {wants_kb}"));
                         ui.monospace(format!("wants_pointer_input: {wants_ptr}"));
                         ui.monospace(format!(
+                            "suppress_list_enter: {}",
+                            self.suppress_list_enter
+                        ));
+                        ui.monospace(format!(
                             "mods: ctrl:{} shift:{} alt:{} command:{}",
                             mods.ctrl, mods.shift, mods.alt, mods.command
                         ));
@@ -62,12 +71,20 @@ impl crate::app::WavesPreviewer {
                             self.debug.last_pointer_over_list
                         ));
                         ui.monospace(format!(
+                            "list_has_focus: {} search_has_focus: {}",
+                            self.list_has_focus, self.search_has_focus
+                        ));
+                        ui.monospace(format!(
                             "ctrl_down:{} c_pressed:{} v_pressed:{} c_down:{} v_down:{}",
                             self.debug.last_ctrl_down,
                             self.debug.last_key_c_pressed,
                             self.debug.last_key_v_pressed,
                             self.debug.last_key_c_down,
                             self.debug.last_key_v_down
+                        ));
+                        ui.monospace(format!(
+                            "clip_edge: c:{} v:{}",
+                            self.clipboard_c_was_down, self.clipboard_v_was_down
                         ));
                         if let Some(hotkey) = self.debug.last_hotkey.as_ref() {
                             let ago = self
@@ -86,6 +103,19 @@ impl crate::app::WavesPreviewer {
                                 egui::DragValue::new(&mut self.debug.input_trace_max)
                                     .range(10..=2000),
                             );
+                            let has_trace = !self.debug.input_trace.is_empty();
+                            if ui
+                                .add_enabled(has_trace, egui::Button::new("Copy trace"))
+                                .on_hover_text("Copy Trace hotkeys lines to clipboard")
+                                .clicked()
+                            {
+                                let mut buf = String::new();
+                                for line in &self.debug.input_trace {
+                                    buf.push_str(line);
+                                    buf.push('\n');
+                                }
+                                ui.ctx().send_cmd(egui::output::OutputCommand::CopyText(buf));
+                            }
                             if ui.button("Clear trace").clicked() {
                                 self.debug.input_trace.clear();
                             }
@@ -151,6 +181,35 @@ impl crate::app::WavesPreviewer {
                                 src
                             ));
                         }
+                        ui.separator();
+                        ui.monospace(format!(
+                            "clip_allow:{} wants_kb:{} ctrl:{}",
+                            self.debug.last_clip_allow,
+                            self.debug.last_clip_wants_kb,
+                            self.debug.last_clip_ctrl
+                        ));
+                        ui.monospace(format!(
+                            "clip_events: copy:{} paste:{}",
+                            self.debug.last_clip_event_copy, self.debug.last_clip_event_paste
+                        ));
+                        ui.monospace(format!(
+                            "clip_raw_keys: c:{} v:{}",
+                            self.debug.last_clip_raw_key_c, self.debug.last_clip_raw_key_v
+                        ));
+                        ui.monospace(format!(
+                            "clip_os_keys: ctrl:{} c:{} v:{}",
+                            self.debug.last_clip_os_ctrl,
+                            self.debug.last_clip_os_key_c,
+                            self.debug.last_clip_os_key_v
+                        ));
+                        ui.monospace(format!(
+                            "clip_consumed: copy:{} paste:{}",
+                            self.debug.last_clip_consumed_copy, self.debug.last_clip_consumed_paste
+                        ));
+                        ui.monospace(format!(
+                            "clip_triggers: copy:{} paste:{}",
+                            self.debug.last_clip_copy_trigger, self.debug.last_clip_paste_trigger
+                        ));
                         ui.horizontal_wrapped(|ui| {
                             if ui.button("Copy selection").clicked() {
                                 self.copy_selected_to_clipboard();
@@ -166,6 +225,19 @@ impl crate::app::WavesPreviewer {
                     .show(ui, |ui| {
                         ui.monospace(format!("selected_row: {:?}", self.selected));
                         ui.monospace(format!("selected_multi: {}", self.selected_multi.len()));
+                        let selected_ids = self.selected_item_ids();
+                        ui.monospace(format!("selected_item_ids: {}", selected_ids.len()));
+                        if let Some(id) = selected_ids.first().copied() {
+                            ui.monospace(format!("selected_item_id: {id:?}"));
+                            let item_idx = self.item_index.get(&id).copied();
+                            ui.monospace(format!("item_index_hit: {}", item_idx.is_some()));
+                            let item_found = self.item_for_id(id).is_some();
+                            ui.monospace(format!("item_for_id_found: {item_found}"));
+                        }
+                        if let Some(row) = self.selected {
+                            let file_id = self.files.get(row).copied();
+                            ui.monospace(format!("selected_row_file_id: {file_id:?}"));
+                        }
                         if let Some(path) = self.selected_path_buf() {
                             ui.monospace(format!("selected_path: {}", path.display()));
                         }

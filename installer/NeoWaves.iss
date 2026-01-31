@@ -51,10 +51,10 @@ Root: HKCR; Subkey: ".m4a"; ValueType: string; ValueName: ""; ValueData: "{#MyAp
 Root: HKCR; Subkey: ".nwproj"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName}"; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "{#MyAppAssoc}\\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\\icon.ico"; Flags: uninsdeletekey; Tasks: assoc
-Root: HKCR; Subkey: "{#MyAppAssoc}\\shell\\open\\command"; ValueType: string; ValueName: ""; ValueData: "\"{app}\\{#MyAppExeName}\" %*"; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "{#MyAppAssoc}\\shell\\open\\command"; ValueType: string; ValueName: ""; ValueData: """{app}\\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppName}"; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\\icon.ico"; Flags: uninsdeletekey; Tasks: assoc
-Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\shell\\open\\command"; ValueType: string; ValueName: ""; ValueData: "\"{app}\\{#MyAppExeName}\" %*"; Flags: uninsdeletekey; Tasks: assoc
+Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\shell\\open\\command"; ValueType: string; ValueName: ""; ValueData: """{app}\\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".wav"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".mp3"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc
 Root: HKCR; Subkey: "Applications\\{#MyAppExeName}\\SupportedTypes"; ValueType: string; ValueName: ".m4a"; ValueData: ""; Flags: uninsdeletekey; Tasks: assoc

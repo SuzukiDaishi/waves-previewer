@@ -255,7 +255,8 @@ impl crate::app::WavesPreviewer {
                         || self.export_state.is_some()
                         || self.csv_export_state.is_some()
                         || !self.spectro_inflight.is_empty()
-                        || self.project_open_state.is_some();
+                        || self.project_open_state.is_some()
+                        || self.bulk_resample_state.is_some();
                     if show_activity {
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
@@ -350,6 +351,34 @@ impl crate::app::WavesPreviewer {
                                     );
                                 } else {
                                     ui.label(RichText::new("CSV: preparing").weak());
+                                }
+                            }
+                            if let Some(state) = &mut self.bulk_resample_state {
+                                let total = state.targets.len().max(1);
+                                let (label, pct) = if state.finalizing {
+                                    let pct =
+                                        (state.after_index as f32 / total as f32).clamp(0.0, 1.0);
+                                    (
+                                        format!("Resample finalize: {}/{}", state.after_index, total),
+                                        pct,
+                                    )
+                                } else {
+                                    let pct =
+                                        (state.index as f32 / total as f32).clamp(0.0, 1.0);
+                                    (
+                                        format!("Resample: {}/{}", state.index, total),
+                                        pct,
+                                    )
+                                };
+                                ui.add(egui::Spinner::new());
+                                ui.label(RichText::new(label).weak());
+                                ui.add(
+                                    egui::ProgressBar::new(pct)
+                                        .desired_width(60.0)
+                                        .show_percentage(),
+                                );
+                                if ui.button("Cancel").clicked() {
+                                    state.cancel_requested = true;
                                 }
                             }
                             if !self.spectro_inflight.is_empty() {
@@ -528,6 +557,24 @@ impl crate::app::WavesPreviewer {
                     let te =
                         egui::TextEdit::singleline(&mut self.search_query).hint_text("Search...");
                     let resp = ui.add(te);
+                    self.search_has_focus = resp.has_focus();
+                    if resp.has_focus() {
+                        self.suppress_list_enter = true;
+                        self.list_has_focus = false;
+                    }
+                    if resp.has_focus()
+                        && self.active_tab.is_none()
+                        && ctx.input(|i| {
+                            i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowDown)
+                        })
+                    {
+                        resp.surrender_focus();
+                        ctx.memory_mut(|m| m.request_focus(crate::app::WavesPreviewer::list_focus_id()));
+                        self.list_has_focus = true;
+                        if self.debug.cfg.enabled {
+                            self.debug_trace_input("search focus released via arrow key");
+                        }
+                    }
                     if resp.changed() {
                         self.schedule_search_refresh();
                     }

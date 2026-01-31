@@ -162,6 +162,8 @@ pub struct ProjectToolState {
     pub fade_out_ms: f32,
     pub gain_db: f32,
     pub normalize_target_db: f32,
+    #[serde(default = "default_loudness_target_lufs")]
+    pub loudness_target_lufs: f32,
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
     #[serde(default = "default_loop_repeat")]
@@ -207,6 +209,10 @@ fn project_data_dir(path: &Path) -> PathBuf {
 
 fn default_loop_repeat() -> u32 {
     2
+}
+
+fn default_loudness_target_lufs() -> f32 {
+    -14.0
 }
 
 fn default_bpm_value() -> f32 {
@@ -299,6 +305,7 @@ pub fn project_tab_from_tab(
             fade_out_ms: tab.tool_state.fade_out_ms,
             gain_db: tab.tool_state.gain_db,
             normalize_target_db: tab.tool_state.normalize_target_db,
+            loudness_target_lufs: tab.tool_state.loudness_target_lufs,
             pitch_semitones: tab.tool_state.pitch_semitones,
             stretch_rate: tab.tool_state.stretch_rate,
             loop_repeat: tab.tool_state.loop_repeat,
@@ -360,6 +367,7 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         fade_out_ms: t.fade_out_ms,
         gain_db: t.gain_db,
         normalize_target_db: t.normalize_target_db,
+        loudness_target_lufs: t.loudness_target_lufs,
         pitch_semitones: t.pitch_semitones,
         stretch_rate: t.stretch_rate,
         loop_repeat: t.loop_repeat.max(2),
@@ -693,6 +701,7 @@ impl super::WavesPreviewer {
                     fade_out_ms: cached.tool_state.fade_out_ms,
                     gain_db: cached.tool_state.gain_db,
                     normalize_target_db: cached.tool_state.normalize_target_db,
+                    loudness_target_lufs: cached.tool_state.loudness_target_lufs,
                     pitch_semitones: cached.tool_state.pitch_semitones,
                     stretch_rate: cached.tool_state.stretch_rate,
                     loop_repeat: cached.tool_state.loop_repeat,

@@ -31,42 +31,99 @@ impl crate::app::WavesPreviewer {
         if self.debug.cfg.enabled {
             self.debug.last_pointer_over_list = pointer_over_list;
         }
-        let pressed_ctrl_c = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C));
-        let pressed_ctrl_v = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V));
-        let event_copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-        let event_paste =
-            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
-        let wants_kb_input = ctx.wants_keyboard_input();
-        let copy_trigger = pressed_ctrl_c || (!wants_kb_input && event_copy);
-        let paste_trigger = pressed_ctrl_v || (!wants_kb_input && event_paste);
+        let list_focus_id = crate::app::WavesPreviewer::list_focus_id();
+        let focus_resp = ui.interact(list_rect, list_focus_id, Sense::click());
+        if self.list_has_focus && !ctx.memory(|m| m.has_focus(list_focus_id)) {
+            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+        }
+        if focus_resp.clicked() {
+            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            self.search_has_focus = false;
+        }
+        let mut list_has_focus =
+            ctx.memory(|m| m.has_focus(list_focus_id)) || self.list_has_focus;
+        if !list_has_focus
+            && self.active_tab.is_none()
+            && self.selected.is_some()
+            && !self.search_has_focus
+        {
+            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            list_has_focus = true;
+            self.list_has_focus = true;
+        }
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
-        if copy_trigger {
-            if !self.selected_multi.is_empty() || self.selected.is_some() {
-                self.copy_selected_to_clipboard();
-                if self.debug.cfg.enabled && event_copy && !pressed_ctrl_c {
-                    self.debug_trace_input("copy triggered via Event::Copy");
+        let pressed_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
+        let pressed_up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+        let pressed_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+        let pressed_ctrl_a = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A));
+        let pressed_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
+        let pressed_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
+        let pressed_pgdown = ctx.input(|i| i.key_pressed(egui::Key::PageDown));
+        let pressed_pgup = ctx.input(|i| i.key_pressed(egui::Key::PageUp));
+        let pressed_home = ctx.input(|i| i.key_pressed(egui::Key::Home));
+        let pressed_end = ctx.input(|i| i.key_pressed(egui::Key::End));
+        let pressed_delete = ctx.input(|i| i.key_pressed(egui::Key::Delete));
+        let wants_kb = ctx.wants_keyboard_input();
+        let allow_list_keys = list_has_focus || !wants_kb;
+        if !allow_list_keys
+            && self.active_tab.is_none()
+            && !self.files.is_empty()
+            && (pressed_down
+                || pressed_up
+                || pressed_enter
+                || pressed_ctrl_a
+                || pressed_left
+                || pressed_right
+                || pressed_pgdown
+                || pressed_pgup
+                || pressed_home
+                || pressed_end
+                || pressed_delete)
+            && (pointer_over_list || self.selected.is_some() || self.list_has_focus)
+        {
+            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            list_has_focus = true;
+            self.list_has_focus = true;
+        }
+        if self.active_tab.is_none() && !self.files.is_empty() && !allow_list_keys {
+            if pressed_down
+                || pressed_up
+                || pressed_enter
+                || pressed_ctrl_a
+                || pressed_left
+                || pressed_right
+                || pressed_pgdown
+                || pressed_pgup
+                || pressed_home
+                || pressed_end
+                || pressed_delete
+            {
+                if self.debug.cfg.enabled {
+                    self.debug_trace_input(format!(
+                        "list keys blocked (list_focus={} wants_kb={})",
+                        list_has_focus, wants_kb
+                    ));
                 }
             }
         }
-        if paste_trigger {
-            self.paste_clipboard_to_list();
-            if self.debug.cfg.enabled && event_paste && !pressed_ctrl_v {
-                self.debug_trace_input("paste triggered via Event::Paste");
+        if self.active_tab.is_none() && !self.files.is_empty() && allow_list_keys {
+            if pressed_ctrl_a
+                || pressed_home
+                || pressed_end
+                || pressed_pgdown
+                || pressed_pgup
+                || pressed_down
+                || pressed_up
+                || pressed_enter
+                || pressed_delete
+                || pressed_left
+                || pressed_right
+            {
+                ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                list_has_focus = true;
+                self.search_has_focus = false;
             }
-        }
-        if self.active_tab.is_none() && !self.files.is_empty() && !ctx.wants_keyboard_input() {
-            let pressed_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
-            let pressed_up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
-            let pressed_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-            let pressed_ctrl_a = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A));
-            let pressed_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
-            let pressed_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
-            let pressed_pgdown = ctx.input(|i| i.key_pressed(egui::Key::PageDown));
-            let pressed_pgup = ctx.input(|i| i.key_pressed(egui::Key::PageUp));
-            let pressed_home = ctx.input(|i| i.key_pressed(egui::Key::Home));
-            let pressed_end = ctx.input(|i| i.key_pressed(egui::Key::End));
-            let pressed_delete = ctx.input(|i| i.key_pressed(egui::Key::Delete));
             if pressed_ctrl_a {
                 self.selected_multi.clear();
                 for i in 0..self.files.len() {
@@ -167,7 +224,8 @@ impl crate::app::WavesPreviewer {
             || self
                 .items
                 .iter()
-                .any(|item| item.pending_gain_db.abs() > 0.0001);
+                .any(|item| item.pending_gain_db.abs() > 0.0001)
+            || !self.sample_rate_override.is_empty();
         let mut filler_cols = 0usize;
         let mut table = TableBuilder::new(ui)
             .striped(true)
@@ -684,10 +742,7 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.sample_rate {
                             row.col(|ui| {
-                                let sr = self
-                                    .meta_for_path(&path_owned)
-                                    .map(|m| m.sample_rate)
-                                    .filter(|v| *v > 0);
+                                let sr = self.effective_sample_rate_for_path(&path_owned);
                                 let resp = ui
                                     .add(
                                         egui::Label::new(
@@ -1028,6 +1083,13 @@ impl crate::app::WavesPreviewer {
                                 self.clear_edits_for_paths(&selected);
                                 ui.close();
                             }
+                            if ui
+                                .add_enabled(has_selection, egui::Button::new("Sample Rate Convert..."))
+                                .clicked()
+                            {
+                                self.open_resample_dialog(selected.clone());
+                                ui.close();
+                            }
                         });
                         let clicked_any =
                             resp.clicked_by(egui::PointerButton::Primary) || clicked_to_load;
@@ -1038,12 +1100,18 @@ impl crate::app::WavesPreviewer {
                             if self.auto_play_list_nav {
                                 self.request_list_autoplay();
                             }
+                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            list_has_focus = true;
+                            self.search_has_focus = false;
                         } else if clicked_to_select {
                             self.selected = Some(row_idx);
                             self.scroll_to_selected = false;
                             self.selected_multi.clear();
                             self.selected_multi.insert(row_idx);
                             self.select_anchor = Some(row_idx);
+                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            list_has_focus = true;
+                            self.search_has_focus = false;
                         }
                     } else {
                         // filler
@@ -1070,6 +1138,7 @@ impl crate::app::WavesPreviewer {
         if let Some(p) = to_open.as_ref() {
             self.open_or_activate_tab(p);
         }
+        self.list_has_focus = list_has_focus;
 
         // keyboard handling moved above table to allow same-frame auto-scroll
     }

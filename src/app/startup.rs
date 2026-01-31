@@ -30,7 +30,21 @@ impl WavesPreviewer {
 
     fn apply_startup_external(&mut self, cfg: &super::StartupConfig) {
         let mut source_path = cfg.external_path.clone();
-        if let Some(rows) = cfg.external_dummy_rows {
+        self.external_load_queue.clear();
+        if cfg.external_dummy_merge {
+            let rows = cfg.external_dummy_rows.unwrap_or(6);
+            let cols = cfg.external_dummy_cols.max(2);
+            let has_header = cfg.external_has_header.unwrap_or(true);
+            let base = std::path::PathBuf::from("debug");
+            let path_a = base.join("external_dummy_a.csv");
+            let path_b = base.join("external_dummy_b.csv");
+            if let Err(err) = write_external_merge_dummy_csvs(&path_a, &path_b, rows, cols, has_header) {
+                self.external_load_error = Some(err);
+            } else {
+                source_path = Some(path_a);
+                self.external_load_queue.push_back(path_b);
+            }
+        } else if let Some(rows) = cfg.external_dummy_rows {
             let path = cfg
                 .external_dummy_path
                 .clone()
@@ -83,6 +97,8 @@ impl WavesPreviewer {
             self.show_external_dialog = true;
         }
         self.external_settings_dirty = false;
+        self.external_load_target =
+            Some(crate::app::external_ops::ExternalLoadTarget::New);
         self.begin_external_load(path);
     }
 
@@ -120,6 +136,9 @@ impl WavesPreviewer {
                         if let Some(idx) = self.active_tab {
                             if let Some(tab) = self.tabs.get_mut(idx) {
                                 tab.view_mode = mode;
+                                if mode != super::types::ViewMode::Waveform {
+                                    tab.show_waveform_overlay = false;
+                                }
                             }
                             self.startup.view_mode_applied = true;
                         }
@@ -183,6 +202,53 @@ fn write_external_dummy_csv(
         row.push(format!("dummy_{:05}.wav", i + 1));
         for c in 1..cols {
             row.push(format!("Value{}_{}", c + 1, i + 1));
+        }
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    std::fs::write(path, out).map_err(|e| format!("write dummy csv failed: {e}"))?;
+    Ok(())
+}
+
+fn write_external_merge_dummy_csvs(
+    path_a: &std::path::Path,
+    path_b: &std::path::Path,
+    rows: usize,
+    cols: usize,
+    has_header: bool,
+) -> Result<(), String> {
+    let overlap = (rows / 2).max(1);
+    write_external_dummy_csv_with_offset(path_a, rows, cols, has_header, 0, "A")?;
+    write_external_dummy_csv_with_offset(path_b, rows, cols, has_header, overlap, "B")?;
+    Ok(())
+}
+
+fn write_external_dummy_csv_with_offset(
+    path: &std::path::Path,
+    rows: usize,
+    cols: usize,
+    has_header: bool,
+    offset: usize,
+    tag: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dir failed: {e}"))?;
+    }
+    let mut out = String::new();
+    if has_header {
+        let mut headers = Vec::with_capacity(cols);
+        headers.push("Key".to_string());
+        for i in 1..cols {
+            headers.push(format!("Col{}", i + 1));
+        }
+        out.push_str(&headers.join(","));
+        out.push('\n');
+    }
+    for i in 0..rows {
+        let mut row = Vec::with_capacity(cols);
+        row.push(format!("dummy_{:05}.wav", offset + i + 1));
+        for c in 1..cols {
+            row.push(format!("{tag}{}_{}", c + 1, i + 1));
         }
         out.push_str(&row.join(","));
         out.push('\n');

@@ -222,6 +222,9 @@ impl crate::app::WavesPreviewer {
                 if ui.selectable_label(tab.view_mode == vm, label).clicked() {
                     tab.view_mode = vm;
                     if prev_view == ViewMode::Waveform && vm != ViewMode::Waveform {
+                        tab.show_waveform_overlay = false;
+                    }
+                    if prev_view == ViewMode::Waveform && vm != ViewMode::Waveform {
                         discard_preview_for_view_change = true;
                     }
                 }
@@ -588,6 +591,7 @@ impl crate::app::WavesPreviewer {
                 let mut pending_heavy_preview_path: Option<(ToolKind, PathBuf, f32)> = None;
                 let mut pending_pitch_apply: Option<f32> = None;
                 let mut pending_stretch_apply: Option<f32> = None;
+                let mut pending_loudness_apply: Option<f32> = None;
                 if discard_preview_for_view_change {
                     need_restore_preview = true;
                     stop_playback = true;
@@ -815,6 +819,7 @@ impl crate::app::WavesPreviewer {
                         }
                     };
                     let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
+                    let mel_min = 1.0_f32;
                     for ci in 0..lane_count {
                         let lane_top = rect.top() + lane_h * ci as f32;
                         let lane_rect = egui::Rect::from_min_size(
@@ -848,11 +853,14 @@ impl crate::app::WavesPreviewer {
                                         (mel / mel_max).clamp(0.0, 1.0)
                                     }
                                     SpectrogramScale::Log => {
-                                        if freq <= 0.0 || max_freq <= log_min {
-                                            0.0
+                                        let mel = 2595.0 * (1.0 + (freq / 700.0)).log10();
+                                        if mel_max <= mel_min {
+                                            (mel / mel_max.max(1.0)).clamp(0.0, 1.0)
                                         } else {
-                                            let f = freq.clamp(log_min, max_freq);
-                                            (f / log_min).ln() / (max_freq / log_min).ln()
+                                            (mel / mel_min)
+                                                .ln()
+                                                .clamp(0.0, (mel_max / mel_min).ln())
+                                                / (mel_max / mel_min).ln()
                                         }
                                     }
                                 },
@@ -889,6 +897,38 @@ impl crate::app::WavesPreviewer {
             }
 
             // Handle interactions (seek, zoom, pan, selection)
+            if tab.view_mode == ViewMode::Waveform && tab.samples_len > 0 && !ctx.wants_keyboard_input() {
+                let zoom_in = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                let zoom_out = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
+                if zoom_in || zoom_out {
+                    let factor = if zoom_in { 0.9 } else { 1.1 };
+                    let old_spp = tab.samples_per_px.max(0.0001);
+                    let vis = (wave_w * old_spp).ceil() as usize;
+                    let playhead = playhead_display_now.min(tab.samples_len);
+                    let anchor = if playhead >= tab.view_offset
+                        && playhead <= tab.view_offset.saturating_add(vis)
+                    {
+                        playhead
+                    } else {
+                        tab.view_offset.saturating_add(vis / 2)
+                    };
+                    let t = if vis > 0 {
+                        ((anchor.saturating_sub(tab.view_offset)) as f32 / vis as f32)
+                            .clamp(0.0, 1.0)
+                    } else {
+                        0.5
+                    };
+                    let min_spp = 0.01;
+                    let max_spp_fit = (tab.samples_len as f32 / wave_w.max(1.0)).max(min_spp);
+                    let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
+                    tab.samples_per_px = new_spp;
+                    let vis2 = (wave_w * tab.samples_per_px).ceil() as usize;
+                    let left = anchor.saturating_sub((t * vis2 as f32) as usize);
+                    let max_left = tab.samples_len.saturating_sub(vis2);
+                    tab.view_offset = left.min(max_left);
+                }
+            }
+
             // Detect hover using pointer position against our canvas rect (robust across senses)
             let pointer_over_canvas = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| rect.contains(p));
             if pointer_over_canvas {
@@ -2334,10 +2374,29 @@ impl crate::app::WavesPreviewer {
                                     ui.selectable_value(&mut tool, ToolKind::TimeStretch, "TimeStretch");
                                     ui.selectable_value(&mut tool, ToolKind::Gain, "Gain");
                                     ui.selectable_value(&mut tool, ToolKind::Normalize, "Normalize");
+                                    ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
                                     ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
+                                // Leaving Markers/LoopEdit: discard un-applied preview markers/loops
+                                if matches!(tab.active_tool, ToolKind::Markers) {
+                                    if tab.markers != tab.markers_committed {
+                                        tab.markers = tab.markers_committed.clone();
+                                        tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                                    }
+                                }
+                                if matches!(tab.active_tool, ToolKind::LoopEdit) {
+                                    if tab.loop_region != tab.loop_region_committed {
+                                        tab.loop_region = tab.loop_region_committed;
+                                    }
+                                    tab.pending_loop_unwrap = None;
+                                    if tab.markers != tab.markers_committed {
+                                        tab.markers = tab.markers_committed.clone();
+                                        tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                                    }
+                                    Self::update_loop_markers_dirty(tab);
+                                }
                                 // Leaving a tool: discard any preview overlay/audio
                                 if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
                                     need_restore_preview = true;
@@ -2622,6 +2681,33 @@ impl crate::app::WavesPreviewer {
                                         });
                                         ui.label(format!("Count: {}", tab.markers.len()));
                                         if !tab.markers.is_empty() {
+                                            let (dot_color, dot_hint) = if tab.markers == tab.markers_saved {
+                                                (
+                                                    Color32::from_rgb(160, 200, 160),
+                                                    "Saved (written to file)",
+                                                )
+                                            } else if tab.markers == tab.markers_committed {
+                                                (
+                                                    Color32::from_rgb(255, 180, 60),
+                                                    "Applied (pending save)",
+                                                )
+                                            } else {
+                                                (
+                                                    Color32::from_rgb(120, 220, 120),
+                                                    "Preview (not applied)",
+                                                )
+                                            };
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new("\u{25CF}")
+                                                        .color(dot_color)
+                                                        .strong(),
+                                                );
+                                                ui.label("Label");
+                                                ui.label("Sec");
+                                                ui.label("Time");
+                                                ui.label("");
+                                            });
                                             let samples_len = tab.samples_len;
                                             let mut len_sec = (samples_len as f32 / out_sr).max(0.0);
                                             if !len_sec.is_finite() { len_sec = 0.0; }
@@ -2637,6 +2723,11 @@ impl crate::app::WavesPreviewer {
                                                         if !secs.is_finite() { secs = 0.0; }
                                                         if secs > len_sec { secs = len_sec; }
                                                         ui.horizontal(|ui| {
+                                                            ui.label(
+                                                                RichText::new("\u{25CF}")
+                                                                    .color(dot_color),
+                                                            )
+                                                            .on_hover_text(dot_hint);
                                                             let resp = ui.add(
                                                                 egui::TextEdit::singleline(&mut m.label)
                                                                     .desired_width(80.0),
@@ -2884,6 +2975,7 @@ impl crate::app::WavesPreviewer {
                                                 do_fade_in = Some(((0, n.min(tab.samples_len)), tab.fade_in_shape));
                                                 tab.preview_audio_tool = None; // will be rebuilt from destructive result below
                                                 tab.preview_overlay = None;
+                                                tab.tool_state = ToolState { fade_in_ms: 0.0, ..tab.tool_state };
                                             }
                                         });
                                         ui.separator();
@@ -2974,6 +3066,7 @@ impl crate::app::WavesPreviewer {
                                                 do_fade_out = Some(((0, n.min(tab.samples_len)), tab.fade_out_shape));
                                                 tab.preview_audio_tool = None;
                                                 tab.preview_overlay = None;
+                                                tab.tool_state = ToolState { fade_out_ms: 0.0, ..tab.tool_state };
                                             }
                                         });
                                     });
@@ -3007,6 +3100,9 @@ impl crate::app::WavesPreviewer {
                                         if overlay_busy || apply_busy { ui.add(egui::Spinner::new()); }
                                         if ui.add_enabled(!apply_busy, egui::Button::new("Apply")).clicked() {
                                             pending_pitch_apply = Some(tab.tool_state.pitch_semitones);
+                                            tab.tool_state = ToolState { pitch_semitones: 0.0, ..tab.tool_state };
+                                            tab.preview_audio_tool = None;
+                                            tab.preview_overlay = None;
                                         }
                                     });
                                 }
@@ -3039,6 +3135,9 @@ impl crate::app::WavesPreviewer {
                                         if overlay_busy || apply_busy { ui.add(egui::Spinner::new()); }
                                         if ui.add_enabled(!apply_busy, egui::Button::new("Apply")).clicked() {
                                             pending_stretch_apply = Some(tab.tool_state.stretch_rate);
+                                            tab.tool_state = ToolState { stretch_rate: 1.0, ..tab.tool_state };
+                                            tab.preview_audio_tool = None;
+                                            tab.preview_overlay = None;
                                         }
                                     });
                                 }
@@ -3075,7 +3174,12 @@ impl crate::app::WavesPreviewer {
                                             tab.preview_overlay = None;
                                         }
                                     }
-                                    if ui.button("Apply").clicked() { do_gain = Some(((0, tab.samples_len), gain_db)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
+                                    if ui.button("Apply").clicked() {
+                                        do_gain = Some(((0, tab.samples_len), gain_db));
+                                        tab.preview_audio_tool = None;
+                                        tab.preview_overlay = None;
+                                        tab.tool_state = ToolState { gain_db: 0.0, ..tab.tool_state };
+                                    }
                                 }
                                 ToolKind::Normalize => {
                                     if !preview_ok {
@@ -3086,37 +3190,109 @@ impl crate::app::WavesPreviewer {
                                     if !target_db.is_finite() { target_db = -6.0; }
                                     ui.label("Target dBFS"); ui.add(egui::DragValue::new(&mut target_db).range(-24.0..=0.0).speed(0.1));
                                     tab.tool_state = ToolState{ normalize_target_db: target_db, ..tab.tool_state };
+                                    let mut preview_normalize = |target_db: f32, tab: &mut EditorTab| {
+                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                        if !mono.is_empty() {
+                                            let mut peak = 0.0f32;
+                                            for &v in &mono { peak = peak.max(v.abs()); }
+                                            if peak > 0.0 {
+                                                let g = db_to_amp(target_db) / peak.max(1e-12);
+                                                // per-channel overlay
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                    overlay,
+                                                    ToolKind::Normalize,
+                                                    timeline_len,
+                                                ));
+                                                // mono audition
+                                                for v in &mut mono { *v *= g; }
+                                                pending_preview = Some((ToolKind::Normalize, mono));
+                                                stop_playback = true;
+                                                tab.preview_audio_tool = Some(ToolKind::Normalize);
+                                            }
+                                        }
+                                    };
                                     if preview_ok {
                                         let changed = (target_db - st.normalize_target_db).abs() > 1e-6;
                                         if changed {
-                                            // live preview: compute gain to reach target (based on current peak)
-                                            let mut mono = Self::editor_mixdown_mono(tab);
-                                            if !mono.is_empty() {
-                                                let mut peak = 0.0f32; for &v in &mono { peak = peak.max(v.abs()); }
-                                                if peak > 0.0 {
-                                                    let g = db_to_amp(target_db) / peak.max(1e-12);
-                                                    // per-channel overlay
-                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                    for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
-                                                    let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
-                                                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                        overlay,
-                                                        ToolKind::Normalize,
-                                                        timeline_len,
-                                                    ));
-                                                    // mono audition
-                                                    for v in &mut mono { *v *= g; }
-                                                    pending_preview = Some((ToolKind::Normalize, mono));
-                                                    stop_playback = true;
-                                                    tab.preview_audio_tool = Some(ToolKind::Normalize);
-                                                }
-                                            }
+                                            preview_normalize(target_db, tab);
                                         }
                                     } else {
                                         tab.preview_audio_tool = None;
                                         tab.preview_overlay = None;
                                     }
-                                    if ui.button("Apply").clicked() { do_normalize = Some(((0, tab.samples_len), target_db)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
+                                    if ui.add_enabled(preview_ok, egui::Button::new("Preview")).clicked() {
+                                        preview_normalize(target_db, tab);
+                                    }
+                                    if ui.button("Apply").clicked() {
+                                        do_normalize = Some(((0, tab.samples_len), target_db));
+                                        tab.preview_audio_tool = None;
+                                        tab.preview_overlay = None;
+                                        tab.tool_state =
+                                            ToolState { normalize_target_db: -6.0, ..tab.tool_state };
+                                    }
+                                }
+                                ToolKind::Loudness => {
+                                    if !preview_ok {
+                                        ui.label(RichText::new("Preview disabled for large clips").weak());
+                                    }
+                                    let st = tab.tool_state;
+                                    let mut target_lufs = st.loudness_target_lufs;
+                                    if !target_lufs.is_finite() { target_lufs = -14.0; }
+                                    ui.label("Target LUFS (I)");
+                                    ui.add(
+                                        egui::DragValue::new(&mut target_lufs)
+                                            .range(-36.0..=0.0)
+                                            .speed(0.1),
+                                    );
+                                    tab.tool_state = ToolState {
+                                        loudness_target_lufs: target_lufs,
+                                        ..tab.tool_state
+                                    };
+                                    if ui.add_enabled(preview_ok, egui::Button::new("Preview")).clicked() {
+                                        if let Ok(lufs) = crate::wave::lufs_integrated_from_multi(
+                                            &tab.ch_samples,
+                                            self.audio.shared.out_sample_rate,
+                                        ) {
+                                            if lufs.is_finite() {
+                                                let gain_db = target_lufs - lufs;
+                                                let gain = db_to_amp(gain_db);
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                for ch in overlay.iter_mut() {
+                                                    for v in ch.iter_mut() {
+                                                        *v = (*v * gain).clamp(-1.0, 1.0);
+                                                    }
+                                                }
+                                                let timeline_len = overlay
+                                                    .get(0)
+                                                    .map(|c| c.len())
+                                                    .unwrap_or(tab.samples_len);
+                                                tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                    overlay,
+                                                    ToolKind::Loudness,
+                                                    timeline_len,
+                                                ));
+                                                let mut mono = Self::editor_mixdown_mono(tab);
+                                                for v in &mut mono {
+                                                    *v = (*v * gain).clamp(-1.0, 1.0);
+                                                }
+                                                pending_preview = Some((ToolKind::Loudness, mono));
+                                                stop_playback = true;
+                                                tab.preview_audio_tool = Some(ToolKind::Loudness);
+                                            }
+                                        }
+                                    }
+                                    if ui.button("Apply").clicked() {
+                                        pending_loudness_apply = Some(target_lufs);
+                                        tab.preview_audio_tool = None;
+                                        tab.preview_overlay = None;
+                                        tab.tool_state = ToolState {
+                                            loudness_target_lufs: -14.0,
+                                            ..tab.tool_state
+                                        };
+                                    }
                                 }
                                 ToolKind::Reverse => {
                                     if !preview_ok {
@@ -3184,6 +3360,9 @@ impl crate::app::WavesPreviewer {
                 }
                 if let Some(rate) = pending_stretch_apply {
                     self.spawn_editor_apply_for_tab(tab_idx, ToolKind::TimeStretch, rate);
+                }
+                if let Some(target) = pending_loudness_apply {
+                    self.spawn_editor_apply_for_tab(tab_idx, ToolKind::Loudness, target);
                 }
                 if stop_playback { self.audio.stop(); }
                 if need_restore_preview { self.clear_preview_if_any(tab_idx); }
@@ -3320,6 +3499,10 @@ impl crate::app::WavesPreviewer {
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     Self::update_loop_markers_dirty(tab);
                 }
+            }
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.loop_xfade_samples = 0;
+                tab.tool_state = ToolState { loop_repeat: 2, ..tab.tool_state };
             }
         }
         if let Some(repeat) = do_preview_unwrap {

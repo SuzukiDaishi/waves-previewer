@@ -68,7 +68,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn after_add_refresh(&mut self) {
-        if self.external_source.is_some() {
+        if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
         self.apply_filter_from_search();

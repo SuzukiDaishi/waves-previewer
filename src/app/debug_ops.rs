@@ -8,6 +8,29 @@ use super::types::{
 use super::{RateMode, WavesPreviewer};
 
 impl WavesPreviewer {
+    pub(super) fn debug_start_external_merge_test(&mut self, rows: usize, cols: usize) {
+        let rows = rows.max(1);
+        let cols = cols.max(2);
+        let base = std::path::PathBuf::from("debug");
+        let path_a = base.join("external_dummy_a.csv");
+        let path_b = base.join("external_dummy_b.csv");
+        let has_header = true;
+        if let Err(err) = write_debug_external_merge_csvs(&path_a, &path_b, rows, cols, has_header)
+        {
+            self.external_load_error = Some(err);
+            return;
+        }
+        self.external_load_queue.clear();
+        self.external_load_queue.push_back(path_b);
+        self.external_sheet_selected = None;
+        self.external_sheet_names.clear();
+        self.external_settings_dirty = false;
+        self.external_load_target =
+            Some(crate::app::external_ops::ExternalLoadTarget::New);
+        self.show_external_dialog = true;
+        self.begin_external_load(path_a);
+        self.debug_log("external merge test started");
+    }
     pub(super) fn default_screenshot_path(&mut self) -> PathBuf {
         let tag = if self.active_tab.is_some() {
             "editor"
@@ -125,6 +148,9 @@ impl WavesPreviewer {
         while self.debug.input_trace.len() > self.debug.input_trace_max.max(1) {
             self.debug.input_trace.pop_front();
         }
+        if self.debug.cfg.input_trace_to_console {
+            println!("{}", self.debug.input_trace.back().unwrap_or(&String::new()));
+        }
     }
 
     pub(super) fn debug_trace_event(&mut self, msg: impl Into<String>) {
@@ -182,19 +208,58 @@ impl WavesPreviewer {
             processing, export, decoding
         ));
         lines.push(format!("meta_pending: {}", meta_pending));
-        if let Some(path) = self.external_source.as_ref() {
-            lines.push(format!("external_source: {}", path.display()));
+        let source_count = self.external_sources.len();
+        if source_count > 0 {
+            let active_label = self
+                .external_active_source
+                .and_then(|idx| self.external_sources.get(idx))
+                .map(|s| s.path.display().to_string())
+                .unwrap_or_else(|| "(none)".to_string());
+            let active_idx = self
+                .external_active_source
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string());
+            lines.push(format!(
+                "external_sources: {} (active: {} / {})",
+                source_count, active_idx, active_label
+            ));
             lines.push(format!(
                 "external_rows: {} headers: {}",
                 self.external_rows.len(),
                 self.external_headers.len()
             ));
+            if let Some(key_idx) = self.external_key_index {
+                let sample_col = self
+                    .external_headers
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, name)| if idx != key_idx { Some((idx, name)) } else { None });
+                if let Some((col_idx, col_name)) = sample_col {
+                    let mut samples = Vec::new();
+                    for row in self.external_rows.iter().take(3) {
+                        let key = row.get(key_idx).map(|v| v.as_str()).unwrap_or("");
+                        let val = row.get(col_idx).map(|v| v.as_str()).unwrap_or("");
+                        if !key.is_empty() {
+                            samples.push(format!("{key}={val}"));
+                        }
+                    }
+                    if !samples.is_empty() {
+                        lines.push(format!(
+                            "external_sample {}: {}",
+                            col_name,
+                            samples.join(", ")
+                        ));
+                    }
+                }
+            }
             lines.push(format!(
                 "external_match: {} unmatched: {} show_unmatched: {}",
                 self.external_match_count,
                 self.external_unmatched_count,
                 self.external_show_unmatched
             ));
+        } else if let Some(path) = self.external_source.as_ref() {
+            lines.push(format!("external_source: {}", path.display()));
         }
         lines.join("\n")
     }
@@ -1103,4 +1168,51 @@ impl WavesPreviewer {
         }
         Self::debug_range_for_tab(tab, 0.1, 0.4)
     }
+}
+
+fn write_debug_external_merge_csvs(
+    path_a: &std::path::Path,
+    path_b: &std::path::Path,
+    rows: usize,
+    cols: usize,
+    has_header: bool,
+) -> Result<(), String> {
+    let overlap = (rows / 2).max(1);
+    write_debug_external_dummy_csv_with_offset(path_a, rows, cols, has_header, 0, "A")?;
+    write_debug_external_dummy_csv_with_offset(path_b, rows, cols, has_header, overlap, "B")?;
+    Ok(())
+}
+
+fn write_debug_external_dummy_csv_with_offset(
+    path: &std::path::Path,
+    rows: usize,
+    cols: usize,
+    has_header: bool,
+    offset: usize,
+    tag: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dir failed: {e}"))?;
+    }
+    let mut out = String::new();
+    if has_header {
+        let mut headers = Vec::with_capacity(cols);
+        headers.push("Key".to_string());
+        for i in 1..cols {
+            headers.push(format!("Col{}", i + 1));
+        }
+        out.push_str(&headers.join(","));
+        out.push('\n');
+    }
+    for i in 0..rows {
+        let mut row = Vec::with_capacity(cols);
+        row.push(format!("dummy_{:05}.wav", offset + i + 1));
+        for c in 1..cols {
+            row.push(format!("{tag}{}_{}", c + 1, i + 1));
+        }
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    std::fs::write(path, out).map_err(|e| format!("write dummy csv failed: {e}"))?;
+    Ok(())
 }

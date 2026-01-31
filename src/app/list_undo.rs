@@ -73,12 +73,14 @@ impl crate::app::WavesPreviewer {
             let edited_cache = self.edited_cache.get(path).cloned();
             let lufs_override = self.lufs_override.get(path).copied();
             let lufs_deadline = self.lufs_recalc_deadline.get(path).copied();
+            let sample_rate_override = self.sample_rate_override.get(path).copied();
             out.push(ListUndoItem {
                 item,
                 item_index: item_idx,
                 edited_cache,
                 lufs_override,
                 lufs_deadline,
+                sample_rate_override,
             });
         }
         out
@@ -99,12 +101,14 @@ impl crate::app::WavesPreviewer {
             let edited_cache = self.edited_cache.get(path).cloned();
             let lufs_override = self.lufs_override.get(path).copied();
             let lufs_deadline = self.lufs_recalc_deadline.get(path).copied();
+            let sample_rate_override = self.sample_rate_override.get(path).copied();
             out.push(ListUndoItem {
                 item,
                 item_index: item_idx,
                 edited_cache,
                 lufs_override,
                 lufs_deadline,
+                sample_rate_override,
             });
         }
         out
@@ -131,8 +135,11 @@ impl crate::app::WavesPreviewer {
             if let Some(v) = entry.lufs_deadline {
                 self.lufs_recalc_deadline.insert(entry.item.path.clone(), v);
             }
+            if let Some(v) = entry.sample_rate_override {
+                self.sample_rate_override.insert(entry.item.path.clone(), v);
+            }
         }
-        if self.external_source.is_some() {
+        if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
         self.apply_filter_from_search();
@@ -181,6 +188,14 @@ impl crate::app::WavesPreviewer {
                 }
                 None => {
                     self.lufs_recalc_deadline.remove(&entry.item.path);
+                }
+            }
+            match entry.sample_rate_override {
+                Some(v) => {
+                    self.sample_rate_override.insert(entry.item.path.clone(), v);
+                }
+                None => {
+                    self.sample_rate_override.remove(&entry.item.path);
                 }
             }
         }
@@ -292,20 +307,83 @@ impl crate::app::WavesPreviewer {
         }
         let after_items = self.capture_list_undo_items_by_paths(paths);
         use std::collections::HashMap;
-        let mut before_map: HashMap<&PathBuf, (f32, Option<f32>, Option<std::time::Instant>)> =
-            HashMap::new();
+        let mut before_map: HashMap<
+            &PathBuf,
+            (f32, Option<f32>, Option<std::time::Instant>, Option<u32>),
+        > = HashMap::new();
         for item in &before_items {
             before_map.insert(
                 &item.item.path,
-                (item.item.pending_gain_db, item.lufs_override, item.lufs_deadline),
+                (
+                    item.item.pending_gain_db,
+                    item.lufs_override,
+                    item.lufs_deadline,
+                    item.sample_rate_override,
+                ),
             );
         }
         let mut changed = false;
         for item in &after_items {
-            if let Some((gain, lufs, dl)) = before_map.get(&item.item.path) {
+            if let Some((gain, lufs, dl, sr_override)) = before_map.get(&item.item.path) {
                 if (item.item.pending_gain_db - gain).abs() > 1e-6
                     || item.lufs_override != *lufs
                     || item.lufs_deadline != *dl
+                    || item.sample_rate_override != *sr_override
+                {
+                    changed = true;
+                    break;
+                }
+            } else {
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let after = self.capture_list_selection_snapshot();
+        self.push_list_undo_action(ListUndoAction {
+            kind: ListUndoActionKind::Update {
+                before: before_items,
+                after: after_items,
+            },
+            before,
+            after,
+        });
+    }
+
+    pub(super) fn record_list_update_from_paths_with_after(
+        &mut self,
+        before_items: Vec<ListUndoItem>,
+        after_items: Vec<ListUndoItem>,
+        before: ListSelectionSnapshot,
+    ) {
+        if before_items.is_empty() || after_items.is_empty() {
+            return;
+        }
+        use std::collections::HashMap;
+        let mut before_map: HashMap<
+            &PathBuf,
+            (f32, Option<f32>, Option<std::time::Instant>, Option<u32>),
+        > = HashMap::new();
+        for item in &before_items {
+            before_map.insert(
+                &item.item.path,
+                (
+                    item.item.pending_gain_db,
+                    item.lufs_override,
+                    item.lufs_deadline,
+                    item.sample_rate_override,
+                ),
+            );
+        }
+        let mut changed = false;
+        for item in &after_items {
+            if let Some((gain, lufs, dl, sr_override)) = before_map.get(&item.item.path) {
+                if (item.item.pending_gain_db - gain).abs() > 1e-6
+                    || item.lufs_override != *lufs
+                    || item.lufs_deadline != *dl
+                    || item.sample_rate_override != *sr_override
                 {
                     changed = true;
                     break;

@@ -161,7 +161,22 @@ impl super::WavesPreviewer {
         if view_mode == ViewMode::Waveform {
             return;
         }
-        if self.spectro_cache.contains_key(&path) || self.spectro_inflight.contains(&path) {
+        if let Some(specs) = self.spectro_cache.get(&path) {
+            let empty_cached = specs
+                .iter()
+                .all(|s| s.frames == 0 || s.values_db.is_empty());
+            let has_audio = !channels.is_empty()
+                && channels
+                    .get(0)
+                    .map(|c| !c.is_empty())
+                    .unwrap_or(false);
+            if empty_cached && has_audio {
+                self.purge_spectro_cache_entry(&path);
+            } else {
+                return;
+            }
+        }
+        if self.spectro_inflight.contains(&path) {
             return;
         }
         let sr = self.audio.shared.out_sample_rate;

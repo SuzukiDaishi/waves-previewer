@@ -10,8 +10,30 @@ impl crate::app::WavesPreviewer {
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                if let Some(path) = self.external_source.as_ref() {
-                    ui.label(path.display().to_string());
+                let source_count = self.external_sources.len();
+                if source_count > 0 {
+                    let mut active = self
+                        .external_active_source
+                        .unwrap_or(0)
+                        .min(source_count.saturating_sub(1));
+                    let active_label = self
+                        .external_sources
+                        .get(active)
+                        .map(|s| s.path.display().to_string())
+                        .unwrap_or_else(|| "External Source".to_string());
+                    egui::ComboBox::from_label("Source")
+                        .selected_text(active_label)
+                        .show_ui(ui, |ui| {
+                            for (idx, src) in self.external_sources.iter().enumerate() {
+                                let label = src.path.display().to_string();
+                                ui.selectable_value(&mut active, idx, label);
+                            }
+                        });
+                    if Some(active) != self.external_active_source {
+                        self.external_active_source = Some(active);
+                        self.sync_active_external_source();
+                        self.external_settings_dirty = false;
+                    }
                 } else {
                     ui.label("No data source loaded.");
                 }
@@ -21,6 +43,9 @@ impl crate::app::WavesPreviewer {
                         .clicked()
                     {
                         if let Some(path) = self.pick_external_file_dialog() {
+                            self.external_load_queue.clear();
+                            self.external_load_target =
+                                Some(crate::app::external_ops::ExternalLoadTarget::New);
                             self.external_sheet_selected = None;
                             self.external_sheet_names.clear();
                             self.external_settings_dirty = false;
@@ -29,17 +54,42 @@ impl crate::app::WavesPreviewer {
                     }
                     if ui
                         .add_enabled(
-                            !self.external_load_inflight && self.external_source.is_some(),
+                            !self.external_load_inflight && self.external_active_source.is_some(),
                             egui::Button::new("Reload"),
                         )
                         .clicked()
                     {
+                        if let Some(idx) = self.external_active_source {
+                            self.external_load_target =
+                                Some(crate::app::external_ops::ExternalLoadTarget::Reload(idx));
+                        }
                         if let Some(path) = self.external_source.clone() {
                             self.begin_external_load(path);
                         }
                     }
                     if ui
-                        .add_enabled(self.external_source.is_some(), egui::Button::new("Clear"))
+                        .add_enabled(self.external_active_source.is_some(), egui::Button::new("Remove"))
+                        .clicked()
+                    {
+                        if let Some(idx) = self.external_active_source {
+                            if idx < self.external_sources.len() {
+                                self.external_sources.remove(idx);
+                                if self.external_sources.is_empty() {
+                                    self.external_active_source = None;
+                                } else {
+                                    self.external_active_source =
+                                        Some(idx.min(self.external_sources.len() - 1));
+                                }
+                                self.sync_active_external_source();
+                                self.rebuild_external_merged();
+                                self.apply_external_mapping();
+                                self.apply_filter_from_search();
+                                self.apply_sort();
+                            }
+                        }
+                    }
+                    if ui
+                        .add_enabled(!self.external_sources.is_empty(), egui::Button::new("Clear"))
                         .clicked()
                     {
                         self.clear_external_data();
@@ -61,7 +111,7 @@ impl crate::app::WavesPreviewer {
                 if let Some(err) = self.external_load_error.as_ref() {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
                 }
-                if self.external_source.is_some() {
+                if !self.external_sources.is_empty() {
                     ui.separator();
                     ui.label(RichText::new("Import Settings").strong());
                     if !self.external_sheet_names.is_empty() {
@@ -78,6 +128,11 @@ impl crate::app::WavesPreviewer {
                             });
                         if Some(selected.clone()) != self.external_sheet_selected {
                             self.external_sheet_selected = Some(selected);
+                            if let Some(idx) = self.external_active_source {
+                                if let Some(src) = self.external_sources.get_mut(idx) {
+                                    src.sheet_name = self.external_sheet_selected.clone();
+                                }
+                            }
                             self.external_settings_dirty = true;
                         }
                     }
@@ -86,6 +141,12 @@ impl crate::app::WavesPreviewer {
                         self.external_has_header = has_header;
                         if !has_header {
                             self.external_header_row = None;
+                        }
+                        if let Some(idx) = self.external_active_source {
+                            if let Some(src) = self.external_sources.get_mut(idx) {
+                                src.has_header = self.external_has_header;
+                                src.header_row = self.external_header_row;
+                            }
                         }
                         self.external_settings_dirty = true;
                     }
@@ -107,6 +168,11 @@ impl crate::app::WavesPreviewer {
                             } else {
                                 Some((header_row - 1) as usize)
                             };
+                            if let Some(idx) = self.external_active_source {
+                                if let Some(src) = self.external_sources.get_mut(idx) {
+                                    src.header_row = self.external_header_row;
+                                }
+                            }
                             self.external_settings_dirty = true;
                         }
                     });
@@ -125,6 +191,11 @@ impl crate::app::WavesPreviewer {
                             } else {
                                 Some((data_row - 1) as usize)
                             };
+                            if let Some(idx) = self.external_active_source {
+                                if let Some(src) = self.external_sources.get_mut(idx) {
+                                    src.data_row = self.external_data_row;
+                                }
+                            }
                             self.external_settings_dirty = true;
                         }
                     });
@@ -135,6 +206,10 @@ impl crate::app::WavesPreviewer {
                                 .add_enabled(!self.external_load_inflight, egui::Button::new("Reload with settings"))
                                 .clicked()
                             {
+                                if let Some(idx) = self.external_active_source {
+                                    self.external_load_target =
+                                        Some(crate::app::external_ops::ExternalLoadTarget::Reload(idx));
+                                }
                                 if let Some(path) = self.external_source.clone() {
                                     self.begin_external_load(path);
                                 }
@@ -161,7 +236,7 @@ impl crate::app::WavesPreviewer {
                     });
                 if Some(key_idx) != self.external_key_index {
                     self.external_key_index = Some(key_idx);
-                    self.rebuild_external_lookup();
+                    self.rebuild_external_merged();
                     self.apply_external_mapping();
                     self.apply_filter_from_search();
                     self.apply_sort();

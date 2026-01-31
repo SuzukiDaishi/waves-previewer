@@ -1,4 +1,6 @@
-use crate::app::types::{ConflictPolicy, SaveMode, SpectrogramScale, ThemeMode, WindowFunction};
+use crate::app::types::{
+    ConflictPolicy, SaveMode, SpectrogramScale, ThemeMode, ViewMode, WindowFunction,
+};
 use egui::RichText;
 
 impl crate::app::WavesPreviewer {
@@ -177,6 +179,33 @@ impl crate::app::WavesPreviewer {
                     {
                         self.zero_cross_epsilon = eps.max(0.0);
                         self.save_prefs();
+                    }
+                    let mut view_change: Option<(usize, ViewMode, ViewMode)> = None;
+                    if let Some(tab_idx) = self.active_tab {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Active View:");
+                                let prev = tab.view_mode;
+                                for (vm, label) in [
+                                    (ViewMode::Waveform, "Wave"),
+                                    (ViewMode::Spectrogram, "Spec"),
+                                    (ViewMode::Mel, "Mel"),
+                                ] {
+                                    if ui.selectable_label(tab.view_mode == vm, label).clicked() {
+                                        tab.view_mode = vm;
+                                        view_change = Some((tab_idx, prev, vm));
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    if let Some((tab_idx, prev, next)) = view_change {
+                        if prev == ViewMode::Waveform && next != ViewMode::Waveform {
+                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                                tab.show_waveform_overlay = false;
+                            }
+                            self.clear_preview_if_any(tab_idx);
+                        }
                     }
                     ui.separator();
                     ui.label("Spectrogram:");

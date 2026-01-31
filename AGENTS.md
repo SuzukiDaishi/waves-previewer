@@ -28,6 +28,7 @@ CLI Arguments (src/main.rs)
 - `--external-dummy <rows>`
 - `--external-dummy-cols <count>`
 - `--external-dummy-path <path>`
+- `--external-dummy-merge`
 - `--external-sheet <name>`
 - `--external-has-header <on|off>`
 - `--external-header-row <n>` (1-based, 0=auto)
