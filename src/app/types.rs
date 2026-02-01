@@ -159,7 +159,7 @@ impl Default for ListColumnConfig {
             channels: true,
             sample_rate: true,
             bits: true,
-            bit_rate: true,
+            bit_rate: false,
             peak: true,
             lufs: true,
             bpm: false,

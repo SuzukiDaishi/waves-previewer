@@ -1,11 +1,11 @@
-# NeoWaves Project Save (.nwproj) Spec and Plan
+﻿# NeoWaves Session Save (.nwsess) Spec and Plan
 
 ## Goals
-- File > Project Save / Open support.
+- File > Session Save / Open support.
 - Save editor state (open tabs, edits-in-progress, selections, tool params, view state).
-- Restore the session from a single `.nwproj` file.
+- Restore the session from a single `.nwsess` file.
 - If a source file is missing, show an error on that item/tab.
-- Project is optional: default workflow remains opening audio files directly.
+- Session is optional: default workflow remains opening audio files directly.
 
 ## Non-Goals (for first release)
 - Network or cloud sync.
@@ -17,11 +17,11 @@
 ## File Format (v1)
 Use TOML (already in the repo) for a human-readable project file.
 
-File: `MyProject.nwproj`
+File: `MySession.nwsess`
 
 ```toml
 version = 1
-name = "My Project"
+name = "My Session"
 created_at = "2025-02-01T12:34:56Z"
 base_dir = "C:\\Audio\\Samples"
 open_first = true
@@ -78,7 +78,7 @@ Current edits are destructive to in-memory samples. To restore "edited waveform"
 
 ### v1 approach
 - Create a sidecar folder next to the project:
-  - `MyProject.nwproj.d/`
+  - `MySession.nwsess.d/`
 - Save edited audio per tab:
   - `data/tab_0001.wav` (32-bit float WAV, matching sample rate + channels).
 - `edited_audio` in the project file points to this path.
@@ -102,15 +102,15 @@ On load:
 
 ## UI/UX
 Add to File menu:
-- Project Save...
-- Project Save As...
-- Project Open...
-- Project Close (clears session and returns to list view)
+- Session Save...
+- Session Save As...
+- Session Open...
+- Session Close (clears session and returns to list view)
 
 Behavior:
-- Project Save defaults to last project path if already opened.
+- Session Save defaults to last project path if already opened.
 - Save As chooses path and writes sidecar folder if needed.
-- On opening a project, restore the list, tabs, and editor state. Show a one-line toast "Project loaded".
+- On opening a project, restore the list, tabs, and editor state. Show a one-line toast "Session loaded".
 
 ---
 
@@ -125,15 +125,15 @@ Behavior:
 ## Implementation Plan
 
 ### Phase 1: Data model + serialization
-- Add `ProjectFile` structs in `src/app/types.rs` (serde-friendly).
+- Add `SessionFile` structs in `src/app/types.rs` (serde-friendly).
 - Implement `read_project(path)` and `write_project(path)` in a new module `src/app/project.rs`.
 - Use TOML for v1 serialization.
 
 ### Phase 2: Save / Open wiring
 - File menu actions:
-  - `Project Save` / `Save As` / `Open`.
+  - `Session Save` / `Save As` / `Open`.
 - Save:
-  - Gather state, serialize to `.nwproj`.
+  - Gather state, serialize to `.nwsess`.
   - Write edited audio sidecars for dirty tabs.
 - Open:
   - Clear current session safely.
@@ -151,3 +151,4 @@ Behavior:
 - Optional "Save edits" checkbox to avoid sidecar audio.
 - Portable projects (path remapping dialog).
 - Compact storage using FLAC or OGG for edited audio.
+

@@ -7,7 +7,7 @@ fn parse_startup_config() -> app::StartupConfig {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--open-project" => {
+            "--open-project" | "--open-session" => {
                 if let Some(p) = args.next() {
                     cfg.open_project = Some(std::path::PathBuf::from(p));
                 }
@@ -23,7 +23,9 @@ fn parse_startup_config() -> app::StartupConfig {
                     if path
                         .extension()
                         .and_then(|s| s.to_str())
-                        .map(|s| s.eq_ignore_ascii_case("nwproj"))
+                        .map(|s| {
+                            s.eq_ignore_ascii_case("nwsess") || s.eq_ignore_ascii_case("nwproj")
+                        })
                         .unwrap_or(false)
                     {
                         cfg.open_project = Some(path);
@@ -275,7 +277,7 @@ fn parse_startup_config() -> app::StartupConfig {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-project <project.nwproj>\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --external-dialog\n  --debug-summary <path>\n  --debug-summary-delay <frames>\n  --external-file <path>\n  --external-dummy <rows>\n  --external-dummy-cols <count>\n  --external-dummy-path <path>\n  --external-dummy-merge\n  --external-sheet <name>\n  --external-has-header <on|off>\n  --external-header-row <n> (1-based, 0=auto)\n  --external-data-row <n> (1-based, 0=auto)\n  --external-key-rule <file|stem|regex>\n  --external-key-input <file|stem|path|dir>\n  --external-key-regex <pattern>\n  --external-key-replace <text>\n  --external-scope-regex <pattern>\n  --external-show-unmatched\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
+                    "Usage:\n  neowaves [options]\n\nOptions:\n  --open-session <session.nwsess>\n  --open-project <project.nwproj> (legacy)\n  --open-folder <dir>\n  --open-file <audio> (repeatable)\n  --open-first\n  --open-view-mode <wave|spec|mel>\n  --waveform-overlay <on|off>\n  --screenshot <path.png>\n  --screenshot-delay <frames>\n  --exit-after-screenshot\n  --dummy-list <count>\n  --external-dialog\n  --debug-summary <path>\n  --debug-summary-delay <frames>\n  --external-file <path>\n  --external-dummy <rows>\n  --external-dummy-cols <count>\n  --external-dummy-path <path>\n  --external-dummy-merge\n  --external-sheet <name>\n  --external-has-header <on|off>\n  --external-header-row <n> (1-based, 0=auto)\n  --external-data-row <n> (1-based, 0=auto)\n  --external-key-rule <file|stem|regex>\n  --external-key-input <file|stem|path|dir>\n  --external-key-regex <pattern>\n  --external-key-replace <text>\n  --external-scope-regex <pattern>\n  --external-show-unmatched\n  --debug\n  --debug-log <path>\n  --auto-run\n  --auto-run-editor\n  --auto-run-pitch-shift <semitones>\n  --auto-run-time-stretch <rate>\n  --auto-run-delay <frames>\n  --auto-run-no-exit\n  --debug-check-interval <frames>\n  --mcp-stdio\n  --mcp-http\n  --mcp-http-addr <addr>\n  --mcp-allow-path <path>\n  --mcp-allow-write\n  --mcp-allow-export\n  --mcp-readwrite\n  --help"
                 );
                 std::process::exit(0);
             }
@@ -287,7 +289,9 @@ fn parse_startup_config() -> app::StartupConfig {
                 if path
                     .extension()
                     .and_then(|s| s.to_str())
-                    .map(|s| s.eq_ignore_ascii_case("nwproj"))
+                    .map(|s| {
+                        s.eq_ignore_ascii_case("nwsess") || s.eq_ignore_ascii_case("nwproj")
+                    })
                     .unwrap_or(false)
                 {
                     cfg.open_project = Some(path);
@@ -327,8 +331,12 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
+    let app_title = format!(
+        "NeoWaves Audio List Editor v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     eframe::run_native(
-        "NeoWaves Audio List Editor",
+        &app_title,
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(

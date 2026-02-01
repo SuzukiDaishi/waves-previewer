@@ -73,7 +73,7 @@ impl WavesPreviewer {
         #[cfg(not(feature = "kittest"))]
         {
             rfd::FileDialog::new()
-                .add_filter("NeoWaves Project", &["nwproj"])
+                .add_filter("NeoWaves Session", &["nwsess", "nwproj"])
                 .pick_file()
         }
     }
@@ -86,7 +86,7 @@ impl WavesPreviewer {
         #[cfg(not(feature = "kittest"))]
         {
             rfd::FileDialog::new()
-                .add_filter("NeoWaves Project", &["nwproj"])
+                .add_filter("NeoWaves Session", &["nwsess"])
                 .save_file()
         }
     }

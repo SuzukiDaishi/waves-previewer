@@ -12,6 +12,8 @@ Console Quick Start (PowerShell)
 - Release build: `cargo build --release`
 
 CLI Arguments (src/main.rs)
+- `--open-session <session.nwsess>`
+- `--open-project <project.nwproj>` (legacy)
 - `--open-folder <dir>`
 - `--open-file <audio>` (repeatable)
 - `--open-first`

@@ -262,6 +262,30 @@ pub struct WavesPreviewer {
 }
 
 impl WavesPreviewer {
+    fn is_session_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("nwsess") || s.eq_ignore_ascii_case("nwproj"))
+            .unwrap_or(false)
+    }
+
+    fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
+        self.clear_preview_if_any(idx);
+        self.cache_dirty_tab_at(idx);
+        self.audio.stop();
+        self.tabs.remove(idx);
+        if !self.tabs.is_empty() {
+            let new_active = if idx < self.tabs.len() {
+                idx
+            } else {
+                self.tabs.len() - 1
+            };
+            self.active_tab = Some(new_active);
+        } else {
+            self.active_tab = None;
+            self.request_list_focus(ctx);
+        }
+    }
     fn list_focus_id() -> egui::Id {
         egui::Id::new("list_focus")
     }
@@ -1809,18 +1833,6 @@ spectro_note_labels={}\n",
         Vec::new()
     }
 
-    #[cfg(windows)]
-    fn os_key_down(vk: i32) -> bool {
-        use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-        let state = unsafe { GetAsyncKeyState(vk) } as u16;
-        (state & 0x8000) != 0
-    }
-
-    #[cfg(not(windows))]
-    fn os_key_down(_vk: i32) -> bool {
-        false
-    }
-
     fn copy_selected_to_clipboard(&mut self) {
         let ids = self.selected_item_ids();
         if ids.is_empty() {
@@ -2037,134 +2049,64 @@ spectro_note_labels={}\n",
         if self.active_tab.is_some() {
             return;
         }
-        let mods = ctx.input(|i| i.modifiers);
-        let mut ctrl = mods.ctrl || mods.command;
-        let pressed_c = ctx.input(|i| i.key_pressed(egui::Key::C));
-        let pressed_v = ctx.input(|i| i.key_pressed(egui::Key::V));
-        let mut down_c = ctx.input(|i| i.key_down(egui::Key::C));
-        let mut down_v = ctx.input(|i| i.key_down(egui::Key::V));
-        let mut os_ctrl = false;
-        let mut os_down_c = false;
-        let mut os_down_v = false;
-        if ctx.input(|i| i.raw.focused) {
-            #[cfg(windows)]
-            {
-                const VK_CONTROL: i32 = 0x11;
-                const VK_C: i32 = 0x43;
-                const VK_V: i32 = 0x56;
-                os_ctrl = Self::os_key_down(VK_CONTROL);
-                os_down_c = Self::os_key_down(VK_C);
-                os_down_v = Self::os_key_down(VK_V);
-            }
-        }
-        if os_ctrl {
-            ctrl = true;
-        }
-        if os_down_c {
-            down_c = true;
-        }
-        if os_down_v {
-            down_v = true;
-        }
-        let edge_c = down_c && !self.clipboard_c_was_down;
-        let edge_v = down_v && !self.clipboard_v_was_down;
+        let wants_kb = ctx.wants_keyboard_input();
+        let list_focus =
+            self.list_has_focus || ctx.memory(|m| m.has_focus(Self::list_focus_id()));
+        let allow = !self.search_has_focus
+            && !wants_kb
+            && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
+        let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let down_c = ctx.input(|i| i.key_down(egui::Key::C));
+        let down_v = ctx.input(|i| i.key_down(egui::Key::V));
+        let copy_trigger = allow
+            && ctx.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                    egui::Key::C,
+                )
+            });
+        let paste_trigger = allow
+            && ctx.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                    egui::Key::V,
+                )
+            });
         self.clipboard_c_was_down = down_c;
         self.clipboard_v_was_down = down_v;
-        let event_copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-        let event_paste =
-            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
-        let raw_key_c = ctx.input(|i| {
-            i.raw.events.iter().any(|e| match e {
-                egui::Event::Key {
-                    key: egui::Key::C,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => modifiers.ctrl || modifiers.command,
-                _ => false,
-            })
-        });
-        let raw_key_v = ctx.input(|i| {
-            i.raw.events.iter().any(|e| match e {
-                egui::Event::Key {
-                    key: egui::Key::V,
-                    pressed: true,
-                    modifiers,
-                    ..
-                } => modifiers.ctrl || modifiers.command,
-                _ => false,
-            })
-        });
-        let wants_kb = ctx.wants_keyboard_input();
-        let allow = !self.search_has_focus
-            && (self.list_has_focus || self.selected.is_some() || !wants_kb);
-        let mut consumed_copy = false;
-        let mut consumed_paste = false;
-        if allow && ctrl {
-            consumed_copy = ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::CTRL, egui::Key::C)
-                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
-            });
-            consumed_paste = ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::CTRL, egui::Key::V)
-                    || i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)
-            });
-        }
-
-        if (pressed_c || event_copy) && !allow && self.debug.cfg.enabled {
-            self.debug_trace_input(format!(
-                "copy blocked (list_focus={} wants_kb={} ctrl={})",
-                self.list_has_focus, wants_kb, ctrl
-            ));
-        }
-        if (pressed_v || event_paste) && !allow && self.debug.cfg.enabled {
-            self.debug_trace_input(format!(
-                "paste blocked (list_focus={} wants_kb={} ctrl={})",
-                self.list_has_focus, wants_kb, ctrl
-            ));
-        }
-
-        let copy_trigger =
-            allow && (ctrl && (pressed_c || edge_c) || event_copy || consumed_copy || raw_key_c);
-        let paste_trigger =
-            allow && (ctrl && (pressed_v || edge_v) || event_paste || consumed_paste || raw_key_v);
         if self.debug.cfg.enabled {
             self.debug.last_clip_allow = allow;
             self.debug.last_clip_wants_kb = wants_kb;
             self.debug.last_clip_ctrl = ctrl;
-            self.debug.last_clip_event_copy = event_copy;
-            self.debug.last_clip_event_paste = event_paste;
-            self.debug.last_clip_raw_key_c = raw_key_c;
-            self.debug.last_clip_raw_key_v = raw_key_v;
-            self.debug.last_clip_os_ctrl = os_ctrl;
-            self.debug.last_clip_os_key_c = os_down_c;
-            self.debug.last_clip_os_key_v = os_down_v;
-            self.debug.last_clip_consumed_copy = consumed_copy;
-            self.debug.last_clip_consumed_paste = consumed_paste;
+            self.debug.last_clip_event_copy = false;
+            self.debug.last_clip_event_paste = false;
+            self.debug.last_clip_raw_key_c = false;
+            self.debug.last_clip_raw_key_v = false;
+            self.debug.last_clip_os_ctrl = false;
+            self.debug.last_clip_os_key_c = false;
+            self.debug.last_clip_os_key_v = false;
+            self.debug.last_clip_consumed_copy = copy_trigger;
+            self.debug.last_clip_consumed_paste = paste_trigger;
             self.debug.last_clip_copy_trigger = copy_trigger;
             self.debug.last_clip_paste_trigger = paste_trigger;
             if allow && ctrl && !paste_trigger && self.clipboard_payload.is_some() {
                 self.debug_trace_input(format!(
-                    "paste not triggered despite allow: pressed_v={} edge_v={} raw_v={} event_paste={} consumed_paste={} down_v={} list_focus={} search_focus={} wants_kb={} sel={:?}",
-                    pressed_v,
-                    edge_v,
-                    raw_key_v,
-                    event_paste,
-                    consumed_paste,
-                    down_v,
-                    self.list_has_focus,
-                    self.search_has_focus,
-                    wants_kb,
-                    self.selected
+                    "paste not triggered despite allow: down_v={} list_focus={} wants_kb={} sel={:?}",
+                    down_v, list_focus, wants_kb, self.selected
+                ));
+            }
+            if !allow && ctrl && (down_c || down_v) {
+                self.debug_trace_input(format!(
+                    "clipboard blocked (list_focus={} wants_kb={})",
+                    list_focus, wants_kb
                 ));
             }
         }
-
         if copy_trigger {
             if !self.selected_multi.is_empty() || self.selected.is_some() {
                 self.copy_selected_to_clipboard();
-                if self.debug.cfg.enabled && event_copy && !(ctrl && pressed_c) {
-                    self.debug_trace_input("copy triggered via Event::Copy");
+                if self.debug.cfg.enabled {
+                    self.debug_trace_input("copy triggered via consume_key");
                 }
             } else if self.debug.cfg.enabled {
                 self.debug_trace_input("copy triggered with no selection");
@@ -2172,45 +2114,35 @@ spectro_note_labels={}\n",
         }
         if paste_trigger {
             self.paste_clipboard_to_list();
-            if self.debug.cfg.enabled && event_paste && !(ctrl && pressed_v) {
-                self.debug_trace_input("paste triggered via Event::Paste");
+            if self.debug.cfg.enabled {
+                self.debug_trace_input("paste triggered via consume_key");
             }
         }
     }
 
     fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
         let wants_kb = ctx.wants_keyboard_input();
+        if wants_kb {
+            return;
+        }
         let allow = !self.search_has_focus
-            && (self.list_has_focus || self.active_tab.is_some() || self.selected.is_some() || !wants_kb);
+            && (self.list_has_focus || self.active_tab.is_some() || self.selected.is_some());
         if !allow {
             return;
         }
-        let mods = ctx.input(|i| i.modifiers);
-        let mut ctrl = mods.ctrl || mods.command;
-        let mut shift = mods.shift;
-        let pressed_z = ctx.input(|i| i.key_pressed(Key::Z));
-        let mut down_z = ctx.input(|i| i.key_down(Key::Z));
-        if ctx.input(|i| i.raw.focused) {
-            #[cfg(windows)]
-            {
-                const VK_CONTROL: i32 = 0x11;
-                const VK_SHIFT: i32 = 0x10;
-                const VK_Z: i32 = 0x5A;
-                if Self::os_key_down(VK_CONTROL) {
-                    ctrl = true;
-                }
-                if Self::os_key_down(VK_SHIFT) {
-                    shift = true;
-                }
-                if Self::os_key_down(VK_Z) {
-                    down_z = true;
-                }
-            }
-        }
-        let edge_z = down_z && !self.undo_z_was_down;
-        self.undo_z_was_down = down_z;
-        let undo = ctrl && !shift && (pressed_z || edge_z);
-        let redo = ctrl && shift && (pressed_z || edge_z);
+        let undo = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                egui::Key::Z,
+            )
+        });
+        let redo = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Z,
+            )
+        });
+        self.undo_z_was_down = ctx.input(|i| i.key_down(Key::Z));
         if !(undo || redo) {
             return;
         }
@@ -3543,9 +3475,14 @@ spectro_note_labels={}\n",
                 pending.push(req);
             }
         }
-        for req in pending {
+        for mut req in pending {
             if let Some(project) = req.project {
                 self.queue_project_open(project);
+                continue;
+            }
+            if let Some(pos) = req.files.iter().position(|p| Self::is_session_path(p)) {
+                let session = req.files.remove(pos);
+                self.queue_project_open(session);
                 continue;
             }
             if !req.files.is_empty() {
@@ -4959,6 +4896,12 @@ impl WavesPreviewer {
 impl eframe::App for WavesPreviewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.suppress_list_enter = false;
+        if ctx.dragged_id().is_some() && !ctx.input(|i| i.pointer.any_down()) {
+            if self.debug.cfg.enabled {
+                self.debug_trace_input("force stop_dragging (pointer released outside)");
+            }
+            ctx.stop_dragging();
+        }
         self.ensure_theme_visuals(ctx);
         self.tick_project_open();
         // Update meter from audio RMS (approximate dBFS)
@@ -4997,12 +4940,6 @@ impl eframe::App for WavesPreviewer {
         self.run_startup_actions(ctx);
         // Debug automation + checks
         self.debug_tick(ctx);
-        // Clipboard hotkeys: handle before UI to avoid text edit consuming Ctrl+V/C
-        if self.active_tab.is_none() {
-            self.handle_clipboard_hotkeys(ctx);
-        }
-        // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z) for editor/list
-        self.handle_undo_redo_hotkeys(ctx);
         // Drain heavy preview results
         if let Some(rx) = &self.heavy_preview_rx {
             if let Ok(mono) = rx.try_recv() {
@@ -5454,6 +5391,11 @@ impl eframe::App for WavesPreviewer {
             }
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) {
+            if let Err(err) = self.save_project() {
+                self.debug_log(format!("session save error: {err}"));
+            }
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::E)) {
             self.trigger_save_selected();
         }
         // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
@@ -5520,20 +5462,7 @@ impl eframe::App for WavesPreviewer {
 
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::W)) {
             if let Some(active_idx) = self.active_tab {
-                self.audio.stop();
-                self.tabs.remove(active_idx);
-                // NOTE: invalid-encoding comment removed
-                if !self.tabs.is_empty() {
-                    let new_active = if active_idx < self.tabs.len() {
-                        active_idx
-                    } else {
-                        self.tabs.len() - 1
-                    };
-                    self.active_tab = Some(new_active);
-                } else {
-                    self.active_tab = None;
-                    self.request_list_focus(ctx);
-                }
+                self.close_tab_at(active_idx, ctx);
             }
         }
 
@@ -5548,11 +5477,7 @@ impl eframe::App for WavesPreviewer {
                 let mut paths: Vec<std::path::PathBuf> = Vec::new();
                 for f in dropped {
                     if let Some(p) = f.path {
-                        let is_project = p
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.eq_ignore_ascii_case("nwproj"))
-                            .unwrap_or(false);
+                        let is_project = Self::is_session_path(&p);
                         let is_external = p
                             .extension()
                             .and_then(|s| s.to_str())
@@ -5648,16 +5573,7 @@ impl eframe::App for WavesPreviewer {
                     });
                 }
                 if let Some(i) = to_close {
-                    self.cache_dirty_tab_at(i);
-                    self.tabs.remove(i);
-                    match self.active_tab {
-                        Some(ai) if ai == i => {
-                            self.active_tab = None;
-                            self.request_list_focus(ctx);
-                        }
-                        Some(ai) if ai > i => self.active_tab = Some(ai - 1),
-                        _ => {}
-                    }
+                    self.close_tab_at(i, ctx);
                 }
             });
             ui.separator();
@@ -6345,18 +6261,8 @@ impl eframe::App for WavesPreviewer {
                             match self.leave_intent.take() {
                                 Some(LeaveIntent::CloseTab(i)) => {
                                     if i < self.tabs.len() {
-                                        self.cache_dirty_tab_at(i);
-                                        self.tabs.remove(i);
-                                        if let Some(ai) = self.active_tab {
-                                            if ai == i {
-                                                self.active_tab = None;
-                                                self.request_list_focus(ctx);
-                                            } else if ai > i {
-                                                self.active_tab = Some(ai - 1);
-                                            }
-                                        }
+                                        self.close_tab_at(i, ctx);
                                     }
-                                    self.audio.stop();
                                 }
                                 Some(LeaveIntent::ToTab(i)) => {
                                     if let Some(t) = self.tabs.get(i) {
@@ -6386,12 +6292,12 @@ impl eframe::App for WavesPreviewer {
 
         // First save prompt window
         if self.show_first_save_prompt {
-            egui::Window::new("First Save Option")
+            egui::Window::new("First Export Option")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
-                    ui.label("Choose default save behavior for Ctrl+S:");
+                    ui.label("Choose default export behavior for Ctrl+E:");
                     ui.horizontal(|ui| {
                         if ui.button("Overwrite").clicked() {
                             self.export_cfg.save_mode = SaveMode::Overwrite;
@@ -6587,5 +6493,8 @@ impl eframe::App for WavesPreviewer {
         }
         // Debug window
         self.ui_debug_window(ctx);
+        // Hotkeys after UI so focus state is accurate
+        self.handle_clipboard_hotkeys(ctx);
+        self.handle_undo_redo_hotkeys(ctx);
     }
 }

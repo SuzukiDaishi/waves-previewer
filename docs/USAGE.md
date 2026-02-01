@@ -1,4 +1,4 @@
-# Usage Notes (Menu, D&D, Scrollbar)
+﻿# Usage Notes (Menu, D&D, Scrollbar)
 
 This document summarizes the recent UX changes: the top-bar menu, drag & drop, and the list scrollbar layout.
 
@@ -10,7 +10,7 @@ This document summarizes the recent UX changes: the top-bar menu, drag & drop, a
 
 - Files...
   - Select multiple files and replace the list with those audio files.
-  - Does not set `root` (clears it). Useful for ad‑hoc multi‑file preview.
+  - Does not set `root` (clears it). Useful for ad窶蘇oc multi窶素ile preview.
 
 Notes
 - Supported extensions: `.wav`, `.mp3`, `.m4a`.
@@ -20,7 +20,7 @@ For details of the upcoming editor features (multichannel, dB grid, seek, zoom),
 
 ## Top Menu: "Export"
 
-- Save Selected (Ctrl+S)
+- Export Selected (Ctrl+E)
   - Apply pending Gain (dB) to selected files and save.
   - Output mode (Overwrite / New File) follows Settings.
 - Apply Gains (new files)
@@ -28,7 +28,7 @@ For details of the upcoming editor features (multichannel, dB grid, seek, zoom),
   - File name format: `<name> (gain+X.YdB).<ext>` (extension follows the source unless the template includes one).
 - Clear All Gains
   - Discard all pending Gain edits.
-- Settings…
+- Settings窶ｦ
   - Save Mode: Overwrite / New File
   - Destination Folder (for New File): choose or use source folder
   - Name Template: tokens `{name}`, `{gain}`, `{gain:+0.0}`, `{gain:+.1}`
@@ -37,13 +37,13 @@ For details of the upcoming editor features (multichannel, dB grid, seek, zoom),
 
 Notes
 - The list shows an "Unsaved Gains: N" counter in the top bar.
-- Rows with pending Gain display a trailing " •" marker after the file name.
+- Rows with pending Gain display a trailing " 窶｢" marker after the file name.
 
 ## Drag & Drop
 
 - Dropping files or folders onto the window adds them to the list (`.wav` / `.mp3` / `.m4a`).
 - Folders are scanned recursively; only supported audio files are added.
-- Existing entries are de‑duplicated.
+- Existing entries are de窶租uplicated.
 - Search and sort are preserved; metadata (RMS/thumbnail) is refreshed asynchronously.
 
 ## List Scrollbar at Right Edge
@@ -56,7 +56,7 @@ Notes
 - Space: Play/Pause
 - L: Toggle Loop (editor tab)
 - Ctrl+A: Select all in list
-- Ctrl+S: Save Selected (apply Gain)
+- Ctrl+E: Export Selected (apply Gain)
 - Arrow Up/Down: Move selection in list
 - Enter: Open selected file in editor tab
 
@@ -64,3 +64,4 @@ For more context, see also:
 - `CHANGELOG.md` (latest changes)
 - `docs/CONTROLS.md` (full controls)
 - `docs/UX.md` (design/UX notes)
+

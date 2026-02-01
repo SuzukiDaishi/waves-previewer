@@ -200,7 +200,16 @@ fn resolve_path(raw: &str, base: &Path) -> PathBuf {
 }
 
 fn project_sidecar_dir(path: &Path) -> PathBuf {
-    path.with_extension("nwproj.d")
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("nwsess");
+    let ext = if ext.eq_ignore_ascii_case("nwproj") || ext.eq_ignore_ascii_case("nwsess") {
+        ext
+    } else {
+        "nwsess"
+    };
+    path.with_extension(format!("{ext}.d"))
 }
 
 fn project_data_dir(path: &Path) -> PathBuf {
@@ -528,18 +537,38 @@ impl super::WavesPreviewer {
                 let needs_ext = picked
                     .extension()
                     .and_then(|s| s.to_str())
-                    .map(|s| !s.eq_ignore_ascii_case("nwproj"))
+                    .map(|s| !s.eq_ignore_ascii_case("nwsess"))
                     .unwrap_or(true);
                 if needs_ext {
-                    picked.set_extension("nwproj");
+                    picked.set_extension("nwsess");
                 }
                 picked
             }
+        };
+        let path = if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("nwproj"))
+            .unwrap_or(false)
+        {
+            path.with_extension("nwsess")
+        } else {
+            path
         };
         self.save_project_as(path)
     }
 
     pub(super) fn save_project_as(&mut self, path: PathBuf) -> Result<(), String> {
+        let path = if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("nwproj"))
+            .unwrap_or(false)
+        {
+            path.with_extension("nwsess")
+        } else {
+            path
+        };
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let list_files: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
         let mut list_items = Vec::new();

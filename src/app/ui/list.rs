@@ -33,7 +33,10 @@ impl crate::app::WavesPreviewer {
         }
         let list_focus_id = crate::app::WavesPreviewer::list_focus_id();
         let focus_resp = ui.interact(list_rect, list_focus_id, Sense::click());
-        if self.list_has_focus && !ctx.memory(|m| m.has_focus(list_focus_id)) {
+        if self.list_has_focus
+            && !ctx.memory(|m| m.has_focus(list_focus_id))
+            && !ctx.wants_keyboard_input()
+        {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
         }
         if focus_resp.clicked() {
@@ -46,6 +49,7 @@ impl crate::app::WavesPreviewer {
             && self.active_tab.is_none()
             && self.selected.is_some()
             && !self.search_has_focus
+            && !ctx.wants_keyboard_input()
         {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             list_has_focus = true;
@@ -53,60 +57,102 @@ impl crate::app::WavesPreviewer {
         }
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
-        let pressed_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
-        let pressed_up = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
-        let pressed_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
-        let pressed_ctrl_a = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A));
-        let pressed_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
-        let pressed_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
-        let pressed_pgdown = ctx.input(|i| i.key_pressed(egui::Key::PageDown));
-        let pressed_pgup = ctx.input(|i| i.key_pressed(egui::Key::PageUp));
-        let pressed_home = ctx.input(|i| i.key_pressed(egui::Key::Home));
-        let pressed_end = ctx.input(|i| i.key_pressed(egui::Key::End));
-        let pressed_delete = ctx.input(|i| i.key_pressed(egui::Key::Delete));
         let wants_kb = ctx.wants_keyboard_input();
-        let allow_list_keys = list_has_focus || !wants_kb;
-        if !allow_list_keys
-            && self.active_tab.is_none()
-            && !self.files.is_empty()
-            && (pressed_down
-                || pressed_up
-                || pressed_enter
-                || pressed_ctrl_a
-                || pressed_left
-                || pressed_right
-                || pressed_pgdown
-                || pressed_pgup
-                || pressed_home
-                || pressed_end
-                || pressed_delete)
-            && (pointer_over_list || self.selected.is_some() || self.list_has_focus)
-        {
-            ctx.memory_mut(|m| m.request_focus(list_focus_id));
-            list_has_focus = true;
-            self.list_has_focus = true;
-        }
-        if self.active_tab.is_none() && !self.files.is_empty() && !allow_list_keys {
-            if pressed_down
-                || pressed_up
-                || pressed_enter
-                || pressed_ctrl_a
-                || pressed_left
-                || pressed_right
-                || pressed_pgdown
-                || pressed_pgup
-                || pressed_home
-                || pressed_end
-                || pressed_delete
+        let mut list_key_intent = false;
+        if self.active_tab.is_none() && !self.files.is_empty() && !wants_kb {
+            list_key_intent = ctx.input(|i| {
+                i.key_pressed(egui::Key::ArrowDown)
+                    || i.key_pressed(egui::Key::ArrowUp)
+                    || i.key_pressed(egui::Key::Enter)
+                    || i.key_pressed(egui::Key::ArrowLeft)
+                    || i.key_pressed(egui::Key::ArrowRight)
+                    || i.key_pressed(egui::Key::PageDown)
+                    || i.key_pressed(egui::Key::PageUp)
+                    || i.key_pressed(egui::Key::Home)
+                    || i.key_pressed(egui::Key::End)
+                    || i.key_pressed(egui::Key::Delete)
+                    || ((i.modifiers.ctrl || i.modifiers.command)
+                        && i.key_pressed(egui::Key::A))
+            });
+            if !list_has_focus
+                && list_key_intent
+                && (pointer_over_list || self.selected.is_some() || self.list_has_focus)
             {
-                if self.debug.cfg.enabled {
-                    self.debug_trace_input(format!(
-                        "list keys blocked (list_focus={} wants_kb={})",
-                        list_has_focus, wants_kb
-                    ));
-                }
+                ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                list_has_focus = true;
+                self.list_has_focus = true;
             }
         }
+        let allow_list_keys = list_has_focus && !wants_kb;
+        if self.active_tab.is_none() && !self.files.is_empty() && list_key_intent && !allow_list_keys
+        {
+            if self.debug.cfg.enabled {
+                self.debug_trace_input(format!(
+                    "list keys blocked (list_focus={} wants_kb={})",
+                    list_has_focus, wants_kb
+                ));
+            }
+        }
+        let pressed_down = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+        } else {
+            false
+        };
+        let pressed_up = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
+        } else {
+            false
+        };
+        let pressed_enter = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        } else {
+            false
+        };
+        let pressed_ctrl_a = if allow_list_keys {
+            ctx.input_mut(|i| {
+                i.consume_key(
+                    egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                    egui::Key::A,
+                )
+            })
+        } else {
+            false
+        };
+        let pressed_left = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+        } else {
+            false
+        };
+        let pressed_right = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+        } else {
+            false
+        };
+        let pressed_pgdown = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown))
+        } else {
+            false
+        };
+        let pressed_pgup = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp))
+        } else {
+            false
+        };
+        let pressed_home = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home))
+        } else {
+            false
+        };
+        let pressed_end = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::End))
+        } else {
+            false
+        };
+        let pressed_delete = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete))
+        } else {
+            false
+        };
         if self.active_tab.is_none() && !self.files.is_empty() && allow_list_keys {
             if pressed_ctrl_a
                 || pressed_home

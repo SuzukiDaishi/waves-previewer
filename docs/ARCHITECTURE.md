@@ -1,187 +1,77 @@
-# アーキテクチャ概要
-
-本プロジェクトは「ファイル一覧 → クリックでエディタタブ」の最短導線と、軽快な再生/表示を目的とした構成です。
-
+﻿# 繧｢繝ｼ繧ｭ繝・け繝√Ε讎りｦ・
+譛ｬ繝励Ο繧ｸ繧ｧ繧ｯ繝医・縲後ヵ繧｡繧､繝ｫ荳隕ｧ 竊・繧ｯ繝ｪ繝・け縺ｧ繧ｨ繝・ぅ繧ｿ繧ｿ繝悶阪・譛遏ｭ蟆守ｷ壹→縲∬ｻｽ蠢ｫ縺ｪ蜀咲函/陦ｨ遉ｺ繧堤岼逧・→縺励◆讒区・縺ｧ縺吶・
 - `src/main.rs`
-  - 最小のエントリポイント。`app::WavesPreviewer` を起動するだけ。
-- `src/app/`
-  - `app.rs`: egui アプリ本体。タブUI、リスト表示、エディタ表示、ショートカット、非同期メタ情報の受信などを担当。
-  - `types.rs`: App 内部の共有型（`EditorTab`/`FileMeta`/`RateMode`/`SortKey` など）。
-  - `helpers.rs`: dB/色変換、ヘッダソート、フォーマット、OS 連携ヘルパ。
-  - `meta.rs`: メタ情報生成のバックグラウンドワーカー（RMS/サムネ）。
-  - `logic.rs`: 走査/検索/ソート/D&D マージ/重処理スレッド起動などの非 UI ロジック。
-  - リストは `egui_extras::TableBuilder` を直接使用し、内部スクロール（vscroll）＋仮想化（`TableBody::rows`）で可視行のみを描画。
-  - 列のリサイズ機能（`.resizable(true)`）、長いテキストの自動切り詰め（`.truncate(true)`）、ホバーツールチップ対応。
-  - `min_scrolled_height(...)` を用い、テーブルのボディが残り高さを使い切る（下端まで枠が伸びる）。
-  - 行全体のクリックを受け取るため、`TableBuilder.sense(Sense::click())` と `row.response()` を使用（セルごとに `interact` は不要）。
-- `src/audio.rs`
-  - 再生エンジン（CPAL）と共有状態（ロックフリー）。音量、再生位置、メータ、ループ再生、再生速度の制御を内包。
-  - 再生速度: `rate (0.25..4.0)` と `play_pos_f`（小数位置）を持ち、コールバックで線形補間して出力。
-- `src/wave.rs`
-  - デコード/リサンプル/波形(min/max)作成。`prepare_for_playback` で「再生準備＋波形作成」を一括で実行。
-  - PitchShift/TimeStretch では `signalsmith-stretch` を用いたオフライン処理を実施。出力レイテンシ（`output_latency()`）と `flush()` 分を考慮して末尾欠けを防止。
+  - 譛蟆上・繧ｨ繝ｳ繝医Μ繝昴う繝ｳ繝医Ａapp::WavesPreviewer` 繧定ｵｷ蜍輔☆繧九□縺代・- `src/app/`
+  - `app.rs`: egui 繧｢繝励Μ譛ｬ菴薙ゅち繝剖I縲√Μ繧ｹ繝郁｡ｨ遉ｺ縲√お繝・ぅ繧ｿ陦ｨ遉ｺ縲√す繝ｧ繝ｼ繝医き繝・ヨ縲・撼蜷梧悄繝｡繧ｿ諠・ｱ縺ｮ蜿嶺ｿ｡縺ｪ縺ｩ繧呈球蠖薙・  - `types.rs`: App 蜀・Κ縺ｮ蜈ｱ譛牙梛・・EditorTab`/`FileMeta`/`RateMode`/`SortKey` 縺ｪ縺ｩ・峨・  - `helpers.rs`: dB/濶ｲ螟画鋤縲√・繝・ム繧ｽ繝ｼ繝医√ヵ繧ｩ繝ｼ繝槭ャ繝医＾S 騾｣謳ｺ繝倥Ν繝代・  - `meta.rs`: 繝｡繧ｿ諠・ｱ逕滓・縺ｮ繝舌ャ繧ｯ繧ｰ繝ｩ繧ｦ繝ｳ繝峨Ρ繝ｼ繧ｫ繝ｼ・・MS/繧ｵ繝繝搾ｼ峨・  - `logic.rs`: 襍ｰ譟ｻ/讀懃ｴ｢/繧ｽ繝ｼ繝・D&D 繝槭・繧ｸ/驥榊・逅・せ繝ｬ繝・ラ襍ｷ蜍輔↑縺ｩ縺ｮ髱・UI 繝ｭ繧ｸ繝・け縲・  - 繝ｪ繧ｹ繝医・ `egui_extras::TableBuilder` 繧堤峩謗･菴ｿ逕ｨ縺励∝・驛ｨ繧ｹ繧ｯ繝ｭ繝ｼ繝ｫ・・scroll・会ｼ倶ｻｮ諠ｳ蛹厄ｼ・TableBody::rows`・峨〒蜿ｯ隕冶｡後・縺ｿ繧呈緒逕ｻ縲・  - 蛻励・繝ｪ繧ｵ繧､繧ｺ讖溯・・・.resizable(true)`・峨・聞縺・ユ繧ｭ繧ｹ繝医・閾ｪ蜍募・繧願ｩｰ繧・ｼ・.truncate(true)`・峨√・繝舌・繝・・繝ｫ繝√ャ繝怜ｯｾ蠢懊・  - `min_scrolled_height(...)` 繧堤畑縺・√ユ繝ｼ繝悶Ν縺ｮ繝懊ョ繧｣縺梧ｮ九ｊ鬮倥＆繧剃ｽｿ縺・・繧具ｼ井ｸ狗ｫｯ縺ｾ縺ｧ譫縺御ｼｸ縺ｳ繧具ｼ峨・  - 陦悟・菴薙・繧ｯ繝ｪ繝・け繧貞女縺大叙繧九◆繧√～TableBuilder.sense(Sense::click())` 縺ｨ `row.response()` 繧剃ｽｿ逕ｨ・医そ繝ｫ縺斐→縺ｫ `interact` 縺ｯ荳崎ｦ・ｼ峨・- `src/audio.rs`
+  - 蜀咲函繧ｨ繝ｳ繧ｸ繝ｳ・・PAL・峨→蜈ｱ譛臥憾諷具ｼ医Ο繝・け繝輔Μ繝ｼ・峨る浹驥上∝・逕滉ｽ咲ｽｮ縲√Γ繝ｼ繧ｿ縲√Ν繝ｼ繝怜・逕溘∝・逕滄溷ｺｦ縺ｮ蛻ｶ蠕｡繧貞・蛹・・  - 蜀咲函騾溷ｺｦ: `rate (0.25..4.0)` 縺ｨ `play_pos_f`・亥ｰ乗焚菴咲ｽｮ・峨ｒ謖√■縲√さ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｧ邱壼ｽ｢陬憺俣縺励※蜃ｺ蜉帙・- `src/wave.rs`
+  - 繝・さ繝ｼ繝・繝ｪ繧ｵ繝ｳ繝励Ν/豕｢蠖｢(min/max)菴懈・縲Ａprepare_for_playback` 縺ｧ縲悟・逕滓ｺ門ｙ・区ｳ｢蠖｢菴懈・縲阪ｒ荳諡ｬ縺ｧ螳溯｡後・  - PitchShift/TimeStretch 縺ｧ縺ｯ `signalsmith-stretch` 繧堤畑縺・◆繧ｪ繝輔Λ繧､繝ｳ蜃ｦ逅・ｒ螳滓命縲ょ・蜉帙Ξ繧､繝・Φ繧ｷ・・output_latency()`・峨→ `flush()` 蛻・ｒ閠・・縺励※譛ｫ蟆ｾ谺縺代ｒ髦ｲ豁｢縲・
+## Waveform Rendering・・oom-aware, unified with overlays・・
+- Zoom 蛻､螳・  - `spp = samples_per_px`・・x縺ゅ◆繧翫し繝ｳ繝励Ν謨ｰ・・  - `spp < 1.0` 竊・Line縲～spp >= 1.0` 竊・Aggregated
+- Base・郁レ譎ｯ・・  - Line: 蜿ｯ隕悶し繝ｳ繝励Ν繧堤ｭ蛾俣髫斐↓ x 縺ｸ蜑ｲ蠖薙※縺ｦ謚倥ｌ邱壹Ａpps>=6` 縺ｧ縺ｯ stems 繧定ｿｽ蜉縲・  - Aggregated: 1px=1bin 縺ｨ縺励※ `build_minmax(samples, bins=wave_w)` 繧堤畑縺・∫ｸｦ繝舌・縺ｧ min/max 繧呈緒逕ｻ縲・- Overlay・育ｷ托ｼ・  - 繝吶・繧ｹ縺ｨ蜷後§繝ｫ繝ｼ繝ｫ縺ｧ謠冗判縲りｦ九◆逶ｮ繝ｻ蛻励・菴咲ｽｮ繝ｻmin/max 縺ｮ蜿悶ｊ譁ｹ縺御ｸ閾ｴ縺吶ｋ縲・  - Time窶壮tretch 譎ゅ・ overlay 蜿ｯ隕也ｪ・[startb..endb] 繧貞ｰ主・縺励｝x 蛻励＃縺ｨ縺ｫ overlay 蝓溘・ min/max 繧堤ｮ怜・縲・    - ratio=overlay_len/orig_len縲∝庄隕也ｪ薙・ `startb=round(start*ratio)`, `endb=startb+ceil(visible_len*ratio)`縲・    - Aggregated 縺ｧ縺ｯ base 縺ｮ px 蛻励↓蜷医ｏ縺帙｜ase 縺ｮ蛻励せ繝ｩ繧､繧ｹ [i0,i1) 繧・overlay 縺ｸ邱壼ｽ｢蜀吝ワ縺励※ [o0,o1) 繧剃ｽ懈・縲・  - LoopEdit 縺ｮ蠅・阜蟶ｯ縺ｯ隧ｲ蠖灘・縺縺大､ｪ邱壹〒荳頑嶌縺搾ｼ郁ｦ冶ｪ肴ｧ縺ｮ縺溘ａ・峨・  - Debug 繝薙Ν繝峨〒縺ｯ繧ｺ繝ｼ繝/繝槭ャ繝斐Φ繧ｰ縺ｮ繝ｭ繧ｰ繧・庄隕門ｸｯ縺ｮ阮・＞繧ｪ繝ｼ繝舌・繝ｬ繧､繧呈怏蜉ｹ縺ｫ縺励※險ｺ譁ｭ蜿ｯ閭ｽ縲・
+## Export / Save・・ain 驕ｩ逕ｨ・・
+- 繝｢繝・Ν
+  - 繝ｪ繧ｹ繝井ｸ翫〒 per-file 縺ｮ菫晉蕗荳ｭ繧ｲ繧､繝ｳ・・pending_gains: HashMap<PathBuf, f32>`・峨ｒ菫晄戟縲・  - 荳企Κ繝舌・縺ｫ譛ｪ菫晏ｭ倅ｻｶ謨ｰ・・nsaved Gains: N・峨ｒ陦ｨ遉ｺ縲ゅヵ繧｡繧､繝ｫ蜷肴忰蟆ｾ縺ｫ " 窶｢" 繧剃ｻ倅ｸ弱＠縺ｦ隕冶ｦ壼喧縲・- 螳溯｣・  - `Export` 繝｡繝九Η繝ｼ縺九ｉ螳溯｡後ＡSave Selected (Ctrl+E)` 縺ｯ驕ｸ謚櫁｡後↓蟇ｾ縺励※菫晏ｭ倥～Apply Gains (new files)` 縺ｯ蜈ｨ菫晉蕗繧呈眠隕上ヵ繧｡繧､繝ｫ縺ｧ荳諡ｬ蜃ｺ蜉帙・  - 譖ｸ縺榊・縺励・蛻･繧ｹ繝ｬ繝・ラ縺ｧ螳溯｡鯉ｼ・std::thread` + `mpsc`・峨らｵ先棡・域・蜉・螟ｱ謨励→譁ｰ隕上ヱ繧ｹ・峨ｒ UI 縺悟女菫｡縲・  - Overwrite 譎ゅ・ `overwrite_gain_wav()`縲∵眠隕丈ｽ懈・縺ｯ `export_gain_wav()` 繧剃ｽｿ逕ｨ縲ょ・縺ｮ繝薙ャ繝域ｷｱ蠎ｦ/繝輔か繝ｼ繝槭ャ繝医ｒ蜿ｯ閭ｽ縺ｪ髯舌ｊ菫晄戟縲・  - 險ｭ螳夲ｼ・ExportConfig`・・ Save Mode・・verwrite/New File・峨∝・蜉帛・縲√ヵ繧｡繧､繝ｫ蜷阪ユ繝ｳ繝励Ξ繝ｼ繝医∬｡晉ｪ∵凾縺ｮ謖吝虚・・ename/Overwrite/Skip・峨～.wav.bak` 繝舌ャ繧ｯ繧｢繝・・縲・  - 菫晏ｭ俶・蜉溷ｾ後・ `pending_gains` 繧定ｩｲ蠖薙ヵ繧｡繧､繝ｫ縺九ｉ繧ｯ繝ｪ繧｢縺励∝ｿ・ｦ√↓蠢懊§縺ｦ荳隕ｧ縺ｸ霑ｽ蜉/蜀阪せ繧ｭ繝｣繝ｳ縲・
+## 繝・・繧ｿ繝輔Ο繝ｼ
 
-## Waveform Rendering（zoom-aware, unified with overlays）
-
-- Zoom 判定
-  - `spp = samples_per_px`（pxあたりサンプル数）
-  - `spp < 1.0` → Line、`spp >= 1.0` → Aggregated
-- Base（背景）
-  - Line: 可視サンプルを等間隔に x へ割当てて折れ線。`pps>=6` では stems を追加。
-  - Aggregated: 1px=1bin として `build_minmax(samples, bins=wave_w)` を用い、縦バーで min/max を描画。
-- Overlay（緑）
-  - ベースと同じルールで描画。見た目・列の位置・min/max の取り方が一致する。
-  - Time‑stretch 時は overlay 可視窓 [startb..endb] を導出し、px 列ごとに overlay 域の min/max を算出。
-    - ratio=overlay_len/orig_len、可視窓は `startb=round(start*ratio)`, `endb=startb+ceil(visible_len*ratio)`。
-    - Aggregated では base の px 列に合わせ、base の列スライス [i0,i1) を overlay へ線形写像して [o0,o1) を作成。
-  - LoopEdit の境界帯は該当列だけ太線で上書き（視認性のため）。
-  - Debug ビルドではズーム/マッピングのログや可視帯の薄いオーバーレイを有効にして診断可能。
-
-## Export / Save（Gain 適用）
-
-- モデル
-  - リスト上で per-file の保留中ゲイン（`pending_gains: HashMap<PathBuf, f32>`）を保持。
-  - 上部バーに未保存件数（Unsaved Gains: N）を表示。ファイル名末尾に " •" を付与して視覚化。
-- 実装
-  - `Export` メニューから実行。`Save Selected (Ctrl+S)` は選択行に対して保存、`Apply Gains (new files)` は全保留を新規ファイルで一括出力。
-  - 書き出しは別スレッドで実行（`std::thread` + `mpsc`）。結果（成功/失敗と新規パス）を UI が受信。
-  - Overwrite 時は `overwrite_gain_wav()`、新規作成は `export_gain_wav()` を使用。元のビット深度/フォーマットを可能な限り保持。
-  - 設定（`ExportConfig`）: Save Mode（Overwrite/New File）、出力先、ファイル名テンプレート、衝突時の挙動（Rename/Overwrite/Skip）、`.wav.bak` バックアップ。
-  - 保存成功後は `pending_gains` を該当ファイルからクリアし、必要に応じて一覧へ追加/再スキャン。
-
-## データフロー
-
-1) リストでファイル（行）をクリック
-2) `wave::prepare_for_playback()` が WAV をモノ化→（必要なら）簡易リサンプルして `AudioEngine::set_samples()` に渡す
-3) `AudioEngine` は共有バッファ（`ArcSwapOption<Vec<f32>>`）を差し替え、再生位置を 0 に戻す
-4) UI は別途、モノ元データから min/max 波形を作成してエディタに描画
-5) コールバック内で短時間 RMS を計算→UI に dBFS 表示。再生速度は `rate` に応じて小数ステップで進める
-6) PitchShift/TimeStretch の場合は別スレッドで処理→完了通知を受けて再生バッファと波形を差し替え（UI は処理中オーバーレイを表示）
-
-7) Gain 保存フロー（Export）
- - リストの Gain 列で per-file のゲイン（dB）を編集 → `pending_gains` に反映
- - `Export` メニューから保存を起動（`Save Selected` または `Apply Gains (new files)`）
- - バックグラウンドで WAV を書き出し（Overwrite/New File）。結果を UI が受信し、`pending_gains` をクリア／一覧を更新
+1) 繝ｪ繧ｹ繝医〒繝輔ぃ繧､繝ｫ・郁｡鯉ｼ峨ｒ繧ｯ繝ｪ繝・け
+2) `wave::prepare_for_playback()` 縺・WAV 繧偵Δ繝主喧竊抵ｼ亥ｿ・ｦ√↑繧会ｼ臥ｰ｡譏薙Μ繧ｵ繝ｳ繝励Ν縺励※ `AudioEngine::set_samples()` 縺ｫ貂｡縺・3) `AudioEngine` 縺ｯ蜈ｱ譛峨ヰ繝・ヵ繧｡・・ArcSwapOption<Vec<f32>>`・峨ｒ蟾ｮ縺玲崛縺医∝・逕滉ｽ咲ｽｮ繧・0 縺ｫ謌ｻ縺・4) UI 縺ｯ蛻･騾斐√Δ繝主・繝・・繧ｿ縺九ｉ min/max 豕｢蠖｢繧剃ｽ懈・縺励※繧ｨ繝・ぅ繧ｿ縺ｫ謠冗判
+5) 繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ蜀・〒遏ｭ譎る俣 RMS 繧定ｨ育ｮ冷・UI 縺ｫ dBFS 陦ｨ遉ｺ縲ょ・逕滄溷ｺｦ縺ｯ `rate` 縺ｫ蠢懊§縺ｦ蟆乗焚繧ｹ繝・ャ繝励〒騾ｲ繧√ｋ
+6) PitchShift/TimeStretch 縺ｮ蝣ｴ蜷医・蛻･繧ｹ繝ｬ繝・ラ縺ｧ蜃ｦ逅・・螳御ｺ・夂衍繧貞女縺代※蜀咲函繝舌ャ繝輔ぃ縺ｨ豕｢蠖｢繧貞ｷｮ縺玲崛縺茨ｼ・I 縺ｯ蜃ｦ逅・ｸｭ繧ｪ繝ｼ繝舌・繝ｬ繧､繧定｡ｨ遉ｺ・・
+7) Gain 菫晏ｭ倥ヵ繝ｭ繝ｼ・・xport・・ - 繝ｪ繧ｹ繝医・ Gain 蛻励〒 per-file 縺ｮ繧ｲ繧､繝ｳ・・B・峨ｒ邱ｨ髮・竊・`pending_gains` 縺ｫ蜿肴丐
+ - `Export` 繝｡繝九Η繝ｼ縺九ｉ菫晏ｭ倥ｒ襍ｷ蜍包ｼ・Save Selected` 縺ｾ縺溘・ `Apply Gains (new files)`・・ - 繝舌ャ繧ｯ繧ｰ繝ｩ繧ｦ繝ｳ繝峨〒 WAV 繧呈嶌縺榊・縺暦ｼ・verwrite/New File・峨らｵ先棡繧・UI 縺悟女菫｡縺励～pending_gains` 繧偵け繝ｪ繧｢・丈ｸ隕ｧ繧呈峩譁ｰ
 
 ---
 
-## ラウドネス（LUFS）
+## 繝ｩ繧ｦ繝峨ロ繧ｹ・・UFS・・
+- 螳溯｣・ ITU-R BS.1770-5 貅匁侠・・-weighting莠梧ｮｵIIR 竊・400ms/100ms繝悶Ο繝・け 竊・竏・0LUFS邨ｶ蟇ｾ繧ｲ繝ｼ繝・竊・逶ｸ蟇ｾ繧ｲ繝ｼ繝・竏・0LU・峨・- 繧ｵ繝ｳ繝励Ν繝ｬ繝ｼ繝・ 菫よ焚蝗ｺ螳壹・縺溘ａ蜑肴ｮｵ縺ｧ 48 kHz 縺ｸ邁｡譏薙Μ繧ｵ繝ｳ繝励Ν・育ｷ壼ｽ｢・峨・- 繝√Ε繝ｳ繝阪Ν蜷育ｮ・ 迴ｾ迥ｶ縺ｯ蜈ｨch=1.0 縺ｮ驥阪∩蜷育ｮ暦ｼ・FE髯､螟悶・繧ｵ繝ｩ繧ｦ繝ｳ繝・1.5dB縺ｯ蟆・擂蟇ｾ蠢懶ｼ峨・- UI 蜿肴丐: 繝ｪ繧ｹ繝医↓縲鍬UFS (I)縲榊・繧定ｿｽ蜉縲ょ､縺ｫ蠢懊§縺ｦ閭梧勹逹濶ｲ縲・
+### Gain 螟画峩縺ｨ縺ｮ騾｣蜍・
+- 蜊ｳ譎り｡ｨ遉ｺ・郁ｿ台ｼｼ・・ `lufs_est 竕・lufs_base + gain_db` 繧定｡ｨ遉ｺ繝ｻ繧ｽ繝ｼ繝医↓菴ｿ逕ｨ縲・- 蜴ｳ蟇・渚譏・亥・險育ｮ暦ｼ・ Gain 螟画峩蠕・400ms 繝・ヰ繧ｦ繝ｳ繧ｹ縺ｧ繝ｯ繝ｼ繧ｫ繝ｼ繧定ｵｷ蜍輔＠縲√ご繝ｼ繝郁ｾｼ縺ｿ縺ｧ蜀崎ｨ育ｮ励ょｮ御ｺ・､繧・`lufs_override` 縺ｫ菫晏ｭ倥＠縺ｦ荳頑嶌縺崎｡ｨ遉ｺ縲・- 蛻ｶ髯・ 竏・0LUFS 霑大ｍ縺ｧ縺ｯ繧ｲ繝ｼ繝磯夐℃/荳埼夐℃縺悟渚霆｢縺励∬ｿ台ｼｼ縺ｨ縺ｮ蟾ｮ縺悟・繧九％縺ｨ縺後≠繧具ｼ亥・險育ｮ励〒遒ｺ螳夲ｼ峨・
+### 繝代ヵ繧ｩ繝ｼ繝槭Φ繧ｹ
 
-- 実装: ITU-R BS.1770-5 準拠（K-weighting二段IIR → 400ms/100msブロック → −70LUFS絶対ゲート → 相対ゲート −10LU）。
-- サンプルレート: 係数固定のため前段で 48 kHz へ簡易リサンプル（線形）。
-- チャンネル合算: 現状は全ch=1.0 の重み合算（LFE除外・サラウンド+1.5dBは将来対応）。
-- UI 反映: リストに「LUFS (I)」列を追加。値に応じて背景着色。
-
-### Gain 変更との連動
-
-- 即時表示（近似）: `lufs_est ≒ lufs_base + gain_db` を表示・ソートに使用。
-- 厳密反映（再計算）: Gain 変更後 400ms デバウンスでワーカーを起動し、ゲート込みで再計算。完了値を `lufs_override` に保存して上書き表示。
-- 制限: −70LUFS 近傍ではゲート通過/不通過が反転し、近似との差が出ることがある（再計算で確定）。
-
-### パフォーマンス
-
-- IIRはf32の二段Biquad、ブロック平均は累積和（O(N)）。
-- ワーカーは同時実行1件（直近優先）。必要に応じてK-weight後のブロック平均をキャッシュすれば再計算はO(ブロック数)に短縮できる。
-
+- IIR縺ｯf32縺ｮ莠梧ｮｵBiquad縲√ヶ繝ｭ繝・け蟷ｳ蝮・・邏ｯ遨榊柱・・(N)・峨・- 繝ｯ繝ｼ繧ｫ繝ｼ縺ｯ蜷梧凾螳溯｡・莉ｶ・育峩霑大━蜈茨ｼ峨ょｿ・ｦ√↓蠢懊§縺ｦK-weight蠕後・繝悶Ο繝・け蟷ｳ蝮・ｒ繧ｭ繝｣繝・す繝･縺吶ｌ縺ｰ蜀崎ｨ育ｮ励・O(繝悶Ο繝・け謨ｰ)縺ｫ遏ｭ邵ｮ縺ｧ縺阪ｋ縲・
 ---
 
-## 表示上の注意
-
-- dBFS列は Peak を表示（`dBFS (Peak)`）。
-- LUFS と dBFS はいずれも値に応じて背景色を着色。
-- 波形描画は Volume の影響を受けず、Gain のみを反映（視認性を一定に保つため）。
-
-## エディタのインタラクション（実装済み）
-- クリック/ドラッグでシーク（スクラブ）。再生状態は維持。
-- Ctrl + マウスホイールで時間ズーム（カーソル位置を固定点として再中心化）。
-- Shift + ホイール（または横ホイール）で水平パン。
-- トラックパッドのピンチにも対応（`Event::Zoom`）。
-- 入力取得は `raw_scroll_delta` と `Event::Scroll/Zoom` の併用、かつキャンバス矩形内判定で確実に発火させています（詳細は `docs/KNOWN_ISSUES.md`）。
-
-## スレッドと共有状態
-
-- CPAL の出力コールバックでのみ音声が消費される。
-- 共有状態は `SharedAudio` に集約し、すべて `Atomic*` と `ArcSwapOption` でロックレス。
-- UI スレッドとのやり取りは値の読み書きのみ。ミューテックス/動的確保をコールバックで行わない。
-
+## 陦ｨ遉ｺ荳翫・豕ｨ諢・
+- dBFS蛻励・ Peak 繧定｡ｨ遉ｺ・・dBFS (Peak)`・峨・- LUFS 縺ｨ dBFS 縺ｯ縺・★繧後ｂ蛟､縺ｫ蠢懊§縺ｦ閭梧勹濶ｲ繧堤捩濶ｲ縲・- 豕｢蠖｢謠冗判縺ｯ Volume 縺ｮ蠖ｱ髻ｿ繧貞女縺代★縲；ain 縺ｮ縺ｿ繧貞渚譏・郁ｦ冶ｪ肴ｧ繧剃ｸ螳壹↓菫昴▽縺溘ａ・峨・
+## 繧ｨ繝・ぅ繧ｿ縺ｮ繧､繝ｳ繧ｿ繝ｩ繧ｯ繧ｷ繝ｧ繝ｳ・亥ｮ溯｣・ｸ医∩・・- 繧ｯ繝ｪ繝・け/繝峨Λ繝・げ縺ｧ繧ｷ繝ｼ繧ｯ・医せ繧ｯ繝ｩ繝厄ｼ峨ょ・逕溽憾諷九・邯ｭ謖√・- Ctrl + 繝槭え繧ｹ繝帙う繝ｼ繝ｫ縺ｧ譎る俣繧ｺ繝ｼ繝・医き繝ｼ繧ｽ繝ｫ菴咲ｽｮ繧貞崋螳夂せ縺ｨ縺励※蜀堺ｸｭ蠢・喧・峨・- Shift + 繝帙う繝ｼ繝ｫ・医∪縺溘・讓ｪ繝帙う繝ｼ繝ｫ・峨〒豌ｴ蟷ｳ繝代Φ縲・- 繝医Λ繝・け繝代ャ繝峨・繝斐Φ繝√↓繧ょｯｾ蠢懶ｼ・Event::Zoom`・峨・- 蜈･蜉帛叙蠕励・ `raw_scroll_delta` 縺ｨ `Event::Scroll/Zoom` 縺ｮ菴ｵ逕ｨ縲√°縺､繧ｭ繝｣繝ｳ繝舌せ遏ｩ蠖｢蜀・愛螳壹〒遒ｺ螳溘↓逋ｺ轣ｫ縺輔○縺ｦ縺・∪縺呻ｼ郁ｩｳ邏ｰ縺ｯ `docs/KNOWN_ISSUES.md`・峨・
+## 繧ｹ繝ｬ繝・ラ縺ｨ蜈ｱ譛臥憾諷・
+- CPAL 縺ｮ蜃ｺ蜉帙さ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｧ縺ｮ縺ｿ髻ｳ螢ｰ縺梧ｶ郁ｲｻ縺輔ｌ繧九・- 蜈ｱ譛臥憾諷九・ `SharedAudio` 縺ｫ髮・ｴ・＠縲√☆縺ｹ縺ｦ `Atomic*` 縺ｨ `ArcSwapOption` 縺ｧ繝ｭ繝・け繝ｬ繧ｹ縲・- UI 繧ｹ繝ｬ繝・ラ縺ｨ縺ｮ繧・ｊ蜿悶ｊ縺ｯ蛟､縺ｮ隱ｭ縺ｿ譖ｸ縺阪・縺ｿ縲ゅΑ繝･繝ｼ繝・ャ繧ｯ繧ｹ/蜍慕噪遒ｺ菫昴ｒ繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｧ陦後ｏ縺ｪ縺・・
 ```
-[UI] ── prepare_for_playback() ──> [AudioEngine::set_samples]
-  │                                     │
-  │                                     └── [SharedAudio.samples] ← ArcSwapOption
-  └── request_repaint_after(16ms)
+[UI] 笏笏 prepare_for_playback() 笏笏> [AudioEngine::set_samples]
+  笏・                                    笏・  笏・                                    笏披楳笏 [SharedAudio.samples] 竊・ArcSwapOption
+  笏披楳笏 request_repaint_after(16ms)
 
-[Audio Callback] ── 共有バッファを参照・消費／RMS計測
+[Audio Callback] 笏笏 蜈ｱ譛峨ヰ繝・ヵ繧｡繧貞盾辣ｧ繝ｻ豸郁ｲｻ・蹴MS險域ｸｬ
 ```
 
-## ループ再生
-
-- 共有状態に `loop_enabled`, `loop_start`, `loop_end`, `loop_xfade_samples`, `loop_xfade_shape` を保持。
-- コールバックでは `pos >= loop_end` になった時点で即 `loop_start` へ巻き戻し、必要に応じて終端/先頭のクロスフェードを適用して継ぎ目を滑らかにします。
-- UI では LoopMode (Off / OnWhole / Marker) を切り替え可能。Marker モードでは Inspector > LoopEdit で設定した開始/終了サンプルを使用し、K/P ショートカットでプレイヘッド位置から範囲を更新できます。
-- LoopEdit ではクロスフェード長・シェイプを指定し、Apply Xfade で波形へ焼き込むこともできます（Undo/Redo は未実装のため注意）。
-
-## 非同期メタ情報（2段階）
-
-- Stage 1（即時）: WAV ヘッダのみ読取り→`channels`/`sample_rate`/`bits_per_sample` を送信（可視行は UI からも即時反映可能）。
-- Stage 2（後追い）: モノ化デコード→RMS(dBFS)/128bin サムネを作成して上書き送信。
-- UI は逐次受信し、行ごとに更新＆再描画。未計算の値は `...` で表示。
-
-## コールバック内の禁止事項（リアルタイム安全）
-
-- 動的確保（Vec::push/extend など）
-- ロック取得（Mutex/RwLock）
-- 重い処理（I/O、ファイルアクセス、ログスパム等）
-
+## 繝ｫ繝ｼ繝怜・逕・
+- 蜈ｱ譛臥憾諷九↓ `loop_enabled`, `loop_start`, `loop_end`, `loop_xfade_samples`, `loop_xfade_shape` 繧剃ｿ晄戟縲・- 繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｧ縺ｯ `pos >= loop_end` 縺ｫ縺ｪ縺｣縺滓凾轤ｹ縺ｧ蜊ｳ `loop_start` 縺ｸ蟾ｻ縺肴綾縺励∝ｿ・ｦ√↓蠢懊§縺ｦ邨らｫｯ/蜈磯ｭ縺ｮ繧ｯ繝ｭ繧ｹ繝輔ぉ繝ｼ繝峨ｒ驕ｩ逕ｨ縺励※邯吶℃逶ｮ繧呈ｻ代ｉ縺九↓縺励∪縺吶・- UI 縺ｧ縺ｯ LoopMode (Off / OnWhole / Marker) 繧貞・繧頑崛縺亥庄閭ｽ縲・arker 繝｢繝ｼ繝峨〒縺ｯ Inspector > LoopEdit 縺ｧ險ｭ螳壹＠縺滄幕蟋・邨ゆｺ・し繝ｳ繝励Ν繧剃ｽｿ逕ｨ縺励゜/P 繧ｷ繝ｧ繝ｼ繝医き繝・ヨ縺ｧ繝励Ξ繧､繝倥ャ繝我ｽ咲ｽｮ縺九ｉ遽・峇繧呈峩譁ｰ縺ｧ縺阪∪縺吶・- LoopEdit 縺ｧ縺ｯ繧ｯ繝ｭ繧ｹ繝輔ぉ繝ｼ繝蛾聞繝ｻ繧ｷ繧ｧ繧､繝励ｒ謖・ｮ壹＠縲、pply Xfade 縺ｧ豕｢蠖｢縺ｸ辟ｼ縺崎ｾｼ繧縺薙→繧ゅ〒縺阪∪縺呻ｼ・ndo/Redo 縺ｯ譛ｪ螳溯｣・・縺溘ａ豕ｨ諢擾ｼ峨・
+## 髱槫酔譛溘Γ繧ｿ諠・ｱ・・谿ｵ髫趣ｼ・
+- Stage 1・亥叉譎ゑｼ・ WAV 繝倥ャ繝縺ｮ縺ｿ隱ｭ蜿悶ｊ竊蛋channels`/`sample_rate`/`bits_per_sample` 繧帝∽ｿ｡・亥庄隕冶｡後・ UI 縺九ｉ繧ょ叉譎ょ渚譏蜿ｯ閭ｽ・峨・- Stage 2・亥ｾ瑚ｿｽ縺・ｼ・ 繝｢繝主喧繝・さ繝ｼ繝俄・RMS(dBFS)/128bin 繧ｵ繝繝阪ｒ菴懈・縺励※荳頑嶌縺埼∽ｿ｡縲・- UI 縺ｯ騾先ｬ｡蜿嶺ｿ｡縺励∬｡後＃縺ｨ縺ｫ譖ｴ譁ｰ・・・謠冗判縲よ悴險育ｮ励・蛟､縺ｯ `...` 縺ｧ陦ｨ遉ｺ縲・
+## 繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ蜀・・遖∵ｭ｢莠矩・ｼ医Μ繧｢繝ｫ繧ｿ繧､繝螳牙・・・
+- 蜍慕噪遒ｺ菫晢ｼ・ec::push/extend 縺ｪ縺ｩ・・- 繝ｭ繝・け蜿門ｾ暦ｼ・utex/RwLock・・- 驥阪＞蜃ｦ逅・ｼ・/O縲√ヵ繧｡繧､繝ｫ繧｢繧ｯ繧ｻ繧ｹ縲√Ο繧ｰ繧ｹ繝代Β遲会ｼ・
 ---
 
-## Heavy Processing（Pitch/Stretch）
-
-- `app` 側で重い処理専用のワーカー（std::thread）を起動し、`mpsc::channel` で結果（処理済み samples と waveform）を受信。
-- UI は `processing` ステートが Some の間、全画面カバー（前景レイヤ）で入力をブロックし、スピナー＋メッセージを表示。
-- 受信後は `AudioEngine::set_samples` で差し替え、波形を更新、必要ならループ領域を全体に設定。
-
+## Heavy Processing・・itch/Stretch・・
+- `app` 蛛ｴ縺ｧ驥阪＞蜃ｦ逅・ｰら畑縺ｮ繝ｯ繝ｼ繧ｫ繝ｼ・・td::thread・峨ｒ襍ｷ蜍輔＠縲～mpsc::channel` 縺ｧ邨先棡・亥・逅・ｸ医∩ samples 縺ｨ waveform・峨ｒ蜿嶺ｿ｡縲・- UI 縺ｯ `processing` 繧ｹ繝・・繝医′ Some 縺ｮ髢薙∝・逕ｻ髱｢繧ｫ繝舌・・亥燕譎ｯ繝ｬ繧､繝､・峨〒蜈･蜉帙ｒ繝悶Ο繝・け縺励√せ繝斐リ繝ｼ・九Γ繝・そ繝ｼ繧ｸ繧定｡ｨ遉ｺ縲・- 蜿嶺ｿ｡蠕後・ `AudioEngine::set_samples` 縺ｧ蟾ｮ縺玲崛縺医∵ｳ｢蠖｢繧呈峩譁ｰ縲∝ｿ・ｦ√↑繧峨Ν繝ｼ繝鈴伜沺繧貞・菴薙↓險ｭ螳壹・
 ---
 
-# モジュール詳細
+# 繝｢繧ｸ繝･繝ｼ繝ｫ隧ｳ邏ｰ
 
 ## audio
-- `AudioEngine::new()` でデフォルト出力デバイス/設定を開く。
-- `build_stream<T>()` で出力ストリームを構築（`SizedSample + FromSample<f32>`）。
-- コールバックはモノラル→全出力チャンネルへ複製し、`vol` を乗算、[-1,1] でクランプ。
-- RMS を逐次計算して `meter_rms` に保存。
-- ループ再生は `loop_enabled` と `loop_start/end` で制御。
-
+- `AudioEngine::new()` 縺ｧ繝・ヵ繧ｩ繝ｫ繝亥・蜉帙ョ繝舌う繧ｹ/險ｭ螳壹ｒ髢九￥縲・- `build_stream<T>()` 縺ｧ蜃ｺ蜉帙せ繝医Μ繝ｼ繝繧呈ｧ狗ｯ会ｼ・SizedSample + FromSample<f32>`・峨・- 繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｯ繝｢繝弱Λ繝ｫ竊貞・蜃ｺ蜉帙メ繝｣繝ｳ繝阪Ν縺ｸ隍・｣ｽ縺励～vol` 繧剃ｹ礼ｮ励ー-1,1] 縺ｧ繧ｯ繝ｩ繝ｳ繝励・- RMS 繧帝先ｬ｡險育ｮ励＠縺ｦ `meter_rms` 縺ｫ菫晏ｭ倥・- 繝ｫ繝ｼ繝怜・逕溘・ `loop_enabled` 縺ｨ `loop_start/end` 縺ｧ蛻ｶ蠕｡縲・
 ## wave
-- `decode_wav_mono()`：WAV をチャンネル平均でモノ化（Int の場合は bit depth で正規化）。
-- `resample_linear()`：出力 SR へ簡易線形リサンプル。
-- `build_minmax()`：固定ビンの min/max 計算。
-- `prepare_for_playback()`：上記をまとめて呼び、再生準備＋波形作成。
-
+- `decode_wav_mono()`・啗AV 繧偵メ繝｣繝ｳ繝阪Ν蟷ｳ蝮・〒繝｢繝主喧・・nt 縺ｮ蝣ｴ蜷医・ bit depth 縺ｧ豁｣隕丞喧・峨・- `resample_linear()`・壼・蜉・SR 縺ｸ邁｡譏鍋ｷ壼ｽ｢繝ｪ繧ｵ繝ｳ繝励Ν縲・- `build_minmax()`・壼崋螳壹ン繝ｳ縺ｮ min/max 險育ｮ励・- `prepare_for_playback()`・壻ｸ願ｨ倥ｒ縺ｾ縺ｨ繧√※蜻ｼ縺ｳ縲∝・逕滓ｺ門ｙ・区ｳ｢蠖｢菴懈・縲・
 ## app
-- リスト: `egui_extras::TableBuilder`（内部スクロール）。`min_scrolled_height` で最下部まで枠を延ばし、`TableBody::rows` で仮想化。
-  - 列構成: File | Folder | Length | Ch | SR | Bits | dBFS (Peak) | LUFS (I) | Gain (dB) | Wave
-  - 全列がリサイズ可能（`.resizable(true)`）で初期幅を最適化済み
-  - 長いテキスト（ファイル名・フォルダパス）は `.truncate(true)` で自動切り詰め、ホバーで全文表示
-  - Wave 列は幅に応じてサムネ高さを比例拡大（1フレーム遅延で行高反映）
-- エディタ: 横幅に比例して縦も拡大（`wave_h = width * 0.35` を余白に収まる範囲で使用）。
-- 色分け: サムネは振幅（max(|min|,|max|)）を青→赤のグラデーションへ。dBFS/LUFS 列は値に応じて着色。
-- ショートカット: Space（再生/停止）、K/P（Loop Start/End @ playhead）、L（ループトグル）、S（ゼロクロススナップ）、Ctrl+S（保存）、Ctrl+W（タブ閉）、Ctrl+A（全選択）、↑/↓/Shift+↑↓（選択操作）、←/→（Gain 調整。Shift/Ctrl でステップ変更）、Enter（タブを開く）。詳細は docs/CONTROLS.md を参照。
-- 検索/ソート: 検索バーで部分一致フィルタ。ソートは昇順→降順→元順をトグル（Length列は秒数順）。元順復帰のため `original_files` を保持。
-- スクロール: 選択行は `row.response().scroll_to_me()` で常に可視範囲へ。
-- 上部バー: Mode はセグメント切替（Speed/Pitch/Stretch）。値はコンパクトな DragValue（Speed/Stretch: 0.25–4.0, Pitch: -12–+12）。高さ・間隔を統一し横幅を節約。
-
-## パフォーマンス設計（大規模リスト）
-- リストは仮想化（可視範囲のみ）で O(可視行) の描画に抑制。
-- データ側はバックグラウンドワーカーでメタ（RMS/サムネ）を逐次生成。UIは受信ごとに最小限の再描画。
-- 毎フレームの `clone()` を避け、`iter()` で参照走査して割当てを削減。
-
+- 繝ｪ繧ｹ繝・ `egui_extras::TableBuilder`・亥・驛ｨ繧ｹ繧ｯ繝ｭ繝ｼ繝ｫ・峨Ａmin_scrolled_height` 縺ｧ譛荳矩Κ縺ｾ縺ｧ譫繧貞ｻｶ縺ｰ縺励～TableBody::rows` 縺ｧ莉ｮ諠ｳ蛹悶・  - 蛻玲ｧ区・: File | Folder | Length | Ch | SR | Bits | dBFS (Peak) | LUFS (I) | Gain (dB) | Wave
+  - 蜈ｨ蛻励′繝ｪ繧ｵ繧､繧ｺ蜿ｯ閭ｽ・・.resizable(true)`・峨〒蛻晄悄蟷・ｒ譛驕ｩ蛹匁ｸ医∩
+  - 髟ｷ縺・ユ繧ｭ繧ｹ繝茨ｼ医ヵ繧｡繧､繝ｫ蜷阪・繝輔か繝ｫ繝繝代せ・峨・ `.truncate(true)` 縺ｧ閾ｪ蜍募・繧願ｩｰ繧√√・繝舌・縺ｧ蜈ｨ譁・｡ｨ遉ｺ
+  - Wave 蛻励・蟷・↓蠢懊§縺ｦ繧ｵ繝繝埼ｫ倥＆繧呈ｯ比ｾ区僑螟ｧ・・繝輔Ξ繝ｼ繝驕・ｻｶ縺ｧ陦碁ｫ伜渚譏・・- 繧ｨ繝・ぅ繧ｿ: 讓ｪ蟷・↓豈比ｾ九＠縺ｦ邵ｦ繧よ僑螟ｧ・・wave_h = width * 0.35` 繧剃ｽ咏區縺ｫ蜿弱∪繧狗ｯ・峇縺ｧ菴ｿ逕ｨ・峨・- 濶ｲ蛻・￠: 繧ｵ繝繝阪・謖ｯ蟷・ｼ・ax(|min|,|max|)・峨ｒ髱停・襍､縺ｮ繧ｰ繝ｩ繝・・繧ｷ繝ｧ繝ｳ縺ｸ縲ＥBFS/LUFS 蛻励・蛟､縺ｫ蠢懊§縺ｦ逹濶ｲ縲・- 繧ｷ繝ｧ繝ｼ繝医き繝・ヨ: Space・亥・逕・蛛懈ｭ｢・峨゜/P・・oop Start/End @ playhead・峨´・医Ν繝ｼ繝励ヨ繧ｰ繝ｫ・峨ヾ・医ぞ繝ｭ繧ｯ繝ｭ繧ｹ繧ｹ繝翫ャ繝暦ｼ峨，trl+S・井ｿ晏ｭ假ｼ峨，trl+W・医ち繝夜哩・峨，trl+A・亥・驕ｸ謚橸ｼ峨≫・/竊・Shift+竊鯛・・磯∈謚樊桃菴懶ｼ峨≫・/竊抵ｼ・ain 隱ｿ謨ｴ縲４hift/Ctrl 縺ｧ繧ｹ繝・ャ繝怜､画峩・峨・nter・医ち繝悶ｒ髢九￥・峨りｩｳ邏ｰ縺ｯ docs/CONTROLS.md 繧貞盾辣ｧ縲・- 讀懃ｴ｢/繧ｽ繝ｼ繝・ 讀懃ｴ｢繝舌・縺ｧ驛ｨ蛻・ｸ閾ｴ繝輔ぅ繝ｫ繧ｿ縲ゅた繝ｼ繝医・譏・・・髯埼・・蜈・・ｒ繝医げ繝ｫ・・ength蛻励・遘呈焚鬆・ｼ峨ょ・鬆・ｾｩ蟶ｰ縺ｮ縺溘ａ `original_files` 繧剃ｿ晄戟縲・- 繧ｹ繧ｯ繝ｭ繝ｼ繝ｫ: 驕ｸ謚櫁｡後・ `row.response().scroll_to_me()` 縺ｧ蟶ｸ縺ｫ蜿ｯ隕也ｯ・峇縺ｸ縲・- 荳企Κ繝舌・: Mode 縺ｯ繧ｻ繧ｰ繝｡繝ｳ繝亥・譖ｿ・・peed/Pitch/Stretch・峨ょ､縺ｯ繧ｳ繝ｳ繝代け繝医↑ DragValue・・peed/Stretch: 0.25窶・.0, Pitch: -12窶・12・峨るｫ倥＆繝ｻ髢馴囈繧堤ｵｱ荳縺玲ｨｪ蟷・ｒ遽邏・・
+## 繝代ヵ繧ｩ繝ｼ繝槭Φ繧ｹ險ｭ險茨ｼ亥､ｧ隕乗ｨ｡繝ｪ繧ｹ繝茨ｼ・- 繝ｪ繧ｹ繝医・莉ｮ諠ｳ蛹厄ｼ亥庄隕也ｯ・峇縺ｮ縺ｿ・峨〒 O(蜿ｯ隕冶｡・ 縺ｮ謠冗判縺ｫ謚大宛縲・- 繝・・繧ｿ蛛ｴ縺ｯ繝舌ャ繧ｯ繧ｰ繝ｩ繧ｦ繝ｳ繝峨Ρ繝ｼ繧ｫ繝ｼ縺ｧ繝｡繧ｿ・・MS/繧ｵ繝繝搾ｼ峨ｒ騾先ｬ｡逕滓・縲６I縺ｯ蜿嶺ｿ｡縺斐→縺ｫ譛蟆城剞縺ｮ蜀肴緒逕ｻ縲・- 豈弱ヵ繝ｬ繝ｼ繝縺ｮ `clone()` 繧帝∩縺代～iter()` 縺ｧ蜿ら・襍ｰ譟ｻ縺励※蜑ｲ蠖薙※繧貞炎貂帙・
 ---
 
-# パフォーマンス設計
-- UI は 16ms 間隔で `request_repaint_after()`、CPU を占有しない程度に滑らかさを確保。
-- コールバックは O(1) 作業（ゲイン、補間、複製、RMS）に限定。補間は線形、追加の割当てなし。
-- サムネ/RMS はバックグラウンドで逐次計算（UI は受信次第更新）。
+# 繝代ヵ繧ｩ繝ｼ繝槭Φ繧ｹ險ｭ險・- UI 縺ｯ 16ms 髢馴囈縺ｧ `request_repaint_after()`縲，PU 繧貞頃譛峨＠縺ｪ縺・ｨ句ｺｦ縺ｫ貊代ｉ縺九＆繧堤｢ｺ菫昴・- 繧ｳ繝ｼ繝ｫ繝舌ャ繧ｯ縺ｯ O(1) 菴懈･ｭ・医ご繧､繝ｳ縲∬｣憺俣縲∬､・｣ｽ縲ヽMS・峨↓髯仙ｮ壹り｣憺俣縺ｯ邱壼ｽ｢縲∬ｿｽ蜉縺ｮ蜑ｲ蠖薙※縺ｪ縺励・- 繧ｵ繝繝・RMS 縺ｯ繝舌ャ繧ｯ繧ｰ繝ｩ繧ｦ繝ｳ繝峨〒騾先ｬ｡險育ｮ暦ｼ・I 縺ｯ蜿嶺ｿ｡谺｡隨ｬ譖ｴ譁ｰ・峨・
+### TimeStretch 出力長の扱い
+- `process_timestretch_offline` は rate に応じて波形長を `1/rate` 倍に伸縮します。例: rate=0.5 なら約 2 倍、rate=2.0 なら約 1/2 の長さになります。
+- 生成された波形が元の描画領域を超えるケース（rate < 1.0）でも、そのまま UI/再生に反映されます。
 
-### TimeStretch �o�͒��̈���
-- `process_timestretch_offline` �� rate �ɉ����Ĕg�`���� `1/rate` �{�ɐL�k���܂��B��: rate=0.5 �Ȃ�� 2 �{�Arate=2.0 �Ȃ�� 1/2 �̒����ɂȂ�܂��B
-- �������ꂽ�g�`�����̕`��̈�𒴂���P�[�X�irate < 1.0�j�ł��A���̂܂� UI/�Đ��ɔ��f����܂��B

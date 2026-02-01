@@ -1,4 +1,4 @@
-# Major Update Plan (2026-01-28)
+﻿# Major Update Plan (2026-01-28)
 
 This document covers the requested fixes and new features. It is scoped to keep the list view fast, preserve non-destructive editing until Save, and avoid UI stalls.
 
@@ -10,6 +10,8 @@ This document covers the requested fixes and new features. It is scoped to keep 
 - Apply semantics consistent across all tools (preview -> applied memory -> destructive save).
 - Clipboard hotkeys reliability.
 - New features: loudness normalize, sample-rate convert (non-destructive), time axis in spectrogram.
+- Remove Command Palette feature and simplify the header layout.
+- Rename "Project" to "Session/State" and separate Save vs Export semantics.
 
 ## Phase 1: External Data (multi CSV/Excel)
 ### Requirements
@@ -23,7 +25,7 @@ This document covers the requested fixes and new features. It is scoped to keep 
    - Replace single `external_source/headers/rows` with a list of sources.
    - Each source stores: path, sheet, headers, rows, row_count, load order, load settings.
 2) Merge layer
-   - Build a merged “view” table from all sources in load order.
+   - Build a merged view table from all sources in load order.
    - Keyed by external key (regex rule). Use `HashMap<key, row>`; later sources overwrite cells.
    - Keep a merged list of columns (stable order by first appearance, then new columns appended).
 3) UI
@@ -155,9 +157,31 @@ This document covers the requested fixes and new features. It is scoped to keep 
 ### Acceptance
 - Spec/Mel show time labels aligned with waveform.
 
+## Phase 10: Session/State Naming + Save Semantics
+### Requirements
+- "Project" naming should not imply full project management; it is only for restoring app state.
+- Ctrl+S should not ambiguously imply audio overwrite or export.
+- Separate "session/state" save from "audio export".
+
+### Implementation Plan
+1) Rename feature in UI
+   - Use "Session" terminology: "Session Open/Save/Save As".
+2) Extension
+   - Use a distinct extension that implies state, not audio (use `.nwsess`).
+3) Shortcut policy
+   - Ctrl+S = Session Save (overwrite current session state).
+   - Ctrl+Shift+S = Session Save As.
+   - Export/Render actions are under Export menu (Ctrl+E optional).
+4) Menu / header cleanup
+   - Remove Command Palette menu entry.
+   - Group File/Open/Session actions in File; Export retains audio outputs.
+
+### Acceptance
+- Users can clearly tell the difference between "state save" and "audio export".
+- Ctrl+S never writes audio files directly.
 ## Risks / Notes
 - Multi-source merge must avoid reallocation per frame (cache the merged view).
-- Tool “Apply reset” affects user workflow; use explicit defaults per tool.
+- Tool Apply reset affects user workflow; use explicit defaults per tool.
 - LUFS normalization needs consistent RMS/LUFS pipeline; avoid per-frame recompute.
 
 ## Milestones
@@ -166,3 +190,8 @@ This document covers the requested fixes and new features. It is scoped to keep 
 3) Apply semantics (Phase 5)
 4) Zoom/Clipboard/Spec time axis (Phase 4, 6, 9)
 5) Normalize + SR convert (Phase 7-8)
+
+
+
+
+

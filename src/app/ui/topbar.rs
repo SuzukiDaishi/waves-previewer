@@ -8,39 +8,35 @@ impl crate::app::WavesPreviewer {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.menu_button("File", |ui| {
-                        if ui.button("Project Open...").clicked() {
+                        if ui.button("Session Open...").clicked() {
                             if let Some(path) = self.pick_project_open_dialog() {
                                 self.queue_project_open(path);
                             }
                             ui.close();
                         }
-                        let has_project = self.project_path.is_some();
-                        if ui
-                            .add_enabled(has_project, egui::Button::new("Project Save"))
-                            .clicked()
-                        {
+                        if ui.button("Session Save (Ctrl+S)").clicked() {
                             if let Err(err) = self.save_project() {
-                                self.debug_log(format!("project save error: {err}"));
+                                self.debug_log(format!("session save error: {err}"));
                             }
                             ui.close();
                         }
-                        if ui.button("Project Save As...").clicked() {
+                        if ui.button("Session Save As...").clicked() {
                             if let Some(mut path) = self.pick_project_save_dialog() {
                                 let needs_ext = path
                                     .extension()
                                     .and_then(|s| s.to_str())
-                                    .map(|s| !s.eq_ignore_ascii_case("nwproj"))
+                                    .map(|s| !s.eq_ignore_ascii_case("nwsess"))
                                     .unwrap_or(true);
                                 if needs_ext {
-                                    path.set_extension("nwproj");
+                                    path.set_extension("nwsess");
                                 }
                                 if let Err(err) = self.save_project_as(path) {
-                                    self.debug_log(format!("project save error: {err}"));
+                                    self.debug_log(format!("session save error: {err}"));
                                 }
                             }
                             ui.close();
                         }
-                        if ui.button("Project Close").clicked() {
+                        if ui.button("Session Close").clicked() {
                             self.close_project();
                             ui.close();
                         }
@@ -70,7 +66,7 @@ impl crate::app::WavesPreviewer {
                             ui.close();
                         }
                         ui.separator();
-                        if ui.button("Save Selected (Ctrl+S)").clicked() {
+                        if ui.button("Export Selected (Ctrl+E)").clicked() {
                             self.trigger_save_selected();
                             ui.close();
                         }
@@ -157,10 +153,6 @@ impl crate::app::WavesPreviewer {
                         }
                     });
                     ui.menu_button("Tools", |ui| {
-                        if ui.button("Command Palette...").clicked() {
-                            self.show_tool_palette = true;
-                            ui.close();
-                        }
                         if ui.button("Settings...").clicked() {
                             self.show_export_settings = true;
                             ui.close();
@@ -209,11 +201,16 @@ impl crate::app::WavesPreviewer {
                     });
                     ui.separator();
                     ui.label("Volume (dB)");
-                    if ui
-                        .add(egui::Slider::new(&mut self.volume_db, -80.0..=6.0))
-                        .changed()
-                    {
+                    let vol_resp = ui.add(egui::Slider::new(&mut self.volume_db, -80.0..=6.0));
+                    if vol_resp.changed() {
                         self.apply_effective_volume();
+                    }
+                    if vol_resp.has_focus()
+                        && ctx.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape))
+                    {
+                        self.suppress_list_enter = true;
+                        vol_resp.surrender_focus();
+                        ctx.memory_mut(|m| m.stop_text_input());
                     }
                     let total_vis = self.files.len();
                     let total_all = self.items.len();
@@ -409,7 +406,7 @@ impl crate::app::WavesPreviewer {
                                 ui.add(egui::Spinner::new());
                                 ui.label(
                                     RichText::new(format!(
-                                        "Opening project... ({elapsed:.1}s)"
+                                        "Opening session... ({elapsed:.1}s)"
                                     ))
                                     .weak(),
                                 );
@@ -484,10 +481,11 @@ impl crate::app::WavesPreviewer {
                                 if resp.changed() {
                                     self.audio.set_rate(self.playback_rate);
                                 }
-                                if resp.drag_stopped() {
-                                    resp.surrender_focus();
-                                }
-                                if resp.has_focus() && ctx.input(|i| i.key_pressed(Key::Enter)) {
+                                if resp.has_focus()
+                                    && ctx.input(|i| {
+                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                                    })
+                                {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
                                 }
@@ -504,10 +502,11 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(1.0);
                                     self.rebuild_current_buffer_with_mode();
                                 }
-                                if resp.drag_stopped() {
-                                    resp.surrender_focus();
-                                }
-                                if resp.has_focus() && ctx.input(|i| i.key_pressed(Key::Enter)) {
+                                if resp.has_focus()
+                                    && ctx.input(|i| {
+                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                                    })
+                                {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
                                 }
@@ -524,10 +523,11 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(1.0);
                                     self.rebuild_current_buffer_with_mode();
                                 }
-                                if resp.drag_stopped() {
-                                    resp.surrender_focus();
-                                }
-                                if resp.has_focus() && ctx.input(|i| i.key_pressed(Key::Enter)) {
+                                if resp.has_focus()
+                                    && ctx.input(|i| {
+                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                                    })
+                                {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
                                 }

@@ -1,9 +1,9 @@
-Sound List Import (CSV/Excel) Plan
+﻿Sound List Import (CSV/Excel) Plan
 ==================================
 
 Goal
 ----
-Provide a robust “sound list” import that supports CSV and Excel, works via drag & drop, and can
+Provide a robust 窶徭ound list窶・import that supports CSV and Excel, works via drag & drop, and can
 map rows to list items using flexible key rules (regex + path variables). The import should be
 fast on large sheets and never block the list UI.
 
@@ -15,21 +15,21 @@ Scope
 2) Header handling:
    - Auto-detect header row by default (heuristic).
    - User can override header row index.
-   - Support headerless tables (columns named A, B, C…).
+   - Support headerless tables (columns named A, B, C窶ｦ).
 3) Key matching:
    - Primary key regex using row values + file/path variables.
    - Default regex should match filename **or** stem.
-   - Secondary “scope” rule (e.g., restrict search to a subfolder).
+   - Secondary 窶徭cope窶・rule (e.g., restrict search to a subfolder).
 4) UI/UX:
    - A preview table (first N rows).
    - Sheet dropdown for Excel.
-   - Header row selector + “data starts at” selector.
+   - Header row selector + 窶彭ata starts at窶・selector.
    - Regex editor with variable list.
    - Status summary (matched, missing, duplicates).
 
 User Flow
 ---------
-1) User selects File > Import CSV/Excel… or drops a file onto the app.
+1) User selects File > Import CSV/Excel窶ｦ or drops a file onto the app.
 2) Import dialog opens:
    - File path shown (read-only).
    - If Excel: sheet dropdown.
@@ -38,7 +38,7 @@ User Flow
    - Column preview.
    - Primary key regex + test field.
    - Secondary scope (optional) with regex or folder column.
-3) User presses “Apply”.
+3) User presses 窶廣pply窶・
 4) Import result:
    - External columns are added to the list (same system as CSV today).
    - Missing items are marked (no file matched).
@@ -46,7 +46,7 @@ User Flow
 
 Data Model (Proposal)
 ---------------------
-Add a structured “external source” config saved in project (nwproj):
+Add a structured 窶彳xternal source窶・config saved in project (nwsess):
 - `source_kind`: `Csv | Excel`
 - `source_path`: path to file
 - `sheet_name`: string (Excel only)
@@ -62,7 +62,7 @@ Add a structured “external source” config saved in project (nwproj):
 Matching Rules
 --------------
 1) Primary key regex:
-   - Regex is applied to a synthesized “key input” string:
+   - Regex is applied to a synthesized 窶很ey input窶・string:
      - concatenation of selected columns + path variables.
    - Variables (expand at runtime):
      - `{path}` full path
@@ -74,7 +74,7 @@ Matching Rules
      - `(?i)(?:^|[\\\\/])(?P<name>[^\\\\/]+?)(?:\\.[^.\\\\/]+)?$`
 2) Secondary scope (optional):
    - Restricts search to a subset of files (faster + more accurate).
-   - Example: “only folders under {dir}/SE/” or a column containing relative paths.
+   - Example: 窶徙nly folders under {dir}/SE/窶・or a column containing relative paths.
    - If specified, pre-filter candidate list by:
      - scope regex applied to `{path}` or to a chosen column.
 
@@ -88,7 +88,7 @@ When header_row is auto:
   - low numeric dominance (header rows are usually text)
 - Pick the highest scoring row as header.
 Fallback:
-- If score below threshold, treat as “headerless”.
+- If score below threshold, treat as 窶徂eaderless窶・
 
 Drag & Drop Behavior
 --------------------
@@ -105,7 +105,7 @@ Import dialog sections:
 2) Table layout:
    - Header row (auto/manual)
    - Data starts at (auto/manual)
-   - “Has header” checkbox
+   - 窶廩as header窶・checkbox
 3) Keying:
    - Primary regex
    - Secondary scope (optional)
@@ -123,7 +123,7 @@ Implementation Plan
 Phase 1: Core parsing
 - Add Excel dependency: `calamine` (read-only; no write needed).
 - CSV loader: current pipeline + delimiter auto-detect.
-- Add a unified “table” struct: rows of strings, column labels.
+- Add a unified 窶徼able窶・struct: rows of strings, column labels.
 
 Phase 2: Import dialog
 - New dialog state in app:
@@ -138,7 +138,7 @@ Phase 4: Drag & drop
 - When drop is CSV/Excel, open import dialog instead of file add.
 - Keep audio drag/drop unchanged.
 
-Notes / Non‑Goals
+Notes / Non窶賎oals
 -----------------
 - Excel/CSV editing or export is out of scope.
 - We do not write back to CSV/Excel.
@@ -167,7 +167,7 @@ Key risks to address:
 5) **UI blocking**: parsing on the UI thread will stall when large sheets or
    header detection scans too much.
 
-Performance‑First Adjustments (Implementation Notes)
+Performance窶詮irst Adjustments (Implementation Notes)
 ----------------------------------------------------
 1) **Background parse + progress**  
    - CSV/Excel parsing should run in a worker thread with progress updates.
@@ -190,7 +190,7 @@ Performance‑First Adjustments (Implementation Notes)
    - Avoid materializing all cells when only a subset of columns is needed.
 
 6) **Header detection sampling**  
-   - Scan only first N rows (default 30–100).
+   - Scan only first N rows (default 30窶・00).
    - Skip full-sheet scans; provide manual override if detection is wrong.
 
 7) **Secondary scope filtering early**  
@@ -199,7 +199,7 @@ Performance‑First Adjustments (Implementation Notes)
 
 8) **Duplicate key handling**  
    - Store `key -> Vec<Row>` (or first + count) and report collisions in UI.
-   - Let user choose “first wins / last wins / show duplicates”.
+   - Let user choose 窶彷irst wins / last wins / show duplicates窶・
 
 Validation Checklist
 --------------------
@@ -207,3 +207,4 @@ Validation Checklist
 - Memory footprint stays below a defined cap (e.g. < 500 MB for large imports).
 - Regex changes do not reparse the source file; only remap from cached rows.
 - Sheet switching does not keep old sheets in memory.
+
