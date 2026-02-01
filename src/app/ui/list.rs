@@ -32,24 +32,23 @@ impl crate::app::WavesPreviewer {
             self.debug.last_pointer_over_list = pointer_over_list;
         }
         let list_focus_id = crate::app::WavesPreviewer::list_focus_id();
+        let list_focus_now = ctx.memory(|m| m.has_focus(list_focus_id));
+        let search_focused =
+            ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
         let focus_resp = ui.interact(list_rect, list_focus_id, Sense::click());
-        if self.list_has_focus
-            && !ctx.memory(|m| m.has_focus(list_focus_id))
-            && !ctx.wants_keyboard_input()
-        {
+        if self.list_has_focus && !list_focus_now && !search_focused {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
         }
         if focus_resp.clicked() {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             self.search_has_focus = false;
         }
-        let mut list_has_focus =
-            ctx.memory(|m| m.has_focus(list_focus_id)) || self.list_has_focus;
+        let mut list_has_focus = list_focus_now || self.list_has_focus;
         if !list_has_focus
             && self.active_tab.is_none()
             && self.selected.is_some()
             && !self.search_has_focus
-            && !ctx.wants_keyboard_input()
+            && !search_focused
         {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             list_has_focus = true;
@@ -57,10 +56,10 @@ impl crate::app::WavesPreviewer {
         }
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
-        let wants_kb = ctx.wants_keyboard_input();
-        let mut list_key_intent = false;
-        if self.active_tab.is_none() && !self.files.is_empty() && !wants_kb {
-            list_key_intent = ctx.input(|i| {
+        let allow_list_keys =
+            self.active_tab.is_none() && !self.files.is_empty() && !search_focused;
+        let list_key_intent = if allow_list_keys {
+            ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
                     || i.key_pressed(egui::Key::ArrowUp)
                     || i.key_pressed(egui::Key::Enter)
@@ -73,25 +72,27 @@ impl crate::app::WavesPreviewer {
                     || i.key_pressed(egui::Key::Delete)
                     || ((i.modifiers.ctrl || i.modifiers.command)
                         && i.key_pressed(egui::Key::A))
-            });
-            if !list_has_focus
-                && list_key_intent
-                && (pointer_over_list || self.selected.is_some() || self.list_has_focus)
-            {
-                ctx.memory_mut(|m| m.request_focus(list_focus_id));
-                list_has_focus = true;
-                self.list_has_focus = true;
-            }
+            })
+        } else {
+            false
+        };
+        if allow_list_keys && list_key_intent {
+            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+            list_has_focus = true;
+            self.list_has_focus = true;
         }
-        let allow_list_keys = list_has_focus && !wants_kb;
-        if self.active_tab.is_none() && !self.files.is_empty() && list_key_intent && !allow_list_keys
-        {
-            if self.debug.cfg.enabled {
-                self.debug_trace_input(format!(
-                    "list keys blocked (list_focus={} wants_kb={})",
-                    list_has_focus, wants_kb
-                ));
-            }
+        if list_has_focus {
+            ctx.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    list_focus_id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        tab: true,
+                        ..Default::default()
+                    },
+                );
+            });
         }
         let pressed_down = if allow_list_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
@@ -111,7 +112,7 @@ impl crate::app::WavesPreviewer {
         let pressed_ctrl_a = if allow_list_keys {
             ctx.input_mut(|i| {
                 i.consume_key(
-                    egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+                    egui::Modifiers::COMMAND,
                     egui::Key::A,
                 )
             })

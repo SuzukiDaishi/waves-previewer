@@ -554,25 +554,41 @@ impl crate::app::WavesPreviewer {
                     ui.checkbox(&mut self.auto_play_list_nav, "Auto Play");
                     ui.separator();
                     let regex_changed = ui.checkbox(&mut self.search_use_regex, "Regex").changed();
-                    let te =
-                        egui::TextEdit::singleline(&mut self.search_query).hint_text("Search...");
+                    let te = egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Search...")
+                        .id(crate::app::WavesPreviewer::search_box_id());
                     let resp = ui.add(te);
-                    self.search_has_focus = resp.has_focus();
-                    if resp.has_focus() {
+                    let search_focused = resp.has_focus();
+                    let search_lost = resp.lost_focus();
+                    self.search_has_focus = search_focused;
+                    if search_focused {
                         self.suppress_list_enter = true;
                         self.list_has_focus = false;
                     }
-                    if resp.has_focus()
-                        && self.active_tab.is_none()
+                    if search_lost
                         && ctx.input(|i| {
-                            i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::ArrowDown)
+                            i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                        })
+                    {
+                        self.suppress_list_enter = true;
+                    }
+                    if resp.has_focus()
+                        && ctx.input(|i| {
+                            i.key_pressed(Key::ArrowUp)
+                                || i.key_pressed(Key::ArrowDown)
+                                || i.key_pressed(Key::Escape)
                         })
                     {
                         resp.surrender_focus();
-                        ctx.memory_mut(|m| m.request_focus(crate::app::WavesPreviewer::list_focus_id()));
-                        self.list_has_focus = true;
+                        if self.active_tab.is_none() {
+                            ctx.memory_mut(|m| {
+                                m.request_focus(crate::app::WavesPreviewer::list_focus_id())
+                            });
+                            self.list_has_focus = true;
+                        }
+                        self.search_has_focus = false;
                         if self.debug.cfg.enabled {
-                            self.debug_trace_input("search focus released via arrow key");
+                            self.debug_trace_input("search focus released via arrow/escape");
                         }
                     }
                     if resp.changed() {

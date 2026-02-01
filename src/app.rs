@@ -290,6 +290,10 @@ impl WavesPreviewer {
         egui::Id::new("list_focus")
     }
 
+    fn search_box_id() -> egui::Id {
+        egui::Id::new("search_box")
+    }
+
     fn request_list_focus(&mut self, ctx: &egui::Context) {
         self.list_has_focus = true;
         self.search_has_focus = false;
@@ -1816,6 +1820,46 @@ spectro_note_labels={}\n",
         FileList.write_clipboard(&list).map_err(|e| e.to_string())
     }
 
+    #[cfg(windows)]
+    fn set_clipboard_files_with_marker(
+        &self,
+        paths: &[PathBuf],
+        marker: &str,
+    ) -> Result<(), String> {
+        // NOTE: egui-winit emits Event::Paste only when clipboard has non-empty text.
+        // We add a small marker text alongside the file list so Ctrl+V always produces
+        // Event::Paste (otherwise Ctrl+V can "vanish" when clipboard holds only files).
+        if marker.is_empty() {
+            return self.set_clipboard_files(paths);
+        }
+        use clipboard_win::formats::{FileList, CF_UNICODETEXT};
+        use clipboard_win::{raw, Clipboard, Setter};
+        let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        let _clip = Clipboard::new_attempts(10).map_err(|e| e.to_string())?;
+        FileList.write_clipboard(&list).map_err(|e| e.to_string())?;
+        if !marker.is_empty() {
+            let mut utf16: Vec<u16> = marker.encode_utf16().collect();
+            utf16.push(0);
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    utf16.as_ptr() as *const u8,
+                    utf16.len() * 2,
+                )
+            };
+            raw::set_without_clear(CF_UNICODETEXT, bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn set_clipboard_marker_text(&self, marker: &str) -> Result<(), String> {
+        // NOTE: keep clipboard text non-empty so Ctrl+V reliably becomes Event::Paste.
+        use clipboard_win::formats::Unicode;
+        use clipboard_win::{Clipboard, Setter};
+        let _clip = Clipboard::new_attempts(10).map_err(|e| e.to_string())?;
+        Unicode.write_clipboard(&marker).map_err(|e| e.to_string())
+    }
+
     #[cfg(not(windows))]
     fn set_clipboard_files(&self, _paths: &[PathBuf]) -> Result<(), String> {
         Err("Clipboard file list is not supported on this platform".to_string())
@@ -1834,6 +1878,7 @@ spectro_note_labels={}\n",
     }
 
     fn copy_selected_to_clipboard(&mut self) {
+        const CLIPBOARD_MARKER: &str = "neowaves://clipboard";
         let ids = self.selected_item_ids();
         if ids.is_empty() {
             return;
@@ -1913,8 +1958,26 @@ spectro_note_labels={}\n",
             self.debug_trace_input(format!("copy_selected_to_clipboard items={count}"));
         }
         if !os_paths.is_empty() {
-            if let Err(err) = self.set_clipboard_files(&os_paths) {
-                self.debug_log(format!("clipboard error: {err}"));
+            #[cfg(windows)]
+            {
+                if let Err(err) =
+                    self.set_clipboard_files_with_marker(&os_paths, CLIPBOARD_MARKER)
+                {
+                    self.debug_log(format!("clipboard error: {err}"));
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                if let Err(err) = self.set_clipboard_files(&os_paths) {
+                    self.debug_log(format!("clipboard error: {err}"));
+                }
+            }
+        } else {
+            #[cfg(windows)]
+            {
+                if let Err(err) = self.set_clipboard_marker_text(CLIPBOARD_MARKER) {
+                    self.debug_log(format!("clipboard error: {err}"));
+                }
             }
         }
     }
@@ -2045,60 +2108,306 @@ spectro_note_labels={}\n",
         }
     }
 
+    fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        let wants_kb = ctx.wants_keyboard_input();
+        let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
+
+        if !search_focused {
+            if ctx
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+            {
+                // Keep preview audio/overlay when toggling playback.
+                self.audio.toggle_play();
+            }
+        }
+
+        // Tab switching: Ctrl+1 = List, Ctrl+2.. = editor tabs
+        if !search_focused || !wants_kb {
+            let mut target: Option<usize> = None;
+            if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1)
+            }) {
+                target = Some(0);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num2)
+            }) {
+                target = Some(1);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num3)
+            }) {
+                target = Some(2);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num4)
+            }) {
+                target = Some(3);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num5)
+            }) {
+                target = Some(4);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)
+            }) {
+                target = Some(5);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num7)
+            }) {
+                target = Some(6);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num8)
+            }) {
+                target = Some(7);
+            } else if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num9)
+            }) {
+                target = Some(8);
+            }
+            if let Some(idx) = target {
+                if idx == 0 {
+                    if let Some(prev) = self.active_tab {
+                        self.clear_preview_if_any(prev);
+                    }
+                    self.active_tab = None;
+                    self.audio.stop();
+                    self.audio.set_loop_enabled(false);
+                    self.request_list_focus(ctx);
+                } else {
+                    let tab_idx = idx - 1;
+                    if tab_idx < self.tabs.len() {
+                        if let Some(prev) = self.active_tab {
+                            if prev != tab_idx {
+                                self.clear_preview_if_any(prev);
+                            }
+                        }
+                        if let Some(tab) = self.tabs.get(tab_idx) {
+                            self.active_tab = Some(tab_idx);
+                            self.audio.stop();
+                            self.pending_activate_path = Some(tab.path.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let save_as = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::S,
+            )
+        });
+        let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+        if save_as {
+            if let Some(mut path) = self.pick_project_save_dialog() {
+                let needs_ext = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| !s.eq_ignore_ascii_case("nwsess"))
+                    .unwrap_or(true);
+                if needs_ext {
+                    path.set_extension("nwsess");
+                }
+                if let Err(err) = self.save_project_as(path) {
+                    self.debug_log(format!("session save-as error: {err}"));
+                }
+            }
+        } else if save {
+            if let Err(err) = self.save_project() {
+                self.debug_log(format!("session save error: {err}"));
+            }
+        }
+
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)
+        }) {
+            self.trigger_save_selected();
+        }
+
+        if ctx.input_mut(|i| {
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+        }) {
+            if let Some(active_idx) = self.active_tab {
+                self.close_tab_at(active_idx, ctx);
+            }
+        }
+
+        // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
+        if let Some(tab_idx) = self.active_tab {
+            if !wants_kb {
+                if ctx
+                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
+                {
+                    // Set Loop Start
+                    let pos_audio = self
+                        .audio
+                        .shared
+                        .play_pos
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let pos_now = self
+                        .tabs
+                        .get(tab_idx)
+                        .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
+                        .unwrap_or(0);
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        let end = tab.loop_region.map(|(_, e)| e).unwrap_or(pos_now);
+                        let s = pos_now.min(end);
+                        let e = end.max(s);
+                        tab.loop_region = Some((s, e));
+                        Self::update_loop_markers_dirty(tab);
+                    }
+                }
+                if ctx
+                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P))
+                {
+                    // Set Loop End
+                    let pos_audio = self
+                        .audio
+                        .shared
+                        .play_pos
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let pos_now = self
+                        .tabs
+                        .get(tab_idx)
+                        .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
+                        .unwrap_or(0);
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        let start = tab.loop_region.map(|(s, _)| s).unwrap_or(pos_now);
+                        let s = start.min(pos_now);
+                        let e = pos_now.max(start);
+                        tab.loop_region = Some((s, e));
+                        Self::update_loop_markers_dirty(tab);
+                    }
+                }
+                if ctx
+                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L))
+                {
+                    // Toggle loop mode without holding a mutable borrow across &self call
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.loop_mode = match tab.loop_mode {
+                            LoopMode::Off => LoopMode::OnWhole,
+                            _ => LoopMode::Off,
+                        };
+                    }
+                    if let Some(tab_ro) = self.tabs.get(tab_idx) {
+                        self.apply_loop_mode_for_tab(tab_ro);
+                    }
+                }
+                if ctx
+                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::S))
+                {
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.snap_zero_cross = !tab.snap_zero_cross;
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
         if self.active_tab.is_some() {
             return;
         }
-        let wants_kb = ctx.wants_keyboard_input();
+        let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
         let list_focus =
             self.list_has_focus || ctx.memory(|m| m.has_focus(Self::list_focus_id()));
-        let allow = !self.search_has_focus
-            && !wants_kb
-            && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
+        let allow =
+            !search_focused && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let down_c = ctx.input(|i| i.key_down(egui::Key::C));
         let down_v = ctx.input(|i| i.key_down(egui::Key::V));
-        let copy_trigger = allow
-            && ctx.input_mut(|i| {
-                i.consume_key(
-                    egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
-                    egui::Key::C,
-                )
+        let mut event_copy = false;
+        let mut event_paste = false;
+        // NOTE: egui-winit intercepts Ctrl+C/V and turns them into Event::Copy / Event::Paste,
+        // so Key::C/Key::V may never appear. We must consume from `i.events` here.
+        ctx.input(|i| {
+            for ev in &i.events {
+                match ev {
+                    egui::Event::Copy => event_copy = true,
+                    egui::Event::Paste(_) => event_paste = true,
+                    _ => {}
+                }
+            }
+        });
+        let mut consumed_copy_event = false;
+        let mut consumed_paste_event = false;
+        let mut paste_text: Option<String> = None; // Some(text) only if OS clipboard provides non-empty text.
+        if allow {
+            ctx.input_mut(|i| {
+                let mut idx = 0;
+                while idx < i.events.len() {
+                    match &i.events[idx] {
+                        egui::Event::Copy => {
+                            consumed_copy_event = true;
+                            i.events.remove(idx);
+                            continue;
+                        }
+                        egui::Event::Paste(s) => {
+                            consumed_paste_event = true;
+                            paste_text = Some(s.clone());
+                            i.events.remove(idx);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    idx += 1;
+                }
             });
-        let paste_trigger = allow
+        }
+        let edge_c = allow && ctrl && down_c && !self.clipboard_c_was_down;
+        let edge_v = allow && ctrl && down_v && !self.clipboard_v_was_down;
+        let consumed_copy = allow
             && ctx.input_mut(|i| {
-                i.consume_key(
-                    egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
-                    egui::Key::V,
-                )
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
             });
+        let consumed_paste = allow
+            && ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)
+            });
+        let copy_trigger = consumed_copy_event || consumed_copy || edge_c;
+        let paste_trigger = consumed_paste_event || consumed_paste || edge_v;
+        let copy_source = if consumed_copy_event {
+            "Event::Copy"
+        } else if consumed_copy {
+            "consume_key"
+        } else if edge_c {
+            "edge"
+        } else {
+            "none"
+        };
+        let paste_source = if consumed_paste_event {
+            "Event::Paste"
+        } else if consumed_paste {
+            "consume_key"
+        } else if edge_v {
+            "edge"
+        } else {
+            "none"
+        };
         self.clipboard_c_was_down = down_c;
         self.clipboard_v_was_down = down_v;
         if self.debug.cfg.enabled {
             self.debug.last_clip_allow = allow;
-            self.debug.last_clip_wants_kb = wants_kb;
+            self.debug.last_clip_wants_kb = ctx.wants_keyboard_input();
             self.debug.last_clip_ctrl = ctrl;
-            self.debug.last_clip_event_copy = false;
-            self.debug.last_clip_event_paste = false;
-            self.debug.last_clip_raw_key_c = false;
-            self.debug.last_clip_raw_key_v = false;
-            self.debug.last_clip_os_ctrl = false;
-            self.debug.last_clip_os_key_c = false;
-            self.debug.last_clip_os_key_v = false;
-            self.debug.last_clip_consumed_copy = copy_trigger;
-            self.debug.last_clip_consumed_paste = paste_trigger;
+            self.debug.last_clip_event_copy = event_copy;
+            self.debug.last_clip_event_paste = event_paste;
+            self.debug.last_clip_raw_key_c = down_c;
+            self.debug.last_clip_raw_key_v = down_v;
+            self.debug.last_clip_os_ctrl = ctrl;
+            self.debug.last_clip_os_key_c = edge_c;
+            self.debug.last_clip_os_key_v = edge_v;
+            self.debug.last_clip_consumed_copy = consumed_copy_event || consumed_copy;
+            self.debug.last_clip_consumed_paste = consumed_paste_event || consumed_paste;
             self.debug.last_clip_copy_trigger = copy_trigger;
             self.debug.last_clip_paste_trigger = paste_trigger;
             if allow && ctrl && !paste_trigger && self.clipboard_payload.is_some() {
                 self.debug_trace_input(format!(
-                    "paste not triggered despite allow: down_v={} list_focus={} wants_kb={} sel={:?}",
-                    down_v, list_focus, wants_kb, self.selected
+                    "paste not triggered despite allow: down_v={} list_focus={} search_focus={} sel={:?}",
+                    down_v, list_focus, search_focused, self.selected
                 ));
             }
             if !allow && ctrl && (down_c || down_v) {
                 self.debug_trace_input(format!(
-                    "clipboard blocked (list_focus={} wants_kb={})",
-                    list_focus, wants_kb
+                    "clipboard blocked (list_focus={} search_focus={})",
+                    list_focus, search_focused
                 ));
             }
         }
@@ -2106,7 +2415,7 @@ spectro_note_labels={}\n",
             if !self.selected_multi.is_empty() || self.selected.is_some() {
                 self.copy_selected_to_clipboard();
                 if self.debug.cfg.enabled {
-                    self.debug_trace_input("copy triggered via consume_key");
+                    self.debug_trace_input(format!("copy triggered via {copy_source}"));
                 }
             } else if self.debug.cfg.enabled {
                 self.debug_trace_input("copy triggered with no selection");
@@ -2115,32 +2424,32 @@ spectro_note_labels={}\n",
         if paste_trigger {
             self.paste_clipboard_to_list();
             if self.debug.cfg.enabled {
-                self.debug_trace_input("paste triggered via consume_key");
+                if let Some(text) = paste_text.as_deref() {
+                    self.debug_trace_input(format!(
+                        "paste triggered via {paste_source} text_len={}",
+                        text.len()
+                    ));
+                } else {
+                    self.debug_trace_input(format!("paste triggered via {paste_source}"));
+                }
             }
         }
     }
 
     fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
-        let wants_kb = ctx.wants_keyboard_input();
-        if wants_kb {
+        let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
+        if search_focused {
             return;
         }
-        let allow = !self.search_has_focus
-            && (self.list_has_focus || self.active_tab.is_some() || self.selected.is_some());
+        let allow = self.list_has_focus || self.active_tab.is_some() || self.selected.is_some();
         if !allow {
             return;
         }
         let undo = ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
-                egui::Key::Z,
-            )
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
         });
         let redo = ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers::CTRL | egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::Z,
-            )
+            i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
         });
         self.undo_z_was_down = ctx.input(|i| i.key_down(Key::Z));
         if !(undo || redo) {
@@ -5334,138 +5643,6 @@ impl eframe::App for WavesPreviewer {
             ctx.request_repaint();
         }
 
-        // Shortcuts
-        if ctx.input(|i| i.key_pressed(Key::Space)) {
-            // Keep preview audio/overlay when toggling playback.
-            self.audio.toggle_play();
-        }
-        // Tab switching: Ctrl+1 = List, Ctrl+2.. = editor tabs
-        if !ctx.wants_keyboard_input() {
-            let mods = ctx.input(|i| i.modifiers);
-            if mods.ctrl {
-                let mut target: Option<usize> = None;
-                if ctx.input(|i| i.key_pressed(Key::Num1)) {
-                    target = Some(0);
-                } else if ctx.input(|i| i.key_pressed(Key::Num2)) {
-                    target = Some(1);
-                } else if ctx.input(|i| i.key_pressed(Key::Num3)) {
-                    target = Some(2);
-                } else if ctx.input(|i| i.key_pressed(Key::Num4)) {
-                    target = Some(3);
-                } else if ctx.input(|i| i.key_pressed(Key::Num5)) {
-                    target = Some(4);
-                } else if ctx.input(|i| i.key_pressed(Key::Num6)) {
-                    target = Some(5);
-                } else if ctx.input(|i| i.key_pressed(Key::Num7)) {
-                    target = Some(6);
-                } else if ctx.input(|i| i.key_pressed(Key::Num8)) {
-                    target = Some(7);
-                } else if ctx.input(|i| i.key_pressed(Key::Num9)) {
-                    target = Some(8);
-                }
-                if let Some(idx) = target {
-                    if idx == 0 {
-                        if let Some(prev) = self.active_tab {
-                            self.clear_preview_if_any(prev);
-                        }
-                        self.active_tab = None;
-                        self.audio.stop();
-                        self.audio.set_loop_enabled(false);
-                        self.request_list_focus(ctx);
-                    } else {
-                        let tab_idx = idx - 1;
-                        if tab_idx < self.tabs.len() {
-                            if let Some(prev) = self.active_tab {
-                                if prev != tab_idx {
-                                    self.clear_preview_if_any(prev);
-                                }
-                            }
-                            if let Some(tab) = self.tabs.get(tab_idx) {
-                                self.active_tab = Some(tab_idx);
-                                self.audio.stop();
-                                self.pending_activate_path = Some(tab.path.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::S)) {
-            if let Err(err) = self.save_project() {
-                self.debug_log(format!("session save error: {err}"));
-            }
-        }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::E)) {
-            self.trigger_save_selected();
-        }
-        // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
-        if let Some(tab_idx) = self.active_tab {
-            // Loop Start/End at playhead
-            if ctx.input(|i| i.key_pressed(Key::K)) {
-                // Set Loop Start
-                let pos_audio = self
-                    .audio
-                    .shared
-                    .play_pos
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let pos_now = self
-                    .tabs
-                    .get(tab_idx)
-                    .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
-                    .unwrap_or(0);
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    let end = tab.loop_region.map(|(_, e)| e).unwrap_or(pos_now);
-                    let s = pos_now.min(end);
-                    let e = end.max(s);
-                    tab.loop_region = Some((s, e));
-                    Self::update_loop_markers_dirty(tab);
-                }
-            }
-            if ctx.input(|i| i.key_pressed(Key::P)) {
-                // Set Loop End
-                let pos_audio = self
-                    .audio
-                    .shared
-                    .play_pos
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let pos_now = self
-                    .tabs
-                    .get(tab_idx)
-                    .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
-                    .unwrap_or(0);
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    let start = tab.loop_region.map(|(s, _)| s).unwrap_or(pos_now);
-                    let s = start.min(pos_now);
-                    let e = pos_now.max(start);
-                    tab.loop_region = Some((s, e));
-                    Self::update_loop_markers_dirty(tab);
-                }
-            }
-            if ctx.input(|i| i.key_pressed(Key::L)) {
-                // Toggle loop mode without holding a mutable borrow across &self call
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    tab.loop_mode = match tab.loop_mode {
-                        LoopMode::Off => LoopMode::OnWhole,
-                        _ => LoopMode::Off,
-                    };
-                }
-                if let Some(tab_ro) = self.tabs.get(tab_idx) {
-                    self.apply_loop_mode_for_tab(tab_ro);
-                }
-            }
-            if ctx.input(|i| i.key_pressed(Key::S)) {
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    tab.snap_zero_cross = !tab.snap_zero_cross;
-                }
-            }
-        }
-
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::W)) {
-            if let Some(active_idx) = self.active_tab {
-                self.close_tab_at(active_idx, ctx);
-            }
-        }
-
         // Top controls (always visible)
         self.ui_top_bar(ctx);
         // Drag & Drop: merge dropped files/folders into the list (supported audio)
@@ -6493,6 +6670,8 @@ impl eframe::App for WavesPreviewer {
         }
         // Debug window
         self.ui_debug_window(ctx);
+        // Global shortcuts after UI so focus state is accurate
+        self.handle_global_shortcuts(ctx);
         // Hotkeys after UI so focus state is accurate
         self.handle_clipboard_hotkeys(ctx);
         self.handle_undo_redo_hotkeys(ctx);
