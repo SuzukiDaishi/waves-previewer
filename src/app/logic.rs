@@ -9,8 +9,8 @@ use walkdir::WalkDir;
 
 use super::helpers::num_order;
 use super::types::{
-    ChannelView, EditorDecodeResult, EditorDecodeState, EditorTab, ListPreviewResult,
-    ProcessingResult, ProcessingState, RateMode, ScanMessage, SortDir, SortKey,
+    ChannelView, EditorDecodeResult, EditorDecodeState, EditorTab, ProcessingResult, ProcessingState,
+    RateMode, ScanMessage, SortDir, SortKey,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 1.0;
@@ -127,6 +127,7 @@ impl super::WavesPreviewer {
 
     pub(super) fn apply_dirty_tab_audio_with_mode(&mut self, path: &Path) -> bool {
         let decode_failed = self.is_decode_failed_path(path);
+        // Prefer a live dirty tab when open; otherwise fall back to cached edits.
         let idx = match self
             .tabs
             .iter()
@@ -192,6 +193,7 @@ impl super::WavesPreviewer {
                 self.audio.set_rate(self.playback_rate);
             }
             _ => {
+                // Decode failures avoid heavy processing; we play cached samples directly.
                 if decode_failed {
                     self.apply_sample_rate_preview_for_path(
                         &tab_path,
@@ -254,6 +256,7 @@ impl super::WavesPreviewer {
     }
 
     fn apply_dirty_tab_preview_for_list(&mut self, path: &Path) -> bool {
+        // List preview prioritizes dirty tab audio, then cached edits.
         let idx = match self
             .tabs
             .iter()
@@ -326,6 +329,7 @@ impl super::WavesPreviewer {
         let sem = self.pitch_semitones;
         let out_sr = self.audio.shared.out_sample_rate;
         let path_for_thread = path.clone();
+        // Heavy pitch/stretch work runs off-thread; waveform is derived for UI reuse.
         std::thread::spawn(move || {
             let mut processed: Vec<Vec<f32>> = Vec::with_capacity(channels.len());
             for chan in channels.iter() {
@@ -441,6 +445,7 @@ impl super::WavesPreviewer {
             self.remove_missing_path(&path);
             return false;
         }
+        // Rebuild editor tab state from on-disk audio (speed vs other modes differ).
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -449,6 +454,7 @@ impl super::WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate;
         match self.mode {
             RateMode::Speed => {
+                // Speed mode uses fast mono preview + prepare_for_speed for playback.
                 let mut waveform = Vec::new();
                 if let Ok((mono, _in_sr)) = crate::wave::decode_wav_mono(&path) {
                     crate::wave::build_minmax(&mut waveform, &mono, 2048);
@@ -868,46 +874,6 @@ impl super::WavesPreviewer {
         self.audio.set_samples_channels(chans);
         self.audio.stop();
         Ok(truncated)
-    }
-
-    fn spawn_list_preview_full(&mut self, path: PathBuf) {
-        use std::sync::mpsc;
-        self.list_preview_job_id = self.list_preview_job_id.wrapping_add(1);
-        let job_id = self.list_preview_job_id;
-        let out_sr = self.audio.shared.out_sample_rate;
-        let target_sr = self.sample_rate_override.get(&path).copied().filter(|v| *v > 0);
-        let (tx, rx) = mpsc::channel::<ListPreviewResult>();
-        std::thread::spawn(move || {
-            let res = (|| -> anyhow::Result<ListPreviewResult> {
-                let (mut chans, in_sr) = crate::wave::decode_wav_multi(&path)?;
-                if let Some(target) = target_sr {
-                    let target = target.max(1);
-                    if in_sr != target {
-                        for c in chans.iter_mut() {
-                            *c = crate::wave::resample_linear(c, in_sr, target);
-                        }
-                    }
-                    if target != out_sr {
-                        for c in chans.iter_mut() {
-                            *c = crate::wave::resample_linear(c, target, out_sr);
-                        }
-                    }
-                } else if in_sr != out_sr {
-                    for c in chans.iter_mut() {
-                        *c = crate::wave::resample_linear(c, in_sr, out_sr);
-                    }
-                }
-                Ok(ListPreviewResult {
-                    path,
-                    channels: chans,
-                    job_id,
-                })
-            })();
-            if let Ok(result) = res {
-                let _ = tx.send(result);
-            }
-        });
-        self.list_preview_rx = Some(rx);
     }
 
     fn spawn_editor_decode(&mut self, path: PathBuf) {
@@ -1714,6 +1680,7 @@ impl super::WavesPreviewer {
         // Preserve selection index if possible
         let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
         let query = self.search_query.trim().to_string();
+        // Search spans display name, folder, transcript, meta summary, and external fields.
         if query.is_empty() {
             self.files = self.items.iter().map(|item| item.id).collect();
         } else if self.search_use_regex {
@@ -1757,6 +1724,7 @@ impl super::WavesPreviewer {
                     .map(|item| item.id)
                     .collect();
             } else {
+                // Regex parse failed; fall back to case-insensitive substring matching.
                 let q = query.to_lowercase();
                 self.files = self
                     .items
@@ -1853,20 +1821,22 @@ impl super::WavesPreviewer {
         if self.files.is_empty() {
             return;
         }
+        // Keep selection stable while reordering the visible file list.
         let selected_idx = self.selected.and_then(|i| self.files.get(i).copied());
         let key = self.sort_key;
         let dir = self.sort_dir;
         if dir == SortDir::None {
             self.files = self.original_files.clone();
         } else {
-        let items = &self.items;
-        let item_index = &self.item_index;
-        let lufs_override = &self.lufs_override;
-        let external_cols = &self.external_visible_columns;
-        let sample_rate_override = &self.sample_rate_override;
-        self.files.sort_by(|a, b| {
-            use std::cmp::Ordering;
-            use std::time::UNIX_EPOCH;
+            // Capture shared references to keep sort_by borrow-friendly.
+            let items = &self.items;
+            let item_index = &self.item_index;
+            let lufs_override = &self.lufs_override;
+            let external_cols = &self.external_visible_columns;
+            let sample_rate_override = &self.sample_rate_override;
+            self.files.sort_by(|a, b| {
+                use std::cmp::Ordering;
+                use std::time::UNIX_EPOCH;
                 let pa_idx = match item_index.get(a) {
                     Some(idx) => *idx,
                     None => return Ordering::Equal,
@@ -1931,7 +1901,7 @@ impl super::WavesPreviewer {
                         ma.and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
                         mb.and_then(|m| m.peak_db).unwrap_or(f32::NEG_INFINITY),
                     ),
-                    // LUFS sorting uses effective value: override if present, else base + gain
+                    // LUFS sorting uses effective value: override if present, else base + gain.
                     SortKey::Lufs => {
                         let ga = pa_item.pending_gain_db;
                         let gb = pb_item.pending_gain_db;

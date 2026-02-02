@@ -4,6 +4,50 @@ Purpose
 - Notes for LLM agents and humans working in this repo.
 - Focus on cargo workflows, console usage, and core implementation principles.
 
+Terminology
+- "Session" (.nwsess) is the current state file name used in UI/docs.
+- Legacy code/file naming still uses `project*` to mean session persistence.
+
+Repository Layout
+- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, MCP smoke tests).
+- `debug/`: Debug fixtures and automation outputs (e.g., gui_test audio, summary text).
+- `docs/`: Design/refactor plans and specs.
+  - `REFACTOR_PLAN.md`: app.rs / logic.rs refactor plan and progress map.
+  - `MAJOR_UPDATE_PLAN.md`: feature roadmap and UX requirements.
+  - `NWPROJ_PLAN.md`: session save format/spec (legacy "project" naming in code).
+  - `SOUND_LIST_IMPORT_PLAN.md`: CSV/Excel import design and performance notes.
+  - `CLIPBOARD_HOTKEY_ISSUE_20260201.md`: clipboard hotkey investigation log.
+- `icons/`: App icon sources/exports.
+- `installer/`: Installer assets/scripts (packaging).
+- `screenshots/`: UI capture output (manual or automated).
+- `src/`: Rust sources (app + engine).
+  - `src/app/`: WavesPreviewer implementation split by feature.
+    - `ui/`: UI panels/windows (top bar, list, editor, debug, export settings).
+    - `render/`: waveform/spectrogram rendering helpers.
+    - `*_ops.rs`: operation logic split by domain (input, clipboard, session, loading, editor apply, loudnorm, resample, meta, preview, export, external load).
+    - `logic.rs`: per-frame update logic.
+    - `types.rs`: shared app state and enums.
+    - `project.rs`: session (nwsess) serialization helpers (legacy naming).
+    - `session_ops.rs`: session open/save/IPC/drag-drop.
+    - `theme_ops.rs`: theme + prefs load/save.
+    - `scan_ops.rs`: folder scan job orchestration + results apply.
+    - `transcript_ops.rs`: transcript seek handling.
+    - `mcp_ops.rs`: MCP command processing + list query helper.
+    - `gain_ops.rs`: pending gain lookup/set helpers for list items.
+    - `list_state_ops.rs`: list accessors, selection helpers, and sort-key visibility guard.
+    - `temp_audio_ops.rs`: clipboard temp wav export + virtual audio decode helpers.
+    - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
+    - `audio_ops.rs`: output volume + per-file gain application.
+  - `src/mcp/`: MCP server/client glue for automation (stdio/http).
+  - `src/bin/`: extra binaries/utilities (if present).
+  - `src/main.rs`: CLI entry + arg parsing.
+  - `src/lib.rs`: crate entry.
+  - `src/audio*.rs`, `src/wave.rs`, `src/markers.rs`, `src/loop_markers.rs`: audio I/O and DSP utilities.
+  - `src/ipc.rs`: IPC message definitions.
+  - `src/kittest.rs`: kittest feature helpers.
+- `tests/`: integration tests (including kittest harness).
+- `target/`: Cargo build artifacts (generated).
+
 Console Quick Start (PowerShell)
 - Build: `cargo build`
 - Run: `cargo run`

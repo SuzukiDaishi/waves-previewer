@@ -1,3 +1,5 @@
+use crate::app::types::{EditorApplyResult, EditorUndoState, ToolKind};
+
 impl crate::app::WavesPreviewer {
     pub(super) fn fade_weight(shape: crate::app::types::FadeShape, t: f32) -> f32 {
         let x = t.clamp(0.0, 1.0);
@@ -592,5 +594,307 @@ impl crate::app::WavesPreviewer {
                 self.audio.set_loop_enabled(false);
             }
         }
+    }
+
+    pub(super) fn spawn_editor_apply_for_tab(
+        &mut self,
+        tab_idx: usize,
+        tool: ToolKind,
+        param: f32,
+    ) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if matches!(tool, ToolKind::PitchShift | ToolKind::TimeStretch)
+            && self.is_decode_failed_path(&tab.path)
+        {
+            return;
+        }
+        let undo = Some(Self::capture_undo_state(tab));
+        // Cancel any previous apply job
+        self.editor_apply_state = None;
+        self.audio.stop();
+        let ch = tab.ch_samples.clone();
+        let sr = self.audio.shared.out_sample_rate;
+        let (tx, rx) = mpsc::channel::<EditorApplyResult>();
+        std::thread::spawn(move || {
+            let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
+            let mut lufs_override = None;
+            match tool {
+                ToolKind::PitchShift | ToolKind::TimeStretch => {
+                    for chan in ch.iter() {
+                        let processed = match tool {
+                            ToolKind::PitchShift => {
+                                crate::wave::process_pitchshift_offline(chan, sr, sr, param)
+                            }
+                            ToolKind::TimeStretch => {
+                                crate::wave::process_timestretch_offline(chan, sr, sr, param)
+                            }
+                            _ => chan.clone(),
+                        };
+                        out.push(processed);
+                    }
+                }
+                ToolKind::Loudness => {
+                    let lufs = crate::wave::lufs_integrated_from_multi(&ch, sr)
+                        .unwrap_or(f32::NEG_INFINITY);
+                    if lufs.is_finite() {
+                        let gain_db = param - lufs;
+                        let gain = 10.0f32.powf(gain_db / 20.0);
+                        for chan in ch.iter() {
+                            let mut processed = chan.clone();
+                            for v in processed.iter_mut() {
+                                *v = (*v * gain).clamp(-1.0, 1.0);
+                            }
+                            out.push(processed);
+                        }
+                        lufs_override = Some(param);
+                    } else {
+                        out = ch.clone();
+                    }
+                }
+                _ => {
+                    out = ch.clone();
+                }
+            }
+            let len = out.get(0).map(|c| c.len()).unwrap_or(0);
+            let mut mono = vec![0.0f32; len];
+            let chn = out.len() as f32;
+            if chn > 0.0 {
+                for ch in &out {
+                    for (i, v) in ch.iter().enumerate() {
+                        if let Some(dst) = mono.get_mut(i) {
+                            *dst += *v;
+                        }
+                    }
+                }
+                for v in &mut mono {
+                    *v /= chn;
+                }
+            }
+            let _ = tx.send(EditorApplyResult {
+                tab_idx,
+                samples: mono,
+                channels: out,
+                lufs_override,
+            });
+        });
+        let msg = match tool {
+            ToolKind::PitchShift => "Applying PitchShift...".to_string(),
+            ToolKind::TimeStretch => "Applying TimeStretch...".to_string(),
+            ToolKind::Loudness => "Applying Loudness Normalize...".to_string(),
+            _ => "Applying...".to_string(),
+        };
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg,
+            rx,
+            tab_idx,
+            undo,
+        });
+    }
+
+    pub(super) fn drain_editor_apply_jobs(&mut self, ctx: &egui::Context) {
+        let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>)> = None;
+        if let Some(state) = &mut self.editor_apply_state {
+            if let Ok(res) = state.rx.try_recv() {
+                let undo = state.undo.take();
+                apply_done = Some((res, undo));
+            }
+        }
+        if let Some((res, undo)) = apply_done {
+            if res.tab_idx < self.tabs.len() {
+                let mut applied_channels = res.channels;
+                if applied_channels.is_empty() && !res.samples.is_empty() {
+                    applied_channels = vec![res.samples.clone()];
+                }
+                if let Some(tab) = self.tabs.get_mut(res.tab_idx) {
+                    let old_len = tab.samples_len.max(1);
+                    let old_view = tab.view_offset;
+                    let old_spp = tab.samples_per_px;
+                    if let Some(undo_state) = undo {
+                        Self::push_undo_state_from(tab, undo_state, true);
+                    }
+                    tab.preview_audio_tool = None;
+                    tab.preview_overlay = None;
+                    tab.ch_samples = applied_channels;
+                    tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                    let new_len = tab.samples_len.max(1);
+                    if old_len > 0 && new_len > 0 {
+                        let ratio = (new_len as f32) / (old_len as f32);
+                        if old_spp > 0.0 {
+                            tab.samples_per_px = (old_spp * ratio).max(0.0001);
+                        }
+                        tab.view_offset = ((old_view as f32) * ratio).round() as usize;
+                        tab.loop_xfade_samples =
+                            ((tab.loop_xfade_samples as f32) * ratio).round() as usize;
+                    }
+                    tab.dirty = true;
+                    Self::editor_clamp_ranges(tab);
+                    if let Some(v) = res.lufs_override {
+                        self.lufs_override.insert(tab.path.clone(), v);
+                    }
+                }
+                self.heavy_preview_rx = None;
+                self.heavy_preview_tool = None;
+                self.heavy_overlay_rx = None;
+                self.overlay_expected_tool = None;
+                self.audio.stop();
+                if let Some(tab) = self.tabs.get(res.tab_idx) {
+                    self.audio.set_samples_channels(tab.ch_samples.clone());
+                    self.apply_loop_mode_for_tab(tab);
+                } else if !res.samples.is_empty() {
+                    self.audio.set_samples_mono(res.samples);
+                }
+            }
+            self.editor_apply_state = None;
+            ctx.request_repaint();
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_trim_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_trim_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_fade_in(
+        &mut self,
+        start: f32,
+        end: f32,
+        shape: crate::app::types::FadeShape,
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_fade_in_explicit(tab_idx, range, shape);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_fade_out(
+        &mut self,
+        start: f32,
+        end: f32,
+        shape: crate::app::types::FadeShape,
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_fade_out_explicit(tab_idx, range, shape);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_gain(&mut self, start: f32, end: f32, db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_gain_range(tab_idx, range, db);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_normalize(&mut self, start: f32, end: f32, db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_normalize_range(tab_idx, range, db);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_reverse(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_reverse_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_pitch_shift(&mut self, semitones: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_editor_apply_for_tab(tab_idx, ToolKind::PitchShift, semitones);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_time_stretch(&mut self, rate: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_editor_apply_for_tab(tab_idx, ToolKind::TimeStretch, rate);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_apply_active(&self) -> bool {
+        self.editor_apply_state.is_some()
+    }
+
+    #[cfg(feature = "kittest")]
+    pub(super) fn test_range_from_frac(
+        tab: &crate::app::types::EditorTab,
+        start: f32,
+        end: f32,
+    ) -> Option<(usize, usize)> {
+        if tab.samples_len == 0 {
+            return None;
+        }
+        let mut s = (tab.samples_len as f32 * start.clamp(0.0, 1.0)).floor() as usize;
+        let mut e = (tab.samples_len as f32 * end.clamp(0.0, 1.0)).ceil() as usize;
+        if s > e {
+            std::mem::swap(&mut s, &mut e);
+        }
+        if e <= s {
+            e = (s + 1).min(tab.samples_len);
+        }
+        if s >= tab.samples_len {
+            return None;
+        }
+        Some((s, e.min(tab.samples_len)))
     }
 }

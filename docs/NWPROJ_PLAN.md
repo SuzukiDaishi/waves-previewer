@@ -10,12 +10,12 @@
 ## Non-Goals (for first release)
 - Network or cloud sync.
 - Cross-machine path rewriting beyond a simple relative-path option.
-- Versioned history of edits inside a project.
+- Versioned history of edits inside a session.
 
 ---
 
 ## File Format (v1)
-Use TOML (already in the repo) for a human-readable project file.
+Use TOML (already in the repo) for a human-readable session file.
 
 File: `MySession.nwsess`
 
@@ -77,11 +77,11 @@ error = "Source file missing"
 Current edits are destructive to in-memory samples. To restore "edited waveform" we must persist it.
 
 ### v1 approach
-- Create a sidecar folder next to the project:
+- Create a sidecar folder next to the session file:
   - `MySession.nwsess.d/`
 - Save edited audio per tab:
   - `data/tab_0001.wav` (32-bit float WAV, matching sample rate + channels).
-- `edited_audio` in the project file points to this path.
+- `edited_audio` in the session file points to this path.
 - If a tab is not dirty, omit `edited_audio` to avoid bloat.
 
 ### Rationale
@@ -108,9 +108,9 @@ Add to File menu:
 - Session Close (clears session and returns to list view)
 
 Behavior:
-- Session Save defaults to last project path if already opened.
+- Session Save defaults to last session path if already opened.
 - Save As chooses path and writes sidecar folder if needed.
-- On opening a project, restore the list, tabs, and editor state. Show a one-line toast "Session loaded".
+- On opening a session, restore the list, tabs, and editor state. Show a one-line toast "Session loaded".
 
 ---
 
@@ -126,7 +126,7 @@ Behavior:
 
 ### Phase 1: Data model + serialization
 - Add `SessionFile` structs in `src/app/types.rs` (serde-friendly).
-- Implement `read_project(path)` and `write_project(path)` in a new module `src/app/project.rs`.
+- Implement `read_session(path)` and `write_session(path)` in `src/app/project.rs` (module name is legacy).
 - Use TOML for v1 serialization.
 
 ### Phase 2: Save / Open wiring
@@ -149,6 +149,6 @@ Behavior:
 
 ## Follow-ups (v2)
 - Optional "Save edits" checkbox to avoid sidecar audio.
-- Portable projects (path remapping dialog).
+- Portable sessions (path remapping dialog).
 - Compact storage using FLAC or OGG for edited audio.
 

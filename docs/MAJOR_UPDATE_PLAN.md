@@ -11,7 +11,7 @@ This document covers the requested fixes and new features. It is scoped to keep 
 - Clipboard hotkeys reliability.
 - New features: loudness normalize, sample-rate convert (non-destructive), time axis in spectrogram.
 - Remove Command Palette feature and simplify the header layout.
-- Rename "Project" to "Session/State" and separate Save vs Export semantics.
+- Use "Session" naming consistently for state save/open, and separate Save vs Export semantics.
 
 ## Phase 1: External Data (multi CSV/Excel)
 ### Requirements
@@ -157,9 +157,9 @@ This document covers the requested fixes and new features. It is scoped to keep 
 ### Acceptance
 - Spec/Mel show time labels aligned with waveform.
 
-## Phase 10: Session/State Naming + Save Semantics
+## Phase 10: Session Naming + Save Semantics
 ### Requirements
-- "Project" naming should not imply full project management; it is only for restoring app state.
+- "Session" naming should clearly mean app-state restore (legacy "project" term should not imply full project management).
 - Ctrl+S should not ambiguously imply audio overwrite or export.
 - Separate "session/state" save from "audio export".
 

@@ -46,7 +46,7 @@ User Flow
 
 Data Model (Proposal)
 ---------------------
-Add a structured 窶彳xternal source窶・config saved in project (nwsess):
+Add a structured 窶彳xternal source窶・config saved in session (nwsess):
 - `source_kind`: `Csv | Excel`
 - `source_path`: path to file
 - `sheet_name`: string (Excel only)
@@ -148,7 +148,7 @@ Open Questions
 --------------
 1) Do we allow multiple external sources at once (stacked columns)?
 2) Preferred default header detection threshold?
-3) Should sheet selection be remembered per file (project setting)?
+3) Should sheet selection be remembered per file (session setting)?
 
 Performance / Memory Review (Critical)
 --------------------------------------
