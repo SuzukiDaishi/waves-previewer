@@ -282,6 +282,33 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    pub(super) fn editor_apply_mute_range(&mut self, tab_idx: usize, range: (usize, usize)) {
+        let (channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            for ch in tab.ch_samples.iter_mut() {
+                for i in s..e {
+                    ch[i] = 0.0;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.push_editor_undo_state(tab_idx, undo_state, true);
+        self.audio.set_samples_channels(channels);
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
+    }
+
     #[allow(dead_code)]
     pub(super) fn editor_apply_fade_range(
         &mut self,

@@ -146,7 +146,6 @@ impl crate::app::WavesPreviewer {
             .play_pos
             .load(std::sync::atomic::Ordering::Relaxed);
         let tab_samples_len = self.tabs[tab_idx].samples_len;
-        let time_stretch_ratio = self.time_stretch_ratio_for_tab(&self.tabs[tab_idx]);
         let audio_len = self
             .audio
             .shared
@@ -156,24 +155,27 @@ impl crate::app::WavesPreviewer {
             .map(|s| s.len())
             .unwrap_or(0);
         let map_audio_to_display = |audio_pos: usize| -> usize {
-            let mapped = if let Some(ratio) = time_stretch_ratio {
-                ((audio_pos as f32) / ratio).round() as usize
-            } else {
-                audio_pos
-            };
+            if audio_len == 0 || tab_samples_len == 0 || audio_len == tab_samples_len {
+                return audio_pos.min(tab_samples_len);
+            }
+            let mapped = ((audio_pos as u128)
+                .saturating_mul(tab_samples_len as u128)
+                .saturating_add((audio_len / 2) as u128)
+                / (audio_len as u128)) as usize;
             mapped.min(tab_samples_len)
         };
         let map_display_to_audio = |display_pos: usize| -> usize {
-            if let Some(ratio) = time_stretch_ratio {
-                let mapped = ((display_pos as f32) * ratio).round() as usize;
-                if audio_len > 0 {
-                    mapped.min(audio_len)
-                } else {
-                    mapped
-                }
-            } else {
-                display_pos
+            if audio_len == 0 {
+                return display_pos;
             }
+            if tab_samples_len == 0 || audio_len == tab_samples_len {
+                return display_pos.min(audio_len);
+            }
+            let mapped = ((display_pos as u128)
+                .saturating_mul(audio_len as u128)
+                .saturating_add((tab_samples_len / 2) as u128)
+                / (tab_samples_len as u128)) as usize;
+            mapped.min(audio_len)
         };
         let playhead_display_now = map_audio_to_display(pos_audio_now);
         let mut request_seek: Option<usize> = None;
@@ -326,10 +328,11 @@ impl crate::app::WavesPreviewer {
                 let audio_samp = map_display_to_audio(display_samp);
                 request_seek = Some(audio_samp);
             }
+            let pos_samples = (pos_sec.max(0.0) * sr).round() as usize;
             ui.label(
                 RichText::new(format!(
-                    " / {}",
-                    crate::app::helpers::format_time_s(len_sec)
+                    " ({pos_samples} smp) / {} ({tab_samples_len} smp)",
+                    crate::app::helpers::format_time_s(len_sec),
                 ))
                 .monospace(),
             );
@@ -350,6 +353,7 @@ impl crate::app::WavesPreviewer {
         if !ctx.wants_keyboard_input() && tab_samples_len > 0 {
             let mods = ctx.input(|i| i.modifiers);
             let ctrl = mods.ctrl || mods.command;
+            let shift = mods.shift;
             let alt = mods.alt;
             let pressed_left = ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft));
             let pressed_right = ctx.input(|i| i.key_pressed(egui::Key::ArrowRight));
@@ -402,73 +406,73 @@ impl crate::app::WavesPreviewer {
                 };
                 if should_step {
                     let cur_display = playhead_display_now;
-                    let new_display = if alt {
-                        self.find_zero_cross_display(tab_idx, cur_display, dir)
+                    let spp = self.tabs[tab_idx].samples_per_px.max(0.0001);
+                    let sr_u32 = self.audio.shared.out_sample_rate.max(1);
+                    let sr = sr_u32 as f32;
+                    let px_per_sec = (1.0 / spp) * sr;
+                    let sample_step_sec = 1.0 / sr;
+                    let sample_step = 1usize;
+                    let time_grid_step = |min_px: f32| -> f32 {
+                        let steps: [f32; 18] = [
+                            0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
+                            5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+                        ];
+                        let mut step = steps[steps.len() - 1];
+                        for s in steps {
+                            if px_per_sec * s >= min_px {
+                                step = s;
+                                break;
+                            }
+                        }
+                        step
+                    };
+                    let tab_bpm_enabled = self.tabs[tab_idx].bpm_enabled;
+                    let bpm_value = self.tabs[tab_idx].bpm_value.max(1.0);
+                    let use_bpm = tab_bpm_enabled && bpm_value >= 20.0;
+                    let base_step_sec = if use_bpm {
+                        let beat_sec = 60.0 / bpm_value;
+                        let steps: [f32; 10] = [
+                            1.0 / 64.0,
+                            1.0 / 32.0,
+                            1.0 / 16.0,
+                            1.0 / 8.0,
+                            1.0 / 4.0,
+                            0.5,
+                            1.0,
+                            2.0,
+                            4.0,
+                            8.0,
+                        ];
+                        let px_per_beat = px_per_sec * beat_sec;
+                        let mut step_beats = steps[steps.len() - 1];
+                        for s in steps {
+                            if px_per_beat * s >= 90.0 {
+                                step_beats = s;
+                                break;
+                            }
+                        }
+                        (beat_sec * step_beats).max(sample_step_sec)
                     } else {
-                        let spp = self.tabs[tab_idx].samples_per_px.max(0.0001);
-                        let sr_u32 = self.audio.shared.out_sample_rate.max(1);
-                        let sr = sr_u32 as f32;
-                        let px_per_sec = (1.0 / spp) * sr;
-                        let sample_step_sec = 1.0 / sr;
-                        let sample_step = 1usize;
-                        let time_grid_step = |min_px: f32| -> f32 {
-                            let steps: [f32; 18] = [
-                                0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
-                                2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
-                            ];
-                            let mut step = steps[steps.len() - 1];
-                            for s in steps {
-                                if px_per_sec * s >= min_px {
-                                    step = s;
-                                    break;
-                                }
-                            }
-                            step
-                        };
-                        let tab_bpm_enabled = self.tabs[tab_idx].bpm_enabled;
-                        let bpm_value = self.tabs[tab_idx].bpm_value.max(1.0);
-                        let use_bpm = tab_bpm_enabled && bpm_value >= 20.0;
-                        let base_step_sec = if use_bpm {
-                            let beat_sec = 60.0 / bpm_value;
-                            let steps: [f32; 10] = [
-                                1.0 / 64.0,
-                                1.0 / 32.0,
-                                1.0 / 16.0,
-                                1.0 / 8.0,
-                                1.0 / 4.0,
-                                0.5,
-                                1.0,
-                                2.0,
-                                4.0,
-                                8.0,
-                            ];
-                            let px_per_beat = px_per_sec * beat_sec;
-                            let mut step_beats = steps[steps.len() - 1];
-                            for s in steps {
-                                if px_per_beat * s >= 90.0 {
-                                    step_beats = s;
-                                    break;
-                                }
-                            }
-                            (beat_sec * step_beats).max(sample_step_sec)
+                        let mut base = time_grid_step(90.0);
+                        if spp <= 1.0 {
+                            base = sample_step_sec;
+                        }
+                        base.max(sample_step_sec)
+                    };
+                    let base_step_samples = ((base_step_sec * sr).round() as usize).max(sample_step);
+                    let raw_target = if alt && !ctrl {
+                        // Alt: zero-cross move/range.
+                        self.find_zero_cross_display(tab_idx, cur_display, dir)
+                    } else if ctrl && alt {
+                        // Ctrl+Alt: relative move (unsnapped grid step).
+                        if dir > 0 {
+                            cur_display.saturating_add(base_step_samples)
                         } else {
-                            let mut base = time_grid_step(90.0);
-                            if spp <= 1.0 {
-                                base = sample_step_sec;
-                            }
-                            base.max(sample_step_sec)
-                        };
-                        let base_step_samples =
-                            ((base_step_sec * sr).round() as usize).max(sample_step);
-                        let fine_step_samples = (base_step_samples / 4).max(sample_step);
-                        let step_samples = if ctrl {
-                            base_step_samples
-                        } else if mods.shift {
-                            fine_step_samples
-                        } else {
-                            base_step_samples
-                        };
-                        let new_display = if ctrl {
+                            cur_display.saturating_sub(base_step_samples)
+                        }
+                    } else {
+                        let step_samples = if ctrl { sample_step } else { base_step_samples };
+                        if ctrl || shift {
                             if dir > 0 {
                                 cur_display.saturating_add(step_samples)
                             } else {
@@ -482,9 +486,38 @@ impl crate::app::WavesPreviewer {
                         } else {
                             let target = cur_display.saturating_sub(1);
                             (target / step_samples) * step_samples
-                        };
-                        new_display.min(tab_samples_len)
+                        }
                     };
+                    let mut new_display = raw_target.min(tab_samples_len);
+                    new_display = Self::stop_with_marker_if_needed(
+                        &self.tabs[tab_idx],
+                        cur_display,
+                        new_display,
+                        dir,
+                    );
+                    if shift {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            let anchor = if ctrl && alt {
+                                if let Some((a0, b0)) = tab.selection {
+                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                    if dir > 0 { a } else { b }
+                                } else {
+                                    tab.drag_select_anchor.unwrap_or(cur_display)
+                                }
+                            } else {
+                                tab.drag_select_anchor.unwrap_or(cur_display)
+                            };
+                            tab.drag_select_anchor = Some(anchor);
+                            let (s, e) = if new_display >= anchor {
+                                (anchor, new_display)
+                            } else {
+                                (new_display, anchor)
+                            };
+                            tab.selection = Some((s, e));
+                        }
+                    } else if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.drag_select_anchor = None;
+                    }
                     if new_display != cur_display {
                         request_seek = Some(map_display_to_audio(new_display));
                     }
@@ -505,7 +538,7 @@ impl crate::app::WavesPreviewer {
         let mut do_gain: Option<((usize, usize), f32)> = None;
         let mut do_normalize: Option<((usize, usize), f32)> = None;
         let mut do_reverse: Option<(usize, usize)> = None;
-        // let mut do_silence: Option<(usize,usize)> = None; // removed
+        let mut do_mute: Option<(usize, usize)> = None;
         let mut do_cutjoin: Option<(usize, usize)> = None;
         // Loop/marker apply handled via commit flags below.
         let mut do_fade_in: Option<((usize, usize), crate::app::types::FadeShape)> = None;
@@ -1023,10 +1056,10 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
-            // Drag markers for LoopEdit / Trim (primary button only)
+            // Drag markers for LoopEdit (primary button only)
             let mut suppress_seek = false;
             if pointer_over_canvas
-                && matches!(tab.active_tool, ToolKind::LoopEdit | ToolKind::Trim)
+                && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && tab.samples_len > 0
             {
                 let pointer_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
@@ -1070,24 +1103,6 @@ impl crate::app::WavesPreviewer {
                                         }
                                     }
                                 }
-                                                                    ToolKind::Trim => {
-                                    if let Some((a0, b0)) = tab.trim_range {
-                                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                        let ax = to_x(a);
-                                        let bx = to_x(b);
-                                        if (x - ax).abs() <= hit_radius {
-                                            if pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            tab.dragging_marker = Some(MarkerKind::A);
-                                        } else if (x - bx).abs() <= hit_radius {
-                                            if pending_edit_undo.is_none() {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            tab.dragging_marker = Some(MarkerKind::B);
-                                        }
-                                    }
-                                }
                                 _ => {}
                             }
                         }
@@ -1109,19 +1124,6 @@ impl crate::app::WavesPreviewer {
                                         tab.loop_region = Some((a, b));
                                         Self::update_loop_markers_dirty(tab);
                                         apply_pending_loop = true;
-                                    }
-                                }
-                                ToolKind::Trim => {
-                                    if let Some((a0, b0)) = tab.trim_range {
-                                        let (mut a, mut b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                        if pending_edit_undo.is_none() {
-                                            pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                        }
-                                        match marker {
-                                            MarkerKind::A => a = samp.min(b),
-                                            MarkerKind::B => b = samp.max(a),
-                                        }
-                                        tab.trim_range = Some((a, b));
                                     }
                                 }
                                 _ => {}
@@ -1183,9 +1185,6 @@ impl crate::app::WavesPreviewer {
                             (samp, anchor)
                         };
                         tab.selection = Some((s, e));
-                        if tab.active_tool == ToolKind::Trim {
-                            tab.trim_range = Some((s, e));
-                        }
                         suppress_seek = true;
                     }
                 }
@@ -1211,9 +1210,6 @@ impl crate::app::WavesPreviewer {
                             let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                             if pos_samp < a || pos_samp > b {
                                 tab.selection = None;
-                                if tab.active_tool == ToolKind::Trim {
-                                    tab.trim_range = None;
-                                }
                             }
                         }
                         request_seek = Some(map_display_to_audio(pos_samp));
@@ -1753,30 +1749,54 @@ impl crate::app::WavesPreviewer {
                 let mut fade_in_handle: Option<f32> = None;
                 let mut fade_out_handle: Option<f32> = None;
 
-                // Selection overlay (Trim tool only)
-                if tab.active_tool == ToolKind::Trim {
-                    if let Some((a0, b0)) = tab.selection {
-                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                        if b >= tab.view_offset {
-                            let vis = (wave_w * spp).ceil() as usize;
-                            let end = tab.view_offset.saturating_add(vis).min(tab.samples_len);
-                            if a <= end {
-                                let ax = to_x(a);
-                                let bx = to_x(b);
-                                let sel_rect = egui::Rect::from_min_max(
-                                    egui::pos2(ax, rect.top()),
-                                    egui::pos2(bx, rect.bottom()),
-                                );
-                                let fill = Color32::from_rgba_unmultiplied(70, 140, 255, 28);
-                                let stroke = Color32::from_rgba_unmultiplied(70, 140, 255, 140);
-                                painter.rect_filled(sel_rect, 0.0, fill);
-                                painter.rect_stroke(
-                                    sel_rect,
-                                    0.0,
-                                    egui::Stroke::new(1.0, stroke),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
+                // Selection overlay (tool-independent)
+                if let Some((a0, b0)) = tab.selection {
+                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                    if b >= tab.view_offset {
+                        let vis = (wave_w * spp).ceil() as usize;
+                        let end = tab.view_offset.saturating_add(vis).min(tab.samples_len);
+                        if a <= end {
+                            let ax = to_x(a);
+                            let bx = to_x(b);
+                            let sel_rect = egui::Rect::from_min_max(
+                                egui::pos2(ax, rect.top()),
+                                egui::pos2(bx, rect.bottom()),
+                            );
+                            let fill = Color32::from_rgba_unmultiplied(70, 140, 255, 28);
+                            let stroke = Color32::from_rgba_unmultiplied(70, 140, 255, 160);
+                            painter.rect_filled(sel_rect, 0.0, fill);
+                            painter.rect_stroke(
+                                sel_rect,
+                                0.0,
+                                egui::Stroke::new(1.0, stroke),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                    }
+                }
+
+                // Trim overlay (set range): orange to distinguish from generic blue selection.
+                if let Some((a0, b0)) = tab.trim_range {
+                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                    if b >= tab.view_offset {
+                        let vis = (wave_w * spp).ceil() as usize;
+                        let end = tab.view_offset.saturating_add(vis).min(tab.samples_len);
+                        if a <= end {
+                            let ax = to_x(a);
+                            let bx = to_x(b);
+                            let trim_rect = egui::Rect::from_min_max(
+                                egui::pos2(ax, rect.top()),
+                                egui::pos2(bx, rect.bottom()),
+                            );
+                            let fill = Color32::from_rgba_unmultiplied(255, 140, 0, 34);
+                            let stroke = Color32::from_rgba_unmultiplied(255, 140, 0, 190);
+                            painter.rect_filled(trim_rect, 0.0, fill);
+                            painter.rect_stroke(
+                                trim_rect,
+                                0.0,
+                                egui::Stroke::new(1.0, stroke),
+                                egui::StrokeKind::Inside,
+                            );
                         }
                     }
                 }
@@ -1952,73 +1972,6 @@ impl crate::app::WavesPreviewer {
                                 last_out_up = Some(p_out_up);
                                 last_out_down = Some(p_out_down);
                             }
-                        }
-                    }
-                }
-
-                // Trim overlay
-                if tab.active_tool == ToolKind::Trim {
-                    if let Some((a0, b0)) = tab.trim_range {
-                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                        let line = Color32::from_rgba_unmultiplied(255, 140, 0, 230);
-                        let fid = TextStyle::Monospace.resolve(ui.style());
-                        let ax = to_x(a);
-                        if b == a {
-                            painter.line_segment(
-                                [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
-                                egui::Stroke::new(2.0, line),
-                            );
-                            draw_handle(ax, line);
-                            painter.text(
-                                egui::pos2(ax + 6.0, rect.top() + 2.0),
-                                egui::Align2::LEFT_TOP,
-                                "A",
-                                fid,
-                                Color32::from_rgb(255, 200, 150),
-                            );
-                        } else {
-                            let bx = to_x(b);
-                            let dim = Color32::from_rgba_unmultiplied(0, 0, 0, 80);
-                            let keep = Color32::from_rgba_unmultiplied(255, 160, 60, 36);
-                            let left = egui::Rect::from_min_max(
-                                egui::pos2(rect.left(), rect.top()),
-                                egui::pos2(ax, rect.bottom()),
-                            );
-                            let right = egui::Rect::from_min_max(
-                                egui::pos2(bx, rect.top()),
-                                egui::pos2(rect.right(), rect.bottom()),
-                            );
-                            painter.rect_filled(left, 0.0, dim);
-                            painter.rect_filled(right, 0.0, dim);
-                            let keep_r = egui::Rect::from_min_max(
-                                egui::pos2(ax, rect.top()),
-                                egui::pos2(bx, rect.bottom()),
-                            );
-                            painter.rect_filled(keep_r, 0.0, keep);
-                            painter.line_segment(
-                                [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
-                                egui::Stroke::new(2.0, line),
-                            );
-                            painter.line_segment(
-                                [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
-                                egui::Stroke::new(2.0, line),
-                            );
-                            draw_handle(ax, line);
-                            draw_handle(bx, line);
-                            painter.text(
-                                egui::pos2(ax + 6.0, rect.top() + 2.0),
-                                egui::Align2::LEFT_TOP,
-                                "A",
-                                fid.clone(),
-                                Color32::from_rgb(255, 200, 150),
-                            );
-                            painter.text(
-                                egui::pos2(bx + 6.0, rect.top() + 2.0),
-                                egui::Align2::LEFT_TOP,
-                                "B",
-                                fid,
-                                Color32::from_rgb(255, 200, 150),
-                            );
                         }
                     }
                 }
@@ -2358,6 +2311,30 @@ impl crate::app::WavesPreviewer {
                             request_redo = true;
                         }
                     });
+                    let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                    let range_info = tab
+                        .selection
+                        .map(|r| ("Selection", r))
+                        .or_else(|| tab.trim_range.map(|r| ("Trim", r)))
+                        .or_else(|| tab.loop_region.map(|r| ("Loop", r)));
+                    if let Some((kind, (a0, b0))) = range_info {
+                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                        let len = b.saturating_sub(a);
+                        let start_sec = (a as f32 / sr).max(0.0);
+                        let end_sec = (b as f32 / sr).max(0.0);
+                        let len_sec = (len as f32 / sr).max(0.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "{kind}: {a}..{b} ({len} smp) / {}..{} ({})",
+                                crate::app::helpers::format_time_s(start_sec),
+                                crate::app::helpers::format_time_s(end_sec),
+                                crate::app::helpers::format_time_s(len_sec)
+                            ))
+                            .monospace(),
+                        );
+                    } else {
+                        ui.label(RichText::new("Range: -").monospace().weak());
+                    }
                     ui.separator();
                     match tab.view_mode {
                         ViewMode::Waveform => {
@@ -2397,6 +2374,10 @@ impl crate::app::WavesPreviewer {
                                     }
                                     Self::update_loop_markers_dirty(tab);
                                 }
+                                if matches!(tab.active_tool, ToolKind::Trim) {
+                                    // Trim-specific range display should not persist after leaving Trim.
+                                    tab.trim_range = None;
+                                }
                                 // Leaving a tool: discard any preview overlay/audio
                                 if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
                                     need_restore_preview = true;
@@ -2414,37 +2395,28 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        let (s0,e0) = tab.loop_region.unwrap_or((0,0));
-                                        ui.label("Loop (samples)");
-                                        let mut s_i = s0 as i64;
-                                        let mut e_i = e0 as i64;
-                                        let max_i = tab.samples_len as i64;
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.label("Start:");
-                                            let resp_s = ui.add(egui::DragValue::new(&mut s_i).range(0..=max_i).speed(64.0));
-                                            ui.label("End:");
-                                            let resp_e = ui.add(egui::DragValue::new(&mut e_i).range(0..=max_i).speed(64.0));
-                                            if (resp_s.gained_focus() || resp_s.drag_started()
-                                                || resp_e.gained_focus()
-                                                || resp_e.drag_started())
-                                                && pending_edit_undo.is_none()
-                                            {
-                                                pending_edit_undo = Some(Self::capture_undo_state(tab));
-                                            }
-                                            let chs = resp_s.changed();
-                                            let che = resp_e.changed();
-                                            if chs || che {
-                                                let mut s = s_i.clamp(0, max_i) as usize;
-                                                let mut e = e_i.clamp(0, max_i) as usize;
-                                                if e < s { std::mem::swap(&mut s, &mut e); }
-                                                tab.loop_region = Some((s,e));
-                                                tab.pending_loop_unwrap = None;
-                                                tab.preview_audio_tool = None;
-                                                tab.preview_overlay = None;
-                                                Self::update_loop_markers_dirty(tab);
-                                                apply_pending_loop = true;
-                                            }
-                                        });
+                                        ui.label("Loop marker range");
+                                        if let Some((a0, b0)) = tab.loop_region {
+                                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                            let len = b.saturating_sub(a);
+                                            ui.label(
+                                                RichText::new(format!("Loop: {a}..{b} ({len} smp)"))
+                                                    .monospace(),
+                                            );
+                                        } else {
+                                            ui.label(RichText::new("Loop: -").monospace().weak());
+                                        }
+                                        if let Some((a0, b0)) = tab.selection {
+                                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                            let len = b.saturating_sub(a);
+                                            ui.label(
+                                                RichText::new(format!("Range: {a}..{b} ({len} smp)"))
+                                                    .monospace()
+                                                    .weak(),
+                                            );
+                                        } else {
+                                            ui.label(RichText::new("Range: -").monospace().weak());
+                                        }
                                         // Crossfade controls (duration in ms + shape)
                                         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                         let mut x_ms = (tab.loop_xfade_samples as f32 / sr) * 1000.0;
@@ -2474,35 +2446,30 @@ impl crate::app::WavesPreviewer {
                                             }
                                         });
                                         ui.horizontal_wrapped(|ui| {
-                                            if ui.button("Set Start").on_hover_text("Set Start at playhead").clicked() {
+                                            let can_set = tab
+                                                .selection
+                                                .map(|(a0, b0)| {
+                                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                                    b > a
+                                                })
+                                                .unwrap_or(false);
+                                            let set_resp = ui
+                                                .add_enabled(can_set, egui::Button::new("Set"))
+                                                .on_hover_text("Use current range as loop markers");
+                                            if set_resp.clicked()
+                                            {
                                                 if pending_edit_undo.is_none() {
                                                     pending_edit_undo = Some(Self::capture_undo_state(tab));
                                                 }
-                                                let pos = playhead_display_now;
-                                                let end = tab.loop_region.map(|(_,e)| e).unwrap_or(pos);
-                                                let (mut s, mut e) = (pos, end);
-                                                if e < s { std::mem::swap(&mut s, &mut e); }
-                                                tab.loop_region = Some((s,e));
-                                                tab.pending_loop_unwrap = None;
-                                                tab.preview_audio_tool = None;
-                                                tab.preview_overlay = None;
-                                                Self::update_loop_markers_dirty(tab);
-                                                apply_pending_loop = true;
-                                            }
-                                            if ui.button("Set End").on_hover_text("Set End at playhead").clicked() {
-                                                if pending_edit_undo.is_none() {
-                                                    pending_edit_undo = Some(Self::capture_undo_state(tab));
+                                                if let Some((a0, b0)) = tab.selection {
+                                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                                    tab.loop_region = Some((a, b));
+                                                    tab.pending_loop_unwrap = None;
+                                                    tab.preview_audio_tool = None;
+                                                    tab.preview_overlay = None;
+                                                    Self::update_loop_markers_dirty(tab);
+                                                    apply_pending_loop = true;
                                                 }
-                                                let pos = playhead_display_now;
-                                                let start = tab.loop_region.map(|(s,_)| s).unwrap_or(pos);
-                                                let (mut s, mut e) = (start, pos);
-                                                if e < s { std::mem::swap(&mut s, &mut e); }
-                                                tab.loop_region = Some((s,e));
-                                                tab.pending_loop_unwrap = None;
-                                                tab.preview_audio_tool = None;
-                                                tab.preview_overlay = None;
-                                                Self::update_loop_markers_dirty(tab);
-                                                apply_pending_loop = true;
                                             }
                                             if ui.button("Clear").clicked() {
                                                 if pending_edit_undo.is_none() {
@@ -2782,91 +2749,62 @@ impl crate::app::WavesPreviewer {
                                         if !preview_ok {
                                             ui.label(RichText::new("Preview disabled for large clips").weak());
                                         }
-                                        // Trim has its own A/B range (independent from loop)
+                                        // Trim range is separated from loop markers and set from generic selection.
                                         let mut range_opt = tab.trim_range;
-                                        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
-                                        let mut len_sec = (tab.samples_len as f32 / sr).max(0.0);
-                                        if !len_sec.is_finite() { len_sec = 0.0; }
-                                        if let Some((smp,emp)) = range_opt { ui.label(format!("Trim A?B: {}..{} samp", smp, emp)); } else { ui.label("Trim A?B: (set below)"); }
+                                        if let Some((smp, emp)) = range_opt {
+                                            let (s, e) = if smp <= emp { (smp, emp) } else { (emp, smp) };
+                                            ui.label(
+                                                RichText::new(format!("Trim: {s}..{e} ({} smp)", e.saturating_sub(s)))
+                                                    .monospace(),
+                                            );
+                                        } else {
+                                            ui.label(RichText::new("Trim: -").monospace().weak());
+                                        }
+
                                         ui.horizontal_wrapped(|ui| {
-                                            let mut s_sec = range_opt.map(|(s, _)| s as f32 / sr).unwrap_or(0.0);
-                                            let mut e_sec = range_opt.map(|(_, e)| e as f32 / sr).unwrap_or(0.0);
-                                            if !s_sec.is_finite() { s_sec = 0.0; }
-                                            if !e_sec.is_finite() { e_sec = 0.0; }
-                                            if s_sec > len_sec { s_sec = len_sec; }
-                                            if e_sec > len_sec { e_sec = len_sec; }
-                                            ui.label("Start (s):");
-                                            let chs = ui.add(egui::DragValue::new(&mut s_sec).range(0.0..=len_sec).speed(0.05).fixed_decimals(3)).changed();
-                                            ui.label("End (s):");
-                                            let che = ui.add(egui::DragValue::new(&mut e_sec).range(0.0..=len_sec).speed(0.05).fixed_decimals(3)).changed();
-                                            if chs || che {
-                                                let mut s = ((s_sec.max(0.0)) * sr).round() as usize;
-                                                let mut e = ((e_sec.max(0.0)) * sr).round() as usize;
-                                                if e < s { std::mem::swap(&mut s, &mut e); }
-                                                s = s.min(tab.samples_len);
-                                                e = e.min(tab.samples_len);
-                                                tab.trim_range = Some((s, e));
-                                                tab.selection = Some((s, e));
-                                                range_opt = tab.trim_range;
-                                                if preview_ok && e > s {
-                                                    let mut mono = Self::editor_mixdown_mono(tab);
-                                                    mono = mono[s..e].to_vec();
-                                                    pending_preview = Some((ToolKind::Trim, mono));
-                                                    stop_playback = true;
-                                                    tab.preview_audio_tool = Some(ToolKind::Trim);
-                                                } else {
-                                                    tab.preview_audio_tool = None;
-                                                    tab.preview_overlay = None;
+                                            let can_set = tab
+                                                .selection
+                                                .map(|(a0, b0)| {
+                                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                                    b > a
+                                                })
+                                                .unwrap_or(false);
+                                            let set_resp = ui
+                                                .add_enabled(can_set, egui::Button::new("Set"))
+                                                .on_hover_text("Use current range as trim range");
+                                            if set_resp.clicked() {
+                                                if let Some((a0, b0)) = tab.selection {
+                                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                                    tab.trim_range = Some((a, b));
+                                                    range_opt = tab.trim_range;
+                                                    if preview_ok && b > a {
+                                                        let mut mono = Self::editor_mixdown_mono(tab);
+                                                        mono = mono[a..b].to_vec();
+                                                        pending_preview = Some((ToolKind::Trim, mono));
+                                                        stop_playback = true;
+                                                        tab.preview_audio_tool = Some(ToolKind::Trim);
+                                                    } else {
+                                                        tab.preview_audio_tool = None;
+                                                        tab.preview_overlay = None;
+                                                    }
                                                 }
                                             }
                                         });
-                                        // A/B setters from playhead
+
                                         ui.horizontal_wrapped(|ui| {
-                                            if ui.button("Set A").on_hover_text("Set A at playhead").clicked() {
-                                                let pos = playhead_display_now;
-                                            let new_r = match tab.trim_range { None => Some((pos, pos)), Some((_a,b)) => Some((pos.min(b), pos.max(b))) };
-                                                tab.trim_range = new_r;
-                                                if let Some((a,b)) = tab.trim_range { if b>a {
-                                                    if preview_ok {
-                                                        // live preview: keep-only A?B
-                                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                                        mono = mono[a..b].to_vec();
-                                                        pending_preview = Some((ToolKind::Trim, mono));
-                                                        stop_playback = true;
-                                                        tab.preview_audio_tool = Some(ToolKind::Trim);
-                                                    } else {
-                                                        tab.preview_audio_tool = None;
-                                                        tab.preview_overlay = None;
-                                                    }
-                                                } }
+                                            let dis = !range_opt.map(|(s, e)| e > s).unwrap_or(false);
+                                            let range = range_opt.unwrap_or((0, 0));
+                                            if ui.add_enabled(!dis, egui::Button::new("Apply cut")).clicked() {
+                                                do_cutjoin = Some(range);
                                             }
-                                            if ui.button("Set B").on_hover_text("Set B at playhead").clicked() {
-                                                let pos = playhead_display_now;
-                                            let new_r = match tab.trim_range { None => Some((pos, pos)), Some((a,_b)) => Some((a.min(pos), a.max(pos))) };
-                                                tab.trim_range = new_r;
-                                                if let Some((a,b)) = tab.trim_range { if b>a {
-                                                    if preview_ok {
-                                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                                        mono = mono[a..b].to_vec();
-                                                        pending_preview = Some((ToolKind::Trim, mono));
-                                                        stop_playback = true;
-                                                        tab.preview_audio_tool = Some(ToolKind::Trim);
-                                                    } else {
-                                                        tab.preview_audio_tool = None;
-                                                        tab.preview_overlay = None;
-                                                    }
-                                                } }
+                                            if ui.add_enabled(!dis, egui::Button::new("Apply mute")).clicked() {
+                                                do_mute = Some(range);
                                             }
-                                            if ui.button("Clear").clicked() { tab.trim_range = None; need_restore_preview = true; }
+                                            if ui.add_enabled(!dis, egui::Button::new("Apply trim")).clicked() {
+                                                do_trim = Some(range);
+                                                tab.preview_audio_tool = None;
+                                            }
                                         });
-                                        range_opt = tab.trim_range;
-                                        // Actions
-                                        ui.horizontal_wrapped(|ui| {
-                                        let dis = !range_opt.map(|(s,e)| e> s).unwrap_or(false);
-                                        let range = range_opt.unwrap_or((0,0));
-                                        if ui.add_enabled(!dis, egui::Button::new("Cut+Join")).clicked() { do_cutjoin = Some(range); }
-                                        if ui.add_enabled(!dis, egui::Button::new("Apply Keep A?B")).clicked() { do_trim = Some(range); tab.preview_audio_tool=None; }
-                                    });
                                     });
                                 }
                                 ToolKind::Fade => {
@@ -3366,7 +3304,20 @@ impl crate::app::WavesPreviewer {
                 }
                 if stop_playback { self.audio.stop(); }
                 if need_restore_preview { self.clear_preview_if_any(tab_idx); }
-                if let Some(s) = request_seek { self.audio.seek_to_sample(s); }
+                if let Some(s) = request_seek {
+                    self.audio.seek_to_sample(s);
+                    let seek_display = map_audio_to_display(s);
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        let vis = (tab.last_wave_w.max(1.0) * tab.samples_per_px.max(0.0001))
+                            .ceil() as usize;
+                        let right = tab.view_offset.saturating_add(vis);
+                        if seek_display < tab.view_offset || seek_display > right {
+                            let max_left = tab.samples_len.saturating_sub(vis);
+                            let centered = seek_display.saturating_sub(vis / 2);
+                            tab.view_offset = centered.min(max_left);
+                        }
+                    }
+                }
                 if let Some((tool_kind, mono)) = pending_preview { self.set_preview_mono(tab_idx, tool_kind, mono); }
             }); // end horizontal split
         if touch_spectro_cache {
@@ -3430,6 +3381,9 @@ impl crate::app::WavesPreviewer {
         }
         if let Some((s, e)) = do_trim {
             self.editor_apply_trim_range(tab_idx, (s, e));
+        }
+        if let Some((s, e)) = do_mute {
+            self.editor_apply_mute_range(tab_idx, (s, e));
         }
         if let Some(((s, e), in_ms, out_ms)) = do_fade {
             self.editor_apply_fade_range(tab_idx, (s, e), in_ms, out_ms);

@@ -711,12 +711,7 @@ impl WavesPreviewer {
         base.to_string()
     }
 
-    fn time_stretch_ratio_for_tab(&self, tab: &EditorTab) -> Option<f32> {
-        let time_stretch_active = self.mode == RateMode::TimeStretch
-            || tab.preview_audio_tool == Some(ToolKind::TimeStretch);
-        if !time_stretch_active {
-            return None;
-        }
+    fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
         let audio_len = self
             .audio
             .shared
@@ -725,43 +720,35 @@ impl WavesPreviewer {
             .as_ref()
             .map(|s| s.len())
             .unwrap_or(0);
-        if audio_len == 0 || tab.samples_len == 0 {
-            return None;
+        if audio_len == 0 || tab.samples_len == 0 || audio_len == tab.samples_len {
+            return audio_pos.min(tab.samples_len);
         }
-        let ratio = audio_len as f32 / tab.samples_len as f32;
-        if (ratio - 1.0).abs() < 1.0e-4 {
-            None
-        } else {
-            Some(ratio)
-        }
-    }
-    fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
-        if let Some(ratio) = self.time_stretch_ratio_for_tab(tab) {
-            let mapped = ((audio_pos as f32) / ratio).round() as usize;
-            mapped.min(tab.samples_len)
-        } else {
-            audio_pos.min(tab.samples_len)
-        }
+        let mapped = ((audio_pos as u128)
+            .saturating_mul(tab.samples_len as u128)
+            .saturating_add((audio_len / 2) as u128)
+            / (audio_len as u128)) as usize;
+        mapped.min(tab.samples_len)
     }
     fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
-        if let Some(ratio) = self.time_stretch_ratio_for_tab(tab) {
-            let mapped = ((display_pos as f32) * ratio).round() as usize;
-            let audio_len = self
-                .audio
-                .shared
-                .samples
-                .load()
-                .as_ref()
-                .map(|s| s.len())
-                .unwrap_or(0);
-            if audio_len > 0 {
-                mapped.min(audio_len)
-            } else {
-                mapped
-            }
-        } else {
-            display_pos
+        let audio_len = self
+            .audio
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        if audio_len == 0 {
+            return display_pos;
         }
+        if tab.samples_len == 0 || audio_len == tab.samples_len {
+            return display_pos.min(audio_len);
+        }
+        let mapped = ((display_pos as u128)
+            .saturating_mul(audio_len as u128)
+            .saturating_add((tab.samples_len / 2) as u128)
+            / (tab.samples_len as u128)) as usize;
+        mapped.min(audio_len)
     }
 
     fn export_list_csv(

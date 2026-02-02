@@ -13,7 +13,7 @@ use symphonia::core::probe::Hint;
 use symphonia::default::{get_codecs, get_probe};
 use id3::TagLike;
 
-pub const SUPPORTED_EXTS: &[&str] = &["wav", "mp3", "m4a"];
+pub const SUPPORTED_EXTS: &[&str] = &["wav", "mp3", "m4a", "ogg"];
 
 #[derive(Clone, Copy, Debug)]
 pub struct AudioInfo {

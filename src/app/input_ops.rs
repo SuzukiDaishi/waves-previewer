@@ -1,6 +1,6 @@
 use egui::Key;
 
-use super::types::{LoopMode, UndoScope};
+use super::types::{LoopMode, RateMode, UndoScope, ViewMode};
 
 impl super::WavesPreviewer {
     pub(super) fn list_focus_id() -> egui::Id {
@@ -23,12 +23,25 @@ impl super::WavesPreviewer {
         let wants_kb = ctx.wants_keyboard_input();
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
 
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            ctx.memory_mut(|m| m.request_focus(Self::search_box_id()));
+            self.search_has_focus = true;
+            self.list_has_focus = false;
+        }
+
         if !search_focused {
-            if ctx
-                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
-            {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
                 // Keep preview audio/overlay when toggling playback.
                 self.audio.toggle_play();
+            }
+        }
+
+        if !wants_kb {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::A)) {
+                self.adjust_volume_db(-1.0);
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::D)) {
+                self.adjust_volume_db(1.0);
             }
         }
 
@@ -140,12 +153,23 @@ impl super::WavesPreviewer {
             }
         }
 
-        // Editor-specific shortcuts: Loop region setters, Loop toggle (L), Zero-cross snap (S)
+        if self.active_tab.is_none() && !wants_kb {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
+                self.auto_play_list_nav = !self.auto_play_list_nav;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
+                self.search_use_regex = !self.search_use_regex;
+                self.apply_filter_from_search();
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M)) {
+                self.cycle_rate_mode();
+            }
+        }
+
+        // Editor-specific shortcuts.
         if let Some(tab_idx) = self.active_tab {
             if !wants_kb {
-                if ctx
-                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K))
-                {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K)) {
                     // Set Loop Start
                     let pos_audio = self
                         .audio
@@ -165,9 +189,7 @@ impl super::WavesPreviewer {
                         Self::update_loop_markers_dirty(tab);
                     }
                 }
-                if ctx
-                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P))
-                {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
                     // Set Loop End
                     let pos_audio = self
                         .audio
@@ -187,29 +209,157 @@ impl super::WavesPreviewer {
                         Self::update_loop_markers_dirty(tab);
                     }
                 }
-                if ctx
-                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L))
-                {
-                    // Toggle loop mode without holding a mutable borrow across &self call
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L)) {
+                    // Keep range-select workflow: if region exists, `L` immediately enables marker loop there.
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.loop_mode = match tab.loop_mode {
-                            LoopMode::Off => LoopMode::OnWhole,
-                            _ => LoopMode::Off,
+                        tab.loop_mode = if tab.loop_region.is_some() {
+                            LoopMode::Marker
+                        } else {
+                            match tab.loop_mode {
+                                LoopMode::Off => LoopMode::OnWhole,
+                                LoopMode::OnWhole => LoopMode::Marker,
+                                LoopMode::Marker => LoopMode::Off,
+                            }
                         };
                     }
                     if let Some(tab_ro) = self.tabs.get(tab_idx) {
                         self.apply_loop_mode_for_tab(tab_ro);
                     }
                 }
-                if ctx
-                    .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::S))
-                {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
+                    let prev = self.tabs[tab_idx].view_mode;
+                    let next = match prev {
+                        ViewMode::Waveform => ViewMode::Spectrogram,
+                        ViewMode::Spectrogram => ViewMode::Mel,
+                        ViewMode::Mel => ViewMode::Waveform,
+                    };
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.view_mode = next;
+                        if prev == ViewMode::Waveform && next != ViewMode::Waveform {
+                            tab.show_waveform_overlay = false;
+                        }
+                    }
+                    if prev == ViewMode::Waveform && next != ViewMode::Waveform {
+                        self.clear_preview_if_any(tab_idx);
+                        self.audio.stop();
+                    }
+                    if next != ViewMode::Waveform {
+                        let path = self.tabs[tab_idx].path.clone();
+                        self.cancel_spectrogram_for_path(&path);
+                    }
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::B)) {
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.bpm_enabled = !tab.bpm_enabled;
+                    }
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M)) {
+                    self.cycle_rate_mode();
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.snap_zero_cross = !tab.snap_zero_cross;
                     }
                 }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num0)) {
+                    self.seek_to_fraction_in_active_tab(1, 1);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num1)) {
+                    self.seek_to_fraction_in_active_tab(1, 1);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num2)) {
+                    self.seek_to_fraction_in_active_tab(1, 2);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num3)) {
+                    self.seek_to_fraction_in_active_tab(1, 3);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num4)) {
+                    self.seek_to_fraction_in_active_tab(1, 4);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num5)) {
+                    self.seek_to_fraction_in_active_tab(1, 5);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num6)) {
+                    self.seek_to_fraction_in_active_tab(1, 6);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num7)) {
+                    self.seek_to_fraction_in_active_tab(1, 7);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num8)) {
+                    self.seek_to_fraction_in_active_tab(1, 8);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num9)) {
+                    self.seek_to_fraction_in_active_tab(1, 9);
+                }
             }
         }
+    }
+
+    fn adjust_volume_db(&mut self, delta_db: f32) {
+        let next = (self.volume_db + delta_db).clamp(-80.0, 6.0);
+        if (next - self.volume_db).abs() >= f32::EPSILON {
+            self.volume_db = next;
+            self.apply_effective_volume();
+        }
+    }
+
+    fn cycle_rate_mode(&mut self) {
+        self.mode = match self.mode {
+            RateMode::Speed => RateMode::PitchShift,
+            RateMode::PitchShift => RateMode::TimeStretch,
+            RateMode::TimeStretch => RateMode::Speed,
+        };
+        self.rebuild_current_buffer_with_mode();
+    }
+
+    fn seek_to_fraction_in_active_tab(&mut self, numer: usize, denom: usize) {
+        let Some(tab_idx) = self.active_tab else {
+            return;
+        };
+        if denom == 0 {
+            return;
+        }
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let target_display = tab.samples_len.saturating_mul(numer) / denom;
+        let target_audio = self.map_display_to_audio_sample(tab, target_display);
+        self.audio.seek_to_sample(target_audio);
+        if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
+            let vis = (tab_mut.last_wave_w.max(1.0) * tab_mut.samples_per_px.max(0.0001)).ceil()
+                as usize;
+            let max_left = tab_mut.samples_len.saturating_sub(vis);
+            let left = target_display.saturating_sub(vis / 2);
+            tab_mut.view_offset = left.min(max_left);
+        }
+    }
+
+    pub(super) fn stop_with_marker_if_needed(
+        tab: &super::types::EditorTab,
+        current_display: usize,
+        target_display: usize,
+        dir: i32,
+    ) -> usize {
+        if dir == 0 || target_display == current_display {
+            return target_display;
+        }
+        if dir > 0 {
+            if let Some(marker) = tab
+                .markers
+                .iter()
+                .find(|m| m.sample > current_display && m.sample <= target_display)
+            {
+                return marker.sample;
+            }
+        } else if let Some(marker) = tab
+            .markers
+            .iter()
+            .rev()
+            .find(|m| m.sample < current_display && m.sample >= target_display)
+        {
+            return marker.sample;
+        }
+        target_display
     }
 
     pub(super) fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
