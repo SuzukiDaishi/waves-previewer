@@ -1,6 +1,4 @@
-use egui::Key;
-
-use super::types::{LoopMode, RateMode, UndoScope, ViewMode};
+use super::types::{LoopMode, UndoScope, ViewMode};
 
 impl super::WavesPreviewer {
     pub(super) fn list_focus_id() -> egui::Id {
@@ -161,9 +159,6 @@ impl super::WavesPreviewer {
                 self.search_use_regex = !self.search_use_regex;
                 self.apply_filter_from_search();
             }
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M)) {
-                self.cycle_rate_mode();
-            }
         }
 
         // Editor-specific shortcuts.
@@ -210,20 +205,23 @@ impl super::WavesPreviewer {
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L)) {
-                    // Keep range-select workflow: if region exists, `L` immediately enables marker loop there.
-                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.loop_mode = if tab.loop_region.is_some() {
-                            LoopMode::Marker
-                        } else {
-                            match tab.loop_mode {
-                                LoopMode::Off => LoopMode::OnWhole,
-                                LoopMode::OnWhole => LoopMode::Marker,
-                                LoopMode::Marker => LoopMode::Off,
-                            }
-                        };
-                    }
-                    if let Some(tab_ro) = self.tabs.get(tab_idx) {
-                        self.apply_loop_mode_for_tab(tab_ro);
+                    if self.has_selected_range(tab_idx) {
+                        self.apply_loop_from_selection(tab_idx);
+                    } else {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.loop_mode = if tab.loop_region.is_some() {
+                                LoopMode::Marker
+                            } else {
+                                match tab.loop_mode {
+                                    LoopMode::Off => LoopMode::OnWhole,
+                                    LoopMode::OnWhole => LoopMode::Marker,
+                                    LoopMode::Marker => LoopMode::Off,
+                                }
+                            };
+                        }
+                        if let Some(tab_ro) = self.tabs.get(tab_idx) {
+                            self.apply_loop_mode_for_tab(tab_ro);
+                        }
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
@@ -254,11 +252,21 @@ impl super::WavesPreviewer {
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M)) {
-                    self.cycle_rate_mode();
+                    self.add_applied_marker_at_playhead(tab_idx);
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.snap_zero_cross = !tab.snap_zero_cross;
+                    }
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
+                    if let Some((s, e)) = self.selected_range(tab_idx) {
+                        self.editor_delete_range_and_join(tab_idx, (s, e));
+                    }
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::T)) {
+                    if let Some((s, e)) = self.selected_range(tab_idx) {
+                        self.editor_apply_trim_range(tab_idx, (s, e));
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num0)) {
@@ -303,13 +311,70 @@ impl super::WavesPreviewer {
         }
     }
 
-    fn cycle_rate_mode(&mut self) {
-        self.mode = match self.mode {
-            RateMode::Speed => RateMode::PitchShift,
-            RateMode::PitchShift => RateMode::TimeStretch,
-            RateMode::TimeStretch => RateMode::Speed,
+    fn selected_range(&self, tab_idx: usize) -> Option<(usize, usize)> {
+        let tab = self.tabs.get(tab_idx)?;
+        let (a0, b0) = tab.selection?;
+        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+        if b > a { Some((a, b)) } else { None }
+    }
+
+    fn has_selected_range(&self, tab_idx: usize) -> bool {
+        self.selected_range(tab_idx).is_some()
+    }
+
+    fn add_applied_marker_at_playhead(&mut self, tab_idx: usize) {
+        let pos_audio = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let Some(tab_ro) = self.tabs.get(tab_idx) else {
+            return;
         };
-        self.rebuild_current_buffer_with_mode();
+        let pos = self.map_audio_to_display_sample(tab_ro, pos_audio);
+        let mut undo_state = None;
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if tab.markers.iter().any(|m| m.sample == pos) {
+                return;
+            }
+            undo_state = Some(Self::capture_undo_state(tab));
+            let label = Self::next_marker_label(&tab.markers);
+            let marker = crate::markers::MarkerEntry { sample: pos, label };
+            match tab.markers.binary_search_by_key(&pos, |m| m.sample) {
+                Ok(idx) | Err(idx) => tab.markers.insert(idx, marker),
+            }
+            tab.markers_committed = tab.markers.clone();
+            tab.markers_applied = tab.markers_committed.clone();
+            tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+        }
+        if let Some(state) = undo_state {
+            self.push_editor_undo_state(tab_idx, state, true);
+        }
+    }
+
+    fn apply_loop_from_selection(&mut self, tab_idx: usize) {
+        let Some((s, e)) = self.selected_range(tab_idx) else {
+            return;
+        };
+        let mut undo_state = None;
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let will_change = tab.loop_region_committed != Some((s, e))
+                || tab.loop_region_applied != Some((s, e));
+            if will_change {
+                undo_state = Some(Self::capture_undo_state(tab));
+            }
+            tab.loop_region = Some((s, e));
+            tab.loop_region_committed = Some((s, e));
+            tab.loop_region_applied = Some((s, e));
+            tab.loop_mode = LoopMode::Marker;
+            Self::update_loop_markers_dirty(tab);
+        }
+        if let Some(state) = undo_state {
+            self.push_editor_undo_state(tab_idx, state, true);
+        }
+        if let Some(tab_ro) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab_ro);
+        }
     }
 
     fn seek_to_fraction_in_active_tab(&mut self, numer: usize, denom: usize) {
@@ -364,20 +429,27 @@ impl super::WavesPreviewer {
 
     pub(super) fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
-        if search_focused {
+        if search_focused && ctx.wants_keyboard_input() {
             return;
         }
-        let allow = self.list_has_focus || self.active_tab.is_some() || self.selected.is_some();
-        if !allow {
+        let cmd_down = ctx.input(|i| i.modifiers.command);
+        let shift_down = ctx.input(|i| i.modifiers.shift);
+        let z_down = ctx.input(|i| i.key_down(egui::Key::Z));
+        let y_down = ctx.input(|i| i.key_down(egui::Key::Y));
+        let combo_down = cmd_down && (z_down || y_down);
+        if combo_down && self.undo_z_was_down {
             return;
         }
         let undo = ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
         });
-        let redo = ctx.input_mut(|i| {
+        let redo_z = ctx.input_mut(|i| {
             i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
         });
-        self.undo_z_was_down = ctx.input(|i| i.key_down(Key::Z));
+        let redo_y =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
+        let redo = redo_z || redo_y;
+        self.undo_z_was_down = cmd_down && ((shift_down && z_down) || (!shift_down && z_down) || y_down);
         if !(undo || redo) {
             return;
         }
@@ -411,5 +483,6 @@ impl super::WavesPreviewer {
             }
             ctx.request_repaint();
         }
+        self.undo_z_was_down = combo_down;
     }
 }
