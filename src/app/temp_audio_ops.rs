@@ -72,7 +72,7 @@ impl WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate;
         if in_sr != out_sr {
             for c in chans.iter_mut() {
-                *c = crate::wave::resample_linear(c, in_sr, out_sr);
+                *c = self.resample_mono_with_quality(c, in_sr, out_sr);
             }
         }
         let bits = crate::audio_io::read_audio_info(path)

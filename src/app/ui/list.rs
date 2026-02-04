@@ -2,6 +2,128 @@ use egui::{Align, Color32, RichText, Sense};
 use egui_extras::TableBuilder;
 
 impl crate::app::WavesPreviewer {
+    fn list_row_context_menu_contents(&mut self, ui: &mut egui::Ui) {
+        let selected = self.selected_paths();
+        let has_selection = !selected.is_empty();
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Copy to Clipboard"))
+            .clicked()
+        {
+            self.copy_selected_to_clipboard();
+            ui.close();
+        }
+        let can_paste = self
+            .clipboard_payload
+            .as_ref()
+            .map(|p| !p.items.is_empty())
+            .unwrap_or(false)
+            || !self.get_clipboard_files().is_empty();
+        if ui
+            .add_enabled(can_paste, egui::Button::new("Paste"))
+            .clicked()
+        {
+            self.paste_clipboard_to_list();
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Export Selected..."))
+            .clicked()
+        {
+            self.trigger_save_selected();
+            ui.close();
+        }
+        let real_selected = self.selected_real_paths();
+        if real_selected.len() == 1 {
+            if ui.button("Rename...").clicked() {
+                self.open_rename_dialog(real_selected[0].clone());
+                ui.close();
+            }
+        }
+        let can_convert_bits = !selected.is_empty()
+            && selected.iter().all(|p| {
+                let is_wav = p
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("wav"))
+                    .unwrap_or(false);
+                is_wav
+                    && p.is_file()
+                    && self
+                        .item_for_path(p)
+                        .map(|item| item.source == crate::app::types::MediaSource::File)
+                        .unwrap_or(false)
+            });
+        let convert_targets = if can_convert_bits {
+            selected.clone()
+        } else {
+            Vec::new()
+        };
+        ui.menu_button("Convert Bits", |ui| {
+            if ui
+                .add_enabled(can_convert_bits, egui::Button::new("16-bit PCM"))
+                .clicked()
+            {
+                self.spawn_convert_bits_selected(convert_targets.clone(), crate::wave::WavBitDepth::Pcm16);
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_convert_bits, egui::Button::new("24-bit PCM"))
+                .clicked()
+            {
+                self.spawn_convert_bits_selected(convert_targets.clone(), crate::wave::WavBitDepth::Pcm24);
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_convert_bits, egui::Button::new("32-bit float"))
+                .clicked()
+            {
+                self.spawn_convert_bits_selected(
+                    convert_targets.clone(),
+                    crate::wave::WavBitDepth::Float32,
+                );
+                ui.close();
+            }
+        });
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Remove from List"))
+            .clicked()
+        {
+            self.remove_paths_from_list_with_undo(&selected);
+            ui.close();
+        }
+        let has_edits = self.has_edits_for_paths(&selected);
+        if ui
+            .add_enabled(has_edits, egui::Button::new("Clear Edits"))
+            .clicked()
+        {
+            self.clear_edits_for_paths(&selected);
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Sample Rate Convert..."))
+            .clicked()
+        {
+            self.open_resample_dialog(selected.clone());
+            ui.close();
+        }
+    }
+
+    fn attach_row_context_menu(
+        &mut self,
+        resp: egui::Response,
+        row_idx: usize,
+        ctx: &egui::Context,
+    ) -> egui::Response {
+        if resp.secondary_clicked() && !self.selected_multi.contains(&row_idx) {
+            let mods = ctx.input(|i| i.modifiers);
+            self.update_selection_on_click(row_idx, mods);
+        }
+        resp.context_menu(|ui| {
+            self.list_row_context_menu_contents(ui);
+        });
+        resp
+    }
+
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
             amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
@@ -110,12 +232,7 @@ impl crate::app::WavesPreviewer {
             false
         };
         let pressed_ctrl_a = if allow_list_keys {
-            ctx.input_mut(|i| {
-                i.consume_key(
-                    egui::Modifiers::COMMAND,
-                    egui::Key::A,
-                )
-            })
+            ctx.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A))
         } else {
             false
         };
@@ -251,6 +368,8 @@ impl crate::app::WavesPreviewer {
 
         let mut sort_changed = false;
         let mut missing_paths: Vec<PathBuf> = Vec::new();
+        let mut visible_first_row: Option<usize> = None;
+        let mut visible_last_row: Option<usize> = None;
         let wheel_raw = ctx.input(|i| i.raw_scroll_delta);
         if pointer_over_list && wheel_raw != egui::Vec2::ZERO {
             self.last_list_scroll_at = Some(std::time::Instant::now());
@@ -269,10 +388,11 @@ impl crate::app::WavesPreviewer {
                 .values()
                 .any(|c| c.dirty || c.loop_markers_dirty || c.markers_dirty)
             || self
-                .items
-                .iter()
-                .any(|item| item.pending_gain_db.abs() > 0.0001)
-            || !self.sample_rate_override.is_empty();
+            .items
+            .iter()
+            .any(|item| item.pending_gain_db.abs() > 0.0001)
+            || !self.sample_rate_override.is_empty()
+            || !self.bit_depth_override.is_empty();
         let mut filler_cols = 0usize;
         let mut table = TableBuilder::new(ui)
             .striped(true)
@@ -564,6 +684,8 @@ impl crate::app::WavesPreviewer {
                 body.rows(row_h, row_count, |mut row| {
                     let row_idx = row.index();
                     if row_idx < self.files.len() {
+                        visible_first_row = Some(visible_first_row.map_or(row_idx, |v| v.min(row_idx)));
+                        visible_last_row = Some(visible_last_row.map_or(row_idx, |v| v.max(row_idx)));
                         let id = self.files[row_idx];
                         let (path_owned, file_name, parent, is_virtual) = match self.item_for_id(id) {
                             Some(item) => (
@@ -582,16 +704,59 @@ impl crate::app::WavesPreviewer {
                             self.queue_meta_for_path(&path_owned, true);
                             self.queue_transcript_for_path(&path_owned, true);
                         }
-                        let Some(item) = self.item_for_id(id) else {
+                        let Some(item) = self.item_for_id(id).cloned() else {
                             return;
                         };
                         let is_selected = self.selected_multi.contains(&row_idx);
                         row.set_selected(is_selected);
+                        let row_base_bg = ctx.style().visuals.faint_bg_color;
+                        let row_bg = if is_selected {
+                            None
+                        } else {
+                            match self.item_bg_mode {
+                                crate::app::types::ItemBgMode::Standard => None,
+                                crate::app::types::ItemBgMode::Dbfs => {
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    self.meta_for_path(&path_owned)
+                                        .and_then(|m| m.peak_db)
+                                        .map(|v| db_to_color(v + gain_db))
+                                }
+                                crate::app::types::ItemBgMode::Lufs => {
+                                    let base =
+                                        self.meta_for_path(&path_owned).and_then(|m| m.lufs_i);
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
+                                        Some(*v)
+                                    } else {
+                                        base.map(|v| v + gain_db)
+                                    };
+                                    eff.map(db_to_color)
+                                }
+                            }
+                            .map(|c| crate::app::helpers::lerp_color(row_base_bg, c, 0.16))
+                        };
+                        let row_fg = row_bg.map(|bg| {
+                            let luma = (0.2126 * bg.r() as f32
+                                + 0.7152 * bg.g() as f32
+                                + 0.0722 * bg.b() as f32)
+                                / 255.0;
+                            if luma > 0.62 {
+                                Color32::from_rgb(18, 22, 28)
+                            } else {
+                                Color32::from_rgb(230, 235, 242)
+                            }
+                        });
                         let mut clicked_to_load = false;
                         let mut clicked_to_select = false;
-                        let is_dirty = self.has_edits_for_paths(&[path_owned.clone()]);
+                        let is_dirty = self.has_edits_for_path(&path_owned);
                         if cols.edited {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 if is_dirty {
                                     ui.label(
                                         RichText::new("\u{25CF}")
@@ -603,11 +768,26 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.file {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
+                                let cell_resp = self.attach_row_context_menu(
+                                    ui.interact(
+                                        ui.max_rect(),
+                                        ui.id().with(("list_cell_file", row_idx)),
+                                        Sense::click(),
+                                    ),
+                                    row_idx,
+                                    ctx,
+                                );
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
                                         let display = file_name.clone();
-                                        let resp = ui
+                                        let label_resp = ui
                                             .add(
                                                 egui::Label::new(
                                                     RichText::new(display)
@@ -619,17 +799,21 @@ impl crate::app::WavesPreviewer {
                                                 .show_tooltip_when_elided(false),
                                             )
                                             .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        if resp.clicked_by(egui::PointerButton::Primary)
-                                            && !resp.double_clicked()
+                                        let label_resp =
+                                            self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                        if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                            || label_resp.clicked_by(egui::PointerButton::Primary))
+                                            && !(cell_resp.double_clicked()
+                                                || label_resp.double_clicked())
                                         {
                                             clicked_to_load = true;
                                         }
-                                        if resp.double_clicked() {
+                                        if cell_resp.double_clicked() || label_resp.double_clicked() {
                                             clicked_to_select = true;
                                             to_open = Some(path_owned.clone());
                                         }
-                                        if resp.hovered() {
-                                            resp.on_hover_text(&file_name);
+                                        if label_resp.hovered() {
+                                            label_resp.on_hover_text(&file_name);
                                         }
                                     },
                                 );
@@ -637,10 +821,25 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.folder {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
+                                let cell_resp = self.attach_row_context_menu(
+                                    ui.interact(
+                                        ui.max_rect(),
+                                        ui.id().with(("list_cell_folder", row_idx)),
+                                        Sense::click(),
+                                    ),
+                                    row_idx,
+                                    ctx,
+                                );
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        let resp = ui
+                                        let label_resp = ui
                                             .add(
                                                 egui::Label::new(
                                                     RichText::new(parent.as_str())
@@ -652,12 +851,16 @@ impl crate::app::WavesPreviewer {
                                                 .show_tooltip_when_elided(false),
                                             )
                                             .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        if resp.clicked_by(egui::PointerButton::Primary)
-                                            && !resp.double_clicked()
+                                        let label_resp =
+                                            self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                        if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                            || label_resp.clicked_by(egui::PointerButton::Primary))
+                                            && !(cell_resp.double_clicked()
+                                                || label_resp.double_clicked())
                                         {
                                             clicked_to_load = true;
                                         }
-                                        if resp.double_clicked() {
+                                        if cell_resp.double_clicked() || label_resp.double_clicked() {
                                             clicked_to_select = true;
                                             if !is_virtual {
                                                 let _ = crate::app::helpers::open_folder_with_file_selected(
@@ -665,8 +868,8 @@ impl crate::app::WavesPreviewer {
                                                 );
                                             }
                                         }
-                                        if resp.hovered() {
-                                            resp.on_hover_text(&parent);
+                                        if label_resp.hovered() {
+                                            label_resp.on_hover_text(&parent);
                                         }
                                     },
                                 );
@@ -674,6 +877,21 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.transcript {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
+                                let cell_resp = self.attach_row_context_menu(
+                                    ui.interact(
+                                        ui.max_rect(),
+                                        ui.id().with(("list_cell_transcript", row_idx)),
+                                        Sense::click(),
+                                    ),
+                                    row_idx,
+                                    ctx,
+                                );
                                 let transcript_text = item
                                     .transcript
                                     .as_ref()
@@ -700,28 +918,47 @@ impl crate::app::WavesPreviewer {
                                     .sense(Sense::click())
                                     .truncate()
                                 };
-                                let resp = ui
+                                let label_resp = ui
                                     .add(label.show_tooltip_when_elided(false))
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.clicked_by(egui::PointerButton::Primary)
-                                    && !resp.double_clicked()
+                                let label_resp =
+                                    self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                    || label_resp.clicked_by(egui::PointerButton::Primary))
+                                    && !(cell_resp.double_clicked()
+                                        || label_resp.double_clicked())
                                 {
                                     clicked_to_load = true;
                                 }
-                                if resp.hovered() && !transcript_text.is_empty() {
-                                    resp.on_hover_text(transcript_text);
+                                if label_resp.hovered() && !transcript_text.is_empty() {
+                                    label_resp.on_hover_text(transcript_text);
                                 }
                             });
                         }
                         if cols.external {
                             for name in external_cols.iter() {
                                 row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    if let Some(fg) = row_fg {
+                                        ui.visuals_mut().override_text_color = Some(fg);
+                                    }
+                                    let cell_resp = self.attach_row_context_menu(
+                                        ui.interact(
+                                            ui.max_rect(),
+                                            ui.id().with(("list_cell_external", row_idx, name)),
+                                            Sense::click(),
+                                        ),
+                                        row_idx,
+                                        ctx,
+                                    );
                                     let value = item
                                         .external
                                         .get(name)
                                         .map(|v| v.as_str())
                                         .unwrap_or("");
-                                    let resp = ui
+                                    let label_resp = ui
                                         .add(
                                             egui::Label::new(
                                                 RichText::new(value).size(text_height * 0.95),
@@ -731,19 +968,29 @@ impl crate::app::WavesPreviewer {
                                             .show_tooltip_when_elided(false),
                                         )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    if resp.clicked_by(egui::PointerButton::Primary)
-                                        && !resp.double_clicked()
+                                    let label_resp =
+                                        self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                    if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                        || label_resp.clicked_by(egui::PointerButton::Primary))
+                                        && !(cell_resp.double_clicked()
+                                            || label_resp.double_clicked())
                                     {
                                         clicked_to_load = true;
                                     }
-                                    if resp.hovered() && !value.is_empty() {
-                                        resp.on_hover_text(value);
+                                    if label_resp.hovered() && !value.is_empty() {
+                                        label_resp.on_hover_text(value);
                                     }
                                 });
                             }
                         }
                         if cols.length {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let secs = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.duration_secs)
@@ -759,6 +1006,7 @@ impl crate::app::WavesPreviewer {
                                             .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -766,6 +1014,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.channels {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let ch = self
                                     .meta_for_path(&path_owned)
                                     .map(|m| m.channels)
@@ -782,6 +1036,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -789,6 +1044,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.sample_rate {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let sr = self.effective_sample_rate_for_path(&path_owned);
                                 let resp = ui
                                     .add(
@@ -802,6 +1063,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -809,10 +1071,13 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.bits {
                             row.col(|ui| {
-                                let bits = self
-                                    .meta_for_path(&path_owned)
-                                    .map(|m| m.bits_per_sample)
-                                    .filter(|v| *v > 0);
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
+                                let bits = self.effective_bits_for_path(&path_owned);
                                 let resp = ui
                                     .add(
                                         egui::Label::new(
@@ -825,6 +1090,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -832,6 +1098,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.bit_rate {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let br = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.bit_rate_bps)
@@ -845,6 +1117,7 @@ impl crate::app::WavesPreviewer {
                                             .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -852,6 +1125,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.peak {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::click(),
@@ -873,6 +1152,7 @@ impl crate::app::WavesPreviewer {
                                     fid,
                                     egui::Color32::WHITE,
                                 );
+                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
                                 if resp2.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -880,6 +1160,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.lufs {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let base = self.meta_for_path(&path_owned).and_then(|m| m.lufs_i);
                                 let gain_db = self.pending_gain_db_for_path(&path_owned);
                                 let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
@@ -905,6 +1191,7 @@ impl crate::app::WavesPreviewer {
                                     fid,
                                     egui::Color32::WHITE,
                                 );
+                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
                                 if resp2.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -912,6 +1199,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.bpm {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let bpm = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.bpm)
@@ -928,6 +1221,7 @@ impl crate::app::WavesPreviewer {
                                         .sense(Sense::click()),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -935,6 +1229,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.created_at {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let text = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.created_at)
@@ -947,6 +1247,7 @@ impl crate::app::WavesPreviewer {
                                             .truncate(),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -954,6 +1255,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.modified_at {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let text = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.modified_at)
@@ -966,6 +1273,7 @@ impl crate::app::WavesPreviewer {
                                             .truncate(),
                                     )
                                     .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                 if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
@@ -973,6 +1281,12 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.gain {
                             row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
                                 let old = self.pending_gain_db_for_path(&path_owned);
                                 let mut g = old;
                                 let resp = ui.add(
@@ -982,6 +1296,10 @@ impl crate::app::WavesPreviewer {
                                         .fixed_decimals(1)
                                         .suffix(" dB"),
                                 );
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
                                 if resp.changed() {
                                     let new = crate::app::WavesPreviewer::clamp_gain_db(g);
                                     let delta = new - old;
@@ -1011,9 +1329,15 @@ impl crate::app::WavesPreviewer {
                         }
                         if cols.wave {
                             row.col(|ui| {
-                                let (rect2, _resp2) = ui.allocate_exact_size(
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                if let Some(fg) = row_fg {
+                                    ui.visuals_mut().override_text_color = Some(fg);
+                                }
+                                let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::hover(),
+                                    Sense::click(),
                                 );
                                 let error_text = self
                                     .meta_for_path(&path_owned)
@@ -1076,86 +1400,38 @@ impl crate::app::WavesPreviewer {
                                         egui::Color32::from_rgb(220, 90, 90),
                                     );
                                 }
+                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
                             });
                         }
-                        row.col(|_ui| {});
-                        // row-level interaction (must call response() after at least one col())
-                        let resp = row.response();
-                        if resp.secondary_clicked() && !self.selected_multi.contains(&row_idx) {
-                            let mods = ctx.input(|i| i.modifiers);
-                            self.update_selection_on_click(row_idx, mods);
-                        }
-                        resp.context_menu(|ui| {
-                            let selected = self.selected_paths();
-                            let has_selection = !selected.is_empty();
-                            if ui
-                                .add_enabled(has_selection, egui::Button::new("Copy to Clipboard"))
-                                .clicked()
-                            {
-                                self.copy_selected_to_clipboard();
-                                ui.close();
-                            }
-                            let can_paste = self
-                                .clipboard_payload
-                                .as_ref()
-                                .map(|p| !p.items.is_empty())
-                                .unwrap_or(false)
-                                || !self.get_clipboard_files().is_empty();
-                            if ui
-                                .add_enabled(can_paste, egui::Button::new("Paste"))
-                                .clicked()
-                            {
-                                self.paste_clipboard_to_list();
-                                ui.close();
-                            }
-                            let real_selected = self.selected_real_paths();
-                            if real_selected.len() == 1 {
-                                if ui.button("Rename...").clicked() {
-                                    self.open_rename_dialog(real_selected[0].clone());
-                                    ui.close();
-                                }
-                            }
-                            if ui
-                                .add_enabled(has_selection, egui::Button::new("Remove from List"))
-                                .clicked()
-                            {
-                                self.remove_paths_from_list_with_undo(&selected);
-                                ui.close();
-                            }
-                            let has_edits = self.has_edits_for_paths(&selected);
-                            if ui
-                                .add_enabled(has_edits, egui::Button::new("Clear Edits"))
-                                .clicked()
-                            {
-                                self.clear_edits_for_paths(&selected);
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(has_selection, egui::Button::new("Sample Rate Convert..."))
-                                .clicked()
-                            {
-                                self.open_resample_dialog(selected.clone());
-                                ui.close();
+                        row.col(|ui| {
+                            if let Some(bg) = row_bg {
+                                ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                             }
                         });
-                        let clicked_any =
-                            resp.clicked_by(egui::PointerButton::Primary) || clicked_to_load;
-                        if clicked_any {
+                        // row-level interaction (must call response() after at least one col())
+                        let resp = self.attach_row_context_menu(row.response(), row_idx, ctx);
+                        let clicked_any = (resp.clicked_by(egui::PointerButton::Primary)
+                            && !resp.double_clicked())
+                            || clicked_to_load;
+                        if clicked_to_select {
+                            self.selected = Some(row_idx);
+                            self.scroll_to_selected = false;
+                            self.selected_multi.clear();
+                            self.selected_multi.insert(row_idx);
+                            self.select_anchor = Some(row_idx);
+                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            list_has_focus = true;
+                            self.search_has_focus = false;
+                        } else if clicked_any {
                             let mods = ctx.input(|i| i.modifiers);
                             self.update_selection_on_click(row_idx, mods);
                             self.select_and_load(row_idx, false);
                             if self.auto_play_list_nav {
                                 self.request_list_autoplay();
                             }
-                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
-                            list_has_focus = true;
-                            self.search_has_focus = false;
-                        } else if clicked_to_select {
-                            self.selected = Some(row_idx);
-                            self.scroll_to_selected = false;
-                            self.selected_multi.clear();
-                            self.selected_multi.insert(row_idx);
-                            self.select_anchor = Some(row_idx);
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;
                             self.search_has_focus = false;
@@ -1173,6 +1449,26 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+
+        if self.item_bg_mode != crate::app::types::ItemBgMode::Standard && !self.files.is_empty() {
+            let start = visible_first_row.or(self.selected).unwrap_or(0).min(self.files.len() - 1);
+            let end = visible_last_row.unwrap_or(start).min(self.files.len() - 1);
+            // Keep UI pass light; broad prefetch is handled by pump_list_meta_prefetch().
+            let look_back = 8usize;
+            let look_ahead = 48usize;
+            let prefetch_start = start.saturating_sub(look_back);
+            let prefetch_end = (end + look_ahead).min(self.files.len() - 1);
+            for idx in prefetch_start..=prefetch_end {
+                let Some(path) = self.path_for_row(idx).cloned() else {
+                    continue;
+                };
+                if self.is_virtual_path(&path) {
+                    continue;
+                }
+                self.queue_meta_for_path(&path, false);
+            }
+        }
+        self.queue_list_preview_prefetch_for_rows(visible_first_row, visible_last_row);
 
         if !missing_paths.is_empty() {
             for p in missing_paths {

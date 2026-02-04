@@ -30,3 +30,7 @@
 - Views: 1=Waveform, 2=Spectrogram, 3=Mel, 4=WORLD (planned)
 - Tools (contextual): Q=Seek/Select, W=Loop Edit, E=Trim, R=Fade, T=Gain, Y=Noise Reduce (Spec), Esc=Cancel tool
 
+## Shortcut note (2026-02-03)
+- `P`: toggle Auto Play for list navigation.
+- `A` / `D`: volume down / up.
+

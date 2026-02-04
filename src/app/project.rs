@@ -29,12 +29,28 @@ pub struct ProjectList {
     pub files: Vec<String>,
     #[serde(default)]
     pub items: Vec<ProjectListItem>,
+    #[serde(default)]
+    pub sample_rate_overrides: Vec<ProjectSampleRateOverride>,
+    #[serde(default)]
+    pub bit_depth_overrides: Vec<ProjectBitDepthOverride>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectListItem {
     pub path: String,
     pub pending_gain_db: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectSampleRateOverride {
+    pub path: String,
+    pub sample_rate: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectBitDepthOverride {
+    pub path: String,
+    pub bit_depth: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,6 +92,47 @@ pub struct ProjectApp {
     pub search_query: String,
     pub search_regex: bool,
     pub list_columns: ProjectListColumns,
+    #[serde(default)]
+    pub auto_play_list_nav: bool,
+    #[serde(default)]
+    pub external_state: Option<ProjectExternalState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectExternalState {
+    #[serde(default)]
+    pub sources: Vec<ProjectExternalSource>,
+    #[serde(default)]
+    pub active_source: Option<usize>,
+    #[serde(default = "default_external_key_rule")]
+    pub key_rule: String,
+    #[serde(default = "default_external_match_input")]
+    pub match_input: String,
+    #[serde(default)]
+    pub match_regex: String,
+    #[serde(default)]
+    pub match_replace: String,
+    #[serde(default)]
+    pub scope_regex: String,
+    #[serde(default)]
+    pub visible_columns: Vec<String>,
+    #[serde(default)]
+    pub show_unmatched: bool,
+    #[serde(default)]
+    pub key_column: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectExternalSource {
+    pub path: String,
+    #[serde(default)]
+    pub sheet_name: Option<String>,
+    #[serde(default = "default_external_has_header")]
+    pub has_header: bool,
+    #[serde(default)]
+    pub header_row: Option<usize>,
+    #[serde(default)]
+    pub data_row: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -181,14 +238,112 @@ pub struct ProjectMarker {
     pub label: String,
 }
 
-pub(super) fn rel_path(path: &Path, base: &Path) -> String {
-    if let Ok(rel) = path.strip_prefix(base) {
-        rel.to_string_lossy().to_string()
-    } else {
-        path.to_string_lossy().to_string()
+fn component_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        match (a, b) {
+            (Component::Normal(x), Component::Normal(y)) => {
+                x.to_string_lossy().eq_ignore_ascii_case(&y.to_string_lossy())
+            }
+            _ => a == b,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
     }
 }
 
+fn same_volume(path: &Path, base: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let p = path
+            .components()
+            .find_map(|c| match c {
+                Component::Prefix(prefix) => {
+                    Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
+                }
+                _ => None,
+            });
+        let b = base
+            .components()
+            .find_map(|c| match c {
+                Component::Prefix(prefix) => {
+                    Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
+                }
+                _ => None,
+            });
+        p == b
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, base);
+        true
+    }
+}
+
+fn diff_paths(path: &Path, base: &Path) -> Option<PathBuf> {
+    if path.is_absolute() != base.is_absolute() {
+        return None;
+    }
+    let path_components: Vec<_> = path.components().collect();
+    let base_components: Vec<_> = base.components().collect();
+    let mut common = 0usize;
+    while common < path_components.len() && common < base_components.len() {
+        if !component_eq(path_components[common], base_components[common]) {
+            break;
+        }
+        common += 1;
+    }
+    let mut rel = PathBuf::new();
+    for comp in &base_components[common..] {
+        if matches!(comp, std::path::Component::Normal(_)) {
+            rel.push("..");
+        }
+    }
+    for comp in &path_components[common..] {
+        match comp {
+            std::path::Component::Normal(seg) => rel.push(seg),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => rel.push(".."),
+            _ => {}
+        }
+    }
+    if rel.as_os_str().is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(rel)
+    }
+}
+
+/// Save path with session-file-relative preference:
+/// - same volume => relative path (can include `..`)
+/// - different volume/unresolvable => absolute path fallback
+pub(super) fn rel_path(path: &Path, base: &Path) -> String {
+    if !path.is_absolute() {
+        return path.to_string_lossy().to_string();
+    }
+    let base_abs = if base.is_absolute() {
+        base.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(base)
+    };
+    if !same_volume(path, &base_abs) {
+        return path.to_string_lossy().to_string();
+    }
+    diff_paths(path, &base_abs)
+        .unwrap_or_else(|| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Resolve saved path:
+/// - absolute path => use as-is
+/// - relative path => resolve from the session file's parent directory
 pub(super) fn resolve_path(raw: &str, base: &Path) -> PathBuf {
     let p = PathBuf::from(raw);
     if p.is_absolute() {
@@ -225,6 +380,18 @@ fn default_loudness_target_lufs() -> f32 {
 
 fn default_bpm_value() -> f32 {
     0.0
+}
+
+fn default_external_key_rule() -> String {
+    "file".to_string()
+}
+
+fn default_external_match_input() -> String {
+    "file".to_string()
+}
+
+fn default_external_has_header() -> bool {
+    true
 }
 
 pub fn serialize_project(project: &ProjectFile) -> Result<String> {
@@ -538,6 +705,8 @@ impl super::WavesPreviewer {
         self.selected = None;
         self.selected_multi.clear();
         self.select_anchor = None;
+        self.sample_rate_override.clear();
+        self.bit_depth_override.clear();
         self.project_path = None;
     }
 
@@ -550,6 +719,8 @@ impl super::WavesPreviewer {
         self.original_files.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.sample_rate_override.clear();
+        self.bit_depth_override.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.spectro_progress.clear();

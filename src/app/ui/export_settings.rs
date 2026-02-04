@@ -1,12 +1,15 @@
 use crate::app::types::{
-    ConflictPolicy, SaveMode, SpectrogramScale, ThemeMode, ViewMode, WindowFunction,
+    ConflictPolicy, ItemBgMode, SaveMode, SpectrogramScale, SrcQuality, ThemeMode, ViewMode,
+    WindowFunction,
 };
 use egui::RichText;
 
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_export_settings_window(&mut self, ctx: &egui::Context) {
         if self.show_export_settings {
+            let mut open = self.show_export_settings;
             egui::Window::new("Settings")
+                .open(&mut open)
                 .resizable(true)
                 .show(ctx, |ui| {
                     ui.label("Default Save Mode:");
@@ -110,6 +113,29 @@ impl crate::app::WavesPreviewer {
                             self.apply_sort();
                         }
                     }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Item Background:");
+                        let mut next_mode = self.item_bg_mode;
+                        ui.selectable_value(&mut next_mode, ItemBgMode::Standard, "Standard");
+                        ui.selectable_value(&mut next_mode, ItemBgMode::Dbfs, "dBFS");
+                        ui.selectable_value(&mut next_mode, ItemBgMode::Lufs, "LUFS");
+                        if next_mode != self.item_bg_mode {
+                            self.item_bg_mode = next_mode;
+                            self.save_prefs();
+                            ctx.request_repaint();
+                        }
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("SRC Quality:");
+                        let mut next_quality = self.src_quality;
+                        ui.selectable_value(&mut next_quality, SrcQuality::Fast, "Fast");
+                        ui.selectable_value(&mut next_quality, SrcQuality::Good, "Good");
+                        ui.selectable_value(&mut next_quality, SrcQuality::Best, "Best");
+                        if next_quality != self.src_quality {
+                            self.src_quality = next_quality;
+                            self.save_prefs();
+                        }
+                    });
                     ui.separator();
                     ui.label("List Columns:");
                     let mut next_cols = self.list_columns;
@@ -344,11 +370,8 @@ impl crate::app::WavesPreviewer {
                     if next_cfg != self.spectro_cfg {
                         self.apply_spectro_config(next_cfg);
                     }
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        self.show_export_settings = false;
-                    }
                 });
+            self.show_export_settings = open;
         }
     }
 }

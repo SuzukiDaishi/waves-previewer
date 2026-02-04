@@ -21,13 +21,18 @@ impl WavesPreviewer {
             return;
         }
         self.external_load_queue.clear();
-        self.external_load_queue.push_back(path_b);
+        self.pending_external_restore = None;
+        self.queue_external_load_with_current_settings(
+            path_b,
+            crate::app::external_ops::ExternalLoadTarget::New,
+        );
         self.external_sheet_selected = None;
         self.external_sheet_names.clear();
         self.external_settings_dirty = false;
         self.external_load_target =
             Some(crate::app::external_ops::ExternalLoadTarget::New);
         self.show_external_dialog = true;
+        self.external_load_error = None;
         self.begin_external_load(path_a);
         self.debug_log("external merge test started");
     }
@@ -208,6 +213,18 @@ impl WavesPreviewer {
             processing, export, decoding
         ));
         lines.push(format!("meta_pending: {}", meta_pending));
+        let avg_frame_ms = if self.debug.frame_samples > 0 {
+            self.debug.frame_sum_ms / self.debug.frame_samples as f64
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "frame_ms: last {:.2} avg {:.2} peak {:.2} samples {}",
+            self.debug.frame_last_ms,
+            avg_frame_ms,
+            self.debug.frame_peak_ms,
+            self.debug.frame_samples
+        ));
         let source_count = self.external_sources.len();
         if source_count > 0 {
             let active_label = self
@@ -267,7 +284,14 @@ impl WavesPreviewer {
     pub(super) fn cancel_processing(&mut self) {
         self.processing = None;
         self.audio.stop();
-        self.list_preview_rx = None;
+        self.cancel_list_preview_job();
+        self.list_preview_pending_path = None;
+        self.list_play_pending = false;
+        self.list_preview_prefetch_tx = None;
+        self.list_preview_prefetch_rx = None;
+        self.list_preview_prefetch_inflight.clear();
+        self.list_preview_cache.clear();
+        self.list_preview_cache_order.clear();
     }
 
     pub(super) fn cancel_editor_decode(&mut self) {

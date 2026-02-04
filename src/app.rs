@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::audio::AudioEngine;
 use crate::mcp;
 use crate::ipc;
-use crate::wave::{build_minmax, prepare_for_speed};
+use crate::wave::build_minmax;
 use anyhow::Result;
 use egui::{Align, Color32, Key, RichText, Sense, TextStyle};
 use egui_extras::TableBuilder;
@@ -77,8 +77,31 @@ const BULK_RESAMPLE_THRESHOLD: usize = 10_000;
 const BULK_RESAMPLE_CHUNK: usize = 200;
 const BULK_RESAMPLE_BLOCK_SECS: u64 = 2;
 const BULK_RESAMPLE_FRAME_BUDGET_MS: u64 = 3;
+const META_UPDATE_FRAME_BUDGET: usize = 256;
+const META_SORT_MIN_INTERVAL_MS: u64 = 120;
+const LIST_META_PREFETCH_BUDGET: usize = 64;
+const LIST_PREVIEW_CACHE_MAX: usize = 48;
+const LIST_PREVIEW_PREFETCH_INFLIGHT_MAX: usize = 2;
 
 // moved to types.rs
+
+#[derive(Clone, Debug)]
+struct ExternalLoadQueueItem {
+    path: PathBuf,
+    sheet_name: Option<String>,
+    has_header: bool,
+    header_row: Option<usize>,
+    data_row: Option<usize>,
+    target: external_ops::ExternalLoadTarget,
+}
+
+#[derive(Clone, Debug)]
+struct PendingExternalRestore {
+    active_source: Option<usize>,
+    visible_columns: Vec<String>,
+    key_column: Option<String>,
+    show_unmatched: bool,
+}
 
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
@@ -99,6 +122,9 @@ pub struct WavesPreviewer {
     pub meta_rx: Option<std::sync::mpsc::Receiver<meta::MetaUpdate>>,
     pub meta_pool: Option<meta::MetaPool>,
     pub meta_inflight: HashSet<PathBuf>,
+    meta_sort_pending: bool,
+    meta_sort_last_applied: Option<std::time::Instant>,
+    list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,
     pub show_transcript_window: bool,
     pub pending_transcript_seek: Option<(PathBuf, u64)>,
@@ -134,7 +160,8 @@ pub struct WavesPreviewer {
     pub external_load_started_at: Option<std::time::Instant>,
     pub external_load_path: Option<PathBuf>,
     external_load_target: Option<external_ops::ExternalLoadTarget>,
-    pub external_load_queue: VecDeque<PathBuf>,
+    external_load_queue: VecDeque<ExternalLoadQueueItem>,
+    pending_external_restore: Option<PendingExternalRestore>,
     pub tool_defs: Vec<ToolDef>,
     pub tool_queue: std::collections::VecDeque<ToolJob>,
     pub tool_run_rx: Option<std::sync::mpsc::Receiver<ToolRunResult>>,
@@ -204,6 +231,15 @@ pub struct WavesPreviewer {
     // background full load for list preview
     list_preview_rx: Option<std::sync::mpsc::Receiver<ListPreviewResult>>,
     list_preview_job_id: u64,
+    list_preview_job_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    list_preview_partial_ready: bool,
+    list_preview_pending_path: Option<PathBuf>,
+    list_play_pending: bool,
+    list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
+    list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
+    list_preview_prefetch_inflight: HashSet<PathBuf>,
+    list_preview_cache: HashMap<PathBuf, ListPreviewCacheEntry>,
+    list_preview_cache_order: VecDeque<PathBuf>,
     // background heavy apply for editor (pitch/stretch)
     editor_apply_state: Option<EditorApplyState>,
     // background decode for editor (prefix + full)
@@ -225,6 +261,7 @@ pub struct WavesPreviewer {
     project_open_pending: Option<PathBuf>,
     project_open_state: Option<ProjectOpenState>,
     theme_mode: ThemeMode,
+    item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,
     rename_target: Option<PathBuf>,
     rename_input: String,
@@ -247,6 +284,8 @@ pub struct WavesPreviewer {
     lufs_worker_busy: bool,
     // Sample rate conversion (non-destructive)
     sample_rate_override: HashMap<PathBuf, u32>,
+    bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
+    src_quality: SrcQuality,
     show_resample_dialog: bool,
     resample_targets: Vec<PathBuf>,
     resample_target_sr: u32,
@@ -321,6 +360,28 @@ impl WavesPreviewer {
             *v /= chn;
         }
         out
+    }
+
+    pub(super) fn to_wave_resample_quality(quality: SrcQuality) -> crate::wave::ResampleQuality {
+        match quality {
+            SrcQuality::Fast => crate::wave::ResampleQuality::Fast,
+            SrcQuality::Good => crate::wave::ResampleQuality::Good,
+            SrcQuality::Best => crate::wave::ResampleQuality::Best,
+        }
+    }
+
+    pub(super) fn resample_mono_with_quality(
+        &self,
+        mono: &[f32],
+        in_sr: u32,
+        out_sr: u32,
+    ) -> Vec<f32> {
+        crate::wave::resample_quality(
+            mono,
+            in_sr,
+            out_sr,
+            Self::to_wave_resample_quality(self.src_quality),
+        )
     }
     fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
         Self::mixdown_channels(&tab.ch_samples, tab.samples_len)
@@ -881,9 +942,8 @@ impl WavesPreviewer {
                 row.push(text);
             }
             if cols.bits {
-                let text = meta
-                    .map(|m| m.bits_per_sample)
-                    .filter(|v| *v > 0)
+                let text = self
+                    .effective_bits_for_path(&item.path)
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string());
                 row.push(text);
@@ -1558,6 +1618,9 @@ impl WavesPreviewer {
             meta_rx: None,
             meta_pool: None,
             meta_inflight: HashSet::new(),
+            meta_sort_pending: false,
+            meta_sort_last_applied: None,
+            list_meta_prefetch_cursor: 0,
             transcript_inflight: HashSet::new(),
             show_transcript_window: false,
             pending_transcript_seek: None,
@@ -1594,6 +1657,7 @@ impl WavesPreviewer {
             external_load_path: None,
             external_load_target: None,
             external_load_queue: VecDeque::new(),
+            pending_external_restore: None,
             tool_defs: Vec::new(),
             tool_queue: std::collections::VecDeque::new(),
             tool_run_rx: None,
@@ -1651,6 +1715,15 @@ impl WavesPreviewer {
             processing: None,
             list_preview_rx: None,
             list_preview_job_id: 0,
+            list_preview_job_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            list_preview_partial_ready: false,
+            list_preview_pending_path: None,
+            list_play_pending: false,
+            list_preview_prefetch_tx: None,
+            list_preview_prefetch_rx: None,
+            list_preview_prefetch_inflight: HashSet::new(),
+            list_preview_cache: HashMap::new(),
+            list_preview_cache_order: VecDeque::new(),
             editor_apply_state: None,
             editor_decode_state: None,
             editor_decode_job_id: 0,
@@ -1673,6 +1746,7 @@ impl WavesPreviewer {
             project_open_pending: None,
             project_open_state: None,
             theme_mode: ThemeMode::Dark,
+            item_bg_mode: ItemBgMode::Standard,
             show_rename_dialog: false,
             rename_target: None,
             rename_input: String::new(),
@@ -1693,6 +1767,8 @@ impl WavesPreviewer {
             lufs_rx2: None,
             lufs_worker_busy: false,
             sample_rate_override: HashMap::new(),
+            bit_depth_override: HashMap::new(),
+            src_quality: SrcQuality::Good,
             show_resample_dialog: false,
             resample_targets: Vec::new(),
             resample_target_sr: 48_000,
@@ -1921,6 +1997,7 @@ impl WavesPreviewer {
 
 impl eframe::App for WavesPreviewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let frame_started = std::time::Instant::now();
         self.suppress_list_enter = false;
         if ctx.dragged_id().is_some() && !ctx.input(|i| i.pointer.any_down()) {
             if self.debug.cfg.enabled {
@@ -1948,6 +2025,7 @@ impl eframe::App for WavesPreviewer {
         self.apply_effective_volume();
         // Drain scan results (background folder scan)
         self.process_scan_messages();
+        self.pump_list_meta_prefetch();
         self.process_ipc_requests();
         self.process_mcp_commands(ctx);
         self.apply_pending_transcript_seek();
@@ -1970,6 +2048,7 @@ impl eframe::App for WavesPreviewer {
         self.drain_heavy_preview_results();
         // Drain list preview full-load results
         self.drain_list_preview_results();
+        self.drain_list_preview_prefetch_results();
         self.drain_editor_decode();
         // Drain heavy per-channel overlay results
         self.drain_heavy_overlay_results();
@@ -2627,7 +2706,13 @@ impl eframe::App for WavesPreviewer {
                 match self.mode {
                     RateMode::Speed => {
                         let _ =
-                            prepare_for_speed(&p, &self.audio, &mut Vec::new(), self.playback_rate);
+                            crate::wave::prepare_for_speed_quality(
+                                &p,
+                                &self.audio,
+                                &mut Vec::new(),
+                                self.playback_rate,
+                                Self::to_wave_resample_quality(self.src_quality),
+                            );
                         self.audio.set_rate(self.playback_rate);
                     }
                     _ => {
@@ -2660,7 +2745,10 @@ impl eframe::App for WavesPreviewer {
 
         // Leave dirty editor confirmation
         if self.show_leave_prompt {
+            let mut open = self.show_leave_prompt;
+            let mut cancel_like_close = false;
             egui::Window::new("Leave Editor?")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2694,15 +2782,25 @@ impl eframe::App for WavesPreviewer {
                         }
                         if ui.button("Cancel").clicked() {
                             self.leave_intent = None;
-                            self.show_leave_prompt = false;
+                            cancel_like_close = true;
                         }
                     });
                 });
+            if cancel_like_close {
+                open = false;
+            }
+            if !open {
+                self.leave_intent = None;
+                self.show_leave_prompt = false;
+            }
         }
 
         // First save prompt window
         if self.show_first_save_prompt {
+            let mut open = self.show_first_save_prompt;
+            let mut close_prompt = false;
             egui::Window::new("First Export Option")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2712,20 +2810,24 @@ impl eframe::App for WavesPreviewer {
                         if ui.button("Overwrite").clicked() {
                             self.export_cfg.save_mode = SaveMode::Overwrite;
                             self.export_cfg.first_prompt = false;
-                            self.show_first_save_prompt = false;
+                            close_prompt = true;
                             self.trigger_save_selected();
                         }
                         if ui.button("New File").clicked() {
                             self.export_cfg.save_mode = SaveMode::NewFile;
                             self.export_cfg.first_prompt = false;
-                            self.show_first_save_prompt = false;
+                            close_prompt = true;
                             self.trigger_save_selected();
                         }
                         if ui.button("Cancel").clicked() {
-                            self.show_first_save_prompt = false;
+                            close_prompt = true;
                         }
                     });
                 });
+            if close_prompt {
+                open = false;
+            }
+            self.show_first_save_prompt = open;
         }
 
         // Export settings window (in separate UI module)
@@ -2737,7 +2839,10 @@ impl eframe::App for WavesPreviewer {
         // Rename dialog
         if self.show_rename_dialog {
             let mut do_rename = false;
+            let mut open = self.show_rename_dialog;
+            let mut cancel_like_close = false;
             egui::Window::new("Rename File")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2758,7 +2863,7 @@ impl eframe::App for WavesPreviewer {
                             do_rename = true;
                         }
                         if ui.button("Cancel").clicked() {
-                            self.show_rename_dialog = false;
+                            cancel_like_close = true;
                         }
                     });
                 });
@@ -2779,10 +2884,21 @@ impl eframe::App for WavesPreviewer {
                     self.show_rename_dialog = false;
                 }
             }
+            if cancel_like_close {
+                open = false;
+            }
+            if !open {
+                self.show_rename_dialog = false;
+                self.rename_target = None;
+                self.rename_error = None;
+            }
         }
         if self.show_batch_rename_dialog {
             let mut do_rename = false;
+            let mut open = self.show_batch_rename_dialog;
+            let mut cancel_like_close = false;
             egui::Window::new("Batch Rename")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2839,9 +2955,7 @@ impl eframe::App for WavesPreviewer {
                             do_rename = true;
                         }
                         if ui.button("Cancel").clicked() {
-                            self.show_batch_rename_dialog = false;
-                            self.batch_rename_targets.clear();
-                            self.batch_rename_error = None;
+                            cancel_like_close = true;
                         }
                     });
                 });
@@ -2857,10 +2971,21 @@ impl eframe::App for WavesPreviewer {
                     }
                 }
             }
+            if cancel_like_close {
+                open = false;
+            }
+            if !open {
+                self.show_batch_rename_dialog = false;
+                self.batch_rename_targets.clear();
+                self.batch_rename_error = None;
+            }
         }
         if self.show_resample_dialog {
             let mut do_apply = false;
+            let mut open = self.show_resample_dialog;
+            let mut cancel_like_close = false;
             egui::Window::new("Sample Rate Convert")
+                .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2882,9 +3007,7 @@ impl eframe::App for WavesPreviewer {
                             do_apply = true;
                         }
                         if ui.button("Cancel").clicked() {
-                            self.show_resample_dialog = false;
-                            self.resample_targets.clear();
-                            self.resample_error = None;
+                            cancel_like_close = true;
                         }
                     });
                 });
@@ -2900,6 +3023,14 @@ impl eframe::App for WavesPreviewer {
                     }
                 }
             }
+            if cancel_like_close {
+                open = false;
+            }
+            if !open {
+                self.show_resample_dialog = false;
+                self.resample_targets.clear();
+                self.resample_error = None;
+            }
         }
         // Debug window
         self.ui_debug_window(ctx);
@@ -2908,5 +3039,12 @@ impl eframe::App for WavesPreviewer {
         // Hotkeys after UI so focus state is accurate
         self.handle_clipboard_hotkeys(ctx);
         self.handle_undo_redo_hotkeys(ctx);
+        let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
+        self.debug.frame_last_ms = frame_ms as f32;
+        self.debug.frame_sum_ms += frame_ms;
+        self.debug.frame_samples = self.debug.frame_samples.saturating_add(1);
+        if self.debug.frame_peak_ms < self.debug.frame_last_ms {
+            self.debug.frame_peak_ms = self.debug.frame_last_ms;
+        }
     }
 }

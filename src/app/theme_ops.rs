@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle, Visuals};
 
-use super::types::{SpectrogramConfig, SpectrogramScale, ThemeMode, WindowFunction};
+use super::types::{
+    ItemBgMode, SpectrogramConfig, SpectrogramScale, SrcQuality, ThemeMode, WindowFunction,
+};
 use super::WavesPreviewer;
 
 impl WavesPreviewer {
@@ -195,6 +197,18 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("spectro_note_labels=") {
                 let v = matches!(rest.trim(), "1" | "true" | "yes" | "on");
                 self.spectro_cfg.show_note_labels = v;
+            } else if let Some(rest) = line.strip_prefix("item_bg_mode=") {
+                self.item_bg_mode = match rest.trim().to_ascii_lowercase().as_str() {
+                    "dbfs" => ItemBgMode::Dbfs,
+                    "lufs" => ItemBgMode::Lufs,
+                    _ => ItemBgMode::Standard,
+                };
+            } else if let Some(rest) = line.strip_prefix("src_quality=") {
+                self.src_quality = match rest.trim().to_ascii_lowercase().as_str() {
+                    "fast" => SrcQuality::Fast,
+                    "best" => SrcQuality::Best,
+                    _ => SrcQuality::Good,
+                };
             }
         }
         Self::normalize_spectro_cfg(&mut self.spectro_cfg);
@@ -222,6 +236,16 @@ impl WavesPreviewer {
             SpectrogramScale::Log => "log",
         };
         let note_labels = if self.spectro_cfg.show_note_labels { "1" } else { "0" };
+        let item_bg_mode = match self.item_bg_mode {
+            ItemBgMode::Standard => "standard",
+            ItemBgMode::Dbfs => "dbfs",
+            ItemBgMode::Lufs => "lufs",
+        };
+        let src_quality = match self.src_quality {
+            SrcQuality::Fast => "fast",
+            SrcQuality::Good => "good",
+            SrcQuality::Best => "best",
+        };
         let _ = std::fs::write(
             path,
             format!(
@@ -235,7 +259,9 @@ spectro_scale={}\n\
 spectro_mel_scale={}\n\
 spectro_db_floor={:.1}\n\
 spectro_max_hz={:.1}\n\
-spectro_note_labels={}\n",
+spectro_note_labels={}\n\
+item_bg_mode={}\n\
+src_quality={}\n",
                 theme,
                 skip,
                 self.zero_cross_epsilon,
@@ -247,7 +273,9 @@ spectro_note_labels={}\n",
                 mel_scale,
                 self.spectro_cfg.db_floor,
                 self.spectro_cfg.max_freq_hz,
-                note_labels
+                note_labels,
+                item_bg_mode,
+                src_quality
             ),
         );
     }

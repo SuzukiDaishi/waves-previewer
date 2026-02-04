@@ -332,6 +332,10 @@ impl AudioEngine {
         self.set_samples(Arc::new(AudioBuffer::from_channels(channels)));
     }
 
+    pub fn set_samples_buffer(&self, samples: Arc<AudioBuffer>) {
+        self.set_samples(samples);
+    }
+
     pub fn replace_samples_keep_pos(&self, samples: Arc<AudioBuffer>) {
         let new_len = samples.len();
         let old_len = self

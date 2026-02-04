@@ -8,6 +8,31 @@ impl super::WavesPreviewer {
         self.playing_path.as_ref()
     }
 
+    pub fn test_selected_path(&self) -> Option<&PathBuf> {
+        self.selected.and_then(|row| self.path_for_row(row))
+    }
+
+    pub fn test_audio_is_playing(&self) -> bool {
+        self.audio
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_audio_has_samples(&self) -> bool {
+        self.audio
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|buf| buf.len() > 0)
+            .unwrap_or(false)
+    }
+
+    pub fn test_set_auto_play_list_nav(&mut self, enabled: bool) {
+        self.auto_play_list_nav = enabled;
+    }
+
     pub fn test_mode_name(&self) -> &'static str {
         match self.mode {
             crate::app::types::RateMode::Speed => "Speed",
@@ -26,6 +51,26 @@ impl super::WavesPreviewer {
 
     pub fn test_pending_gain_count(&self) -> usize {
         self.pending_gain_count()
+    }
+
+    pub fn test_auto_play_list_nav(&self) -> bool {
+        self.auto_play_list_nav
+    }
+
+    pub fn test_volume_db(&self) -> f32 {
+        self.volume_db
+    }
+
+    pub fn test_select_and_load_row(&mut self, row: usize) -> bool {
+        if row >= self.files.len() {
+            return false;
+        }
+        self.select_and_load(row, false);
+        true
+    }
+
+    pub fn test_force_load_selected_list_preview_for_play(&mut self) -> bool {
+        self.force_load_selected_list_preview_for_play()
     }
 
     pub fn test_sort_key_name(&self) -> &'static str {

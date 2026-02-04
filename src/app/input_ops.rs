@@ -30,11 +30,23 @@ impl super::WavesPreviewer {
         if !search_focused {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
                 // Keep preview audio/overlay when toggling playback.
-                self.audio.toggle_play();
+                // In list view, if preview decode is still pending, request play once ready.
+                if self.active_tab.is_none() && self.list_preview_rx.is_some() {
+                    if self.force_load_selected_list_preview_for_play() {
+                        self.audio.toggle_play();
+                    } else {
+                        self.list_play_pending = true;
+                    }
+                } else {
+                    self.audio.toggle_play();
+                }
             }
         }
 
-        if !wants_kb {
+        let allow_list_shortcuts = self.active_tab.is_none() && !search_focused;
+        // Keep list shortcuts responsive even when the list currently owns keyboard focus.
+        let allow_volume_shortcuts = !search_focused && (self.active_tab.is_none() || !wants_kb);
+        if allow_volume_shortcuts {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::A)) {
                 self.adjust_volume_db(-1.0);
             }
@@ -151,7 +163,7 @@ impl super::WavesPreviewer {
             }
         }
 
-        if self.active_tab.is_none() && !wants_kb {
+        if allow_list_shortcuts {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
                 self.auto_play_list_nav = !self.auto_play_list_nav;
             }

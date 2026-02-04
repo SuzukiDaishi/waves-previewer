@@ -16,6 +16,10 @@ use mp4::{
 
 use crate::audio::AudioEngine;
 use crate::audio_io;
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction as RubatoWindowFunction,
+};
 use signalsmith_stretch::Stretch;
 
 pub fn decode_wav_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
@@ -32,6 +36,144 @@ pub fn decode_wav_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
 
 pub fn decode_wav_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
     audio_io::decode_audio_multi_prefix(path, max_secs)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WavBitDepth {
+    Pcm16,
+    Pcm24,
+    Float32,
+}
+
+impl WavBitDepth {
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Pcm16 => "16bit",
+            Self::Pcm24 => "24bit",
+            Self::Float32 => "32float",
+        }
+    }
+
+    pub fn bits_per_sample(self) -> u16 {
+        match self {
+            Self::Pcm16 => 16,
+            Self::Pcm24 => 24,
+            Self::Float32 => 32,
+        }
+    }
+
+    pub fn project_value(self) -> &'static str {
+        match self {
+            Self::Pcm16 => "pcm16",
+            Self::Pcm24 => "pcm24",
+            Self::Float32 => "float32",
+        }
+    }
+
+    pub fn from_project_value(value: &str) -> Option<Self> {
+        match value {
+            "pcm16" => Some(Self::Pcm16),
+            "pcm24" => Some(Self::Pcm24),
+            "float32" => Some(Self::Float32),
+            _ => None,
+        }
+    }
+}
+
+fn quantize_sample(sample: f32, depth: WavBitDepth) -> f32 {
+    let sample = sample.clamp(-1.0, 1.0);
+    match depth {
+        WavBitDepth::Pcm16 => {
+            let max_abs = i16::MAX as f32;
+            ((sample * max_abs).round().clamp(-max_abs, max_abs)) / max_abs
+        }
+        WavBitDepth::Pcm24 => {
+            let max_abs = 8_388_607.0f32;
+            ((sample * max_abs).round().clamp(-max_abs, max_abs)) / max_abs
+        }
+        WavBitDepth::Float32 => sample,
+    }
+}
+
+pub fn quantize_mono_in_place(samples: &mut [f32], depth: WavBitDepth) {
+    if matches!(depth, WavBitDepth::Float32) {
+        for v in samples.iter_mut() {
+            *v = v.clamp(-1.0, 1.0);
+        }
+        return;
+    }
+    for v in samples.iter_mut() {
+        *v = quantize_sample(*v, depth);
+    }
+}
+
+pub fn quantize_channels_in_place(channels: &mut [Vec<f32>], depth: WavBitDepth) {
+    for ch in channels.iter_mut() {
+        quantize_mono_in_place(ch, depth);
+    }
+}
+
+fn write_wav_range_with_depth(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    range: (usize, usize),
+    dst: &Path,
+    depth: WavBitDepth,
+) -> Result<()> {
+    let ch = chans.len() as u16;
+    let (mut s, mut e) = range;
+    if s > e {
+        std::mem::swap(&mut s, &mut e);
+    }
+    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    let s = s.min(frames);
+    let e = e.min(frames);
+    let spec = match depth {
+        WavBitDepth::Pcm16 => hound::WavSpec {
+            channels: ch,
+            sample_rate: sample_rate.max(1),
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+        WavBitDepth::Pcm24 => hound::WavSpec {
+            channels: ch,
+            sample_rate: sample_rate.max(1),
+            bits_per_sample: 24,
+            sample_format: hound::SampleFormat::Int,
+        },
+        WavBitDepth::Float32 => hound::WavSpec {
+            channels: ch,
+            sample_rate: sample_rate.max(1),
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    };
+    let mut writer = hound::WavWriter::create(dst, spec)?;
+    for i in s..e {
+        for ci in 0..(ch as usize) {
+            let v = chans
+                .get(ci)
+                .and_then(|c| c.get(i))
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(-1.0, 1.0);
+            match depth {
+                WavBitDepth::Pcm16 => {
+                    writer.write_sample::<i16>((v * i16::MAX as f32).round() as i16)?;
+                }
+                WavBitDepth::Pcm24 => {
+                    let max_abs = 8_388_607.0f32;
+                    let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
+                    writer.write_sample::<i32>(q)?;
+                }
+                WavBitDepth::Float32 => {
+                    writer.write_sample::<f32>(v)?;
+                }
+            }
+        }
+    }
+    writer.finalize()?;
+    Ok(())
 }
 
 pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
@@ -61,6 +203,100 @@ pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
         out.push(v);
     }
     out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResampleQuality {
+    Fast,
+    Good,
+    Best,
+}
+
+fn resample_with_rubato(
+    mono: &[f32],
+    in_sr: u32,
+    out_sr: u32,
+    params: SincInterpolationParameters,
+    chunk_size: usize,
+) -> Result<Vec<f32>> {
+    let ratio = out_sr as f64 / in_sr as f64;
+    let expected_len = ((mono.len() as f64) * ratio).round().max(0.0) as usize;
+    let mut resampler = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk_size.max(32), 1)
+        .map_err(|e| anyhow::anyhow!("rubato init failed: {e}"))?;
+    let in_frames = resampler.input_frames_next().max(1);
+    let mut out = Vec::with_capacity(expected_len.saturating_add(in_frames));
+    let mut pos = 0usize;
+    while pos + in_frames <= mono.len() {
+        let chunk = vec![mono[pos..pos + in_frames].to_vec()];
+        let processed = resampler
+            .process(&chunk, None)
+            .map_err(|e| anyhow::anyhow!("rubato process failed: {e}"))?;
+        if let Some(ch) = processed.get(0) {
+            out.extend_from_slice(ch);
+        }
+        pos += in_frames;
+    }
+    if pos < mono.len() {
+        let tail = vec![mono[pos..].to_vec()];
+        let processed = resampler
+            .process_partial(Some(&tail), None)
+            .map_err(|e| anyhow::anyhow!("rubato process tail failed: {e}"))?;
+        if let Some(ch) = processed.get(0) {
+            out.extend_from_slice(ch);
+        }
+    }
+    for _ in 0..4 {
+        let flushed = resampler
+            .process_partial::<Vec<f32>>(None, None)
+            .map_err(|e| anyhow::anyhow!("rubato flush failed: {e}"))?;
+        let Some(ch) = flushed.get(0) else {
+            break;
+        };
+        if ch.is_empty() {
+            break;
+        }
+        out.extend_from_slice(ch);
+        if expected_len > 0 && out.len() >= expected_len {
+            break;
+        }
+    }
+    if expected_len > 0 && out.len() > expected_len {
+        out.truncate(expected_len);
+    }
+    Ok(out)
+}
+
+pub fn resample_quality(
+    mono: &[f32],
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResampleQuality,
+) -> Vec<f32> {
+    if in_sr == out_sr || mono.is_empty() || in_sr == 0 || out_sr == 0 {
+        return mono.to_vec();
+    }
+    let (sinc_len, f_cutoff, oversampling_factor, interpolation, chunk_size) = match quality {
+        ResampleQuality::Fast => (64, 0.90, 64, SincInterpolationType::Linear, 1024),
+        ResampleQuality::Good => (128, 0.94, 128, SincInterpolationType::Quadratic, 1024),
+        ResampleQuality::Best => (256, 0.96, 256, SincInterpolationType::Cubic, 2048),
+    };
+    let params = SincInterpolationParameters {
+        sinc_len,
+        f_cutoff,
+        oversampling_factor,
+        interpolation,
+        window: RubatoWindowFunction::BlackmanHarris2,
+    };
+    match resample_with_rubato(mono, in_sr, out_sr, params, chunk_size) {
+        Ok(out) if !out.is_empty() => out,
+        _ => resample_linear(mono, in_sr, out_sr),
+    }
+}
+
+pub fn convert_wav_bit_depth(src: &Path, dst: &Path, depth: WavBitDepth) -> Result<()> {
+    let (chans, in_sr) = decode_wav_multi(src)?;
+    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    write_wav_range_with_depth(&chans, in_sr, (0, frames), dst, depth)
 }
 
 fn mixdown_channels_mono(chans: &[Vec<f32>]) -> Vec<f32> {
@@ -243,11 +479,20 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
 
 // High level helper used by UI when a file is clicked
 pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>) -> Result<()> {
+    prepare_for_playback_quality(path, audio, out_waveform, ResampleQuality::Good)
+}
+
+pub fn prepare_for_playback_quality(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    quality: ResampleQuality,
+) -> Result<()> {
     let (mut chans, in_sr) = decode_wav_multi(path)?;
     let out_sr = audio.shared.out_sample_rate;
     if in_sr != out_sr {
         for c in chans.iter_mut() {
-            *c = resample_linear(c, in_sr, out_sr);
+            *c = resample_quality(c, in_sr, out_sr, quality);
         }
     }
     let mono = mixdown_channels_mono(&chans);
@@ -258,11 +503,20 @@ pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut
 }
 
 pub fn prepare_for_list_preview(path: &Path, audio: &AudioEngine, max_secs: f32) -> Result<bool> {
+    prepare_for_list_preview_quality(path, audio, max_secs, ResampleQuality::Good)
+}
+
+pub fn prepare_for_list_preview_quality(
+    path: &Path,
+    audio: &AudioEngine,
+    max_secs: f32,
+    quality: ResampleQuality,
+) -> Result<bool> {
     let (mut chans, in_sr, truncated) = decode_wav_multi_prefix(path, max_secs)?;
     let out_sr = audio.shared.out_sample_rate;
     if in_sr != out_sr {
         for c in chans.iter_mut() {
-            *c = resample_linear(c, in_sr, out_sr);
+            *c = resample_quality(c, in_sr, out_sr, quality);
         }
     }
     audio.set_samples_channels(chans);
@@ -272,8 +526,18 @@ pub fn prepare_for_list_preview(path: &Path, audio: &AudioEngine, max_secs: f32)
 
 // Prepare with Speed mode (rate change without pitch preservation)
 pub fn prepare_for_speed(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, _rate: f32) -> Result<()> {
+    prepare_for_speed_quality(path, audio, out_waveform, _rate, ResampleQuality::Good)
+}
+
+pub fn prepare_for_speed_quality(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    _rate: f32,
+    quality: ResampleQuality,
+) -> Result<()> {
     // playback rate is applied in the audio engine; here we just set the base buffer
-    prepare_for_playback(path, audio, out_waveform)
+    prepare_for_playback_quality(path, audio, out_waveform, quality)
 }
 
 // Prepare with PitchShift mode (preserve duration, shift pitch in semitones)
@@ -713,35 +977,41 @@ fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
 // Export a selection from in-memory multi-channel samples (float32) to a WAV file.
 #[allow(dead_code)]
 pub fn export_selection_wav(chans: &[Vec<f32>], sample_rate: u32, range: (usize,usize), dst: &Path) -> Result<()> {
-    let ch = chans.len() as u16;
-    let (mut s, mut e) = range;
-    if s > e { std::mem::swap(&mut s, &mut e); }
-    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
-    let s = s.min(frames);
-    let e = e.min(frames);
-    let mut writer = hound::WavWriter::create(dst, hound::WavSpec{
-        channels: ch,
-        sample_rate: sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    })?;
-    for i in s..e {
-        for ci in 0..(ch as usize) {
-            let v = chans.get(ci).and_then(|c| c.get(i)).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-            writer.write_sample::<f32>(v)?;
-        }
-    }
-    writer.finalize()?;
-    Ok(())
+    export_selection_wav_with_depth(chans, sample_rate, range, dst, None)
+}
+
+pub fn export_selection_wav_with_depth(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    range: (usize, usize),
+    dst: &Path,
+    depth: Option<WavBitDepth>,
+) -> Result<()> {
+    write_wav_range_with_depth(
+        chans,
+        sample_rate,
+        range,
+        dst,
+        depth.unwrap_or(WavBitDepth::Float32),
+    )
 }
 
 // Export full in-memory audio to a supported format (wav/mp3/m4a) based on dst extension.
 pub fn export_channels_audio(chans: &[Vec<f32>], sample_rate: u32, dst: &Path) -> Result<()> {
+    export_channels_audio_with_depth(chans, sample_rate, dst, None)
+}
+
+pub fn export_channels_audio_with_depth(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    dst: &Path,
+    wav_depth: Option<WavBitDepth>,
+) -> Result<()> {
     let ext = dst.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     match ext.as_str() {
         "wav" => {
             let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
-            export_selection_wav(chans, sample_rate, (0, len), dst)
+            export_selection_wav_with_depth(chans, sample_rate, (0, len), dst, wav_depth)
         }
         "mp3" => {
             let data = encode_mp3(chans, sample_rate)?;
@@ -760,6 +1030,16 @@ pub fn overwrite_audio_from_channels(
     src: &Path,
     backup: bool,
 ) -> Result<()> {
+    overwrite_audio_from_channels_with_depth(chans, sample_rate, src, backup, None)
+}
+
+pub fn overwrite_audio_from_channels_with_depth(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    src: &Path,
+    backup: bool,
+    wav_depth: Option<WavBitDepth>,
+) -> Result<()> {
     use std::fs;
     let parent = src.parent().unwrap_or_else(|| Path::new("."));
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
@@ -767,7 +1047,7 @@ pub fn overwrite_audio_from_channels(
     if tmp.exists() {
         let _ = fs::remove_file(&tmp);
     }
-    export_channels_audio(chans, sample_rate, &tmp)?;
+    export_channels_audio_with_depth(chans, sample_rate, &tmp, wav_depth)?;
     if backup {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
         let bak = src.with_file_name(format!("{}.bak", fname));

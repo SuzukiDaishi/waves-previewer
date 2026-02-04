@@ -453,6 +453,185 @@ mod kittest_suite {
     }
 
     #[test]
+    fn list_shortcut_p_toggles_auto_play() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let before = harness.state().test_auto_play_list_nav();
+        harness.key_press(Key::P);
+        harness.run_steps(2);
+        let after = harness.state().test_auto_play_list_nav();
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn list_shortcut_a_d_adjust_volume() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let base = harness.state().test_volume_db();
+        harness.key_press(Key::A);
+        harness.run_steps(1);
+        let down = harness.state().test_volume_db();
+        assert!(down < base);
+        harness.key_press(Key::D);
+        harness.run_steps(1);
+        let up = harness.state().test_volume_db();
+        assert!(up > down);
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn list_navigation_timing_metrics() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        select_first_row(&mut harness);
+        let steps = 120usize;
+        let start = Instant::now();
+        for _ in 0..steps {
+            harness.key_press(Key::ArrowDown);
+            harness.run_steps(1);
+        }
+        let elapsed = start.elapsed();
+        let per_ms = elapsed.as_secs_f64() * 1000.0 / steps as f64;
+        eprintln!(
+            "list_navigation_timing_metrics: steps={} total_ms={:.2} per_step_ms={:.2}",
+            steps,
+            elapsed.as_secs_f64() * 1000.0,
+            per_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn list_select_and_load_call_timing_metrics() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let rows = harness.state().files.len();
+        let steps = 120usize.min(rows.saturating_sub(1));
+        let start = Instant::now();
+        for i in 0..steps {
+            let row = (i + 1).min(rows.saturating_sub(1));
+            assert!(harness.state_mut().test_select_and_load_row(row));
+        }
+        let elapsed = start.elapsed();
+        let per_ms = elapsed.as_secs_f64() * 1000.0 / steps.max(1) as f64;
+        eprintln!(
+            "list_select_and_load_call_timing_metrics: steps={} total_ms={:.2} per_call_ms={:.2}",
+            steps,
+            elapsed.as_secs_f64() * 1000.0,
+            per_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn list_idle_frame_timing_metrics() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let steps = 120usize;
+        let start = Instant::now();
+        for _ in 0..steps {
+            harness.run_steps(1);
+        }
+        let elapsed = start.elapsed();
+        let per_ms = elapsed.as_secs_f64() * 1000.0 / steps as f64;
+        eprintln!(
+            "list_idle_frame_timing_metrics: steps={} total_ms={:.2} per_frame_ms={:.2}",
+            steps,
+            elapsed.as_secs_f64() * 1000.0,
+            per_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn list_sync_decode_timing_reference() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let rows = harness.state().files.len();
+        let steps = 32usize.min(rows.saturating_sub(1));
+        let start = Instant::now();
+        for i in 0..steps {
+            let row = (i + 1).min(rows.saturating_sub(1));
+            assert!(harness.state_mut().test_select_and_load_row(row));
+            let _ = harness.state_mut().test_force_load_selected_list_preview_for_play();
+        }
+        let elapsed = start.elapsed();
+        let per_ms = elapsed.as_secs_f64() * 1000.0 / steps.max(1) as f64;
+        eprintln!(
+            "list_sync_decode_timing_reference: steps={} total_ms={:.2} per_call_ms={:.2}",
+            steps,
+            elapsed.as_secs_f64() * 1000.0,
+            per_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn list_autoplay_ready_timing_metrics() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        select_first_row(&mut harness);
+        harness.run_steps(2);
+
+        let rows = harness.state().files.len();
+        let steps = 48usize.min(rows.saturating_sub(1));
+        if steps == 0 {
+            eprintln!("list_autoplay_ready_timing_metrics: skipped (not enough rows)");
+            return;
+        }
+
+        let mut lat_ms: Vec<f64> = Vec::new();
+        let mut timeouts = 0usize;
+        for _ in 0..steps {
+            harness.key_press(Key::ArrowDown);
+            let start = Instant::now();
+            let mut ready = false;
+            for _ in 0..120 {
+                harness.run_steps(1);
+                let state = harness.state();
+                let selected = state.test_selected_path().cloned();
+                let playing = state.test_playing_path().cloned();
+                if selected.is_some()
+                    && selected == playing
+                    && state.test_audio_is_playing()
+                    && state.test_audio_has_samples()
+                {
+                    ready = true;
+                    break;
+                }
+            }
+            if ready {
+                lat_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+            } else {
+                timeouts = timeouts.saturating_add(1);
+            }
+        }
+
+        lat_ms.sort_by(|a, b| a.total_cmp(b));
+        let avg = if lat_ms.is_empty() {
+            0.0
+        } else {
+            lat_ms.iter().sum::<f64>() / lat_ms.len() as f64
+        };
+        let p95 = if lat_ms.is_empty() {
+            0.0
+        } else {
+            lat_ms[((lat_ms.len() - 1) * 95) / 100]
+        };
+        let max = lat_ms.last().copied().unwrap_or(0.0);
+        eprintln!(
+            "list_autoplay_ready_timing_metrics: steps={} measured={} timeouts={} avg_ms={:.2} p95_ms={:.2} max_ms={:.2}",
+            steps,
+            lat_ms.len(),
+            timeouts,
+            avg,
+            p95,
+            max
+        );
+    }
+
+    #[test]
     fn arrow_down_moves_selection() {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);

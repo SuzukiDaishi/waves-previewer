@@ -72,6 +72,24 @@ impl Drop for MetaPool {
 }
 
 fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
+    fn quick_peak_db(path: &PathBuf) -> Option<f32> {
+        let (mono, _sr, _truncated, _decode_errors) =
+            audio_io::decode_audio_mono_prefix_with_errors(path, 0.25).ok()?;
+        let mut peak_abs = 0.0f32;
+        for &v in &mono {
+            let a = v.abs();
+            if a > peak_abs {
+                peak_abs = a;
+            }
+        }
+        let silent_thresh = 10.0_f32.powf(-80.0 / 20.0);
+        Some(if peak_abs > silent_thresh {
+            20.0 * peak_abs.log10()
+        } else {
+            f32::NEG_INFINITY
+        })
+    }
+
     match audio_io::read_audio_info(path) {
         Ok(info) => Ok(FileMeta {
             channels: info.channels,
@@ -80,7 +98,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             bit_rate_bps: info.bit_rate_bps,
             duration_secs: info.duration_secs,
             rms_db: None,
-            peak_db: None,
+            peak_db: quick_peak_db(path),
             lufs_i: None,
             bpm: audio_io::read_audio_bpm(path),
             created_at: info.created_at,

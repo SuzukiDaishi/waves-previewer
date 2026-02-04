@@ -65,6 +65,7 @@ impl super::WavesPreviewer {
             out_sr: u32,
             target_sr: u32,
             file_sr: u32,
+            wav_bit_depth: Option<crate::wave::WavBitDepth>,
             max_file_samples: Option<u64>,
             markers: Vec<crate::markers::MarkerEntry>,
             loop_region: Option<(usize, usize)>,
@@ -169,17 +170,24 @@ impl super::WavesPreviewer {
                 let mut ch_samples: Option<Vec<Vec<f32>>> = None;
                 let mut max_file_samples: Option<u64> = None;
                 let sr_override = self.sample_rate_override.get(&p).copied();
+                let bit_override = self.bit_depth_override.get(&p).copied();
                 if let Some(tab) = self.tabs.iter().find(|t| t.path.as_path() == p.as_path()) {
                     dirty_audio = tab.dirty;
                     markers_dirty = tab.markers_dirty;
                     loop_markers_dirty = tab.loop_markers_dirty;
                     markers = tab.markers_committed.clone();
                     loop_region = tab.loop_region_committed;
-                    if dirty_audio || markers_dirty || loop_markers_dirty || sr_override.is_some() {
+                    if dirty_audio
+                        || markers_dirty
+                        || loop_markers_dirty
+                        || sr_override.is_some()
+                        || bit_override.is_some()
+                    {
                         let needs_audio = cfg.save_mode == SaveMode::NewFile
                             || dirty_audio
                             || db.abs() > 0.0001
-                            || sr_override.is_some();
+                            || sr_override.is_some()
+                            || bit_override.is_some();
                         if needs_audio {
                             ch_samples = Some(tab.ch_samples.clone());
                             let target_sr = sr_override.unwrap_or(out_sr);
@@ -201,11 +209,17 @@ impl super::WavesPreviewer {
                     loop_markers_dirty = cached.loop_markers_dirty;
                     markers = cached.markers_committed.clone();
                     loop_region = cached.loop_region_committed;
-                    if dirty_audio || markers_dirty || loop_markers_dirty || sr_override.is_some() {
+                    if dirty_audio
+                        || markers_dirty
+                        || loop_markers_dirty
+                        || sr_override.is_some()
+                        || bit_override.is_some()
+                    {
                         let needs_audio = cfg.save_mode == SaveMode::NewFile
                             || dirty_audio
                             || db.abs() > 0.0001
-                            || sr_override.is_some();
+                            || sr_override.is_some()
+                            || bit_override.is_some();
                         if needs_audio {
                             ch_samples = Some(cached.ch_samples.clone());
                             let target_sr = sr_override.unwrap_or(out_sr);
@@ -223,12 +237,17 @@ impl super::WavesPreviewer {
                     }
                 }
                 let has_edits =
-                    dirty_audio || markers_dirty || loop_markers_dirty || sr_override.is_some();
+                    dirty_audio
+                        || markers_dirty
+                        || loop_markers_dirty
+                        || sr_override.is_some()
+                        || bit_override.is_some();
                 if has_edits {
                     let write_audio = cfg.save_mode == SaveMode::NewFile
                         || dirty_audio
                         || db.abs() > 0.0001
-                        || sr_override.is_some();
+                        || sr_override.is_some()
+                        || bit_override.is_some();
                     let audio = ch_samples.map(crate::audio::AudioBuffer::from_channels).map(
                         std::sync::Arc::new,
                     );
@@ -248,6 +267,7 @@ impl super::WavesPreviewer {
                         out_sr,
                         target_sr,
                         file_sr,
+                        wav_bit_depth: bit_override,
                         max_file_samples,
                         markers,
                         loop_region,
@@ -285,6 +305,7 @@ impl super::WavesPreviewer {
             })
             .collect::<Vec<_>>();
         let edit_jobs = edit_tasks;
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
             let mut ok = 0usize;
@@ -473,19 +494,30 @@ impl super::WavesPreviewer {
                     }
                     if src_sr != task.target_sr {
                         for ch in channels.iter_mut() {
-                            *ch = crate::wave::resample_linear(ch, src_sr, task.target_sr);
+                            *ch = crate::wave::resample_quality(
+                                ch,
+                                src_sr,
+                                task.target_sr,
+                                resample_quality,
+                            );
                         }
                     }
                     let res = match save_mode {
-                        SaveMode::Overwrite => crate::wave::overwrite_audio_from_channels(
+                        SaveMode::Overwrite => {
+                            crate::wave::overwrite_audio_from_channels_with_depth(
+                                &channels,
+                                task.target_sr,
+                                &dst,
+                                cfg.backup_bak,
+                                task.wav_bit_depth,
+                            )
+                        }
+                        SaveMode::NewFile => crate::wave::export_channels_audio_with_depth(
                             &channels,
                             task.target_sr,
                             &dst,
-                            cfg.backup_bak,
+                            task.wav_bit_depth,
                         ),
-                        SaveMode::NewFile => {
-                            crate::wave::export_channels_audio(&channels, task.target_sr, &dst)
-                        }
                     };
                     if res.is_err() {
                         failed += 1;
@@ -558,7 +590,12 @@ impl super::WavesPreviewer {
                 let mut out_sr = sr.max(1);
                 if out_sr != target_sr.max(1) {
                     for ch in channels.iter_mut() {
-                        *ch = crate::wave::resample_linear(ch, out_sr, target_sr.max(1));
+                        *ch = crate::wave::resample_quality(
+                            ch,
+                            out_sr,
+                            target_sr.max(1),
+                            resample_quality,
+                        );
                     }
                     out_sr = target_sr.max(1);
                 }
@@ -592,6 +629,48 @@ impl super::WavesPreviewer {
         });
     }
 
+    pub(super) fn spawn_convert_bits_selected(
+        &mut self,
+        paths: Vec<PathBuf>,
+        depth: crate::wave::WavBitDepth,
+    ) {
+        let mut targets: Vec<PathBuf> = Vec::new();
+        for p in paths {
+            let is_wav = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false);
+            if p.is_file() && is_wav {
+                targets.push(p);
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let before = self.capture_list_selection_snapshot();
+        let before_items = self.capture_list_undo_items_by_paths(&targets);
+        for p in &targets {
+            let file_bits = self
+                .meta_for_path(p)
+                .map(|m| m.bits_per_sample)
+                .filter(|v| *v > 0)
+                .or_else(|| {
+                    crate::audio_io::read_audio_info(p)
+                        .ok()
+                        .map(|info| info.bits_per_sample)
+                })
+                .unwrap_or(0);
+            if file_bits == depth.bits_per_sample() {
+                self.bit_depth_override.remove(p);
+            } else {
+                self.bit_depth_override.insert(p.clone(), depth);
+            }
+        }
+        self.record_list_update_from_paths(&targets, before_items, before);
+        self.refresh_audio_after_sample_rate_change(&targets);
+    }
+
     pub(super) fn drain_export_results(&mut self, ctx: &egui::Context) {
         let Some(state) = &self.export_state else {
             return;
@@ -605,6 +684,7 @@ impl super::WavesPreviewer {
                     self.set_pending_gain_db_for_path(p, 0.0);
                     self.lufs_override.remove(p);
                     self.sample_rate_override.remove(p);
+                    self.bit_depth_override.remove(p);
                 }
                 let success_set: std::collections::HashSet<PathBuf> =
                     res.success_paths.iter().cloned().collect();
@@ -625,8 +705,10 @@ impl super::WavesPreviewer {
                     self.set_pending_gain_db_for_path(src, 0.0);
                     self.lufs_override.remove(src);
                     self.sample_rate_override.remove(src);
+                    self.bit_depth_override.remove(src);
                     self.replace_path_in_state(src, dst);
                     self.sample_rate_override.remove(dst);
+                    self.bit_depth_override.remove(dst);
                 }
                 match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                     SaveMode::Overwrite => {

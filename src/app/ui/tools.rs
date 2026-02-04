@@ -203,7 +203,9 @@ impl crate::app::WavesPreviewer {
         let Some(job) = self.pending_tool_confirm.clone() else {
             return;
         };
+        let mut open = true;
         egui::Window::new("Confirm Tool Command")
+            .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -229,5 +231,8 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+        if !open {
+            self.pending_tool_confirm = None;
+        }
     }
 }

@@ -31,6 +31,7 @@ impl WavesPreviewer {
     fn apply_startup_external(&mut self, cfg: &super::StartupConfig) {
         let mut source_path = cfg.external_path.clone();
         self.external_load_queue.clear();
+        self.pending_external_restore = None;
         if cfg.external_dummy_merge {
             let rows = cfg.external_dummy_rows.unwrap_or(6);
             let cols = cfg.external_dummy_cols.max(2);
@@ -42,7 +43,10 @@ impl WavesPreviewer {
                 self.external_load_error = Some(err);
             } else {
                 source_path = Some(path_a);
-                self.external_load_queue.push_back(path_b);
+                self.queue_external_load_with_current_settings(
+                    path_b,
+                    crate::app::external_ops::ExternalLoadTarget::New,
+                );
             }
         } else if let Some(rows) = cfg.external_dummy_rows {
             let path = cfg
@@ -97,8 +101,8 @@ impl WavesPreviewer {
             self.show_external_dialog = true;
         }
         self.external_settings_dirty = false;
-        self.external_load_target =
-            Some(crate::app::external_ops::ExternalLoadTarget::New);
+        self.external_load_error = None;
+        self.external_load_target = Some(crate::app::external_ops::ExternalLoadTarget::New);
         self.begin_external_load(path);
     }
 

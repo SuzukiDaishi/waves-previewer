@@ -5,7 +5,9 @@ impl crate::app::WavesPreviewer {
         if !self.show_external_dialog {
             return;
         }
+        let mut open = self.show_external_dialog;
         egui::Window::new("External Data")
+            .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -44,6 +46,8 @@ impl crate::app::WavesPreviewer {
                     {
                         if let Some(path) = self.pick_external_file_dialog() {
                             self.external_load_queue.clear();
+                            self.pending_external_restore = None;
+                            self.external_load_error = None;
                             self.external_load_target =
                                 Some(crate::app::external_ops::ExternalLoadTarget::New);
                             self.external_sheet_selected = None;
@@ -64,6 +68,8 @@ impl crate::app::WavesPreviewer {
                                 Some(crate::app::external_ops::ExternalLoadTarget::Reload(idx));
                         }
                         if let Some(path) = self.external_source.clone() {
+                            self.pending_external_restore = None;
+                            self.external_load_error = None;
                             self.begin_external_load(path);
                         }
                     }
@@ -93,9 +99,6 @@ impl crate::app::WavesPreviewer {
                         .clicked()
                     {
                         self.clear_external_data();
-                    }
-                    if ui.button("Close").clicked() {
-                        self.show_external_dialog = false;
                     }
                 });
                 if self.external_load_inflight {
@@ -211,6 +214,8 @@ impl crate::app::WavesPreviewer {
                                         Some(crate::app::external_ops::ExternalLoadTarget::Reload(idx));
                                 }
                                 if let Some(path) = self.external_source.clone() {
+                                    self.pending_external_restore = None;
+                                    self.external_load_error = None;
                                     self.begin_external_load(path);
                                 }
                             }
@@ -393,5 +398,6 @@ impl crate::app::WavesPreviewer {
                     self.external_match_count, self.external_unmatched_count
                 ));
             });
+        self.show_external_dialog = open;
     }
 }

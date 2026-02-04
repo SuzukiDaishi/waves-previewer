@@ -61,6 +61,15 @@ impl WavesPreviewer {
             .filter(|v| *v > 0)
     }
 
+    pub(super) fn effective_bits_for_path(&self, path: &Path) -> Option<u16> {
+        self.bit_depth_override
+            .get(path)
+            .copied()
+            .map(|v| v.bits_per_sample())
+            .or_else(|| self.meta_for_path(path).map(|m| m.bits_per_sample))
+            .filter(|v| *v > 0)
+    }
+
     pub(super) fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         if let Some(item) = self.item_for_path_mut(path) {
@@ -266,6 +275,10 @@ impl WavesPreviewer {
                 return;
             }
             state.autoplay_when_ready = false;
+        }
+        if self.list_preview_rx.is_some() {
+            // Keep autoplay intent while async preview is still loading.
+            self.list_play_pending = true;
         }
         self.audio.play();
     }

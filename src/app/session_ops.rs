@@ -12,13 +12,48 @@ use super::project::{
     project_tab_from_tab, project_tool_state_to_tool_state, rel_path, resolve_path,
     save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio, serialize_project,
     spectro_config_from_project, tool_kind_from_str, view_mode_from_str, ProjectApp, ProjectEdit,
-    ProjectFile, ProjectList, ProjectListColumns, ProjectListItem, ProjectToolState,
+    ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectList, ProjectListColumns,
+    ProjectListItem, ProjectSampleRateOverride, ProjectBitDepthOverride, ProjectToolState,
 };
 use super::types::{LoopXfadeShape, MediaSource};
 
 pub(super) struct ProjectOpenState {
     pub started_at: Instant,
     pub shown: bool,
+}
+
+fn external_key_rule_to_project(rule: super::types::ExternalKeyRule) -> &'static str {
+    match rule {
+        super::types::ExternalKeyRule::FileName => "file",
+        super::types::ExternalKeyRule::Stem => "stem",
+        super::types::ExternalKeyRule::Regex => "regex",
+    }
+}
+
+fn external_key_rule_from_project(raw: &str) -> super::types::ExternalKeyRule {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "stem" => super::types::ExternalKeyRule::Stem,
+        "regex" => super::types::ExternalKeyRule::Regex,
+        _ => super::types::ExternalKeyRule::FileName,
+    }
+}
+
+fn external_match_input_to_project(input: super::types::ExternalRegexInput) -> &'static str {
+    match input {
+        super::types::ExternalRegexInput::FileName => "file",
+        super::types::ExternalRegexInput::Stem => "stem",
+        super::types::ExternalRegexInput::Path => "path",
+        super::types::ExternalRegexInput::Dir => "dir",
+    }
+}
+
+fn external_match_input_from_project(raw: &str) -> super::types::ExternalRegexInput {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "stem" => super::types::ExternalRegexInput::Stem,
+        "path" => super::types::ExternalRegexInput::Path,
+        "dir" => super::types::ExternalRegexInput::Dir,
+        _ => super::types::ExternalRegexInput::FileName,
+    }
 }
 
 impl super::WavesPreviewer {
@@ -108,10 +143,62 @@ impl super::WavesPreviewer {
                 });
             }
         }
+        let mut sample_rate_overrides: Vec<ProjectSampleRateOverride> = self
+            .sample_rate_override
+            .iter()
+            .filter_map(|(path, &sample_rate)| {
+                if sample_rate > 0 {
+                    Some(ProjectSampleRateOverride {
+                        path: rel_path(path, base_dir),
+                        sample_rate,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        sample_rate_overrides.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut bit_depth_overrides: Vec<ProjectBitDepthOverride> = self
+            .bit_depth_override
+            .iter()
+            .map(|(path, depth)| ProjectBitDepthOverride {
+                path: rel_path(path, base_dir),
+                bit_depth: depth.project_value().to_string(),
+            })
+            .collect();
+        bit_depth_overrides.sort_by(|a, b| a.path.cmp(&b.path));
         let list = ProjectList {
             root: self.root.as_ref().map(|p| rel_path(p, base_dir)),
             files: list_files.iter().map(|p| rel_path(p, base_dir)).collect(),
             items: list_items,
+            sample_rate_overrides,
+            bit_depth_overrides,
+        };
+        let key_column = self
+            .external_key_index
+            .and_then(|idx| self.external_headers.get(idx))
+            .cloned();
+        let external_state = ProjectExternalState {
+            sources: self
+                .external_sources
+                .iter()
+                .map(|src| ProjectExternalSource {
+                    path: rel_path(&src.path, base_dir),
+                    sheet_name: src.sheet_name.clone(),
+                    has_header: src.has_header,
+                    header_row: src.header_row,
+                    data_row: src.data_row,
+                })
+                .collect(),
+            active_source: self.external_active_source,
+            key_rule: external_key_rule_to_project(self.external_key_rule).to_string(),
+            match_input: external_match_input_to_project(self.external_match_input).to_string(),
+            match_regex: self.external_match_regex.clone(),
+            match_replace: self.external_match_replace.clone(),
+            scope_regex: self.external_scope_regex.clone(),
+            visible_columns: self.external_visible_columns.clone(),
+            show_unmatched: self.external_show_unmatched,
+            key_column,
         };
         let app = ProjectApp {
             theme: match self.theme_mode {
@@ -162,6 +249,8 @@ impl super::WavesPreviewer {
                 gain: self.list_columns.gain,
                 wave: self.list_columns.wave,
             },
+            auto_play_list_nav: self.auto_play_list_nav,
+            external_state: Some(external_state),
         };
         let spectrogram = project_spectrogram_from_cfg(&self.spectro_cfg);
 
@@ -313,10 +402,12 @@ impl super::WavesPreviewer {
 
         let project_path = path.clone();
         self.close_project();
+        self.clear_external_data();
         self.project_path = Some(project_path.clone());
 
         self.search_query = project.app.search_query.clone();
         self.search_use_regex = project.app.search_regex;
+        self.auto_play_list_nav = project.app.auto_play_list_nav;
         self.list_columns = super::types::ListColumnConfig {
             edited: project.app.list_columns.edited,
             file: project.app.list_columns.file,
@@ -377,6 +468,62 @@ impl super::WavesPreviewer {
                 list_item.pending_gain_db = item.pending_gain_db;
             }
         }
+        self.sample_rate_override.clear();
+        for override_item in project.list.sample_rate_overrides.iter() {
+            if override_item.sample_rate == 0 {
+                continue;
+            }
+            let path = resolve_path(&override_item.path, &base_dir);
+            self.sample_rate_override
+                .insert(path, override_item.sample_rate);
+        }
+        self.bit_depth_override.clear();
+        for override_item in project.list.bit_depth_overrides.iter() {
+            let Some(depth) = crate::wave::WavBitDepth::from_project_value(&override_item.bit_depth) else {
+                continue;
+            };
+            let path = resolve_path(&override_item.path, &base_dir);
+            self.bit_depth_override.insert(path, depth);
+        }
+        self.external_load_queue.clear();
+        self.pending_external_restore = None;
+        self.external_load_error = None;
+        if let Some(external_state) = project.app.external_state.as_ref() {
+            self.external_key_rule = external_key_rule_from_project(&external_state.key_rule);
+            self.external_match_input = external_match_input_from_project(&external_state.match_input);
+            self.external_match_regex = external_state.match_regex.clone();
+            self.external_match_replace = external_state.match_replace.clone();
+            self.external_scope_regex = external_state.scope_regex.clone();
+            self.external_show_unmatched = external_state.show_unmatched;
+            self.pending_external_restore = Some(super::PendingExternalRestore {
+                active_source: external_state.active_source,
+                visible_columns: external_state.visible_columns.clone(),
+                key_column: external_state.key_column.clone(),
+                show_unmatched: external_state.show_unmatched,
+            });
+            let mut missing_errors = Vec::new();
+            for source in external_state.sources.iter() {
+                let source_path = resolve_path(&source.path, &base_dir);
+                if source_path.exists() {
+                    self.queue_external_load_with_settings(
+                        source_path,
+                        source.sheet_name.clone(),
+                        source.has_header,
+                        source.header_row,
+                        source.data_row,
+                        super::external_ops::ExternalLoadTarget::New,
+                    );
+                } else {
+                    missing_errors.push(format!("Missing external source: {}", source_path.display()));
+                }
+            }
+            if !missing_errors.is_empty() {
+                self.external_load_error = Some(missing_errors.join("\n"));
+            }
+            if !self.start_next_external_load_from_queue() {
+                self.finalize_pending_external_restore();
+            }
+        }
 
         let out_sr = self.audio.shared.out_sample_rate;
         for edit in project.cached_edits.iter() {
@@ -387,7 +534,7 @@ impl super::WavesPreviewer {
             };
             if sr != out_sr {
                 for ch in chans.iter_mut() {
-                    *ch = crate::wave::resample_linear(ch, sr, out_sr);
+                    *ch = self.resample_mono_with_quality(ch, sr, out_sr);
                 }
             }
             let samples_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
@@ -444,7 +591,7 @@ impl super::WavesPreviewer {
             if let Some((mut chans, sr, _)) = edited {
                 if sr != out_sr {
                     for ch in chans.iter_mut() {
-                        *ch = crate::wave::resample_linear(ch, sr, out_sr);
+                        *ch = self.resample_mono_with_quality(ch, sr, out_sr);
                     }
                 }
                 let mut waveform = Vec::new();
@@ -529,7 +676,7 @@ impl super::WavesPreviewer {
                     if let Ok((mut chans, sr, _)) = load_sidecar_audio(&project_path, raw) {
                         if sr != out_sr {
                             for ch in chans.iter_mut() {
-                                *ch = crate::wave::resample_linear(ch, sr, out_sr);
+                                *ch = self.resample_mono_with_quality(ch, sr, out_sr);
                             }
                         }
                         let timeline_len = chans.get(0).map(|c| c.len()).unwrap_or_default();
@@ -682,6 +829,8 @@ impl super::WavesPreviewer {
                 self.external_sheet_names.clear();
                 self.external_settings_dirty = false;
                 self.external_load_queue.clear();
+                self.pending_external_restore = None;
+                self.external_load_error = None;
                 self.external_load_target = Some(external_ops::ExternalLoadTarget::New);
                 self.show_external_dialog = true;
                 self.begin_external_load(data_path);

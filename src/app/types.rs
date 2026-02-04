@@ -107,6 +107,7 @@ pub struct ListUndoItem {
     pub lufs_override: Option<f32>,
     pub lufs_deadline: Option<Instant>,
     pub sample_rate_override: Option<u32>,
+    pub bit_depth_override: Option<crate::wave::WavBitDepth>,
 }
 
 #[derive(Clone)]
@@ -197,6 +198,20 @@ pub enum RateMode {
 pub enum ThemeMode {
     Dark,
     Light,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ItemBgMode {
+    Standard,
+    Dbfs,
+    Lufs,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SrcQuality {
+    Fast,
+    Good,
+    Best,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -619,6 +634,28 @@ pub struct ListPreviewResult {
     pub path: PathBuf,
     pub channels: Vec<Vec<f32>>,
     pub job_id: u64,
+    pub is_final: bool,
+    pub settings: ListPreviewSettings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListPreviewSettings {
+    pub out_sr: u32,
+    pub target_sr: Option<u32>,
+    pub bit_depth: Option<crate::wave::WavBitDepth>,
+    pub quality: SrcQuality,
+}
+
+#[derive(Clone)]
+pub struct ListPreviewCacheEntry {
+    pub audio: Arc<AudioBuffer>,
+    pub truncated: bool,
+    pub settings: ListPreviewSettings,
+}
+
+pub struct ListPreviewPrefetchResult {
+    pub path: PathBuf,
+    pub entry: Option<ListPreviewCacheEntry>,
 }
 
 // --- Editing skeleton ---
@@ -812,6 +849,8 @@ pub struct DebugConfig {
     pub enabled: bool,
     pub log_path: Option<PathBuf>,
     pub input_trace_to_console: bool,
+    pub input_trace_enabled: bool,
+    pub event_trace_enabled: bool,
     pub auto_run: bool,
     pub auto_run_editor: bool,
     pub auto_run_pitch_shift_semitones: Option<f32>,
@@ -827,6 +866,8 @@ impl Default for DebugConfig {
             enabled: false,
             log_path: None,
             input_trace_to_console: false,
+            input_trace_enabled: false,
+            event_trace_enabled: false,
             auto_run: false,
             auto_run_editor: false,
             auto_run_pitch_shift_semitones: None,
@@ -881,6 +922,10 @@ pub struct DebugState {
     pub check_counter: u32,
     pub overlay_trace: bool,
     pub dummy_list_count: u32,
+    pub frame_last_ms: f32,
+    pub frame_peak_ms: f32,
+    pub frame_sum_ms: f64,
+    pub frame_samples: u64,
     pub started_at: Instant,
 }
 
@@ -888,15 +933,17 @@ impl DebugState {
     pub fn new(cfg: DebugConfig) -> Self {
         let show = cfg.enabled;
         let check_counter = cfg.check_interval_frames.max(1);
+        let input_trace_enabled = cfg.input_trace_enabled;
+        let event_trace_enabled = cfg.event_trace_enabled;
         Self {
             cfg,
             show_window: show,
             logs: VecDeque::new(),
             input_trace: VecDeque::new(),
-            input_trace_enabled: false,
+            input_trace_enabled,
             input_trace_max: 200,
             event_trace: VecDeque::new(),
-            event_trace_enabled: false,
+            event_trace_enabled,
             event_trace_max: 200,
             last_copy_at: None,
             last_copy_count: 0,
@@ -931,6 +978,10 @@ impl DebugState {
             check_counter,
             overlay_trace: false,
             dummy_list_count: 300000,
+            frame_last_ms: 0.0,
+            frame_peak_ms: 0.0,
+            frame_sum_ms: 0.0,
+            frame_samples: 0,
             started_at: Instant::now(),
         }
     }

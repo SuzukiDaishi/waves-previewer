@@ -391,6 +391,7 @@ impl WavesPreviewer {
         self.external_settings_dirty = false;
         self.external_load_target = None;
         self.external_load_queue.clear();
+        self.pending_external_restore = None;
         self.clear_external_unmatched_items();
         for item in &mut self.items {
             item.external.clear();

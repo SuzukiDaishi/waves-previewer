@@ -291,19 +291,24 @@ impl WavesPreviewer {
     ) {
         use std::sync::mpsc;
         let sr = self.audio.shared.out_sample_rate;
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        let bit_depth = self.bit_depth_override.get(&path).copied();
         self.heavy_preview_rx = None;
         self.heavy_preview_tool = None;
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         std::thread::spawn(move || {
-            let (mono, in_sr) = match crate::wave::decode_wav_mono(&path) {
+            let (mut mono, in_sr) = match crate::wave::decode_wav_mono(&path) {
                 Ok(v) => v,
                 Err(_) => return,
             };
-            let mono = if in_sr != sr {
-                crate::wave::resample_linear(&mono, in_sr, sr)
+            mono = if in_sr != sr {
+                crate::wave::resample_quality(&mono, in_sr, sr, resample_quality)
             } else {
                 mono
             };
+            if let Some(depth) = bit_depth {
+                crate::wave::quantize_mono_in_place(&mut mono, depth);
+            }
             let out = match tool {
                 ToolKind::PitchShift => {
                     crate::wave::process_pitchshift_offline(&mono, sr, sr, param)
@@ -378,6 +383,8 @@ impl WavesPreviewer {
         self.overlay_expected_gen = gen;
         self.overlay_expected_tool = Some(tool);
         let out_sr = self.audio.shared.out_sample_rate;
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        let bit_depth = self.bit_depth_override.get(&path).copied();
         let (tx, rx) = mpsc::channel::<(std::path::PathBuf, Vec<Vec<f32>>, usize, u64)>();
         std::thread::spawn(move || {
             let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
@@ -386,8 +393,11 @@ impl WavesPreviewer {
             };
             if in_sr != out_sr {
                 for c in chs.iter_mut() {
-                    *c = crate::wave::resample_linear(c, in_sr, out_sr);
+                    *c = crate::wave::resample_quality(c, in_sr, out_sr, resample_quality);
                 }
+            }
+            if let Some(depth) = bit_depth {
+                crate::wave::quantize_channels_in_place(&mut chs, depth);
             }
             let mut out: Vec<Vec<f32>> = Vec::with_capacity(chs.len());
             let mut result_len = 0;
