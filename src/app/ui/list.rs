@@ -84,6 +84,36 @@ impl crate::app::WavesPreviewer {
                 ui.close();
             }
         });
+        ui.menu_button("Convert Format", |ui| {
+            if ui
+                .add_enabled(has_selection, egui::Button::new("To WAV"))
+                .clicked()
+            {
+                self.spawn_convert_format_selected(selected.clone(), "wav");
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_selection, egui::Button::new("To MP3"))
+                .clicked()
+            {
+                self.spawn_convert_format_selected(selected.clone(), "mp3");
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_selection, egui::Button::new("To M4A"))
+                .clicked()
+            {
+                self.spawn_convert_format_selected(selected.clone(), "m4a");
+                ui.close();
+            }
+            if ui
+                .add_enabled(has_selection, egui::Button::new("To OGG"))
+                .clicked()
+            {
+                self.spawn_convert_format_selected(selected.clone(), "ogg");
+                ui.close();
+            }
+        });
         if ui
             .add_enabled(has_selection, egui::Button::new("Remove from List"))
             .clicked()
@@ -700,13 +730,61 @@ impl crate::app::WavesPreviewer {
                             missing_paths.push(path_owned.clone());
                             return;
                         }
+                        let large_bg_list =
+                            self.item_bg_mode != crate::app::types::ItemBgMode::Standard
+                                && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD;
+                        let near_selected = self
+                            .selected
+                            .map(|sel| sel.abs_diff(row_idx) <= 2)
+                            .unwrap_or(false);
                         if !is_virtual {
-                            self.queue_meta_for_path(&path_owned, true);
-                            self.queue_transcript_for_path(&path_owned, true);
+                            if large_bg_list {
+                                self.queue_header_meta_for_path(&path_owned, near_selected);
+                                self.queue_transcript_for_path(&path_owned, near_selected);
+                            } else {
+                                self.queue_meta_for_path(&path_owned, true);
+                                self.queue_transcript_for_path(&path_owned, true);
+                            }
                         }
                         let Some(item) = self.item_for_id(id).cloned() else {
                             return;
                         };
+                        if !is_virtual {
+                            let needs_bg_full = match self.item_bg_mode {
+                                crate::app::types::ItemBgMode::Standard => false,
+                                crate::app::types::ItemBgMode::Dbfs => item
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|m| m.peak_db)
+                                    .is_none(),
+                                crate::app::types::ItemBgMode::Lufs => {
+                                    if self.lufs_override.contains_key(&path_owned) {
+                                        false
+                                    } else {
+                                        item.meta
+                                            .as_ref()
+                                            .and_then(|m| m.lufs_i)
+                                            .is_none()
+                                    }
+                                }
+                            };
+                            let needs_wave_meta = cols.wave
+                                && item
+                                    .meta
+                                    .as_ref()
+                                    .map(|m| m.thumb.is_empty() && m.decode_error.is_none())
+                                    .unwrap_or(true);
+                            let needs_lufs_meta = cols.lufs
+                                && !self.lufs_override.contains_key(&path_owned)
+                                && item
+                                    .meta
+                                    .as_ref()
+                                    .and_then(|m| m.lufs_i)
+                                    .is_none();
+                            if needs_bg_full || needs_wave_meta || needs_lufs_meta {
+                                self.queue_full_meta_for_path(&path_owned, near_selected);
+                            }
+                        }
                         let is_selected = self.selected_multi.contains(&row_idx);
                         row.set_selected(is_selected);
                         let row_base_bg = ctx.style().visuals.faint_bg_color;
@@ -754,9 +832,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 if is_dirty {
                                     ui.label(
                                         RichText::new("\u{25CF}")
@@ -771,9 +847,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let cell_resp = self.attach_row_context_menu(
                                     ui.interact(
                                         ui.max_rect(),
@@ -824,9 +898,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let cell_resp = self.attach_row_context_menu(
                                     ui.interact(
                                         ui.max_rect(),
@@ -880,9 +952,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let cell_resp = self.attach_row_context_menu(
                                     ui.interact(
                                         ui.max_rect(),
@@ -941,9 +1011,7 @@ impl crate::app::WavesPreviewer {
                                     if let Some(bg) = row_bg {
                                         ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                     }
-                                    if let Some(fg) = row_fg {
-                                        ui.visuals_mut().override_text_color = Some(fg);
-                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
                                     let cell_resp = self.attach_row_context_menu(
                                         ui.interact(
                                             ui.max_rect(),
@@ -988,9 +1056,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let secs = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.duration_secs)
@@ -1017,9 +1083,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let ch = self
                                     .meta_for_path(&path_owned)
                                     .map(|m| m.channels)
@@ -1047,9 +1111,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let sr = self.effective_sample_rate_for_path(&path_owned);
                                 let resp = ui
                                     .add(
@@ -1074,9 +1136,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let bits = self.effective_bits_for_path(&path_owned);
                                 let resp = ui
                                     .add(
@@ -1101,9 +1161,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let br = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.bit_rate_bps)
@@ -1128,9 +1186,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::click(),
@@ -1163,9 +1219,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let base = self.meta_for_path(&path_owned).and_then(|m| m.lufs_i);
                                 let gain_db = self.pending_gain_db_for_path(&path_owned);
                                 let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
@@ -1202,9 +1256,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let bpm = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.bpm)
@@ -1232,9 +1284,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let text = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.created_at)
@@ -1258,9 +1308,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let text = self
                                     .meta_for_path(&path_owned)
                                     .and_then(|m| m.modified_at)
@@ -1284,9 +1332,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let old = self.pending_gain_db_for_path(&path_owned);
                                 let mut g = old;
                                 let resp = ui.add(
@@ -1332,9 +1378,7 @@ impl crate::app::WavesPreviewer {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
-                                if let Some(fg) = row_fg {
-                                    ui.visuals_mut().override_text_color = Some(fg);
-                                }
+                                ui.visuals_mut().override_text_color = row_fg;
                                 let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::click(),
@@ -1455,7 +1499,11 @@ impl crate::app::WavesPreviewer {
             let end = visible_last_row.unwrap_or(start).min(self.files.len() - 1);
             // Keep UI pass light; broad prefetch is handled by pump_list_meta_prefetch().
             let look_back = 8usize;
-            let look_ahead = 48usize;
+            let look_ahead = if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
+                16usize
+            } else {
+                48usize
+            };
             let prefetch_start = start.saturating_sub(look_back);
             let prefetch_end = (end + look_ahead).min(self.files.len() - 1);
             for idx in prefetch_start..=prefetch_end {
@@ -1465,7 +1513,11 @@ impl crate::app::WavesPreviewer {
                 if self.is_virtual_path(&path) {
                     continue;
                 }
-                self.queue_meta_for_path(&path, false);
+                if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
+                    self.queue_header_meta_for_path(&path, false);
+                } else {
+                    self.queue_meta_for_path(&path, false);
+                }
             }
         }
         self.queue_list_preview_prefetch_for_rows(visible_first_row, visible_last_row);

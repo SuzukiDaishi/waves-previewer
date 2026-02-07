@@ -60,6 +60,7 @@ impl crate::app::WavesPreviewer {
         self.push_editor_undo_state(tab_idx, undo_state, true);
         self.audio.set_samples_channels(channels);
         self.audio.stop();
+        self.on_audio_length_changed(tab_idx);
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
         }
@@ -150,6 +151,33 @@ impl crate::app::WavesPreviewer {
         Self::update_loop_markers_dirty(tab);
     }
 
+    fn on_audio_length_changed(&mut self, tab_idx: usize) {
+        let len = if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            Self::editor_clamp_ranges(tab);
+            tab.samples_len
+        } else {
+            0
+        };
+        let clamped_pos = if len == 0 {
+            0usize
+        } else {
+            let pos = self
+                .audio
+                .shared
+                .play_pos
+                .load(std::sync::atomic::Ordering::Relaxed);
+            pos.min(len.saturating_sub(1))
+        };
+        self.audio
+            .shared
+            .play_pos
+            .store(clamped_pos, std::sync::atomic::Ordering::Relaxed);
+        self.audio
+            .shared
+            .play_pos_f
+            .store(clamped_pos as f32, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(super) fn editor_apply_reverse_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
@@ -202,8 +230,142 @@ impl crate::app::WavesPreviewer {
         self.push_editor_undo_state(tab_idx, undo_state, true);
         self.audio.set_samples_channels(channels);
         self.audio.stop();
+        self.on_audio_length_changed(tab_idx);
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
+        }
+    }
+
+    pub(super) fn add_trim_range_as_virtual(&mut self, tab_idx: usize, range: (usize, usize)) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let (s, e) = range;
+        if e <= s || e > tab.samples_len {
+            return;
+        }
+        let source_path = tab.path.clone();
+        let source_name = tab.display_name.clone();
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let source_meta = self.meta_for_path(&source_path).cloned();
+        let explicit_sr_override = self.sample_rate_override.contains_key(&source_path);
+        let explicit_bits_override = self.bit_depth_override.contains_key(&source_path);
+        let source_sr = self
+            .item_for_path(&source_path)
+            .and_then(|item| {
+                if item.source == crate::app::types::MediaSource::Virtual {
+                    item.virtual_state.as_ref().map(|state| state.sample_rate)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| self.effective_sample_rate_for_path(&source_path))
+            .filter(|v| *v > 0)
+            .unwrap_or(out_sr);
+        let bits_per_sample = self
+            .bit_depth_override
+            .get(&source_path)
+            .copied()
+            .map(|d| d.bits_per_sample())
+            .or_else(|| {
+                self.item_for_path(&source_path).and_then(|item| {
+                    if item.source == crate::app::types::MediaSource::Virtual {
+                        item.virtual_state.as_ref().map(|state| state.bits_per_sample)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| source_meta.as_ref().map(|m| m.bits_per_sample))
+            .filter(|v| *v > 0)
+            .unwrap_or(32);
+        let mut channels = Vec::with_capacity(tab.ch_samples.len());
+        for ch in tab.ch_samples.iter() {
+            channels.push(ch[s..e].to_vec());
+        }
+        if source_sr != out_sr {
+            let quality = Self::to_wave_resample_quality(self.src_quality);
+            for ch in channels.iter_mut() {
+                *ch = crate::wave::resample_quality(ch, out_sr, source_sr, quality);
+            }
+        }
+        let quantize_depth = match bits_per_sample {
+            0..=16 => Some(crate::wave::WavBitDepth::Pcm16),
+            17..=24 => Some(crate::wave::WavBitDepth::Pcm24),
+            _ => Some(crate::wave::WavBitDepth::Float32),
+        };
+        if let Some(depth) = quantize_depth {
+            crate::wave::quantize_channels_in_place(&mut channels, depth);
+        }
+        let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(channels.clone()));
+        let map_to_source = |pos: usize| -> usize {
+            if source_sr == out_sr {
+                return pos;
+            }
+            ((pos as u128)
+                .saturating_mul(source_sr as u128)
+                .saturating_add((out_sr / 2) as u128)
+                / (out_sr as u128)) as usize
+        };
+        let source_start = map_to_source(s);
+        let mut source_end = map_to_source(e);
+        if source_end <= source_start {
+            source_end = source_start.saturating_add(1);
+        }
+        let source_ref = if self.is_virtual_path(&source_path) {
+            crate::app::types::VirtualSourceRef::VirtualPath(source_path.clone())
+        } else {
+            crate::app::types::VirtualSourceRef::FilePath(source_path.clone())
+        };
+        let virtual_state = Some(crate::app::types::VirtualState {
+            source: source_ref,
+            op_chain: vec![crate::app::types::VirtualOp::Trim {
+                start: source_start,
+                end: source_end,
+            }],
+            sample_rate: source_sr,
+            channels: audio.channels.len().max(1) as u16,
+            bits_per_sample,
+        });
+        if self.debug.cfg.enabled {
+            self.debug_log(format!(
+                "virtual create source={} trim={}..{} sr={} ch={} bits={}",
+                source_path.display(),
+                source_start,
+                source_end,
+                source_sr,
+                audio.channels.len().max(1),
+                bits_per_sample
+            ));
+        }
+        let base = std::path::Path::new(&source_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip");
+        let ext = std::path::Path::new(&source_name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wav");
+        let name = self.unique_virtual_display_name(&format!("{base} (trim).{ext}"));
+        let mut item = self.make_virtual_item(name, audio, source_sr, bits_per_sample, virtual_state);
+        if let Some(meta) = item.meta.as_mut() {
+            meta.sample_rate = source_sr;
+            meta.bits_per_sample = bits_per_sample;
+            if !explicit_sr_override && !explicit_bits_override {
+                meta.bit_rate_bps = source_meta.as_ref().and_then(|m| m.bit_rate_bps);
+            } else {
+                meta.bit_rate_bps = None;
+            }
+        }
+        let before = self.capture_list_selection_snapshot();
+        let insert_idx = self.selected.map(|row| row.saturating_add(1));
+        let added_path = item.path.clone();
+        self.add_virtual_item(item, insert_idx);
+        self.after_add_refresh();
+        self.record_list_insert_from_paths(&[added_path.clone()], before);
+        if let Some(row) = self.row_for_path(&added_path) {
+            self.update_selection_on_click(row, egui::Modifiers::NONE);
+            self.select_and_load(row, true);
         }
     }
 
@@ -603,6 +765,7 @@ impl crate::app::WavesPreviewer {
         self.push_editor_undo_state(tab_idx, undo_state, true);
         self.audio.set_samples_channels(channels);
         self.audio.stop();
+        self.on_audio_length_changed(tab_idx);
         match loop_mode {
             crate::app::types::LoopMode::OnWhole => {
                 self.audio.set_loop_enabled(true);

@@ -1,4 +1,4 @@
-﻿use crate::audio_io;
+use crate::audio_io;
 use crate::loop_markers;
 use regex::RegexBuilder;
 use std::collections::HashSet;
@@ -8,14 +8,57 @@ use walkdir::WalkDir;
 
 use super::helpers::num_order;
 use super::types::{
-    ChannelView, EditorDecodeResult, EditorDecodeState, EditorTab, ProcessingResult, ProcessingState,
-    RateMode, ScanMessage, SortDir, SortKey,
+    ChannelView, EditorDecodeResult, EditorDecodeState, EditorTab, ProcessingResult,
+    ProcessingState, RateMode, ScanMessage, SortDir, SortKey,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 0.35;
+const LIST_PLAY_PREFIX_SECS_BASE: f32 = 0.6;
+const LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE: f32 = 1.2;
+const LIST_PLAY_PREFIX_SECS_MIN: f32 = 0.25;
 const EDITOR_PREVIEW_PREFIX_SECS: f32 = 8.0;
 
 impl super::WavesPreviewer {
+    fn list_preview_base_rate(&self) -> f32 {
+        if self.mode == RateMode::Speed {
+            self.playback_rate
+        } else {
+            1.0
+        }
+    }
+
+    pub(super) fn apply_list_preview_rate(&self, play_sr: u32) {
+        let out_sr = self.audio.shared.out_sample_rate.max(1) as f32;
+        let src_sr = play_sr.max(1) as f32;
+        let ratio = (src_sr / out_sr).clamp(0.25, 4.0);
+        let rate = (self.list_preview_base_rate() * ratio).clamp(0.25, 4.0);
+        self.audio.set_rate(rate);
+    }
+
+    pub(super) fn list_preview_cached_secs(&self, sample_len: usize, play_sr: u32) -> f32 {
+        sample_len as f32 / play_sr.max(1) as f32
+    }
+
+    pub(super) fn list_play_prefix_secs(&self, path: &Path) -> f32 {
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        let base = match ext.as_str() {
+            "mp3" | "m4a" | "ogg" => LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE,
+            _ => LIST_PLAY_PREFIX_SECS_BASE,
+        };
+        if let Some(dur) = self
+            .meta_for_path(path)
+            .and_then(|m| m.duration_secs)
+            .filter(|v| v.is_finite() && *v > 0.0)
+        {
+            return dur.clamp(LIST_PLAY_PREFIX_SECS_MIN, base);
+        }
+        base
+    }
+
     fn mixdown_channels_mono(chs: &[Vec<f32>], len: usize) -> Vec<f32> {
         if len == 0 {
             return Vec::new();
@@ -54,12 +97,22 @@ impl super::WavesPreviewer {
             let target = target.max(1);
             if in_sr != target {
                 for ch in channels.iter_mut() {
-                    *ch = self.resample_mono_with_quality(ch, in_sr, target);
+                    *ch = crate::wave::resample_quality(
+                        ch,
+                        in_sr,
+                        target,
+                        crate::wave::ResampleQuality::Best,
+                    );
                 }
             }
             if target != out_sr {
                 for ch in channels.iter_mut() {
-                    *ch = self.resample_mono_with_quality(ch, target, out_sr);
+                    *ch = crate::wave::resample_quality(
+                        ch,
+                        target,
+                        out_sr,
+                        crate::wave::ResampleQuality::Best,
+                    );
                 }
             }
         } else if in_sr != out_sr {
@@ -130,13 +183,9 @@ impl super::WavesPreviewer {
     pub(super) fn apply_dirty_tab_audio_with_mode(&mut self, path: &Path) -> bool {
         let decode_failed = self.is_decode_failed_path(path);
         // Prefer a live dirty tab when open; otherwise fall back to cached edits.
-        let idx = match self
-            .tabs
-            .iter()
-            .position(|t| {
-                (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
-            })
-        {
+        let idx = match self.tabs.iter().position(|t| {
+            (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
+        }) {
             Some(i) => i,
             None => {
                 let mut channels = {
@@ -232,6 +281,12 @@ impl super::WavesPreviewer {
             };
             (item.display_name.clone(), audio)
         };
+        let virtual_in_sr = self
+            .item_for_path(&path)
+            .and_then(|item| item.virtual_state.as_ref().map(|v| v.sample_rate))
+            .or_else(|| self.meta_for_path(&path).map(|m| m.sample_rate))
+            .filter(|v| *v > 0)
+            .unwrap_or(self.audio.shared.out_sample_rate.max(1));
         let samples_len = audio.len();
         let mono = Self::mixdown_channels_mono(&audio.channels, samples_len);
         let mut waveform = Vec::new();
@@ -246,11 +301,7 @@ impl super::WavesPreviewer {
         if update_audio {
             self.audio.set_rate(1.0);
             let mut channels = audio.channels.clone();
-            self.apply_sample_rate_preview_for_path(
-                &path,
-                &mut channels,
-                self.audio.shared.out_sample_rate,
-            );
+            self.apply_sample_rate_preview_for_path(&path, &mut channels, virtual_in_sr);
             self.audio.set_samples_channels(channels);
             self.apply_effective_volume();
         }
@@ -259,13 +310,9 @@ impl super::WavesPreviewer {
 
     fn apply_dirty_tab_preview_for_list(&mut self, path: &Path) -> bool {
         // List preview prioritizes dirty tab audio, then cached edits.
-        let idx = match self
-            .tabs
-            .iter()
-            .position(|t| {
-                (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
-            })
-        {
+        let idx = match self.tabs.iter().position(|t| {
+            (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
+        }) {
             Some(i) => i,
             None => {
                 let mut channels = {
@@ -304,11 +351,7 @@ impl super::WavesPreviewer {
         self.audio.set_loop_enabled(false);
         self.cancel_list_preview_job();
         self.list_play_pending = false;
-        let rate = if self.mode == RateMode::Speed {
-            self.playback_rate
-        } else {
-            1.0
-        };
+        let rate = self.list_preview_base_rate();
         self.audio.set_rate(rate);
         self.apply_sample_rate_preview_for_path(
             path,
@@ -382,8 +425,7 @@ impl super::WavesPreviewer {
                 .map(|c| c.dirty || c.loop_markers_dirty || c.markers_dirty)
                 .unwrap_or(false)
             || self.tabs.iter().any(|t| {
-                (t.dirty || t.loop_markers_dirty || t.markers_dirty)
-                    && t.path.as_path() == path
+                (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
             })
     }
 
@@ -587,6 +629,7 @@ impl super::WavesPreviewer {
             self.lufs_override.remove(p);
             self.lufs_recalc_deadline.remove(p);
             self.sample_rate_override.remove(p);
+            self.sample_rate_probe_cache.remove(p);
             self.bit_depth_override.remove(p);
             if self.playing_path.as_ref() == Some(p) {
                 affect_playing = true;
@@ -651,12 +694,25 @@ impl super::WavesPreviewer {
         tab.loop_markers_dirty = false;
     }
 
-    pub(super) fn sample_rate_for_path(&self, path: &Path, fallback: u32) -> u32 {
-        self.meta_for_path(path)
+    pub(super) fn sample_rate_for_path(&mut self, path: &Path, fallback: u32) -> u32 {
+        if let Some(sr) = self
+            .meta_for_path(path)
             .map(|m| m.sample_rate)
             .filter(|&sr| sr > 0)
-            .or_else(|| audio_io::read_audio_info(path).ok().map(|i| i.sample_rate))
-            .unwrap_or(fallback)
+        {
+            self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
+            return sr;
+        }
+        if let Some(sr) = self.sample_rate_probe_cache.get(path).copied() {
+            return sr;
+        }
+        let sr = audio_io::read_audio_info(path)
+            .ok()
+            .map(|i| i.sample_rate)
+            .filter(|v| *v > 0)
+            .unwrap_or(fallback.max(1));
+        self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
+        sr
     }
 
     pub(super) fn load_markers_for_tab(
@@ -732,6 +788,7 @@ impl super::WavesPreviewer {
         }
         self.edited_cache.remove(path);
         self.sample_rate_override.remove(path);
+        self.sample_rate_probe_cache.remove(path);
         self.bit_depth_override.remove(path);
     }
     // multi-select aware selection update for list clicks (moved from app.rs)
@@ -793,6 +850,7 @@ impl super::WavesPreviewer {
             self.remove_missing_path(&p_owned);
             return;
         }
+        self.debug_mark_list_select_start(&p_owned);
         if self.apply_dirty_tab_preview_for_list(&p_owned) {
             return;
         }
@@ -832,14 +890,18 @@ impl super::WavesPreviewer {
                 1.0
             };
             self.audio.set_rate(rate);
-            self.apply_sample_rate_preview_for_path(
-                &p_owned,
-                &mut channels,
-                self.audio.shared.out_sample_rate,
-            );
+            let virtual_in_sr = item_snapshot
+                .virtual_state
+                .as_ref()
+                .map(|v| v.sample_rate)
+                .or_else(|| item_snapshot.meta.as_ref().map(|m| m.sample_rate))
+                .filter(|v| *v > 0)
+                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            self.apply_sample_rate_preview_for_path(&p_owned, &mut channels, virtual_in_sr);
             self.audio.set_samples_channels(channels);
             self.audio.stop();
             self.apply_effective_volume();
+            self.debug_mark_list_preview_ready(&p_owned);
             return;
         }
         if need_heavy && !decode_failed {
@@ -857,25 +919,59 @@ impl super::WavesPreviewer {
         } else {
             1.0
         };
+        // AutoPlay uses a larger dynamic prefix so playback starts quickly but
+        // still has enough headroom before full decode replaces the buffer.
+        let decode_secs = if self.auto_play_list_nav {
+            self.list_play_prefix_secs(&p_owned)
+        } else {
+            LIST_PREVIEW_PREFIX_SECS
+        };
         self.audio.set_rate(rate);
-        if let Some((audio, truncated)) = self.take_cached_list_preview(&p_owned) {
-            self.audio.set_samples_buffer(audio);
-            self.audio.stop();
-            self.apply_effective_volume();
+        if let Some((audio, truncated, play_sr)) = self.take_cached_list_preview(&p_owned) {
+            let cached_secs = self.list_preview_cached_secs(audio.len(), play_sr);
+            let min_secs = decode_secs * 0.85;
+            let use_cached_now = !truncated || cached_secs >= min_secs;
+            if use_cached_now {
+                self.audio.set_samples_buffer(audio);
+                self.apply_list_preview_rate(play_sr);
+                self.audio.stop();
+                self.apply_effective_volume();
+                self.debug_mark_list_preview_ready(&p_owned);
+            } else {
+                // Cached prefix (typically 0.35s prefetch) is too short for autoplay.
+                self.evict_list_preview_cache_path(&p_owned);
+                self.audio.stop();
+                self.audio.set_samples_mono(Vec::new());
+                self.apply_effective_volume();
+            }
             if truncated {
                 self.list_preview_pending_path = None;
-                self.spawn_list_preview_async(p_owned.clone(), LIST_PREVIEW_PREFIX_SECS);
+                self.spawn_list_preview_async(
+                    p_owned.clone(),
+                    0.0,
+                    crate::app::LIST_PLAY_EMIT_SECS,
+                );
+                if !use_cached_now {
+                    return;
+                }
             }
             return;
         }
         if self.list_preview_rx.is_some() {
-            if self.list_preview_partial_ready {
+            if self.list_preview_partial_ready || self.auto_play_list_nav {
                 // Current async job is in full-decode phase; switch immediately.
                 self.cancel_list_preview_job();
+                self.debug.stale_preview_cancel_count =
+                    self.debug.stale_preview_cancel_count.saturating_add(1);
                 self.list_preview_pending_path = None;
                 self.audio.stop();
                 self.audio.set_samples_mono(Vec::new());
-                self.spawn_list_preview_async(p_owned.clone(), LIST_PREVIEW_PREFIX_SECS);
+                let emit_secs = if self.auto_play_list_nav {
+                    crate::app::LIST_PLAY_EMIT_SECS
+                } else {
+                    0.0
+                };
+                self.spawn_list_preview_async(p_owned.clone(), decode_secs, emit_secs);
                 self.apply_effective_volume();
                 return;
             } else {
@@ -891,35 +987,107 @@ impl super::WavesPreviewer {
         // Do list decode asynchronously so row navigation never blocks UI.
         self.audio.stop();
         self.audio.set_samples_mono(Vec::new());
-        self.spawn_list_preview_async(p_owned.clone(), LIST_PREVIEW_PREFIX_SECS);
+        let emit_secs = if self.auto_play_list_nav {
+            crate::app::LIST_PLAY_EMIT_SECS
+        } else {
+            0.0
+        };
+        self.spawn_list_preview_async(p_owned.clone(), decode_secs, emit_secs);
         // apply effective volume including per-file gain
         self.apply_effective_volume();
     }
 
     pub(super) fn force_load_selected_list_preview_for_play(&mut self) -> bool {
-        if self.active_tab.is_some() || self.list_preview_rx.is_none() {
+        if self.active_tab.is_some() {
             return false;
         }
+        let selected_row = self.selected;
         let Some(path) = self.selected_path_buf() else {
             return false;
         };
-        if self.is_virtual_path(&path) || !path.is_file() {
+        let source = self.item_for_path(&path).map(|item| item.source);
+        if matches!(source, Some(crate::app::types::MediaSource::External)) {
             return false;
         }
-        let decoded = crate::wave::decode_wav_multi_prefix(&path, LIST_PREVIEW_PREFIX_SECS);
-        let (mut chans, in_sr, _truncated) = match decoded {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        self.apply_sample_rate_preview_for_path(&path, &mut chans, in_sr);
-        let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(chans));
-        self.audio.set_samples_buffer(audio);
+        if matches!(source, Some(crate::app::types::MediaSource::Virtual)) {
+            if let Some(row) = selected_row {
+                self.select_and_load(row, false);
+                return true;
+            }
+            return false;
+        }
+        if !path.is_file() {
+            return false;
+        }
+        let has_active_sample = self
+            .debug
+            .list_select_started_path
+            .as_deref()
+            .map(|p| p == path.as_path())
+            .unwrap_or(false)
+            && self.debug.list_select_started_at.is_some();
+        if !has_active_sample {
+            self.debug_mark_list_select_start(&path);
+        }
+        self.playing_path = Some(path.clone());
+        let play_prefix_secs = self.list_play_prefix_secs(&path);
+        if let Some((audio, truncated, play_sr)) = self.take_cached_list_preview(&path) {
+            let cached_secs = self.list_preview_cached_secs(audio.len(), play_sr);
+            let min_secs = play_prefix_secs * 0.85;
+            let use_cached_now = !truncated || cached_secs >= min_secs;
+            if use_cached_now {
+                self.audio.set_samples_buffer(audio);
+                self.apply_list_preview_rate(play_sr);
+                self.audio.stop();
+                self.apply_effective_volume();
+                self.debug_mark_list_preview_ready(&path);
+                if !truncated {
+                    self.list_play_pending = false;
+                    return true;
+                }
+                // Cached prefix is long enough: start now and continue with full decode.
+                self.list_play_pending = true;
+                self.debug.autoplay_pending_count =
+                    self.debug.autoplay_pending_count.saturating_add(1);
+                if self.list_preview_rx.is_some() {
+                    self.cancel_list_preview_job();
+                    self.debug.stale_preview_cancel_count =
+                        self.debug.stale_preview_cancel_count.saturating_add(1);
+                }
+                self.list_preview_pending_path = None;
+                self.spawn_list_preview_async(path.clone(), 0.0, crate::app::LIST_PLAY_EMIT_SECS);
+                return true;
+            }
+            // Too-short cached prefix causes audible gap; decode a longer prefix instead.
+            self.evict_list_preview_cache_path(&path);
+        }
+        self.list_play_pending = true;
+        self.debug.autoplay_pending_count = self.debug.autoplay_pending_count.saturating_add(1);
+        if self.list_preview_rx.is_some() {
+            self.cancel_list_preview_job();
+            self.debug.stale_preview_cancel_count =
+                self.debug.stale_preview_cancel_count.saturating_add(1);
+            self.list_preview_pending_path = None;
+            self.audio.stop();
+            self.audio.set_samples_mono(Vec::new());
+            self.spawn_list_preview_async(
+                path,
+                play_prefix_secs,
+                crate::app::LIST_PLAY_EMIT_SECS,
+            );
+            self.apply_effective_volume();
+            return false;
+        }
+        self.list_preview_pending_path = None;
         self.audio.stop();
-        self.cancel_list_preview_job();
-        self.list_play_pending = false;
-        self.playing_path = Some(path);
+        self.audio.set_samples_mono(Vec::new());
+        self.spawn_list_preview_async(
+            path,
+            play_prefix_secs,
+            crate::app::LIST_PLAY_EMIT_SECS,
+        );
         self.apply_effective_volume();
-        true
+        false
     }
 
     fn spawn_editor_decode(&mut self, path: PathBuf) {
@@ -1206,6 +1374,7 @@ impl super::WavesPreviewer {
         self.lufs_override.remove(&path_buf);
         self.lufs_recalc_deadline.remove(&path_buf);
         self.sample_rate_override.remove(&path_buf);
+        self.sample_rate_probe_cache.remove(&path_buf);
         self.bit_depth_override.remove(&path_buf);
         self.evict_list_preview_cache_path(&path_buf);
         if was_playing {
@@ -1299,6 +1468,7 @@ impl super::WavesPreviewer {
             self.lufs_override.remove(path);
             self.lufs_recalc_deadline.remove(path);
             self.sample_rate_override.remove(path);
+            self.sample_rate_probe_cache.remove(path);
             self.bit_depth_override.remove(path);
             self.evict_list_preview_cache_path(path);
         }
@@ -1360,6 +1530,7 @@ impl super::WavesPreviewer {
         self.scan_rx = None;
         self.scan_in_progress = false;
         self.sample_rate_override.clear();
+        self.sample_rate_probe_cache.clear();
         self.bit_depth_override.clear();
         if let Some(root) = &self.root {
             self.start_scan_folder(root.clone());

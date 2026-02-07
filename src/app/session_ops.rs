@@ -12,10 +12,11 @@ use super::project::{
     project_tab_from_tab, project_tool_state_to_tool_state, rel_path, resolve_path,
     save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio, serialize_project,
     spectro_config_from_project, tool_kind_from_str, view_mode_from_str, ProjectApp, ProjectEdit,
-    ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectList, ProjectListColumns,
-    ProjectListItem, ProjectSampleRateOverride, ProjectBitDepthOverride, ProjectToolState,
+    ProjectExportPolicy, ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectList,
+    ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectBitDepthOverride,
+    ProjectToolState, ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
 };
-use super::types::{LoopXfadeShape, MediaSource};
+use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
 pub(super) struct ProjectOpenState {
     pub started_at: Instant,
@@ -53,6 +54,91 @@ fn external_match_input_from_project(raw: &str) -> super::types::ExternalRegexIn
         "path" => super::types::ExternalRegexInput::Path,
         "dir" => super::types::ExternalRegexInput::Dir,
         _ => super::types::ExternalRegexInput::FileName,
+    }
+}
+
+fn virtual_source_to_project(source: &VirtualSourceRef, base_dir: &Path) -> ProjectVirtualSource {
+    match source {
+        VirtualSourceRef::FilePath(path) => ProjectVirtualSource {
+            kind: "file".to_string(),
+            path: Some(rel_path(path, base_dir)),
+        },
+        VirtualSourceRef::VirtualPath(path) => ProjectVirtualSource {
+            kind: "virtual".to_string(),
+            path: Some(rel_path(path, base_dir)),
+        },
+        VirtualSourceRef::Sidecar(tag) => ProjectVirtualSource {
+            kind: "sidecar".to_string(),
+            path: Some(tag.clone()),
+        },
+    }
+}
+
+fn virtual_source_from_project(source: &ProjectVirtualSource, base_dir: &Path) -> VirtualSourceRef {
+    match source.kind.trim().to_ascii_lowercase().as_str() {
+        "virtual" => source
+            .path
+            .as_deref()
+            .map(|raw| VirtualSourceRef::VirtualPath(resolve_path(raw, base_dir)))
+            .unwrap_or_else(|| VirtualSourceRef::Sidecar("missing_virtual_source".to_string())),
+        "sidecar" => VirtualSourceRef::Sidecar(source.path.clone().unwrap_or_default()),
+        _ => source
+            .path
+            .as_deref()
+            .map(|raw| VirtualSourceRef::FilePath(resolve_path(raw, base_dir)))
+            .unwrap_or_else(|| VirtualSourceRef::Sidecar("missing_file_source".to_string())),
+    }
+}
+
+fn virtual_ops_to_project(ops: &[VirtualOp]) -> Vec<ProjectVirtualOp> {
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            VirtualOp::Trim { start, end } => out.push(ProjectVirtualOp {
+                kind: "trim".to_string(),
+                start: Some(*start),
+                end: Some(*end),
+            }),
+        }
+    }
+    out
+}
+
+fn virtual_ops_from_project(ops: &[ProjectVirtualOp]) -> Vec<VirtualOp> {
+    let mut out = Vec::new();
+    for op in ops {
+        if op.kind.trim().eq_ignore_ascii_case("trim") {
+            if let (Some(start), Some(end)) = (op.start, op.end) {
+                if end > start {
+                    out.push(VirtualOp::Trim { start, end });
+                }
+            }
+        }
+    }
+    out
+}
+
+fn apply_virtual_ops(channels: &mut [Vec<f32>], ops: &[VirtualOp]) {
+    for op in ops {
+        match *op {
+            VirtualOp::Trim { start, end } => {
+                for ch in channels.iter_mut() {
+                    let len = ch.len();
+                    if len == 0 {
+                        continue;
+                    }
+                    let s = start.min(len);
+                    let e = end.min(len);
+                    if e <= s {
+                        ch.clear();
+                    } else {
+                        let mut seg = ch[s..e].to_vec();
+                        std::mem::swap(ch, &mut seg);
+                        ch.truncate(e - s);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -167,12 +253,90 @@ impl super::WavesPreviewer {
             })
             .collect();
         bit_depth_overrides.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut virtual_items: Vec<ProjectVirtualItem> = Vec::new();
+        let mut virtual_sidecar_index = 0usize;
+        for item in self
+            .items
+            .iter()
+            .filter(|item| item.source == MediaSource::Virtual)
+        {
+            let source = item
+                .virtual_state
+                .as_ref()
+                .map(|state| virtual_source_to_project(&state.source, base_dir))
+                .unwrap_or(ProjectVirtualSource {
+                    kind: "sidecar".to_string(),
+                    path: Some("runtime".to_string()),
+                });
+            let op_chain = item
+                .virtual_state
+                .as_ref()
+                .map(|state| virtual_ops_to_project(&state.op_chain))
+                .unwrap_or_default();
+            let mut sidecar_audio: Option<String> = None;
+            let needs_sidecar = item.virtual_audio.is_some();
+            if needs_sidecar {
+                if let Some(audio) = item.virtual_audio.as_ref() {
+                    let sr = item
+                        .virtual_state
+                        .as_ref()
+                        .map(|s| s.sample_rate)
+                        .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
+                        .filter(|v| *v > 0)
+                        .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                    match save_sidecar_cached_audio(
+                        &path,
+                        100_000 + virtual_sidecar_index,
+                        &audio.channels,
+                        sr,
+                    ) {
+                        Ok(saved_path) => {
+                            sidecar_audio = Some(rel_path(&saved_path, base_dir));
+                            virtual_sidecar_index = virtual_sidecar_index.saturating_add(1);
+                        }
+                        Err(err) => {
+                            return Err(format!("Failed to save virtual sidecar audio: {err}"));
+                        }
+                    }
+                }
+            }
+            let channels = item
+                .virtual_state
+                .as_ref()
+                .map(|state| state.channels)
+                .or_else(|| item.meta.as_ref().map(|m| m.channels))
+                .unwrap_or(1);
+            let sample_rate = item
+                .virtual_state
+                .as_ref()
+                .map(|state| state.sample_rate)
+                .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
+                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            let bits_per_sample = item
+                .virtual_state
+                .as_ref()
+                .map(|state| state.bits_per_sample)
+                .or_else(|| item.meta.as_ref().map(|m| m.bits_per_sample))
+                .unwrap_or(32);
+            virtual_items.push(ProjectVirtualItem {
+                path: rel_path(&item.path, base_dir),
+                display_name: item.display_name.clone(),
+                sample_rate,
+                channels,
+                bits_per_sample,
+                source,
+                op_chain,
+                sidecar_audio,
+            });
+        }
+        virtual_items.sort_by(|a, b| a.path.cmp(&b.path));
         let list = ProjectList {
             root: self.root.as_ref().map(|p| rel_path(p, base_dir)),
             files: list_files.iter().map(|p| rel_path(p, base_dir)).collect(),
             items: list_items,
             sample_rate_overrides,
             bit_depth_overrides,
+            virtual_items,
         };
         let key_column = self
             .external_key_index
@@ -230,6 +394,10 @@ impl super::WavesPreviewer {
             .to_string(),
             search_query: self.search_query.clone(),
             search_regex: self.search_use_regex,
+            selected_path: self
+                .selected_path_buf()
+                .as_ref()
+                .map(|path| rel_path(path, base_dir)),
             list_columns: ProjectListColumns {
                 edited: self.list_columns.edited,
                 file: self.list_columns.file,
@@ -250,6 +418,24 @@ impl super::WavesPreviewer {
                 wave: self.list_columns.wave,
             },
             auto_play_list_nav: self.auto_play_list_nav,
+            export_policy: Some(ProjectExportPolicy {
+                save_mode: match self.export_cfg.save_mode {
+                    super::types::SaveMode::Overwrite => "overwrite".to_string(),
+                    super::types::SaveMode::NewFile => "new_file".to_string(),
+                },
+                conflict: match self.export_cfg.conflict {
+                    super::types::ConflictPolicy::Rename => "rename".to_string(),
+                    super::types::ConflictPolicy::Overwrite => "overwrite".to_string(),
+                    super::types::ConflictPolicy::Skip => "skip".to_string(),
+                },
+                backup_bak: self.export_cfg.backup_bak,
+                name_template: self.export_cfg.name_template.clone(),
+                dest_folder: self
+                    .export_cfg
+                    .dest_folder
+                    .as_ref()
+                    .map(|path| rel_path(path, base_dir)),
+            }),
             external_state: Some(external_state),
         };
         let spectrogram = project_spectrogram_from_cfg(&self.spectro_cfg);
@@ -408,6 +594,31 @@ impl super::WavesPreviewer {
         self.search_query = project.app.search_query.clone();
         self.search_use_regex = project.app.search_regex;
         self.auto_play_list_nav = project.app.auto_play_list_nav;
+        let selected_path = project
+            .app
+            .selected_path
+            .as_deref()
+            .map(|raw| resolve_path(raw, &base_dir));
+        if let Some(policy) = project.app.export_policy.as_ref() {
+            self.export_cfg.save_mode = match policy.save_mode.trim().to_ascii_lowercase().as_str()
+            {
+                "overwrite" => super::types::SaveMode::Overwrite,
+                _ => super::types::SaveMode::NewFile,
+            };
+            self.export_cfg.conflict = match policy.conflict.trim().to_ascii_lowercase().as_str() {
+                "overwrite" => super::types::ConflictPolicy::Overwrite,
+                "skip" => super::types::ConflictPolicy::Skip,
+                _ => super::types::ConflictPolicy::Rename,
+            };
+            self.export_cfg.backup_bak = policy.backup_bak;
+            if !policy.name_template.trim().is_empty() {
+                self.export_cfg.name_template = policy.name_template.clone();
+            }
+            self.export_cfg.dest_folder = policy
+                .dest_folder
+                .as_deref()
+                .map(|raw| resolve_path(raw, &base_dir));
+        }
         self.list_columns = super::types::ListColumnConfig {
             edited: project.app.list_columns.edited,
             file: project.app.list_columns.file,
@@ -460,6 +671,200 @@ impl super::WavesPreviewer {
             let root_path = resolve_path(root, &base_dir);
             self.root = Some(root_path);
             self.rescan();
+        }
+        if !project.list.virtual_items.is_empty() {
+            let mut pending = project.list.virtual_items.clone();
+            let mut missing_errors: Vec<String> = Vec::new();
+            let mut rounds = 0usize;
+            while !pending.is_empty() && rounds < 8 {
+                rounds += 1;
+                let mut next_pending: Vec<ProjectVirtualItem> = Vec::new();
+                let mut progressed = false;
+                let current_pending = std::mem::take(&mut pending);
+                for entry in current_pending.into_iter() {
+                    let path = resolve_path(&entry.path, &base_dir);
+                    let source = virtual_source_from_project(&entry.source, &base_dir);
+                    let op_chain = virtual_ops_from_project(&entry.op_chain);
+                    let mut channels_opt: Option<Vec<Vec<f32>>> = None;
+                    let mut sample_rate = entry.sample_rate.max(1);
+                    let bits_per_sample = entry.bits_per_sample.max(16);
+                    match &source {
+                        VirtualSourceRef::FilePath(src_path) => {
+                            if src_path.is_file() {
+                                if let Ok((channels, sr)) = crate::audio_io::decode_audio_multi(src_path) {
+                                    channels_opt = Some(channels);
+                                    sample_rate = sr.max(1);
+                                } else {
+                                    missing_errors.push(format!(
+                                        "Virtual source decode failed: {}",
+                                        src_path.display()
+                                    ));
+                                }
+                            } else {
+                                missing_errors
+                                    .push(format!("Missing virtual source: {}", src_path.display()));
+                            }
+                        }
+                        VirtualSourceRef::VirtualPath(src_path) => {
+                            if let Some(src_item) = self.item_for_path(src_path) {
+                                if let Some(audio) = src_item.virtual_audio.as_ref() {
+                                    channels_opt = Some(audio.channels.clone());
+                                    sample_rate = src_item
+                                        .virtual_state
+                                        .as_ref()
+                                        .map(|state| state.sample_rate)
+                                        .or_else(|| src_item.meta.as_ref().map(|m| m.sample_rate))
+                                        .filter(|v| *v > 0)
+                                        .unwrap_or(sample_rate);
+                                } else {
+                                    next_pending.push(entry);
+                                    continue;
+                                }
+                            } else {
+                                missing_errors.push(format!(
+                                    "Missing virtual source item: {}",
+                                    src_path.display()
+                                ));
+                            }
+                        }
+                        VirtualSourceRef::Sidecar(_) => {
+                            let sidecar_raw = entry
+                                .sidecar_audio
+                                .as_ref()
+                                .or(entry.source.path.as_ref())
+                                .cloned();
+                            if let Some(raw) = sidecar_raw {
+                                if let Ok((channels, sr, _)) = load_sidecar_audio(&project_path, &raw) {
+                                    channels_opt = Some(channels);
+                                    sample_rate = sr.max(1);
+                                } else {
+                                    missing_errors.push(format!(
+                                        "Virtual sidecar decode failed: {}",
+                                        raw
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    if channels_opt.is_none() {
+                        if let Some(raw) = entry
+                            .sidecar_audio
+                            .as_ref()
+                            .or(entry.source.path.as_ref())
+                            .cloned()
+                        {
+                            if let Ok((channels, sr, _)) = load_sidecar_audio(&project_path, &raw) {
+                                channels_opt = Some(channels);
+                                sample_rate = sr.max(1);
+                            }
+                        }
+                    }
+                    let Some(mut channels) = channels_opt else {
+                        continue;
+                    };
+                    apply_virtual_ops(&mut channels, &op_chain);
+                    let desired_sr = entry.sample_rate.max(1);
+                    if sample_rate != desired_sr {
+                        for ch in channels.iter_mut() {
+                            *ch = self.resample_mono_with_quality(ch, sample_rate, desired_sr);
+                        }
+                        sample_rate = desired_sr;
+                    }
+                    let audio = std::sync::Arc::new(AudioBuffer::from_channels(channels.clone()));
+                    let channels_count = channels.len().max(1) as u16;
+                    let mut item = if let Some(existing) = self.item_for_path(&path).cloned() {
+                        existing
+                    } else {
+                        self.make_media_item(path.clone())
+                    };
+                    item.path = path.clone();
+                    item.display_name = if entry.display_name.trim().is_empty() {
+                        item.display_name
+                    } else {
+                        entry.display_name.clone()
+                    };
+                    item.display_folder = "(virtual)".to_string();
+                    item.source = MediaSource::Virtual;
+                    item.status = super::types::MediaStatus::Ok;
+                    item.meta = Some(super::WavesPreviewer::build_meta_from_audio(
+                        &channels,
+                        sample_rate,
+                        bits_per_sample,
+                    ));
+                    item.virtual_audio = Some(audio);
+                    item.virtual_state = Some(VirtualState {
+                        source: source.clone(),
+                        op_chain: op_chain.clone(),
+                        sample_rate,
+                        channels: channels_count,
+                        bits_per_sample,
+                    });
+                    if self.debug.cfg.enabled {
+                        self.debug_log(format!(
+                            "virtual restore path={} source_kind={} ops={} sr={} ch={} bits={}",
+                            path.display(),
+                            match &source {
+                                VirtualSourceRef::FilePath(_) => "file",
+                                VirtualSourceRef::VirtualPath(_) => "virtual",
+                                VirtualSourceRef::Sidecar(_) => "sidecar",
+                            },
+                            op_chain.len(),
+                            sample_rate,
+                            channels_count,
+                            bits_per_sample
+                        ));
+                    }
+                    if self.item_for_path(&path).is_some() {
+                        if let Some(existing) = self.item_for_path_mut(&path) {
+                            *existing = item;
+                        }
+                    } else {
+                        let id = item.id;
+                        self.path_index.insert(path.clone(), id);
+                        self.item_index.insert(id, self.items.len());
+                        self.items.push(item);
+                    }
+                    progressed = true;
+                }
+                if !progressed {
+                    for unresolved in next_pending.into_iter() {
+                        missing_errors.push(format!(
+                            "Virtual restore unresolved dependency: {}",
+                            unresolved.path
+                        ));
+                    }
+                    break;
+                }
+                pending = next_pending;
+            }
+            if !pending.is_empty() {
+                for entry in pending.into_iter() {
+                    let path = resolve_path(&entry.path, &base_dir);
+                    if let Some(item) = self.item_for_path_mut(&path) {
+                        item.source = MediaSource::Virtual;
+                        item.status = super::types::MediaStatus::DecodeFailed(
+                            "Virtual restore failed".to_string(),
+                        );
+                        item.meta = Some(missing_file_meta(&path));
+                        item.virtual_state = Some(VirtualState {
+                            source: virtual_source_from_project(&entry.source, &base_dir),
+                            op_chain: virtual_ops_from_project(&entry.op_chain),
+                            sample_rate: entry.sample_rate.max(1),
+                            channels: entry.channels.max(1),
+                            bits_per_sample: entry.bits_per_sample.max(16),
+                        });
+                        item.virtual_audio = Some(std::sync::Arc::new(AudioBuffer::from_channels(
+                            vec![Vec::new()],
+                        )));
+                    }
+                }
+            }
+            if !missing_errors.is_empty() {
+                self.debug_log(missing_errors.join("\n"));
+            }
+            self.rebuild_item_indexes();
+            self.apply_filter_from_search();
+            self.apply_sort();
         }
 
         for item in project.list.items.iter() {
@@ -652,11 +1057,21 @@ impl super::WavesPreviewer {
                 );
             }
             if !tab_path.is_file() {
+                let fallback_sr = self.audio.shared.out_sample_rate.max(1);
                 if let Some(item) = self.item_for_path_mut(&tab_path) {
                     item.source = MediaSource::Virtual;
                     item.status =
                         super::types::MediaStatus::DecodeFailed(describe_missing(&tab_path));
                     item.meta = Some(missing_file_meta(&tab_path));
+                    if item.virtual_state.is_none() {
+                        item.virtual_state = Some(VirtualState {
+                            source: VirtualSourceRef::FilePath(tab_path.clone()),
+                            op_chain: Vec::new(),
+                            sample_rate: fallback_sr,
+                            channels: 1,
+                            bits_per_sample: 32,
+                        });
+                    }
                     if item.virtual_audio.is_none() {
                         item.virtual_audio = Some(std::sync::Arc::new(AudioBuffer::from_channels(
                             vec![Vec::new()],
@@ -735,16 +1150,9 @@ impl super::WavesPreviewer {
             }
         }
         if let Some(active) = self.active_tab {
-            let (tool, mono) = {
-                let Some(tab) = self.tabs.get(active) else {
-                    return Ok(());
-                };
-                let Some(tool) = tab.preview_audio_tool else {
-                    return Ok(());
-                };
-                let Some(overlay) = tab.preview_overlay.as_ref() else {
-                    return Ok(());
-                };
+            let preview = self.tabs.get(active).and_then(|tab| {
+                let tool = tab.preview_audio_tool?;
+                let overlay = tab.preview_overlay.as_ref()?;
                 let mono = if let Some(m) = overlay.mixdown.as_ref() {
                     m.clone()
                 } else {
@@ -754,9 +1162,19 @@ impl super::WavesPreviewer {
                         .cloned()
                         .unwrap_or_default()
                 };
-                (tool, mono)
-            };
-            self.set_preview_mono(active, tool, mono);
+                Some((tool, mono))
+            });
+            if let Some((tool, mono)) = preview {
+                self.set_preview_mono(active, tool, mono);
+            }
+        }
+        if let Some(path) = selected_path {
+            if let Some(row) = self.row_for_path(&path) {
+                self.selected = Some(row);
+                self.selected_multi.clear();
+                self.selected_multi.insert(row);
+                self.select_anchor = Some(row);
+            }
         }
         Ok(())
     }

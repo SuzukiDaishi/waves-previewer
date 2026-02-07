@@ -82,6 +82,9 @@ const META_SORT_MIN_INTERVAL_MS: u64 = 120;
 const LIST_META_PREFETCH_BUDGET: usize = 64;
 const LIST_PREVIEW_CACHE_MAX: usize = 48;
 const LIST_PREVIEW_PREFETCH_INFLIGHT_MAX: usize = 2;
+const LIST_BG_META_LARGE_THRESHOLD: usize = 8_000;
+const LIST_BG_META_INFLIGHT_LIMIT: usize = 192;
+const LIST_PLAY_EMIT_SECS: f32 = 0.75;
 
 // moved to types.rs
 
@@ -276,6 +279,7 @@ pub struct WavesPreviewer {
     saving_virtual: Vec<(PathBuf, PathBuf)>,
     saving_edit_sources: Vec<PathBuf>,
     saving_mode: Option<SaveMode>,
+    overwrite_undo_stack: Vec<Vec<(PathBuf, PathBuf)>>,
 
     // LUFS with Gain recompute support
     lufs_override: HashMap<PathBuf, f32>,
@@ -284,6 +288,7 @@ pub struct WavesPreviewer {
     lufs_worker_busy: bool,
     // Sample rate conversion (non-destructive)
     sample_rate_override: HashMap<PathBuf, u32>,
+    sample_rate_probe_cache: HashMap<PathBuf, u32>,
     bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
     src_quality: SrcQuality,
     show_resample_dialog: bool,
@@ -628,6 +633,7 @@ impl WavesPreviewer {
             transcript: None,
             external: HashMap::new(),
             virtual_audio: None,
+            virtual_state: None,
         };
         self.fill_external_for_item(&mut item);
         item
@@ -711,6 +717,7 @@ impl WavesPreviewer {
         audio: std::sync::Arc<crate::audio::AudioBuffer>,
         sample_rate: u32,
         bits_per_sample: u16,
+        virtual_state: Option<VirtualState>,
     ) -> MediaItem {
         let id = self.next_media_id;
         self.next_media_id = self.next_media_id.wrapping_add(1);
@@ -732,6 +739,7 @@ impl WavesPreviewer {
             transcript: None,
             external: HashMap::new(),
             virtual_audio: Some(audio),
+            virtual_state,
         }
     }
 
@@ -1737,6 +1745,7 @@ impl WavesPreviewer {
                 save_mode: SaveMode::NewFile,
                 dest_folder: None,
                 name_template: "{name} (gain{gain:+.1}dB)".into(),
+                format_override: None,
                 conflict: ConflictPolicy::Rename,
                 backup_bak: true,
             },
@@ -1761,12 +1770,14 @@ impl WavesPreviewer {
             saving_virtual: Vec::new(),
             saving_edit_sources: Vec::new(),
             saving_mode: None,
+            overwrite_undo_stack: Vec::new(),
 
             lufs_override: HashMap::new(),
             lufs_recalc_deadline: HashMap::new(),
             lufs_rx2: None,
             lufs_worker_busy: false,
             sample_rate_override: HashMap::new(),
+            sample_rate_probe_cache: HashMap::new(),
             bit_depth_override: HashMap::new(),
             src_quality: SrcQuality::Good,
             show_resample_dialog: false,
@@ -2703,21 +2714,53 @@ impl eframe::App for WavesPreviewer {
         if let Some(p) = activate_path {
             if !self.apply_dirty_tab_audio_with_mode(&p) {
                 // Reload audio for the activated tab only; do not touch stored waveform
-                match self.mode {
-                    RateMode::Speed => {
-                        let _ =
-                            crate::wave::prepare_for_speed_quality(
+                if self.is_virtual_path(&p) {
+                    let mut channels = self
+                        .active_tab
+                        .and_then(|idx| self.tabs.get(idx))
+                        .filter(|tab| tab.path == p)
+                        .map(|tab| tab.ch_samples.clone())
+                        .unwrap_or_default();
+                    if !channels.is_empty() {
+                        let virtual_in_sr = self
+                            .item_for_path(&p)
+                            .and_then(|item| item.virtual_state.as_ref().map(|v| v.sample_rate))
+                            .or_else(|| self.meta_for_path(&p).map(|m| m.sample_rate))
+                            .filter(|v| *v > 0)
+                            .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                        match self.mode {
+                            RateMode::Speed => {
+                                self.apply_sample_rate_preview_for_path(
+                                    &p,
+                                    &mut channels,
+                                    virtual_in_sr,
+                                );
+                                self.audio.set_rate(self.playback_rate);
+                                self.audio.set_samples_channels(channels);
+                                self.audio.stop();
+                            }
+                            _ => {
+                                self.audio.set_rate(1.0);
+                                self.spawn_heavy_processing_from_channels(p.clone(), channels);
+                            }
+                        }
+                    }
+                } else {
+                    match self.mode {
+                        RateMode::Speed => {
+                            let _ = crate::wave::prepare_for_speed_quality(
                                 &p,
                                 &self.audio,
                                 &mut Vec::new(),
                                 self.playback_rate,
                                 Self::to_wave_resample_quality(self.src_quality),
                             );
-                        self.audio.set_rate(self.playback_rate);
-                    }
-                    _ => {
-                        self.audio.set_rate(1.0);
-                        self.spawn_heavy_processing(&p);
+                            self.audio.set_rate(self.playback_rate);
+                        }
+                        _ => {
+                            self.audio.set_rate(1.0);
+                            self.spawn_heavy_processing(&p);
+                        }
                     }
                 }
                 if let Some(idx) = self.active_tab {

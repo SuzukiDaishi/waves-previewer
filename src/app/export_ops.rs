@@ -1,8 +1,13 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::types::{ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode};
 
 impl super::WavesPreviewer {
+    fn overwrite_backup_path(src: &Path) -> PathBuf {
+        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
+        src.with_file_name(format!("{}.bak", fname))
+    }
+
     pub(super) fn spawn_export_gains(&mut self, _overwrite: bool) {
         use std::sync::mpsc;
         let mut targets: Vec<(PathBuf, f32)> = Vec::new();
@@ -74,6 +79,11 @@ impl super::WavesPreviewer {
             write_loop_markers: bool,
         }
         let cfg = self.export_cfg.clone();
+        let format_override = cfg
+            .format_override
+            .as_ref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| crate::audio_io::is_supported_extension(s));
         let out_sr = self.audio.shared.out_sample_rate.max(1);
         let mut items: Vec<(PathBuf, f32)> = Vec::new();
         let mut edit_tasks: Vec<EditSaveTask> = Vec::new();
@@ -117,15 +127,18 @@ impl super::WavesPreviewer {
                 name = name.replace("{gain}", &format!("{:+.1}", db));
                 let name = crate::app::helpers::sanitize_filename_component(&name);
                 let mut dst = parent.join(name);
-                dst.set_extension("wav");
+                let target_ext = format_override.as_deref().unwrap_or("wav");
+                dst.set_extension(target_ext);
                 if dst.exists() {
                     match self.export_cfg.conflict {
                         ConflictPolicy::Overwrite => {}
                         ConflictPolicy::Skip => continue,
                         ConflictPolicy::Rename => {
                             let orig = dst.clone();
-                            let orig_ext =
-                                orig.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+                            let orig_ext = orig
+                                .extension()
+                                .and_then(|e| e.to_str())
+                                .unwrap_or(target_ext);
                             let mut idx = 1u32;
                             loop {
                                 let stem2 =
@@ -150,9 +163,10 @@ impl super::WavesPreviewer {
                     }
                 }
                 let sr = item
-                    .meta
+                    .virtual_state
                     .as_ref()
-                    .map(|m| m.sample_rate)
+                    .map(|v| v.sample_rate)
+                    .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
                     .unwrap_or(self.audio.shared.out_sample_rate);
                 let target_sr = self
                     .sample_rate_override
@@ -305,7 +319,8 @@ impl super::WavesPreviewer {
             })
             .collect::<Vec<_>>();
         let edit_jobs = edit_tasks;
-        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        // File export prioritizes output quality over realtime speed.
+        let resample_quality = crate::wave::ResampleQuality::Best;
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
             let mut ok = 0usize;
@@ -341,11 +356,14 @@ impl super::WavesPreviewer {
                         let name = crate::app::helpers::sanitize_filename_component(&name);
                         let mut dst = parent.join(name);
                         let src_ext = src.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+                        let forced_ext = format_override.as_deref();
                         let dst_ext = dst.extension().and_then(|e| e.to_str());
                         let use_dst_ext = dst_ext
                             .map(|e| crate::audio_io::is_supported_extension(e))
                             .unwrap_or(false);
-                        if !use_dst_ext {
+                        if let Some(ext) = forced_ext {
+                            dst.set_extension(ext);
+                        } else if !use_dst_ext {
                             dst.set_extension(src_ext);
                         }
                         if dst.exists() {
@@ -424,11 +442,14 @@ impl super::WavesPreviewer {
                             .extension()
                             .and_then(|e| e.to_str())
                             .unwrap_or("wav");
+                        let forced_ext = format_override.as_deref();
                         let dst_ext = dst.extension().and_then(|e| e.to_str());
                         let use_dst_ext = dst_ext
                             .map(|e| crate::audio_io::is_supported_extension(e))
                             .unwrap_or(false);
-                        if !use_dst_ext {
+                        if let Some(ext) = forced_ext {
+                            dst.set_extension(ext);
+                        } else if !use_dst_ext {
                             dst.set_extension(src_ext);
                         }
                         if dst.exists() {
@@ -599,12 +620,7 @@ impl super::WavesPreviewer {
                     }
                     out_sr = target_sr.max(1);
                 }
-                let res = crate::wave::export_selection_wav(
-                    &channels,
-                    out_sr,
-                    (0, channels.get(0).map(|c| c.len()).unwrap_or(0)),
-                    &dst,
-                );
+                let res = crate::wave::export_channels_audio(&channels, out_sr, &dst);
                 match res {
                     Ok(()) => {
                         ok += 1;
@@ -671,6 +687,36 @@ impl super::WavesPreviewer {
         self.refresh_audio_after_sample_rate_change(&targets);
     }
 
+    pub(super) fn spawn_convert_format_selected(
+        &mut self,
+        paths: Vec<PathBuf>,
+        target_ext: &str,
+    ) {
+        let ext = target_ext.trim().to_ascii_lowercase();
+        if !crate::audio_io::is_supported_extension(&ext) {
+            return;
+        }
+        let mut indices = std::collections::BTreeSet::new();
+        for path in paths {
+            if let Some(row) = self.row_for_path(&path) {
+                indices.insert(row);
+            }
+        }
+        if indices.is_empty() {
+            return;
+        }
+        let prev_mode = self.export_cfg.save_mode;
+        let prev_prompt = self.export_cfg.first_prompt;
+        let prev_format = self.export_cfg.format_override.clone();
+        self.export_cfg.save_mode = SaveMode::NewFile;
+        self.export_cfg.first_prompt = false;
+        self.export_cfg.format_override = Some(ext);
+        self.spawn_save_selected(indices);
+        self.export_cfg.save_mode = prev_mode;
+        self.export_cfg.first_prompt = prev_prompt;
+        self.export_cfg.format_override = prev_format;
+    }
+
     pub(super) fn drain_export_results(&mut self, ctx: &egui::Context) {
         let Some(state) = &self.export_state else {
             return;
@@ -684,10 +730,29 @@ impl super::WavesPreviewer {
                     self.set_pending_gain_db_for_path(p, 0.0);
                     self.lufs_override.remove(p);
                     self.sample_rate_override.remove(p);
+                    self.sample_rate_probe_cache.remove(p);
                     self.bit_depth_override.remove(p);
                 }
                 let success_set: std::collections::HashSet<PathBuf> =
                     res.success_paths.iter().cloned().collect();
+                if matches!(self.saving_mode, Some(SaveMode::Overwrite)) && self.export_cfg.backup_bak {
+                    let mut restore_batch: Vec<(PathBuf, PathBuf)> = Vec::new();
+                    for src in &self.saving_sources {
+                        if !success_set.contains(src) {
+                            continue;
+                        }
+                        let bak = Self::overwrite_backup_path(src);
+                        if bak.is_file() {
+                            restore_batch.push((src.clone(), bak));
+                        }
+                    }
+                    if !restore_batch.is_empty() {
+                        self.overwrite_undo_stack.push(restore_batch);
+                        while self.overwrite_undo_stack.len() > 20 {
+                            self.overwrite_undo_stack.remove(0);
+                        }
+                    }
+                }
                 if matches!(self.saving_mode, Some(SaveMode::Overwrite)) {
                     for p in &edit_sources {
                         if success_set.contains(p) {
@@ -705,9 +770,11 @@ impl super::WavesPreviewer {
                     self.set_pending_gain_db_for_path(src, 0.0);
                     self.lufs_override.remove(src);
                     self.sample_rate_override.remove(src);
+                    self.sample_rate_probe_cache.remove(src);
                     self.bit_depth_override.remove(src);
                     self.replace_path_in_state(src, dst);
                     self.sample_rate_override.remove(dst);
+                    self.sample_rate_probe_cache.remove(dst);
                     self.bit_depth_override.remove(dst);
                 }
                 match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
@@ -764,5 +831,48 @@ impl super::WavesPreviewer {
             self.export_state = None;
             ctx.request_repaint();
         }
+    }
+
+    pub(super) fn undo_last_overwrite_export(&mut self) -> bool {
+        let Some(batch) = self.overwrite_undo_stack.pop() else {
+            return false;
+        };
+        let mut restored: Vec<PathBuf> = Vec::new();
+        for (src, bak) in batch {
+            if !bak.is_file() {
+                continue;
+            }
+            let parent = src.parent().unwrap_or_else(|| Path::new("."));
+            let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
+            let tmp = parent.join(format!("._wvp_undo_tmp.{}", ext));
+            if tmp.exists() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            if std::fs::copy(&bak, &tmp).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+            let _ = std::fs::remove_file(&src);
+            if std::fs::rename(&tmp, &src).is_ok() {
+                restored.push(src);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+        if restored.is_empty() {
+            return false;
+        }
+        self.ensure_meta_pool();
+        for path in &restored {
+            self.clear_meta_for_path(path);
+            self.meta_inflight.remove(path);
+            self.queue_meta_for_path(path, false);
+        }
+        if let Some(first) = restored.first().cloned() {
+            if let Some(row) = self.row_for_path(&first) {
+                self.select_and_load(row, true);
+            }
+        }
+        true
     }
 }

@@ -1,3 +1,4 @@
+use std::num::{NonZeroU32, NonZeroU8};
 use std::path::Path;
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -13,6 +14,7 @@ use mp4::{
     AacConfig, AudioObjectType as Mp4AudioObjectType, ChannelConfig, MediaConfig, Mp4Config,
     Mp4Sample, Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
 };
+use vorbis_rs::VorbisEncoderBuilder;
 
 use crate::audio::AudioEngine;
 use crate::audio_io;
@@ -651,8 +653,21 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     let (mut chans, in_sr) = decode_wav_multi(src)?;
     let g = 10.0f32.powf(gain_db / 20.0);
     for c in chans.iter_mut() { for v in c.iter_mut() { *v = (*v * g).clamp(-1.0, 1.0); } }
-    // Try to preserve original bit depth and format if possible
-    let spec = hound::WavReader::open(src)?.spec();
+    // Preserve source WAV format when available; otherwise use a safe default.
+    let default_spec = hound::WavSpec {
+        channels: chans.len().max(1) as u16,
+        sample_rate: in_sr.max(1),
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let spec = src
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+        .then(|| hound::WavReader::open(src).ok().map(|r| r.spec()))
+        .flatten()
+        .unwrap_or(default_spec);
     let mut writer = hound::WavWriter::create(dst, hound::WavSpec{
         channels: spec.channels,
         sample_rate: in_sr,
@@ -686,6 +701,7 @@ pub fn export_gain_audio(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
         "wav" => export_gain_wav(src, dst, gain_db),
         "mp3" => export_gain_mp3(src, dst, gain_db),
         "m4a" => export_gain_m4a(src, dst, gain_db),
+        "ogg" => export_gain_ogg(src, dst, gain_db),
         _ => anyhow::bail!("unsupported format: {}", fmt),
     }
 }
@@ -703,6 +719,12 @@ fn export_gain_m4a(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     let (mut chans, in_sr) = decode_wav_multi(src)?;
     apply_gain_in_place(&mut chans, gain_db);
     encode_aac_to_mp4(dst, &chans, in_sr)
+}
+
+fn export_gain_ogg(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    let (mut chans, in_sr) = decode_wav_multi(src)?;
+    apply_gain_in_place(&mut chans, gain_db);
+    encode_ogg_vorbis(dst, &chans, in_sr)
 }
 
 fn pick_format(src: &Path, dst: &Path) -> Option<String> {
@@ -745,6 +767,43 @@ fn resample_channels(chans: &[Vec<f32>], in_sr: u32, out_sr: u32) -> Vec<Vec<f32
         .iter()
         .map(|c| resample_linear(c, in_sr, out_sr))
         .collect()
+}
+
+fn encode_ogg_vorbis(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
+    let chans = normalize_channels_for_encode(chans);
+    if chans.is_empty() {
+        anyhow::bail!("empty channels");
+    }
+    let sample_rate = NonZeroU32::new(in_sr.max(1))
+        .ok_or_else(|| anyhow::anyhow!("invalid sample rate for ogg encode"))?;
+    let channels = NonZeroU8::new(chans.len().min(u8::MAX as usize) as u8)
+        .ok_or_else(|| anyhow::anyhow!("invalid channel count for ogg encode"))?;
+    let mut output = std::fs::File::create(dst)
+        .with_context(|| format!("create ogg output: {}", dst.display()))?;
+    let mut builder = VorbisEncoderBuilder::new(sample_rate, channels, &mut output)
+        .map_err(|e| anyhow::anyhow!("ogg encoder init: {e}"))?;
+    let mut encoder = builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("ogg encoder build: {e}"))?;
+    // Submit in chunks to avoid pathological memory/latency spikes on long clips.
+    let frames = chans.first().map(|c| c.len()).unwrap_or(0);
+    let block = 4096usize;
+    let mut start = 0usize;
+    while start < frames {
+        let end = (start + block).min(frames);
+        let mut chunk: Vec<&[f32]> = Vec::with_capacity(chans.len());
+        for ch in chans.iter() {
+            chunk.push(&ch[start..end]);
+        }
+        encoder
+            .encode_audio_block(&chunk)
+            .map_err(|e| anyhow::anyhow!("ogg encode block: {e}"))?;
+        start = end;
+    }
+    encoder
+        .finish()
+        .map_err(|e| anyhow::anyhow!("ogg finalize: {e}"))?;
+    Ok(())
 }
 
 fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
@@ -934,6 +993,86 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     writer
         .write_end()
         .map_err(|e| anyhow::anyhow!("mp4 finalize: {e:?}"))?;
+    // Some mp4 readers are strict about esds descriptors. If probe/decode fails,
+    // fall back to ADTS AAC payload (kept under the requested extension).
+    if crate::audio_io::read_audio_info(dst).is_err() {
+        encode_aac_to_adts(dst, &chans, sr)?;
+    }
+    Ok(())
+}
+
+fn encode_aac_to_adts(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
+    use std::io::Write;
+    if chans.is_empty() {
+        anyhow::bail!("empty channels");
+    }
+    let mut chans = normalize_channels_for_encode(chans);
+    let mut sr = in_sr;
+    if aac_freq_index(sr).is_none() {
+        let target = 48_000;
+        chans = resample_channels(&chans, in_sr, target);
+        sr = target;
+    }
+    let channels = chans.len();
+    let bitrate = if channels == 1 { 96_000 } else { 192_000 };
+    let params = AacEncoderParams {
+        bit_rate: AacBitRate::Cbr(bitrate),
+        sample_rate: sr,
+        transport: AacTransport::Adts,
+        channels: if channels == 1 {
+            AacChannelMode::Mono
+        } else {
+            AacChannelMode::Stereo
+        },
+        audio_object_type: FdkAudioObjectType::Mpeg4LowComplexity,
+    };
+    let encoder =
+        AacEncoder::new(params).map_err(|e| anyhow::anyhow!("aac adts encoder init: {e}"))?;
+    let info = encoder
+        .info()
+        .map_err(|e| anyhow::anyhow!("aac adts encoder info: {e}"))?;
+    let frame_len = info.frameLength as usize;
+    if frame_len == 0 {
+        anyhow::bail!("aac frame length is zero");
+    }
+    let max_out = (info.maxOutBufBytes as usize).max(4096);
+    let interleaved = interleave_i16(&chans);
+    let frame_samples = frame_len * channels;
+    let mut file = std::fs::File::create(dst)
+        .with_context(|| format!("create adts fallback: {}", dst.display()))?;
+    let mut pos = 0usize;
+    while pos < interleaved.len() {
+        let end = (pos + frame_samples).min(interleaved.len());
+        let mut input_slice = &interleaved[pos..end];
+        let mut padded;
+        if input_slice.len() < frame_samples {
+            padded = vec![0i16; frame_samples];
+            padded[..input_slice.len()].copy_from_slice(input_slice);
+            input_slice = &padded;
+        }
+        let mut out_buf = vec![0u8; max_out];
+        let enc_info = encoder
+            .encode(input_slice, &mut out_buf)
+            .map_err(|e| anyhow::anyhow!("aac adts encode: {e}"))?;
+        if enc_info.output_size > 0 {
+            file.write_all(&out_buf[..enc_info.output_size])?;
+        }
+        if enc_info.input_consumed == 0 {
+            break;
+        }
+        pos += enc_info.input_consumed;
+    }
+    loop {
+        let mut out_buf = vec![0u8; max_out];
+        let enc_info = encoder
+            .encode(&[], &mut out_buf)
+            .map_err(|e| anyhow::anyhow!("aac adts flush: {e}"))?;
+        if enc_info.output_size == 0 {
+            break;
+        }
+        file.write_all(&out_buf[..enc_info.output_size])?;
+    }
+    file.flush()?;
     Ok(())
 }
 
@@ -1019,6 +1158,7 @@ pub fn export_channels_audio_with_depth(
             Ok(())
         }
         "m4a" => encode_aac_to_mp4(dst, chans, sample_rate),
+        "ogg" => encode_ogg_vorbis(dst, chans, sample_rate),
         _ => anyhow::bail!("unsupported export format: {}", ext),
     }
 }

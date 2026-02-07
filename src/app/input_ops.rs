@@ -31,11 +31,25 @@ impl super::WavesPreviewer {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
                 // Keep preview audio/overlay when toggling playback.
                 // In list view, if preview decode is still pending, request play once ready.
-                if self.active_tab.is_none() && self.list_preview_rx.is_some() {
-                    if self.force_load_selected_list_preview_for_play() {
-                        self.audio.toggle_play();
+                if self.active_tab.is_none() {
+                    let now_playing = self
+                        .audio
+                        .shared
+                        .playing
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if now_playing {
+                        // Explicit pause in list mode.
+                        self.audio.stop();
+                        self.list_play_pending = false;
                     } else {
-                        self.list_play_pending = true;
+                        if self.force_load_selected_list_preview_for_play() {
+                            self.audio.play();
+                            if let Some(path) = self.selected_path_buf() {
+                                self.debug_mark_list_play_start(&path);
+                            }
+                        } else {
+                            self.list_play_pending = true;
+                        }
                     }
                 } else {
                     self.audio.toggle_play();
@@ -487,6 +501,9 @@ impl super::WavesPreviewer {
         }
         if !handled {
             handled = if redo { self.list_redo() } else { self.list_undo() };
+        }
+        if !handled && !redo {
+            handled = self.undo_last_overwrite_export();
         }
         if handled {
             if self.debug.cfg.enabled && self.debug.input_trace_enabled {

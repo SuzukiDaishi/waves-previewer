@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::types::{
     DebugAction, DebugAutomation, DebugStep, EditorTab, FadeShape, LoopMode, LoopXfadeShape,
@@ -170,6 +170,55 @@ impl WavesPreviewer {
         }
     }
 
+    fn debug_push_latency_sample(samples: &mut std::collections::VecDeque<f32>, value_ms: f32) {
+        if !value_ms.is_finite() || value_ms < 0.0 {
+            return;
+        }
+        samples.push_back(value_ms);
+        while samples.len() > 512 {
+            samples.pop_front();
+        }
+    }
+
+    pub(super) fn debug_mark_list_select_start(&mut self, path: &Path) {
+        self.debug.list_select_started_at = Some(std::time::Instant::now());
+        self.debug.list_select_started_path = Some(path.to_path_buf());
+    }
+
+    pub(super) fn debug_mark_list_preview_ready(&mut self, path: &Path) {
+        let Some(started_at) = self.debug.list_select_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .list_select_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(&mut self.debug.select_to_preview_ms, elapsed_ms);
+        }
+    }
+
+    pub(super) fn debug_mark_list_play_start(&mut self, path: &Path) {
+        let Some(started_at) = self.debug.list_select_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .list_select_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(&mut self.debug.select_to_play_ms, elapsed_ms);
+            self.debug.list_select_started_at = None;
+            self.debug.list_select_started_path = None;
+        }
+    }
+
     pub(super) fn debug_summary(&self) -> String {
         let selected = self
             .selected_path_buf()
@@ -224,6 +273,44 @@ impl WavesPreviewer {
             avg_frame_ms,
             self.debug.frame_peak_ms,
             self.debug.frame_samples
+        ));
+        let summarize = |samples: &std::collections::VecDeque<f32>| -> String {
+            if samples.is_empty() {
+                return "n=0".to_string();
+            }
+            let mut values: Vec<f32> = samples.iter().copied().collect();
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = values.len();
+            let p50_idx = ((n.saturating_sub(1)) as f32 * 0.50).round() as usize;
+            let p95_idx = ((n.saturating_sub(1)) as f32 * 0.95).round() as usize;
+            let p50 = values[p50_idx.min(n - 1)];
+            let p95 = values[p95_idx.min(n - 1)];
+            let max_v = values.last().copied().unwrap_or(0.0);
+            format!("n={} p50={:.1} p95={:.1} max={:.1}", n, p50, p95, max_v)
+        };
+        lines.push(format!(
+            "select_to_preview_ms: {}",
+            summarize(&self.debug.select_to_preview_ms)
+        ));
+        lines.push(format!(
+            "select_to_play_ms: {}",
+            summarize(&self.debug.select_to_play_ms)
+        ));
+        if self.debug.select_to_preview_ms.is_empty() {
+            lines.push(
+                "warning: select_to_preview_ms has no samples (run list selection scenario)"
+                    .to_string(),
+            );
+        }
+        if self.debug.select_to_play_ms.is_empty() {
+            lines.push(
+                "warning: select_to_play_ms has no samples (run Space/AutoPlay scenario)"
+                    .to_string(),
+            );
+        }
+        lines.push(format!(
+            "autoplay_pending_count: {} stale_preview_cancel_count: {}",
+            self.debug.autoplay_pending_count, self.debug.stale_preview_cancel_count
         ));
         let source_count = self.external_sources.len();
         if source_count > 0 {
@@ -464,7 +551,23 @@ impl WavesPreviewer {
         });
         steps.push_back(DebugStep {
             wait_frames: delay,
-            action: DebugAction::OpenFirst,
+            action: DebugAction::SelectNext,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::SelectNext,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::SelectNext,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::SelectNext,
+        });
+        steps.push_back(DebugStep {
+            wait_frames: delay,
+            action: DebugAction::SelectNext,
         });
         steps.push_back(DebugStep {
             wait_frames: delay,
@@ -1105,11 +1208,17 @@ impl WavesPreviewer {
                 self.debug_log("auto: play/pause");
             }
             DebugAction::SelectNext => {
-                if let Some(cur) = self.selected {
-                    let next = (cur + 1).min(self.files.len().saturating_sub(1));
-                    self.select_and_load(next, true);
-                    self.debug_log(format!("auto: select {next}"));
+                if self.files.is_empty() {
+                    return;
                 }
+                let cur = self.selected.unwrap_or(0);
+                let next = if self.selected.is_some() {
+                    (cur + 1).min(self.files.len().saturating_sub(1))
+                } else {
+                    0
+                };
+                self.select_and_load(next, true);
+                self.debug_log(format!("auto: select {next}"));
             }
             DebugAction::PreviewTimeStretch(rate) => {
                 if let Some(tab_idx) = self.active_tab {
@@ -1146,7 +1255,12 @@ impl WavesPreviewer {
                 }
             }
             DebugAction::DumpSummaryAuto => {
-                let path = self.default_debug_summary_path();
+                let path = self
+                    .startup
+                    .cfg
+                    .debug_summary_path
+                    .clone()
+                    .unwrap_or_else(|| self.default_debug_summary_path());
                 self.save_debug_summary(path);
             }
             DebugAction::Exit => {

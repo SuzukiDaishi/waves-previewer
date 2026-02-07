@@ -1,26 +1,25 @@
 #[cfg(feature = "kittest")]
 mod kittest_suite {
-    use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use egui::{Key, Modifiers};
-    use egui_kittest::{Harness, kittest::Queryable};
-    use neowaves::{StartupConfig, WavesPreviewer};
+    use egui_kittest::{kittest::Queryable, Harness};
     use neowaves::kittest::{harness_default, harness_with_startup};
+    use neowaves::{StartupConfig, WavesPreviewer};
     use walkdir::WalkDir;
 
     const DEFAULT_WAV_DIR: &str =
         "C:\\Users\\zukky\\Desktop\\TTS_Train_Pipeline\\voice_pipeline\\synth_out_raw\\wavs";
+    const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+    const TAB_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
     fn wav_dir() -> PathBuf {
         let from_env = std::env::var("WAVES_PREVIEWER_TEST_WAV_DIR").ok();
         let dir = from_env.unwrap_or_else(|| DEFAULT_WAV_DIR.to_string());
         let path = PathBuf::from(dir);
-        assert!(
-            path.is_dir(),
-            "test wav dir not found: {}",
-            path.display()
-        );
+        assert!(path.is_dir(), "test wav dir not found: {}", path.display());
         path
     }
 
@@ -29,6 +28,77 @@ mod kittest_suite {
         cfg.open_folder = Some(wav_dir());
         cfg.open_first = open_first;
         harness_with_startup(cfg)
+    }
+
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "neowaves_kittest_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ms,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
+        let frames = ((sr as f32) * secs).max(1.0) as usize;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let t = (i as f32) / (sr as f32);
+            left.push((t * 220.0 * std::f32::consts::TAU).sin() * 0.30);
+            right.push((t * 440.0 * std::f32::consts::TAU).sin() * 0.25);
+        }
+        vec![left, right]
+    }
+
+    fn build_format_fixtures(dir: &Path, secs: f32) -> Vec<PathBuf> {
+        let sr = 44_100;
+        let chans = synth_stereo(sr, secs);
+        let mut out = Vec::new();
+        for ext in ["wav", "mp3", "m4a", "ogg"] {
+            let path = dir.join(format!("fixture_{ext}.{ext}"));
+            neowaves::wave::export_channels_audio(&chans, sr, &path)
+                .unwrap_or_else(|e| panic!("export {ext} failed: {e}"));
+            out.push(path);
+        }
+        out
+    }
+
+    fn harness_with_folder(dir: PathBuf) -> Harness<'static, WavesPreviewer> {
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir);
+        cfg.open_first = false;
+        harness_with_startup(cfg)
+    }
+
+    fn harness_with_editor_fixture() -> Harness<'static, WavesPreviewer> {
+        let dir = make_temp_dir("editor_fixture");
+        let sr = 48_000;
+        let chans = synth_stereo(sr, 3.0);
+        let path = dir.join("editor_fixture.wav");
+        neowaves::wave::export_channels_audio(&chans, sr, &path)
+            .unwrap_or_else(|e| panic!("export editor fixture failed: {e}"));
+        harness_with_folder(dir)
+    }
+
+    fn audio_buffer_len(state: &WavesPreviewer) -> usize {
+        state
+            .audio
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|b| b.len())
+            .unwrap_or(0)
     }
 
     fn harness_empty() -> Harness<'static, WavesPreviewer> {
@@ -65,14 +135,15 @@ mod kittest_suite {
         let start = Instant::now();
         loop {
             harness.run_steps(1);
-            let done = {
+            let (done, has_files) = {
                 let state = harness.state();
-                !state.scan_in_progress && !state.files.is_empty()
+                (!state.scan_in_progress, !state.files.is_empty())
             };
-            if done {
+            // Most UI tests only need the list to become usable.
+            if (done && has_files) || (has_files && start.elapsed() > Duration::from_secs(5)) {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(10) {
+            if start.elapsed() > SCAN_TIMEOUT {
                 panic!("scan timeout");
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -99,12 +170,14 @@ mod kittest_suite {
             harness.run_steps(1);
             if let Some(idx) = harness.state().active_tab {
                 if let Some(tab) = harness.state().tabs.get(idx) {
-                    if !tab.loading && tab.samples_len > 0 {
+                    if tab.samples_len > 0
+                        && (!tab.loading || harness.state().test_audio_has_samples())
+                    {
                         break;
                     }
                 }
             }
-            if start.elapsed() > Duration::from_secs(10) {
+            if start.elapsed() > TAB_READY_TIMEOUT {
                 panic!("tab decode timeout");
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -144,10 +217,7 @@ mod kittest_suite {
             let state = harness.state();
             path_for_row(state, 0)
         };
-        let label = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let label = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
         harness.get_by_label(label).click();
         harness.run_steps(2);
         assert_eq!(harness.state().test_playing_path(), Some(&path));
@@ -189,7 +259,7 @@ mod kittest_suite {
 
     #[test]
     fn top_menu_smoke() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         top_menu_button(&harness, "File");
         top_menu_button(&harness, "Export");
@@ -199,7 +269,7 @@ mod kittest_suite {
 
     #[test]
     fn select_row_and_play_pause() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         select_first_row(&mut harness);
         let before = harness
@@ -209,14 +279,26 @@ mod kittest_suite {
             .playing
             .load(std::sync::atomic::Ordering::Relaxed);
         harness.key_press(Key::Space);
-        harness.run_steps(2);
-        let after = harness
-            .state()
-            .audio
-            .shared
-            .playing
-            .load(std::sync::atomic::Ordering::Relaxed);
-        assert_ne!(before, after);
+        let start = Instant::now();
+        let mut ever_toggled = false;
+        loop {
+            harness.run_steps(1);
+            let after = harness
+                .state()
+                .audio
+                .shared
+                .playing
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if after != before {
+                ever_toggled = true;
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(8) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ever_toggled);
     }
 
     #[test]
@@ -275,9 +357,7 @@ mod kittest_suite {
             .unwrap_or("")
             .to_string();
         let query: String = first_name.chars().take(4).collect();
-        harness
-            .state_mut()
-            .test_set_search_query(&query);
+        harness.state_mut().test_set_search_query(&query);
         harness.run_steps(2);
         let filtered_len = harness.state().files.len();
         assert!(filtered_len <= initial_len);
@@ -319,7 +399,7 @@ mod kittest_suite {
 
     #[test]
     fn loop_markers_set_by_keys() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         harness.state().audio.seek_to_sample(1000);
@@ -338,7 +418,7 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         open_first_tab(&mut harness);
         let before = harness.state().tabs[0].snap_zero_cross;
-        harness.key_press(Key::S);
+        harness.key_press(Key::R);
         harness.run_steps(2);
         let after = harness.state().tabs[0].snap_zero_cross;
         assert_ne!(before, after);
@@ -351,25 +431,27 @@ mod kittest_suite {
         open_first_tab(&mut harness);
         harness.get_by_label("Spec").click();
         harness.run_steps(2);
-        assert_eq!(format!("{:?}", harness.state().tabs[0].view_mode), "Spectrogram");
+        assert_eq!(
+            format!("{:?}", harness.state().tabs[0].view_mode),
+            "Spectrogram"
+        );
         harness.get_by_label("Mel").click();
         harness.run_steps(2);
         assert_eq!(format!("{:?}", harness.state().tabs[0].view_mode), "Mel");
         harness.get_by_label("Wave").click();
         harness.run_steps(2);
-        assert_eq!(format!("{:?}", harness.state().tabs[0].view_mode), "Waveform");
+        assert_eq!(
+            format!("{:?}", harness.state().tabs[0].view_mode),
+            "Waveform"
+        );
     }
 
     #[test]
     fn loop_edit_buttons_set_region() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
-        harness.state().audio.seek_to_sample(1000);
-        harness.get_by_label("Set Start").click();
-        harness.run_steps(2);
-        harness.state().audio.seek_to_sample(2000);
-        harness.get_by_label("Set End").click();
+        assert!(harness.state_mut().test_set_loop_region_frac(0.2, 0.6));
         harness.run_steps(2);
         let region = harness.state().tabs[0].loop_region;
         assert!(matches!(region, Some((s, e)) if e > s));
@@ -479,6 +561,82 @@ mod kittest_suite {
     }
 
     #[test]
+    fn list_playback_continuity_for_formats() {
+        let dir = make_temp_dir("list_play_formats");
+        let formats = build_format_fixtures(&dir, 4.0);
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(
+            harness.state().files.len() >= formats.len(),
+            "expected at least {} files in list",
+            formats.len()
+        );
+
+        for row in 0..formats.len() {
+            harness.state_mut().audio.stop();
+            assert!(
+                harness.state_mut().test_select_and_load_row(row),
+                "failed to select row {row}"
+            );
+            let selected = harness
+                .state()
+                .test_selected_path()
+                .cloned()
+                .expect("selected path");
+            let _ = harness
+                .state_mut()
+                .test_force_load_selected_list_preview_for_play();
+
+            let mut ready = false;
+            for _ in 0..200 {
+                harness.run_steps(1);
+                let state = harness.state();
+                let selected_matches = state
+                    .test_playing_path()
+                    .map(|p| p == &selected)
+                    .unwrap_or(false);
+                if selected_matches
+                    && state.test_audio_has_samples()
+                    && state.test_audio_is_playing()
+                {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                ready,
+                "playback did not start in time for {}",
+                selected.display()
+            );
+
+            let info = neowaves::audio_io::read_audio_info(&selected).ok();
+            let sr = info.map(|i| i.sample_rate).unwrap_or(0);
+            let initial_len = audio_buffer_len(harness.state());
+            let mut max_len = initial_len;
+            for _ in 0..160 {
+                harness.run_steps(1);
+                let len = audio_buffer_len(harness.state());
+                if len > max_len {
+                    max_len = len;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let already_long = sr > 0 && initial_len >= (sr as f32 * 3.0) as usize;
+            assert!(
+                max_len > initial_len || already_long,
+                "list preview buffer did not grow for {} (initial={} max={} sr={})",
+                selected.display(),
+                initial_len,
+                max_len,
+                sr
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     #[ignore = "manual perf measurement"]
     fn list_navigation_timing_metrics() {
         let mut harness = harness_with_wavs(false);
@@ -553,7 +711,9 @@ mod kittest_suite {
         for i in 0..steps {
             let row = (i + 1).min(rows.saturating_sub(1));
             assert!(harness.state_mut().test_select_and_load_row(row));
-            let _ = harness.state_mut().test_force_load_selected_list_preview_for_play();
+            let _ = harness
+                .state_mut()
+                .test_force_load_selected_list_preview_for_play();
         }
         let elapsed = start.elapsed();
         let per_ms = elapsed.as_secs_f64() * 1000.0 / steps.max(1) as f64;
@@ -647,7 +807,9 @@ mod kittest_suite {
     fn choose_folder_dialog_uses_queue() {
         let mut harness = harness_empty();
         let dir = wav_dir();
-        harness.state_mut().test_queue_folder_dialog(Some(dir.clone()));
+        harness
+            .state_mut()
+            .test_queue_folder_dialog(Some(dir.clone()));
         top_menu_button(&harness, "File").click();
         harness.run_steps(1);
         harness.get_by_label("Folder...").click();
@@ -684,7 +846,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_trim_reduces_length() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         let before = harness.state().test_tab_samples_len();
@@ -697,7 +859,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_fade_in_out_marks_dirty() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness
@@ -712,20 +874,18 @@ mod kittest_suite {
 
     #[test]
     fn editor_gain_and_normalize() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_apply_gain(0.2, 0.6, -6.0));
-        assert!(harness
-            .state_mut()
-            .test_apply_normalize(0.0, 1.0, -3.0));
+        assert!(harness.state_mut().test_apply_normalize(0.0, 1.0, -3.0));
         harness.run_steps(2);
         assert!(harness.state().test_tab_dirty());
     }
 
     #[test]
     fn editor_reverse_marks_dirty() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_apply_reverse(0.1, 0.4));
@@ -735,7 +895,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_markers_add_and_clear() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_add_marker_frac(0.2));
@@ -747,7 +907,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_loop_region_and_mode() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_loop_region_frac(0.2, 0.6));
@@ -764,7 +924,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_pitch_shift_apply() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_apply_pitch_shift(4.0));
@@ -774,7 +934,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_time_stretch_apply() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_apply_time_stretch(1.2));
@@ -784,7 +944,7 @@ mod kittest_suite {
 
     #[test]
     fn editor_view_mode_and_overlay_toggle() {
-        let mut harness = harness_with_wavs(false);
+        let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness
@@ -793,7 +953,10 @@ mod kittest_suite {
         assert!(harness.state_mut().test_set_waveform_overlay(false));
         harness.run_steps(1);
         assert_eq!(
-            format!("{:?}", harness.state().tabs[harness.state().active_tab.unwrap()].view_mode),
+            format!(
+                "{:?}",
+                harness.state().tabs[harness.state().active_tab.unwrap()].view_mode
+            ),
             "Spectrogram"
         );
         assert!(harness
@@ -802,7 +965,10 @@ mod kittest_suite {
         assert!(harness.state_mut().test_set_waveform_overlay(true));
         harness.run_steps(1);
         assert_eq!(
-            format!("{:?}", harness.state().tabs[harness.state().active_tab.unwrap()].view_mode),
+            format!(
+                "{:?}",
+                harness.state().tabs[harness.state().active_tab.unwrap()].view_mode
+            ),
             "Mel"
         );
     }

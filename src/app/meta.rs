@@ -10,6 +10,7 @@ use crate::audio_io;
 #[derive(Clone, Debug)]
 pub enum MetaTask {
     Header(PathBuf),
+    HeaderOnly(PathBuf),
     Decode(PathBuf),
     Transcript(PathBuf),
     External(PathBuf),
@@ -25,6 +26,7 @@ pub enum MetaUpdate {
 fn task_path(task: &MetaTask) -> &PathBuf {
     match task {
         MetaTask::Header(path)
+        | MetaTask::HeaderOnly(path)
         | MetaTask::Decode(path)
         | MetaTask::Transcript(path)
         | MetaTask::External(path) => path,
@@ -298,9 +300,10 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                     break;
                 };
 
-                let (p, do_header) = match task {
-                    MetaTask::Header(path) => (path, true),
-                    MetaTask::Decode(path) => (path, false),
+                let (p, do_header, do_decode) = match task {
+                    MetaTask::Header(path) => (path, true, true),
+                    MetaTask::HeaderOnly(path) => (path, true, false),
+                    MetaTask::Decode(path) => (path, false, true),
                     MetaTask::Transcript(path) => {
                         let transcript_data = transcript::srt_path_for_audio(&path)
                             .and_then(|p| transcript::load_srt(&p));
@@ -327,15 +330,20 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                     }
                 }
 
-                // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
-                if let Some(full) = decode_full_meta(&p) {
-                    let _ = tx.send(MetaUpdate::Full(p.clone(), full));
-                } else if let Some(mut header_meta) = header_meta_opt {
-                    header_meta.decode_error = Some("Decode failed".to_string());
-                    header_meta.rms_db = None;
-                    header_meta.peak_db = None;
-                    header_meta.lufs_i = None;
-                    header_meta.thumb.clear();
+                if do_decode {
+                    // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
+                    if let Some(full) = decode_full_meta(&p) {
+                        let _ = tx.send(MetaUpdate::Full(p.clone(), full));
+                    } else if let Some(mut header_meta) = header_meta_opt {
+                        header_meta.decode_error = Some("Decode failed".to_string());
+                        header_meta.rms_db = None;
+                        header_meta.peak_db = None;
+                        header_meta.lufs_i = None;
+                        header_meta.thumb.clear();
+                        let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
+                    }
+                } else if let Some(header_meta) = header_meta_opt {
+                    // Header-only tasks are finalized here intentionally.
                     let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
                 }
             }

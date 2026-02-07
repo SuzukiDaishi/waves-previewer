@@ -68,17 +68,11 @@ impl WavesPreviewer {
         &self,
         path: &Path,
     ) -> Option<(std::sync::Arc<crate::audio::AudioBuffer>, u32, u16)> {
-        let (mut chans, in_sr) = crate::audio_io::decode_audio_multi(path).ok()?;
-        let out_sr = self.audio.shared.out_sample_rate;
-        if in_sr != out_sr {
-            for c in chans.iter_mut() {
-                *c = self.resample_mono_with_quality(c, in_sr, out_sr);
-            }
-        }
+        let (chans, in_sr) = crate::audio_io::decode_audio_multi(path).ok()?;
         let bits = crate::audio_io::read_audio_info(path)
             .map(|info| info.bits_per_sample)
             .unwrap_or(32);
         let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(chans));
-        Some((audio, out_sr, bits))
+        Some((audio, in_sr.max(1), bits))
     }
 }

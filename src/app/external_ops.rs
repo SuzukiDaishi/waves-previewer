@@ -73,6 +73,7 @@ impl WavesPreviewer {
                 transcript: None,
                 external: HashMap::new(),
                 virtual_audio: None,
+                virtual_state: None,
             };
             self.next_media_id = self.next_media_id.wrapping_add(1);
             for (idx, header) in self.external_headers.iter().enumerate() {

@@ -47,6 +47,7 @@ impl super::WavesPreviewer {
                 && self.selected_path_buf().as_ref() == Some(&path)
             {
                 self.audio.play();
+                self.debug_mark_list_play_start(&path);
             }
             ctx.request_repaint();
         }

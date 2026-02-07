@@ -72,8 +72,12 @@ impl WavesPreviewer {
 
     pub(super) fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
+        let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
         if let Some(item) = self.item_for_path_mut(path) {
             item.meta = Some(meta);
+            if let Some(sr) = sr_hint {
+                self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
+            }
             if let Some(bpm) = bpm_hint {
                 for tab in self.tabs.iter_mut() {
                     if tab.path == path && !tab.bpm_user_set {
@@ -90,6 +94,7 @@ impl WavesPreviewer {
         if let Some(item) = self.item_for_path_mut(path) {
             item.meta = None;
         }
+        self.sample_rate_probe_cache.remove(path);
     }
 
     pub(super) fn transcript_for_path(&self, path: &Path) -> Option<&Transcript> {
@@ -279,8 +284,16 @@ impl WavesPreviewer {
         if self.list_preview_rx.is_some() {
             // Keep autoplay intent while async preview is still loading.
             self.list_play_pending = true;
+            self.debug.autoplay_pending_count = self.debug.autoplay_pending_count.saturating_add(1);
+            return;
+        }
+        if self.list_preview_pending_path.is_some() {
+            self.list_play_pending = true;
+            self.debug.autoplay_pending_count = self.debug.autoplay_pending_count.saturating_add(1);
+            return;
         }
         self.audio.play();
+        self.debug_mark_list_play_start(&path);
     }
 
     pub(super) fn current_active_path(&self) -> Option<&PathBuf> {

@@ -88,6 +88,10 @@
 - `Ctrl+E` と同等のエクスポートを右クリックメニューから実行可能に
 - session ファイル内パスは session ファイル基準の相対パスで保持
 
+#### 非破壊方針（確定）
+- `Export` を除き、音声データへの実ファイル上書きは行わない。
+- SR/Bits/Trim(Add Virtual) などの編集結果はメモリ状態（override/virtual）として保持し、保存は明示的な Export 操作時のみ実行する。
+
 ### 中規模修正
 - VST / CLAP 読み込み対応（List 表示性能を維持し、波形ズレを回避。重処理は一時的許容）
 - エディタ下部の猫アニメ表示（透過 GIF / 音・BPM 連動、無音時挙動含む、軽量実装）
@@ -542,3 +546,148 @@ rubato = "0.15"
 
 6. `src-quality-upgrade`
 - 新SRC導入 + 経路統一
+
+---
+
+## 追加修正（2026-02-04）
+
+### 追加要望（確定）
+- wav, m4a, mp3, ogg 周りの読み込み、保存のテストコードの作成と修正
+- virtualのセッションファイルからの復元と、そのテスト
+- m4aのサンプルレート、チャンネル表示、mp3やwav, oggも同様
+- virtualの生成時に元の音声とサンプルレート表示が変わる
+- virtualの挙動の諸々の確認と安定化
+- virtualの保存機能の確認(m4a,mp3,ogg,wav)
+- wav, m4a, mp3, oggの相互変換機能(リストで右クリックから選択)
+- エディタでトリム機能など波形長さが変わる際に、シークバーの移動範囲がそのままになる(一度閉じて再度開くとなおる)
+- trim機能に追加、選択範囲を新たなバーチャルファイルとしてリストに追加。
+- その他、ファイルの読み込み、書き出し周りの実装要件を改めて定義して、デバッグを厳密に追加
+
+### 実装方針（I/O基盤を先に統一）
+1. `audio_io` の責務を統一し、`probe` / `decode` / `encode` / `convert` の4系統APIを一本化する。
+2. List表示は軽量 `probe`、編集/再生は `decode` を使い分け、メタ表示差異を解消する。
+3. 書き出しは以下を基本方針とする。
+   - WAV: ネイティブ実装（PCM16/24/32f）
+   - MP3/M4A/OGG: export backend 経由（既存実装を優先、必要に応じてffmpeg backendを許容）
+4. 相互変換（右クリック）は専用実装を増やさず、Exportパイプラインを呼ぶ共通導線にする。
+
+### virtual 安定化方針
+1. virtualは `audio_spec(sample_rate/channels)` を生成時に固定保持し、後段の再probeで上書きしない。
+2. `.nwsess` には virtual の復元に必要な情報（source参照、処理チェーン、audio_spec）を加算保存する。
+3. セッション復元時は virtual を再構築し、欠損入力があってもクラッシュせず継続する。
+4. virtual保存（wav/m4a/mp3/ogg）は `decode(virtual) -> encode(target)` の同一経路で検証する。
+
+### Editor trim / seek 修正方針
+1. 波形長変更時に `seek_pos` / `seek_max` / `view_window` / `selection` を同フレームで再計算・clampする。
+2. trim適用時の追加機能として「選択範囲を新規virtualとしてリスト追加」を実装する（非破壊）。
+
+### テスト方針（厳密化）
+1. フォーマット別I/Oテスト: wav/m4a/mp3/ogg の `probe/decode` 成功、SR/Ch/Duration の検証。
+2. 保存往復テスト: encode後に再decodeしてメタ整合を確認（lossyは許容差を定義）。
+3. 相互変換テスト: 各入力->各出力の最小マトリクスを自動テスト化。
+4. virtualセッション復元テスト: 保存->再読込で item数、spec、再生可能性を検証。
+5. trim長変更テスト: seek範囲が即時更新されることを検証。
+
+### デバッグ強化
+- I/O境界で path/container/codec/sr/ch/frames を構造化ログ出力する。
+- virtual生成/復元時に source参照・処理チェーン・最終spec をログ出力する。
+- debugビルドでPCM健全性チェック（NaN/Inf/peak/rms）を追加する。
+  - 実装: `NEOWAVES_IO_TRACE=1` で `io_trace` を出力（probe/decode境界）。
+  - 実装: debugビルドでは decode後に非有限値（NaN/Inf）を0へ置換し、件数をログ出力。
+
+### 実機UI確認・計測手順（追加修正）
+1. List高速性の確認（dummy 70k）
+   - `cargo run -- --dummy-list 70000 --screenshot debug\\zz_dummy_70k.png --screenshot-delay 20 --exit-after-screenshot`
+   - 起動直後のスクロール/選択でフリーズがないことを確認。
+2. AutoPlay遅延計測（実ファイル）
+   - `cargo run -- --open-file debug\\gui_test_440.wav --auto-run --debug --debug-summary debug\\zz_auto_list_summary.txt --debug-summary-delay 120`
+   - summaryの `select_to_preview_ms` / `select_to_play_ms` の `p95` を比較する。
+3. Editor自動操作の回帰確認
+   - `cargo run -- --open-file debug\\gui_test_440.wav --auto-run-editor --auto-run-delay 20 --debug --debug-summary debug\\zz_auto_editor_summary.txt`
+   - Trim/適用後にseek範囲が即時反映されるか確認する。
+4. 相互変換確認（右クリック）
+   - List右クリック `Convert Format` から `WAV/MP3/M4A/OGG` を順次実行。
+   - 生成物を再読込し、`Ch/SR/Bits` が `-` にならないことを確認。
+5. virtual復元確認
+   - virtualを作成して `.nwsess` 保存→再起動→再読込。
+   - virtualが欠落せず再生可能で、SR表示が保存前後で一致することを確認。
+
+---
+
+## 仕様確定（安定化フェーズ基準 / 2026-02-06）
+
+この節は、実装と文書の不一致を解消するための優先仕様です。
+以降の安定化作業は本節を基準にします。
+
+### 1. 再生と SRC
+- 通常の List 再生は体感優先の軽量経路を使う。
+- 明示的な Sample Rate 変換（右クリック Resample）と Export は品質優先で `Best` SRC を使う。
+- 元 SR と同一の場合は不要な SRC を行わない。
+
+### 2. Bits 変換
+- v0 では `bit_depth_override` によるメモリ上の非破壊オーバーライドを正仕様とする。
+- 実ファイルへの反映は Save/Export 実行時に行う。
+
+### 3. ショートカット確定
+- Editor の `S` は View 切り替え専用（Waveform/Spectrogram/Mel）。
+- Zero Cross Snap は `R` で切り替える。
+- List の `P` は Auto Play 切り替え、List の `R` は Regex 切り替え。
+
+### 4. 計測運用
+- `debug summary` の `select_to_preview_ms` / `select_to_play_ms` が `n=0` の場合は「計測不足」と扱う。
+- 速度比較は p50/p95/max で記録する。
+
+### Deprecated 記載（参照無効）
+- 旧記載の「Editor の `S` で Zero Cross Snap 切り替え」は無効。
+- 旧記載の「Bits 変換は常に新規ファイル生成」は無効（v0 仕様ではオーバーライド）。
+- 旧記載の「SRC を全経路で同一品質で適用」は無効（軽量経路と品質経路を分離）。
+
+---
+
+## セッション/エクスポート仕様（安定化追記 / 2026-02-06）
+
+### セッション復元（.nwsess）
+- 復元対象:
+  - リスト内容（files/items）
+  - virtual（source/op_chain/spec/sidecar）
+  - sample_rate_override / bit_depth_override
+  - external 設定（source群、key/match、visible/show_unmatched）
+  - tabs / cached edits / active tab
+  - `selected_path`（選択行）
+  - export policy（save_mode/conflict/backup_bak/name_template/dest_folder）
+- 復元非対象（ランタイムのみ）:
+  - Editor Undo/Redo スタック
+  - List Undo/Redo スタック
+  - 非同期ジョブ状態（inflight receiver 等）
+
+### Ctrl+Z と保存の扱い
+- `Ctrl+Z` は次の優先順で適用:
+  1. List Undo/Redo
+  2. Editor Undo/Redo
+  3. Overwrite export 復元（`.bak` が存在する場合のみ）
+- Overwrite export の復元は `.bak backup on overwrite` が有効な場合にのみ可能。
+- セッション保存時に Undo スタック自体は永続化しない（メモリコストと復元複雑度を抑えるため）。
+
+### エクスポート仕様
+- SaveMode:
+  - `Overwrite`: 元ファイルを置換（必要時 `.bak` 作成）
+  - `NewFile`: 新規ファイル生成（conflict で Rename/Overwrite/Skip）
+- 反映優先順位:
+  1. 明示設定（sample_rate_override / bit_depth_override）
+  2. 編集済みタブ・virtual の現在状態
+  3. 元ファイルメタ
+- マーカー:
+  - `markers`: 書き出し時に各フォーマットの対応方式で保存
+    - WAV: 埋め込み
+    - MP3/M4A/OGG: sidecar/tag 方式
+  - `loop markers`: WAV/MP3/M4A は書き込み対象、OGG は非対応
+
+### テストゲート（必須）
+- `cargo test -q`
+- `cargo test -q --features kittest`
+- 重点テスト:
+  - `tests/session_virtual_restore.rs`
+  - `tests/export_overwrite_undo.rs`
+  - `tests/audio_convert_matrix.rs`
+  - `tests/virtual_export_behavior.rs`
+  - `tests/editor_trim_seek_bounds.rs`

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::app::types::{LoopMode, LoopXfadeShape, SortDir, SortKey, ToolKind, ViewMode};
 
@@ -353,5 +353,235 @@ impl super::WavesPreviewer {
             return false;
         };
         self.tabs.get(tab_idx).map(|t| t.dirty).unwrap_or(false)
+    }
+
+    pub fn test_add_trim_virtual_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some((s, e)) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        if e <= s {
+            return false;
+        }
+        self.add_trim_range_as_virtual(tab_idx, (s, e));
+        true
+    }
+
+    pub fn test_virtual_item_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.source == crate::app::types::MediaSource::Virtual)
+            .count()
+    }
+
+    pub fn test_set_selected_sample_rate_override(&mut self, sample_rate: u32) -> bool {
+        let Some(path) = self.selected_path_buf() else {
+            return false;
+        };
+        if sample_rate == 0 {
+            self.sample_rate_override.remove(&path);
+        } else {
+            self.sample_rate_override.insert(path, sample_rate);
+        }
+        true
+    }
+
+    pub fn test_sample_rate_override_count(&self) -> usize {
+        self.sample_rate_override.len()
+    }
+
+    pub fn test_selected_sample_rate_override(&self) -> Option<u32> {
+        let path = self.test_selected_path()?;
+        self.sample_rate_override.get(path).copied()
+    }
+
+    pub fn test_apply_selected_resample_override(&mut self, target_sr: u32) -> bool {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            return false;
+        }
+        self.open_resample_dialog(selected);
+        self.resample_target_sr = target_sr.max(1);
+        self.apply_resample_dialog().is_ok()
+    }
+
+    pub fn test_convert_bits_selected_to(&mut self, depth: crate::wave::WavBitDepth) -> bool {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            return false;
+        }
+        self.spawn_convert_bits_selected(selected, depth);
+        true
+    }
+
+    pub fn test_selected_bit_depth_override(&self) -> Option<crate::wave::WavBitDepth> {
+        let path = self.test_selected_path()?;
+        self.bit_depth_override.get(path).copied()
+    }
+
+    pub fn test_select_path(&mut self, path: &Path) -> bool {
+        let Some(row) = self.row_for_path(path) else {
+            return false;
+        };
+        self.select_and_load(row, true);
+        true
+    }
+
+    pub fn test_switch_to_list(&mut self) {
+        if let Some(active) = self.active_tab {
+            self.clear_preview_if_any(active);
+        }
+        self.active_tab = None;
+        self.audio.stop();
+        self.audio.set_loop_enabled(false);
+    }
+
+    pub fn test_audio_buffer_len(&self) -> usize {
+        self.audio
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|b| b.len())
+            .unwrap_or(0)
+    }
+
+    pub fn test_audio_play_pos(&self) -> usize {
+        self.audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_tab_ranges_in_bounds(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let len = tab.samples_len;
+        let valid_range = |r: Option<(usize, usize)>| -> bool {
+            match r {
+                None => true,
+                Some((s, e)) => s < e && e <= len,
+            }
+        };
+        if !valid_range(tab.selection) {
+            return false;
+        }
+        if !valid_range(tab.trim_range) {
+            return false;
+        }
+        if !valid_range(tab.fade_in_range) {
+            return false;
+        }
+        if !valid_range(tab.fade_out_range) {
+            return false;
+        }
+        if !valid_range(tab.loop_region) {
+            return false;
+        }
+        tab.view_offset <= len.saturating_sub(1)
+    }
+
+    pub fn test_set_external_show_unmatched(&mut self, enabled: bool) {
+        self.external_show_unmatched = enabled;
+    }
+
+    pub fn test_external_show_unmatched(&self) -> bool {
+        self.external_show_unmatched
+    }
+
+    pub fn test_save_session_to(&mut self, path: &Path) -> bool {
+        self.save_project_as(path.to_path_buf()).is_ok()
+    }
+
+    pub fn test_open_session_from(&mut self, path: &Path) -> bool {
+        self.open_project_file(path.to_path_buf()).is_ok()
+    }
+
+    pub fn test_set_export_save_mode_overwrite(&mut self, overwrite: bool) {
+        self.export_cfg.save_mode = if overwrite {
+            crate::app::types::SaveMode::Overwrite
+        } else {
+            crate::app::types::SaveMode::NewFile
+        };
+    }
+
+    pub fn test_set_export_first_prompt(&mut self, enabled: bool) {
+        self.export_cfg.first_prompt = enabled;
+    }
+
+    pub fn test_export_save_mode_name(&self) -> &'static str {
+        match self.export_cfg.save_mode {
+            crate::app::types::SaveMode::Overwrite => "Overwrite",
+            crate::app::types::SaveMode::NewFile => "NewFile",
+        }
+    }
+
+    pub fn test_set_export_conflict(&mut self, name: &str) {
+        self.export_cfg.conflict = match name.trim().to_ascii_lowercase().as_str() {
+            "overwrite" => crate::app::types::ConflictPolicy::Overwrite,
+            "skip" => crate::app::types::ConflictPolicy::Skip,
+            _ => crate::app::types::ConflictPolicy::Rename,
+        };
+    }
+
+    pub fn test_export_conflict_name(&self) -> &'static str {
+        match self.export_cfg.conflict {
+            crate::app::types::ConflictPolicy::Rename => "Rename",
+            crate::app::types::ConflictPolicy::Overwrite => "Overwrite",
+            crate::app::types::ConflictPolicy::Skip => "Skip",
+        }
+    }
+
+    pub fn test_set_export_backup_bak(&mut self, enabled: bool) {
+        self.export_cfg.backup_bak = enabled;
+    }
+
+    pub fn test_export_backup_bak(&self) -> bool {
+        self.export_cfg.backup_bak
+    }
+
+    pub fn test_set_export_name_template(&mut self, template: &str) {
+        self.export_cfg.name_template = template.to_string();
+    }
+
+    pub fn test_export_name_template(&self) -> &str {
+        &self.export_cfg.name_template
+    }
+
+    pub fn test_set_export_dest_folder(&mut self, dest: Option<&Path>) {
+        self.export_cfg.dest_folder = dest.map(|p| p.to_path_buf());
+    }
+
+    pub fn test_set_export_format_override(&mut self, ext: Option<&str>) {
+        self.export_cfg.format_override = ext.map(|v| v.to_string());
+    }
+
+    pub fn test_export_dest_folder(&self) -> Option<&PathBuf> {
+        self.export_cfg.dest_folder.as_ref()
+    }
+
+    pub fn test_trigger_save_selected(&mut self) {
+        self.trigger_save_selected();
+    }
+
+    pub fn test_export_in_progress(&self) -> bool {
+        self.export_state.is_some()
+    }
+
+    pub fn test_undo_last_overwrite_export(&mut self) -> bool {
+        self.undo_last_overwrite_export()
+    }
+
+    pub fn test_debug_summary_text(&self) -> String {
+        self.debug_summary()
     }
 }

@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use super::types::{ClipboardItem, ClipboardPayload, MediaSource};
+use super::types::{
+    ClipboardItem, ClipboardPayload, MediaSource, VirtualSourceRef, VirtualState,
+};
 
 impl super::WavesPreviewer {
     #[cfg(windows)]
@@ -233,7 +235,15 @@ impl super::WavesPreviewer {
                     continue;
                 };
                 let name = self.unique_virtual_display_name(&item.display_name);
-                let vitem = self.make_virtual_item(name, audio, sample_rate, bits_per_sample);
+                let virtual_state = Some(VirtualState {
+                    source: VirtualSourceRef::Sidecar("clipboard".to_string()),
+                    op_chain: Vec::new(),
+                    sample_rate: sample_rate.max(1),
+                    channels: audio.channels.len().max(1) as u16,
+                    bits_per_sample,
+                });
+                let vitem =
+                    self.make_virtual_item(name, audio, sample_rate, bits_per_sample, virtual_state);
                 added_paths.push(vitem.path.clone());
                 self.add_virtual_item(vitem, Some(insert_idx));
                 insert_idx = insert_idx.saturating_add(1);

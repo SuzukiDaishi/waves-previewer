@@ -20,6 +20,27 @@ pub enum MediaSource {
     External,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VirtualSourceRef {
+    FilePath(PathBuf),
+    VirtualPath(PathBuf),
+    Sidecar(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VirtualOp {
+    Trim { start: usize, end: usize },
+}
+
+#[derive(Clone, Debug)]
+pub struct VirtualState {
+    pub source: VirtualSourceRef,
+    pub op_chain: Vec<VirtualOp>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub bits_per_sample: u16,
+}
+
 #[derive(Clone, Debug)]
 pub struct MediaItem {
     pub id: MediaId,
@@ -33,6 +54,7 @@ pub struct MediaItem {
     pub transcript: Option<Transcript>,
     pub external: HashMap<String, String>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
+    pub virtual_state: Option<VirtualState>,
 }
 
 #[derive(Clone, Debug)]
@@ -633,6 +655,7 @@ pub struct ClipboardPayload {
 pub struct ListPreviewResult {
     pub path: PathBuf,
     pub channels: Vec<Vec<f32>>,
+    pub play_sr: u32,
     pub job_id: u64,
     pub is_final: bool,
     pub settings: ListPreviewSettings,
@@ -649,6 +672,7 @@ pub struct ListPreviewSettings {
 #[derive(Clone)]
 pub struct ListPreviewCacheEntry {
     pub audio: Arc<AudioBuffer>,
+    pub play_sr: u32,
     pub truncated: bool,
     pub settings: ListPreviewSettings,
 }
@@ -727,6 +751,7 @@ pub struct ExportConfig {
     pub save_mode: SaveMode,
     pub dest_folder: Option<PathBuf>,
     pub name_template: String, // tokens: {name}, {gain:+0.0}
+    pub format_override: Option<String>,
     pub conflict: ConflictPolicy,
     pub backup_bak: bool,
 }
@@ -927,6 +952,12 @@ pub struct DebugState {
     pub frame_sum_ms: f64,
     pub frame_samples: u64,
     pub started_at: Instant,
+    pub list_select_started_at: Option<Instant>,
+    pub list_select_started_path: Option<PathBuf>,
+    pub select_to_preview_ms: VecDeque<f32>,
+    pub select_to_play_ms: VecDeque<f32>,
+    pub autoplay_pending_count: u64,
+    pub stale_preview_cancel_count: u64,
 }
 
 impl DebugState {
@@ -983,6 +1014,12 @@ impl DebugState {
             frame_sum_ms: 0.0,
             frame_samples: 0,
             started_at: Instant::now(),
+            list_select_started_at: None,
+            list_select_started_path: None,
+            select_to_preview_ms: VecDeque::new(),
+            select_to_play_ms: VecDeque::new(),
+            autoplay_pending_count: 0,
+            stale_preview_cancel_count: 0,
         }
     }
 }

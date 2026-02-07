@@ -243,6 +243,14 @@ impl crate::app::WavesPreviewer {
                             );
                         }
                     }
+                    let list_loading = self.active_tab.is_none()
+                        && (self.list_play_pending
+                            || self.list_preview_pending_path.is_some()
+                            || (self.list_preview_rx.is_some()
+                                && self.playing_path.is_some()
+                                && !self.audio.shared.playing.load(
+                                    std::sync::atomic::Ordering::Relaxed,
+                                )));
                     let show_activity = self.scan_in_progress
                         || self.processing.is_some()
                         || self.editor_decode_state.is_some()
@@ -253,7 +261,8 @@ impl crate::app::WavesPreviewer {
                         || self.csv_export_state.is_some()
                         || !self.spectro_inflight.is_empty()
                         || self.project_open_state.is_some()
-                        || self.bulk_resample_state.is_some();
+                        || self.bulk_resample_state.is_some()
+                        || list_loading;
                     if show_activity {
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
@@ -298,6 +307,20 @@ impl crate::app::WavesPreviewer {
                                         self.cancel_editor_decode();
                                     }
                                 }
+                            }
+                            if list_loading {
+                                let elapsed = self
+                                    .debug
+                                    .list_select_started_at
+                                    .map(|t| t.elapsed().as_secs_f32())
+                                    .unwrap_or(0.0);
+                                ui.add(egui::Spinner::new());
+                                let label = if elapsed >= 0.1 {
+                                    format!("Loading audio... ({elapsed:.1}s)")
+                                } else {
+                                    "Loading audio...".to_string()
+                                };
+                                ui.label(RichText::new(label).weak());
                             }
                             if let Some(t) = &self.heavy_preview_tool {
                                 ui.add(egui::Spinner::new());
@@ -549,7 +572,28 @@ impl crate::app::WavesPreviewer {
                         .add_sized(egui::vec2(110.0, 22.0), egui::Button::new(play_text))
                         .clicked()
                     {
-                        self.audio.toggle_play();
+                        if self.active_tab.is_none() {
+                            let now_playing = self
+                                .audio
+                                .shared
+                                .playing
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            if now_playing {
+                                self.audio.stop();
+                                self.list_play_pending = false;
+                            } else {
+                                if self.force_load_selected_list_preview_for_play() {
+                                    self.audio.play();
+                                    if let Some(path) = self.selected_path_buf() {
+                                        self.debug_mark_list_play_start(&path);
+                                    }
+                                } else {
+                                    self.list_play_pending = true;
+                                }
+                            }
+                        } else {
+                            self.audio.toggle_play();
+                        }
                     }
                     ui.checkbox(&mut self.auto_play_list_nav, "Auto Play");
                     ui.separator();

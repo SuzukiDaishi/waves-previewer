@@ -31,6 +31,14 @@ impl super::WavesPreviewer {
         if self.meta_for_path(path).is_some() {
             return;
         }
+        if !priority
+            && self.item_bg_mode != crate::app::types::ItemBgMode::Standard
+            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
+            && self.meta_inflight.len() >= crate::app::LIST_BG_META_INFLIGHT_LIMIT
+        {
+            // Keep large-list background coloring from building an unbounded decode backlog.
+            return;
+        }
         self.ensure_meta_pool();
         if let Some(pool) = &self.meta_pool {
             if self.meta_inflight.contains(path) {
@@ -48,8 +56,47 @@ impl super::WavesPreviewer {
         }
     }
 
+    pub(super) fn queue_header_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
+        if self.is_virtual_path(path) {
+            return;
+        }
+        if self.meta_for_path(path).is_some() {
+            return;
+        }
+        if !priority
+            && self.item_bg_mode != crate::app::types::ItemBgMode::Standard
+            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
+            && self.meta_inflight.len() >= crate::app::LIST_BG_META_INFLIGHT_LIMIT
+        {
+            return;
+        }
+        self.ensure_meta_pool();
+        if let Some(pool) = &self.meta_pool {
+            if self.meta_inflight.contains(path) {
+                if priority {
+                    pool.promote_path(path);
+                }
+                return;
+            }
+            self.meta_inflight.insert(path.clone());
+            let task = meta::MetaTask::HeaderOnly(path.clone());
+            if priority {
+                pool.enqueue_front(task);
+            } else {
+                pool.enqueue(task);
+            }
+        }
+    }
+
     pub(super) fn queue_full_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
         if self.is_virtual_path(path) {
+            return;
+        }
+        if !priority
+            && self.item_bg_mode != crate::app::types::ItemBgMode::Standard
+            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
+            && self.meta_inflight.len() >= crate::app::LIST_BG_META_INFLIGHT_LIMIT
+        {
             return;
         }
         self.ensure_meta_pool();
@@ -110,6 +157,11 @@ impl super::WavesPreviewer {
             || self.item_bg_mode == crate::app::types::ItemBgMode::Standard
             || self.files.is_empty()
         {
+            self.list_meta_prefetch_cursor = 0;
+            return;
+        }
+        if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
+            // Visible-window prefetch in `ui/list.rs` is enough for very large lists.
             self.list_meta_prefetch_cursor = 0;
             return;
         }

@@ -75,6 +75,9 @@ impl WavesPreviewer {
         if let Some(v) = self.sample_rate_override.remove(from) {
             self.sample_rate_override.insert(new_path.clone(), v);
         }
+        if let Some(v) = self.sample_rate_probe_cache.remove(from) {
+            self.sample_rate_probe_cache.insert(new_path.clone(), v);
+        }
         if let Some(v) = self.bit_depth_override.remove(from) {
             self.bit_depth_override.insert(new_path.clone(), v);
         }

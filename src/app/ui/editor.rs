@@ -534,6 +534,7 @@ impl crate::app::WavesPreviewer {
         // pending actions to perform after UI borrows end
         let mut do_set_loop_from: Option<(usize, usize)> = None;
         let mut do_trim: Option<(usize, usize)> = None; // keep-only (optional)
+        let mut do_trim_virtual: Option<(usize, usize)> = None;
         let do_fade: Option<((usize, usize), f32, f32)> = None; // legacy whole-file fade
         let mut do_gain: Option<((usize, usize), f32)> = None;
         let mut do_normalize: Option<((usize, usize), f32)> = None;
@@ -2804,6 +2805,12 @@ impl crate::app::WavesPreviewer {
                                                 do_trim = Some(range);
                                                 tab.preview_audio_tool = None;
                                             }
+                                            if ui
+                                                .add_enabled(!dis, egui::Button::new("Add Trim As Virtual"))
+                                                .clicked()
+                                            {
+                                                do_trim_virtual = Some(range);
+                                            }
                                         });
                                     });
                                 }
@@ -3381,6 +3388,9 @@ impl crate::app::WavesPreviewer {
         }
         if let Some((s, e)) = do_trim {
             self.editor_apply_trim_range(tab_idx, (s, e));
+        }
+        if let Some((s, e)) = do_trim_virtual {
+            self.add_trim_range_as_virtual(tab_idx, (s, e));
         }
         if let Some((s, e)) = do_mute {
             self.editor_apply_mute_range(tab_idx, (s, e));

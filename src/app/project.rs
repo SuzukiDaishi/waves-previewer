@@ -33,6 +33,8 @@ pub struct ProjectList {
     pub sample_rate_overrides: Vec<ProjectSampleRateOverride>,
     #[serde(default)]
     pub bit_depth_overrides: Vec<ProjectBitDepthOverride>,
+    #[serde(default)]
+    pub virtual_items: Vec<ProjectVirtualItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,6 +53,42 @@ pub struct ProjectSampleRateOverride {
 pub struct ProjectBitDepthOverride {
     pub path: String,
     pub bit_depth: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectVirtualItem {
+    pub path: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub sample_rate: u32,
+    #[serde(default)]
+    pub channels: u16,
+    #[serde(default)]
+    pub bits_per_sample: u16,
+    #[serde(default)]
+    pub source: ProjectVirtualSource,
+    #[serde(default)]
+    pub op_chain: Vec<ProjectVirtualOp>,
+    #[serde(default)]
+    pub sidecar_audio: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectVirtualSource {
+    #[serde(default = "default_virtual_source_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectVirtualOp {
+    #[serde(default = "default_virtual_op_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub start: Option<usize>,
+    #[serde(default)]
+    pub end: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,11 +129,29 @@ pub struct ProjectApp {
     pub sort_dir: String,
     pub search_query: String,
     pub search_regex: bool,
+    #[serde(default)]
+    pub selected_path: Option<String>,
     pub list_columns: ProjectListColumns,
     #[serde(default)]
     pub auto_play_list_nav: bool,
     #[serde(default)]
+    pub export_policy: Option<ProjectExportPolicy>,
+    #[serde(default)]
     pub external_state: Option<ProjectExternalState>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectExportPolicy {
+    #[serde(default = "default_export_save_mode")]
+    pub save_mode: String,
+    #[serde(default = "default_export_conflict")]
+    pub conflict: String,
+    #[serde(default = "default_export_backup_bak")]
+    pub backup_bak: bool,
+    #[serde(default = "default_export_name_template")]
+    pub name_template: String,
+    #[serde(default)]
+    pub dest_folder: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -392,6 +448,30 @@ fn default_external_match_input() -> String {
 
 fn default_external_has_header() -> bool {
     true
+}
+
+fn default_virtual_source_kind() -> String {
+    "file".to_string()
+}
+
+fn default_virtual_op_kind() -> String {
+    "trim".to_string()
+}
+
+fn default_export_save_mode() -> String {
+    "new_file".to_string()
+}
+
+fn default_export_conflict() -> String {
+    "rename".to_string()
+}
+
+fn default_export_backup_bak() -> bool {
+    true
+}
+
+fn default_export_name_template() -> String {
+    "{name} (gain{gain:+.1}dB)".to_string()
 }
 
 pub fn serialize_project(project: &ProjectFile) -> Result<String> {
@@ -707,6 +787,9 @@ impl super::WavesPreviewer {
         self.select_anchor = None;
         self.sample_rate_override.clear();
         self.bit_depth_override.clear();
+        self.list_undo_stack.clear();
+        self.list_redo_stack.clear();
+        self.overwrite_undo_stack.clear();
         self.project_path = None;
     }
 
@@ -743,5 +826,87 @@ impl super::WavesPreviewer {
             self.items.push(item);
         }
         self.ensure_meta_pool();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rel_path_prefers_relative_for_same_volume() {
+        let base = std::env::temp_dir().join("nw_rel_base").join("a").join("b");
+        let target = base
+            .parent()
+            .unwrap_or(base.as_path())
+            .join("audio")
+            .join("tone.wav");
+        let rel = rel_path(&target, &base);
+        assert!(
+            !PathBuf::from(&rel).is_absolute(),
+            "expected relative path, got: {rel}"
+        );
+    }
+
+    #[test]
+    fn resolve_path_keeps_absolute_and_joins_relative() {
+        let base = std::env::temp_dir().join("nw_resolve_base");
+        let abs = if cfg!(windows) {
+            PathBuf::from(r"C:\tmp\nw_abs_test.wav")
+        } else {
+            PathBuf::from("/tmp/nw_abs_test.wav")
+        };
+        let rel = "foo/bar.wav";
+        assert_eq!(resolve_path(abs.to_string_lossy().as_ref(), &base), abs);
+        assert_eq!(resolve_path(rel, &base), base.join(rel));
+    }
+
+    #[test]
+    fn project_list_deserialize_keeps_virtual_items_backward_compatible() {
+        let raw = r#"
+root = ""
+files = []
+"#;
+        let list: ProjectList =
+            toml::from_str(raw).expect("deserialize ProjectList without virtual_items");
+        assert!(list.virtual_items.is_empty());
+    }
+
+    #[test]
+    fn project_list_virtual_item_roundtrip() {
+        let list = ProjectList {
+            root: None,
+            files: vec!["a.wav".to_string()],
+            items: Vec::new(),
+            sample_rate_overrides: Vec::new(),
+            bit_depth_overrides: Vec::new(),
+            virtual_items: vec![ProjectVirtualItem {
+                path: "virtual://trim_0001".to_string(),
+                display_name: "trim_0001".to_string(),
+                sample_rate: 48_000,
+                channels: 2,
+                bits_per_sample: 24,
+                source: ProjectVirtualSource {
+                    kind: "file".to_string(),
+                    path: Some("a.wav".to_string()),
+                },
+                op_chain: vec![ProjectVirtualOp {
+                    kind: "trim".to_string(),
+                    start: Some(100),
+                    end: Some(1000),
+                }],
+                sidecar_audio: Some("data/virtual_0001.wav".to_string()),
+            }],
+        };
+        let text = toml::to_string(&list).expect("serialize ProjectList");
+        let restored: ProjectList = toml::from_str(&text).expect("deserialize ProjectList");
+        assert_eq!(restored.virtual_items.len(), 1);
+        let v = &restored.virtual_items[0];
+        assert_eq!(v.path, "virtual://trim_0001");
+        assert_eq!(v.sample_rate, 48_000);
+        assert_eq!(v.channels, 2);
+        assert_eq!(v.bits_per_sample, 24);
+        assert_eq!(v.source.kind, "file");
+        assert_eq!(v.op_chain.len(), 1);
     }
 }
