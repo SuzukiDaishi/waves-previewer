@@ -20,12 +20,7 @@ impl crate::app::WavesPreviewer {
         if require_all {
             visible = (0..channel_count).collect();
         }
-        let min_len = tab
-            .ch_samples
-            .iter()
-            .map(|c| c.len())
-            .min()
-            .unwrap_or(0);
+        let min_len = tab.ch_samples.iter().map(|c| c.len()).min().unwrap_or(0);
         if min_len == 0 {
             return cur;
         }
@@ -265,7 +260,7 @@ impl crate::app::WavesPreviewer {
                             } else {
                                 view.selected.retain(|&v| v != idx);
                             }
-                            }
+                        }
                     }
                     if ui.button("Clear").clicked() {
                         view.selected.clear();
@@ -360,7 +355,11 @@ impl crate::app::WavesPreviewer {
             let left_down = ctx.input(|i| i.key_down(egui::Key::ArrowLeft));
             let right_down = ctx.input(|i| i.key_down(egui::Key::ArrowRight));
             let dir = if left_down ^ right_down {
-                if right_down { 1 } else { -1 }
+                if right_down {
+                    1
+                } else {
+                    -1
+                }
             } else {
                 0
             };
@@ -414,8 +413,8 @@ impl crate::app::WavesPreviewer {
                     let sample_step = 1usize;
                     let time_grid_step = |min_px: f32| -> f32 {
                         let steps: [f32; 18] = [
-                            0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
-                            5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
+                            0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0,
+                            10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
                         ];
                         let mut step = steps[steps.len() - 1];
                         for s in steps {
@@ -459,7 +458,8 @@ impl crate::app::WavesPreviewer {
                         }
                         base.max(sample_step_sec)
                     };
-                    let base_step_samples = ((base_step_sec * sr).round() as usize).max(sample_step);
+                    let base_step_samples =
+                        ((base_step_sec * sr).round() as usize).max(sample_step);
                     let raw_target = if alt && !ctrl {
                         // Alt: zero-cross move/range.
                         self.find_zero_cross_display(tab_idx, cur_display, dir)
@@ -500,7 +500,11 @@ impl crate::app::WavesPreviewer {
                             let anchor = if ctrl && alt {
                                 if let Some((a0, b0)) = tab.selection {
                                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                    if dir > 0 { a } else { b }
+                                    if dir > 0 {
+                                        a
+                                    } else {
+                                        b
+                                    }
                                 } else {
                                     tab.drag_select_anchor.unwrap_or(cur_display)
                                 }
@@ -529,6 +533,14 @@ impl crate::app::WavesPreviewer {
         } else if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.seek_hold = None;
         }
+        if self
+            .tabs
+            .get(tab_idx)
+            .map(|tab| tab.active_tool == ToolKind::PluginFx)
+            .unwrap_or(false)
+        {
+            self.request_plugin_scan_if_needed();
+        }
 
         let avail = ui.available_size();
         // pending actions to perform after UI borrows end
@@ -548,8 +560,28 @@ impl crate::app::WavesPreviewer {
         // Snapshot busy state and prepare deferred overlay job.
         // IMPORTANT: Do NOT call `self.*` (which takes &mut self) while holding `let tab = &mut self.tabs[...]`.
         // That pattern triggers borrow checker error E0499. Defer such calls to after the UI closures.
+        let tab_path = self.tabs[tab_idx].path.clone();
+        let plugin_catalog = self.plugin_catalog.clone();
+        let plugin_search_paths = self.plugin_search_paths.clone();
+        let mut plugin_search_path_input = self.plugin_search_path_input.clone();
+        let plugin_scan_busy = self.plugin_scan_state.is_some();
+        let plugin_probe_busy = self
+            .plugin_probe_state
+            .as_ref()
+            .map(|s| s.tab_path == tab_path)
+            .unwrap_or(false);
+        let plugin_preview_busy = self
+            .plugin_process_state
+            .as_ref()
+            .map(|s| s.tab_idx == tab_idx && !s.is_apply)
+            .unwrap_or(false);
+        let plugin_apply_busy = self
+            .plugin_process_state
+            .as_ref()
+            .map(|s| s.tab_idx == tab_idx && s.is_apply)
+            .unwrap_or(false);
         let overlay_busy = self.heavy_overlay_rx.is_some();
-        let apply_busy = self.editor_apply_state.is_some();
+        let apply_busy = self.editor_apply_state.is_some() || plugin_apply_busy;
         let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
         let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32)> = None;
         let mut request_undo = false;
@@ -559,8 +591,13 @@ impl crate::app::WavesPreviewer {
             .get(tab_idx)
             .map(|tab| self.pending_gain_db_for_path(&tab.path))
             .unwrap_or(0.0);
-        let tab_path = self.tabs[tab_idx].path.clone();
-        let apply_msg = self.editor_apply_state.as_ref().map(|s| s.msg.clone());
+        let apply_msg = if let Some(state) = self.editor_apply_state.as_ref() {
+            Some(state.msg.clone())
+        } else if plugin_apply_busy {
+            Some("Applying Plugin FX...".to_string())
+        } else {
+            None
+        };
         let decode_status = self.editor_decode_state.as_ref().and_then(|state| {
             if state.path == tab_path {
                 let (msg, progress) = if state.partial_ready {
@@ -589,6 +626,8 @@ impl crate::app::WavesPreviewer {
                 "Previewing...".to_string()
             };
             Some(msg)
+        } else if plugin_preview_busy {
+            Some("Previewing Plugin FX...".to_string())
         } else {
             None
         };
@@ -626,6 +665,14 @@ impl crate::app::WavesPreviewer {
                 let mut pending_pitch_apply: Option<f32> = None;
                 let mut pending_stretch_apply: Option<f32> = None;
                 let mut pending_loudness_apply: Option<f32> = None;
+                let mut pending_plugin_scan = false;
+                let mut pending_plugin_probe: Option<String> = None;
+                let mut pending_plugin_preview = false;
+                let mut pending_plugin_apply = false;
+                let mut pending_plugin_add_path: Option<PathBuf> = None;
+                let mut pending_plugin_remove_index: Option<usize> = None;
+                let mut pending_plugin_reset_paths = false;
+                let mut pending_plugin_pick_folder = false;
                 if discard_preview_for_view_change {
                     need_restore_preview = true;
                     stop_playback = true;
@@ -2354,6 +2401,7 @@ impl crate::app::WavesPreviewer {
                                     ui.selectable_value(&mut tool, ToolKind::Normalize, "Normalize");
                                     ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
                                     ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
+                                    ui.selectable_value(&mut tool, ToolKind::PluginFx, "Plugin FX");
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -3239,6 +3287,274 @@ impl crate::app::WavesPreviewer {
                                         };
                                     }
                                 }
+                                ToolKind::PluginFx => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        if plugin_scan_busy {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add(egui::Spinner::new());
+                                                ui.label(RichText::new("Scanning plugins...").weak());
+                                            });
+                                        }
+                                        let draft = &mut tab.plugin_fx_draft;
+                                        let mut selected_changed = false;
+                                        let selected_text = draft
+                                            .plugin_key
+                                            .as_deref()
+                                            .and_then(|key| {
+                                                plugin_catalog
+                                                    .iter()
+                                                    .find(|entry| entry.key == key)
+                                                    .map(|entry| {
+                                                        format!(
+                                                            "{:?}: {}",
+                                                            entry.format,
+                                                            Self::plugin_path_label(&entry.path)
+                                                        )
+                                                    })
+                                            })
+                                            .or_else(|| {
+                                                if draft.plugin_name.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(draft.plugin_name.clone())
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "(Select plugin)".to_string());
+                                        egui::ComboBox::from_id_salt("plugin_fx_select")
+                                            .selected_text(selected_text)
+                                            .show_ui(ui, |ui| {
+                                                for entry in plugin_catalog.iter() {
+                                                    let selected = draft
+                                                        .plugin_key
+                                                        .as_deref()
+                                                        .map(|v| v == entry.key)
+                                                        .unwrap_or(false);
+                                                    let label = format!(
+                                                        "{:?}: {}",
+                                                        entry.format,
+                                                        Self::plugin_path_label(&entry.path)
+                                                    );
+                                                    if ui.selectable_label(selected, label).clicked()
+                                                    {
+                                                        draft.plugin_key = Some(entry.key.clone());
+                                                        draft.plugin_name = entry.name.clone();
+                                                        draft.params.clear();
+                                                        draft.last_error = None;
+                                                        draft.last_backend_log = None;
+                                                        pending_plugin_probe =
+                                                            Some(entry.key.clone());
+                                                        selected_changed = true;
+                                                    }
+                                                }
+                                            });
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui.button("Rescan").clicked() {
+                                                pending_plugin_scan = true;
+                                            }
+                                            let can_reload = draft.plugin_key.is_some()
+                                                && !plugin_probe_busy
+                                                && !plugin_scan_busy;
+                                            if ui
+                                                .add_enabled(can_reload, egui::Button::new("Reload Params"))
+                                                .clicked()
+                                            {
+                                                pending_plugin_probe = draft.plugin_key.clone();
+                                                draft.last_backend_log = None;
+                                            }
+                                        });
+                                        ui.collapsing("Search Paths", |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui.button("Add Folder...").clicked() {
+                                                    pending_plugin_pick_folder = true;
+                                                }
+                                                if ui.button("Reset Defaults").clicked() {
+                                                    pending_plugin_reset_paths = true;
+                                                }
+                                                if ui.button("Rescan Paths").clicked() {
+                                                    pending_plugin_scan = true;
+                                                }
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                let edit = ui.text_edit_singleline(&mut plugin_search_path_input);
+                                                if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                {
+                                                    let raw = plugin_search_path_input.trim();
+                                                    if !raw.is_empty() {
+                                                        pending_plugin_add_path = Some(PathBuf::from(raw));
+                                                        plugin_search_path_input.clear();
+                                                    }
+                                                }
+                                                if ui.button("Add Path").clicked() {
+                                                    let raw = plugin_search_path_input.trim();
+                                                    if !raw.is_empty() {
+                                                        pending_plugin_add_path = Some(PathBuf::from(raw));
+                                                        plugin_search_path_input.clear();
+                                                    }
+                                                }
+                                            });
+                                            egui::ScrollArea::vertical()
+                                                .id_salt("plugin_search_paths_scroll")
+                                                .max_height(120.0)
+                                                .show(ui, |ui| {
+                                                    if plugin_search_paths.is_empty() {
+                                                        ui.label(RichText::new("(No search paths)").weak());
+                                                    } else {
+                                                        for (idx, path) in plugin_search_paths.iter().enumerate() {
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                ui.label(
+                                                                    RichText::new(path.display().to_string())
+                                                                        .small()
+                                                                        .monospace(),
+                                                                );
+                                                                if ui.small_button("Remove").clicked() {
+                                                                    pending_plugin_remove_index = Some(idx);
+                                                                }
+                                                            });
+                                                        }
+                                                    }
+                                                });
+                                        });
+                                        if selected_changed {
+                                            stop_playback = true;
+                                            need_restore_preview = true;
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.checkbox(&mut draft.enabled, "Enable");
+                                            ui.checkbox(&mut draft.bypass, "Bypass");
+                                            if let Some(backend) = draft.backend {
+                                                ui.label(
+                                                    RichText::new(format!("Backend: {:?}", backend))
+                                                        .small()
+                                                        .weak(),
+                                                );
+                                            }
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("Param Filter");
+                                            ui.text_edit_singleline(&mut draft.filter);
+                                        });
+                                        if plugin_probe_busy {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add(egui::Spinner::new());
+                                                ui.label(RichText::new("Loading params...").weak());
+                                            });
+                                        }
+                                        let filter = draft.filter.trim().to_ascii_lowercase();
+                                        egui::ScrollArea::vertical()
+                                            .id_salt("plugin_param_scroll")
+                                            .max_height(320.0)
+                                            .show(ui, |ui| {
+                                                if draft.params.is_empty() {
+                                                    ui.label(RichText::new("No parameters").weak());
+                                                } else {
+                                                    for param in draft.params.iter_mut() {
+                                                        if !filter.is_empty()
+                                                            && !param
+                                                                .name
+                                                                .to_ascii_lowercase()
+                                                                .contains(&filter)
+                                                            && !param
+                                                                .id
+                                                                .to_ascii_lowercase()
+                                                                .contains(&filter)
+                                                        {
+                                                            continue;
+                                                        }
+                                                        ui.horizontal(|ui| {
+                                                            ui.label(
+                                                                RichText::new(param.name.as_str())
+                                                                    .monospace(),
+                                                            );
+                                                            let mut norm = param.normalized;
+                                                            if ui
+                                                                .add(
+                                                                    egui::Slider::new(
+                                                                        &mut norm,
+                                                                        0.0..=1.0,
+                                                                    )
+                                                                    .show_value(false),
+                                                                )
+                                                                .changed()
+                                                            {
+                                                                param.normalized =
+                                                                    norm.clamp(0.0, 1.0);
+                                                            }
+                                                            let actual = param.min
+                                                                + (param.max - param.min)
+                                                                    * param.normalized;
+                                                            let val = if param.unit.is_empty() {
+                                                                format!(
+                                                                    "{actual:.3} (n={:.3})",
+                                                                    param.normalized
+                                                                )
+                                                            } else {
+                                                                format!(
+                                                                    "{actual:.3}{} (n={:.3})",
+                                                                    param.unit,
+                                                                    param.normalized
+                                                                )
+                                                            };
+                                                            ui.label(RichText::new(val).small());
+                                                            if ui.small_button("Reset").clicked() {
+                                                                param.normalized = param
+                                                                    .default_normalized
+                                                                    .clamp(0.0, 1.0);
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                        if let Some(err) = draft.last_error.as_ref() {
+                                            ui.label(RichText::new(err).color(Color32::LIGHT_RED));
+                                        }
+                                        if let Some(log) = draft.last_backend_log.as_ref() {
+                                            ui.label(
+                                                RichText::new(log.as_str())
+                                                    .small()
+                                                    .monospace()
+                                                    .weak(),
+                                            );
+                                        }
+                                        if plugin_preview_busy || plugin_apply_busy {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add(egui::Spinner::new());
+                                                if plugin_apply_busy {
+                                                    ui.label(RichText::new("Applying Plugin FX...").weak());
+                                                } else {
+                                                    ui.label(RichText::new("Previewing Plugin FX...").weak());
+                                                }
+                                            });
+                                        }
+                                        let can_run = draft.plugin_key.is_some()
+                                            && !plugin_scan_busy
+                                            && !plugin_probe_busy
+                                            && !plugin_preview_busy
+                                            && !plugin_apply_busy
+                                            && !apply_busy;
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(can_run, egui::Button::new("Preview"))
+                                                .clicked()
+                                            {
+                                                pending_plugin_preview = true;
+                                                stop_playback = true;
+                                            }
+                                            if ui
+                                                .add_enabled(can_run, egui::Button::new("Apply"))
+                                                .clicked()
+                                            {
+                                                pending_plugin_apply = true;
+                                                stop_playback = true;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                need_restore_preview = true;
+                                            }
+                                        });
+                                    });
+                                }
                                 ToolKind::Reverse => {
                                     if !preview_ok {
                                         ui.label(RichText::new("Preview disabled for large clips").weak());
@@ -3309,6 +3625,43 @@ impl crate::app::WavesPreviewer {
                 if let Some(target) = pending_loudness_apply {
                     self.spawn_editor_apply_for_tab(tab_idx, ToolKind::Loudness, target);
                 }
+                if pending_plugin_scan {
+                    self.spawn_plugin_scan();
+                }
+                if pending_plugin_pick_folder {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        pending_plugin_add_path = Some(folder);
+                    }
+                }
+                if pending_plugin_reset_paths {
+                    self.reset_plugin_search_paths_to_default();
+                    self.save_prefs();
+                    self.plugin_catalog.clear();
+                    self.spawn_plugin_scan();
+                }
+                if let Some(index) = pending_plugin_remove_index {
+                    if self.remove_plugin_search_path_at(index) {
+                        self.save_prefs();
+                        self.plugin_catalog.clear();
+                        self.spawn_plugin_scan();
+                    }
+                }
+                if let Some(path) = pending_plugin_add_path {
+                    if self.add_plugin_search_path(path) {
+                        self.save_prefs();
+                        self.plugin_catalog.clear();
+                        self.spawn_plugin_scan();
+                    }
+                }
+                if let Some(plugin_key) = pending_plugin_probe {
+                    self.spawn_plugin_probe_for_tab(tab_idx, plugin_key);
+                }
+                if pending_plugin_preview {
+                    self.spawn_plugin_preview_for_tab(tab_idx);
+                }
+                if pending_plugin_apply {
+                    self.spawn_plugin_apply_for_tab(tab_idx);
+                }
                 if stop_playback { self.audio.stop(); }
                 if need_restore_preview { self.clear_preview_if_any(tab_idx); }
                 if let Some(s) = request_seek {
@@ -3327,12 +3680,14 @@ impl crate::app::WavesPreviewer {
                 }
                 if let Some((tool_kind, mono)) = pending_preview { self.set_preview_mono(tab_idx, tool_kind, mono); }
             }); // end horizontal split
+        self.plugin_search_path_input = plugin_search_path_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
         }
 
         if cancel_apply {
             self.cancel_editor_apply();
+            self.cancel_plugin_process();
         }
         if cancel_decode {
             self.cancel_editor_decode();
@@ -3466,7 +3821,10 @@ impl crate::app::WavesPreviewer {
             }
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 tab.loop_xfade_samples = 0;
-                tab.tool_state = ToolState { loop_repeat: 2, ..tab.tool_state };
+                tab.tool_state = ToolState {
+                    loop_repeat: 2,
+                    ..tab.tool_state
+                };
             }
         }
         if let Some(repeat) = do_preview_unwrap {

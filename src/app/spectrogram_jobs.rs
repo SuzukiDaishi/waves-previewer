@@ -56,17 +56,19 @@ impl super::WavesPreviewer {
                         start,
                         end,
                     );
-                    let _ = tx.send(super::types::SpectrogramJobMsg::Tile(super::types::SpectrogramTile {
-                        path: path.clone(),
-                        channel_index: ci,
-                        channel_count,
-                        frames: params.frames,
-                        bins: params.bins,
-                        frame_step: params.frame_step,
-                        sample_rate,
-                        start_frame: start,
-                        values_db: values,
-                    }));
+                    let _ = tx.send(super::types::SpectrogramJobMsg::Tile(
+                        super::types::SpectrogramTile {
+                            path: path.clone(),
+                            channel_index: ci,
+                            channel_count,
+                            frames: params.frames,
+                            bins: params.bins,
+                            frame_step: params.frame_step,
+                            sample_rate,
+                            start_frame: start,
+                            values_db: values,
+                        },
+                    ));
                     start = end;
                 }
             }
@@ -84,8 +86,7 @@ impl super::WavesPreviewer {
             let channel_view = tab.channel_view.clone();
             let channel_count = tab.ch_samples.len().max(1);
             let requested = channel_view.visible_indices(channel_count);
-            let use_mixdown =
-                channel_view.mode == ChannelViewMode::Mixdown || requested.is_empty();
+            let use_mixdown = channel_view.mode == ChannelViewMode::Mixdown || requested.is_empty();
             let channels = if use_mixdown {
                 vec![super::WavesPreviewer::mixdown_channels(
                     &tab.ch_samples,
@@ -108,11 +109,8 @@ impl super::WavesPreviewer {
             let empty_cached = specs
                 .iter()
                 .all(|s| s.frames == 0 || s.values_db.is_empty());
-            let has_audio = !channels.is_empty()
-                && channels
-                    .get(0)
-                    .map(|c| !c.is_empty())
-                    .unwrap_or(false);
+            let has_audio =
+                !channels.is_empty() && channels.get(0).map(|c| !c.is_empty()).unwrap_or(false);
             if empty_cached && has_audio {
                 self.purge_spectro_cache_entry(&path);
             } else {

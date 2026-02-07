@@ -67,7 +67,10 @@ mod virtual_export_behavior {
                 .state()
                 .active_tab
                 .and_then(|idx| harness.state().tabs.get(idx))
-                .map(|tab| tab.samples_len > 0 && (!tab.loading || harness.state().test_audio_has_samples()))
+                .map(|tab| {
+                    tab.samples_len > 0
+                        && (!tab.loading || harness.state().test_audio_has_samples())
+                })
                 .unwrap_or(false);
             if ready {
                 break;
@@ -144,9 +147,13 @@ mod virtual_export_behavior {
                 .expect("selected virtual path should exist");
             assert!(harness.state_mut().test_select_path(&current));
             harness.state_mut().test_set_export_first_prompt(false);
-            harness.state_mut().test_set_export_save_mode_overwrite(false);
+            harness
+                .state_mut()
+                .test_set_export_save_mode_overwrite(false);
             harness.state_mut().test_set_export_conflict("rename");
-            harness.state_mut().test_set_export_dest_folder(Some(&export_dir));
+            harness
+                .state_mut()
+                .test_set_export_dest_folder(Some(&export_dir));
             harness
                 .state_mut()
                 .test_set_export_name_template("{name}_virt_export");
@@ -175,10 +182,18 @@ mod virtual_export_behavior {
         let dir = make_temp_dir("virtual_length_leak");
         let src_short = dir.join("a_short.wav");
         let src_long = dir.join("b_long.wav");
-        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 4.0, 220.0, 330.0), 48_000, &src_short)
-            .expect("export short source");
-        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 10.0, 330.0, 550.0), 48_000, &src_long)
-            .expect("export long source");
+        neowaves::wave::export_channels_audio(
+            &synth_stereo(48_000, 4.0, 220.0, 330.0),
+            48_000,
+            &src_short,
+        )
+        .expect("export short source");
+        neowaves::wave::export_channels_audio(
+            &synth_stereo(48_000, 10.0, 330.0, 550.0),
+            48_000,
+            &src_long,
+        )
+        .expect("export long source");
 
         let mut harness = harness_with_folder(dir.clone());
         wait_for_scan(&mut harness);

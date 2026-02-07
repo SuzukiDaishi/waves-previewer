@@ -446,7 +446,8 @@ impl super::WavesPreviewer {
                     && !self.is_virtual_path(&path)
                     && path.is_file()
                 {
-                    if let Some((audio, truncated, play_sr)) = self.take_cached_list_preview(&path) {
+                    if let Some((audio, truncated, play_sr)) = self.take_cached_list_preview(&path)
+                    {
                         let needs_play = self.list_play_pending || self.auto_play_list_nav;
                         let cached_secs = self.list_preview_cached_secs(audio.len(), play_sr);
                         let min_secs = if needs_play {

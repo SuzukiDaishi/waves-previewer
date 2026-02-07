@@ -104,7 +104,11 @@ impl WavesPreviewer {
         }
     }
 
-    pub(super) fn rename_file_path(&mut self, from: &PathBuf, new_name: &str) -> Result<PathBuf, String> {
+    pub(super) fn rename_file_path(
+        &mut self,
+        from: &PathBuf,
+        new_name: &str,
+    ) -> Result<PathBuf, String> {
         let name = new_name.trim();
         if name.is_empty() {
             return Err("Name is empty.".to_string());

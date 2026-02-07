@@ -270,7 +270,9 @@ impl crate::app::WavesPreviewer {
             .or_else(|| {
                 self.item_for_path(&source_path).and_then(|item| {
                     if item.source == crate::app::types::MediaSource::Virtual {
-                        item.virtual_state.as_ref().map(|state| state.bits_per_sample)
+                        item.virtual_state
+                            .as_ref()
+                            .map(|state| state.bits_per_sample)
                     } else {
                         None
                     }
@@ -347,7 +349,8 @@ impl crate::app::WavesPreviewer {
             .and_then(|s| s.to_str())
             .unwrap_or("wav");
         let name = self.unique_virtual_display_name(&format!("{base} (trim).{ext}"));
-        let mut item = self.make_virtual_item(name, audio, source_sr, bits_per_sample, virtual_state);
+        let mut item =
+            self.make_virtual_item(name, audio, source_sr, bits_per_sample, virtual_state);
         if let Some(meta) = item.meta.as_mut() {
             meta.sample_rate = source_sr;
             meta.bits_per_sample = bits_per_sample;
@@ -526,12 +529,8 @@ impl crate::app::WavesPreviewer {
                     return;
                 }
             };
-            let half = Self::effective_loop_xfade_samples(
-                s,
-                e,
-                tab.samples_len,
-                tab.loop_xfade_samples,
-            );
+            let half =
+                Self::effective_loop_xfade_samples(s, e, tab.samples_len, tab.loop_xfade_samples);
             if half == 0 {
                 return;
             }
@@ -684,13 +683,8 @@ impl crate::app::WavesPreviewer {
                 out.extend_from_slice(&ch[e..]);
                 *ch = out;
             }
-            let markers = Self::build_loop_unwrap_markers(
-                &tab.markers,
-                s,
-                e,
-                tab.samples_len,
-                repeat_count,
-            );
+            let markers =
+                Self::build_loop_unwrap_markers(&tab.markers, s, e, tab.samples_len, repeat_count);
             tab.markers = markers.clone();
             tab.markers_committed = markers.clone();
             tab.markers_applied = markers;

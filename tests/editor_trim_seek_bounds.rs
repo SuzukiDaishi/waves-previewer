@@ -67,7 +67,10 @@ mod editor_trim_seek_bounds {
                 .state()
                 .active_tab
                 .and_then(|idx| harness.state().tabs.get(idx))
-                .map(|tab| tab.samples_len > 0 && (!tab.loading || harness.state().test_audio_has_samples()))
+                .map(|tab| {
+                    tab.samples_len > 0
+                        && (!tab.loading || harness.state().test_audio_has_samples())
+                })
                 .unwrap_or(false);
             if ready {
                 break;

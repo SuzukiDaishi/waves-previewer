@@ -143,6 +143,7 @@ impl WavesPreviewer {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
+        let mut plugin_paths = Vec::<PathBuf>::new();
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("theme=") {
@@ -209,9 +210,18 @@ impl WavesPreviewer {
                     "best" => SrcQuality::Best,
                     _ => SrcQuality::Good,
                 };
+            } else if let Some(rest) = line.strip_prefix("plugin_search_path=") {
+                let raw = rest.trim().trim_matches('"');
+                if !raw.is_empty() {
+                    plugin_paths.push(PathBuf::from(raw));
+                }
             }
         }
         Self::normalize_spectro_cfg(&mut self.spectro_cfg);
+        if !plugin_paths.is_empty() {
+            self.plugin_search_paths = plugin_paths;
+            Self::normalize_plugin_search_paths(&mut self.plugin_search_paths);
+        }
     }
 
     pub(super) fn save_prefs(&self) {
@@ -235,7 +245,11 @@ impl WavesPreviewer {
             SpectrogramScale::Linear => "linear",
             SpectrogramScale::Log => "log",
         };
-        let note_labels = if self.spectro_cfg.show_note_labels { "1" } else { "0" };
+        let note_labels = if self.spectro_cfg.show_note_labels {
+            "1"
+        } else {
+            "0"
+        };
         let item_bg_mode = match self.item_bg_mode {
             ItemBgMode::Standard => "standard",
             ItemBgMode::Dbfs => "dbfs",
@@ -246,9 +260,7 @@ impl WavesPreviewer {
             SrcQuality::Good => "good",
             SrcQuality::Best => "best",
         };
-        let _ = std::fs::write(
-            path,
-            format!(
+        let mut out = format!(
                 "theme={}\nskip_dotfiles={}\n\
 zero_cross_eps={:.6}\n\
 spectro_fft={}\n\
@@ -276,7 +288,13 @@ src_quality={}\n",
                 note_labels,
                 item_bg_mode,
                 src_quality
-            ),
-        );
+            );
+        for p in &self.plugin_search_paths {
+            let path_text = p.to_string_lossy().replace('\n', " ");
+            out.push_str("plugin_search_path=");
+            out.push_str(&path_text);
+            out.push('\n');
+        }
+        let _ = std::fs::write(path, out);
     }
 }

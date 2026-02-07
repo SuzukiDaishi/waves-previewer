@@ -35,28 +35,105 @@ impl McpServer {
     }
 
     pub fn list_tools(&self) -> ListToolsResult {
-        let schema_empty = json!({ "type": "object", "properties": {}, "additionalProperties": false });
+        let schema_empty =
+            json!({ "type": "object", "properties": {}, "additionalProperties": false });
         ListToolsResult {
             tools: vec![
-                ToolDescriptor { name: "list_files".into(), description: "List files in the current view".into(), input_schema: json!({"type":"object","properties":{"query":{"type":"string"},"regex":{"type":"boolean"},"limit":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"include_meta":{"type":"boolean"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "get_selection".into(), description: "Get current selection".into(), input_schema: schema_empty.clone() },
-                ToolDescriptor { name: "set_selection".into(), description: "Set selection".into(), input_schema: json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"open_tab":{"type":"boolean"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "play".into(), description: "Start playback".into(), input_schema: schema_empty.clone() },
-                ToolDescriptor { name: "stop".into(), description: "Stop playback".into(), input_schema: schema_empty.clone() },
-                ToolDescriptor { name: "set_volume".into(), description: "Set master volume (dB)".into(), input_schema: json!({"type":"object","properties":{"db":{"type":"number"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "set_mode".into(), description: "Set playback mode".into(), input_schema: json!({"type":"object","properties":{"mode":{"type":"string"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "set_speed".into(), description: "Set speed rate".into(), input_schema: json!({"type":"object","properties":{"rate":{"type":"number"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "set_pitch".into(), description: "Set pitch semitones".into(), input_schema: json!({"type":"object","properties":{"semitones":{"type":"number"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "set_stretch".into(), description: "Set stretch rate".into(), input_schema: json!({"type":"object","properties":{"rate":{"type":"number"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "apply_gain".into(), description: "Apply pending gain".into(), input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"db":{"type":"number"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "clear_gain".into(), description: "Clear pending gain".into(), input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "set_loop_markers".into(), description: "Set loop markers".into(), input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"start_samples":{"type":"integer"},"end_samples":{"type":"integer"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "write_loop_markers".into(), description: "Write loop markers".into(), input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "export_selected".into(), description: "Export selected files".into(), input_schema: json!({"type":"object","properties":{"mode":{"type":"string"},"dest_folder":{"type":"string"},"name_template":{"type":"string"},"conflict":{"type":"string"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "open_folder".into(), description: "Open folder".into(), input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "open_files".into(), description: "Open files".into(), input_schema: json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}) },
-                ToolDescriptor { name: "screenshot".into(), description: "Take screenshot".into(), input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}) },
-                ToolDescriptor { name: "get_debug_summary".into(), description: "Get debug summary".into(), input_schema: schema_empty },
+                ToolDescriptor {
+                    name: "list_files".into(),
+                    description: "List files in the current view".into(),
+                    input_schema: json!({"type":"object","properties":{"query":{"type":"string"},"regex":{"type":"boolean"},"limit":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"include_meta":{"type":"boolean"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "get_selection".into(),
+                    description: "Get current selection".into(),
+                    input_schema: schema_empty.clone(),
+                },
+                ToolDescriptor {
+                    name: "set_selection".into(),
+                    description: "Set selection".into(),
+                    input_schema: json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}},"open_tab":{"type":"boolean"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "play".into(),
+                    description: "Start playback".into(),
+                    input_schema: schema_empty.clone(),
+                },
+                ToolDescriptor {
+                    name: "stop".into(),
+                    description: "Stop playback".into(),
+                    input_schema: schema_empty.clone(),
+                },
+                ToolDescriptor {
+                    name: "set_volume".into(),
+                    description: "Set master volume (dB)".into(),
+                    input_schema: json!({"type":"object","properties":{"db":{"type":"number"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "set_mode".into(),
+                    description: "Set playback mode".into(),
+                    input_schema: json!({"type":"object","properties":{"mode":{"type":"string"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "set_speed".into(),
+                    description: "Set speed rate".into(),
+                    input_schema: json!({"type":"object","properties":{"rate":{"type":"number"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "set_pitch".into(),
+                    description: "Set pitch semitones".into(),
+                    input_schema: json!({"type":"object","properties":{"semitones":{"type":"number"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "set_stretch".into(),
+                    description: "Set stretch rate".into(),
+                    input_schema: json!({"type":"object","properties":{"rate":{"type":"number"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "apply_gain".into(),
+                    description: "Apply pending gain".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"db":{"type":"number"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "clear_gain".into(),
+                    description: "Clear pending gain".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "set_loop_markers".into(),
+                    description: "Set loop markers".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"},"start_samples":{"type":"integer"},"end_samples":{"type":"integer"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "write_loop_markers".into(),
+                    description: "Write loop markers".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "export_selected".into(),
+                    description: "Export selected files".into(),
+                    input_schema: json!({"type":"object","properties":{"mode":{"type":"string"},"dest_folder":{"type":"string"},"name_template":{"type":"string"},"conflict":{"type":"string"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "open_folder".into(),
+                    description: "Open folder".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "open_files".into(),
+                    description: "Open files".into(),
+                    input_schema: json!({"type":"object","properties":{"paths":{"type":"array","items":{"type":"string"}}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "screenshot".into(),
+                    description: "Take screenshot".into(),
+                    input_schema: json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+                },
+                ToolDescriptor {
+                    name: "get_debug_summary".into(),
+                    description: "Get debug summary".into(),
+                    input_schema: schema_empty,
+                },
             ],
         }
     }
@@ -68,7 +145,9 @@ impl McpServer {
             if res.ok {
                 Ok(res.payload)
             } else {
-                Err(anyhow!(res.error.unwrap_or_else(|| "tool failed".to_string())))
+                Err(anyhow!(res
+                    .error
+                    .unwrap_or_else(|| "tool failed".to_string())))
             }
         };
         match name {
@@ -243,7 +322,11 @@ impl McpServer {
             let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
             log_mcp(debug, &format!("stdio rpc id={id} method={method}"));
             let resp = self.handle_rpc_request(req);
-            let status = if resp.get("error").is_some() { "error" } else { "ok" };
+            let status = if resp.get("error").is_some() {
+                "error"
+            } else {
+                "ok"
+            };
             log_mcp(debug, &format!("stdio rpc id={id} status={status}"));
             let _ = writeln!(stdout, "{}", resp);
             stdout.flush()?;
@@ -320,7 +403,11 @@ impl McpServer {
             let rpc_method = req_val.get("method").and_then(|m| m.as_str()).unwrap_or("");
             log_mcp(debug, &format!("http rpc id={id} method={rpc_method}"));
             let resp_val = self.handle_rpc_request(req_val);
-            let status = if resp_val.get("error").is_some() { "error" } else { "ok" };
+            let status = if resp_val.get("error").is_some() {
+                "error"
+            } else {
+                "ok"
+            };
             log_mcp(debug, &format!("http rpc id={id} status={status}"));
             let mut response = Response::from_string(resp_val.to_string());
             for header in &cors_headers {

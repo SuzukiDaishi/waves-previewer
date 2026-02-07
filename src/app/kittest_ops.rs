@@ -107,7 +107,11 @@ impl super::WavesPreviewer {
     fn test_cycle_sort(&mut self, key: SortKey, default_asc: bool) {
         if self.sort_key != key {
             self.sort_key = key;
-            self.sort_dir = if default_asc { SortDir::Asc } else { SortDir::Desc };
+            self.sort_dir = if default_asc {
+                SortDir::Asc
+            } else {
+                SortDir::Desc
+            };
         } else {
             self.sort_dir = match self.sort_dir {
                 SortDir::Asc => {

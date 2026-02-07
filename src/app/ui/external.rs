@@ -41,7 +41,10 @@ impl crate::app::WavesPreviewer {
                 }
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.external_load_inflight, egui::Button::new("Load CSV/Excel..."))
+                        .add_enabled(
+                            !self.external_load_inflight,
+                            egui::Button::new("Load CSV/Excel..."),
+                        )
                         .clicked()
                     {
                         if let Some(path) = self.pick_external_file_dialog() {
@@ -74,7 +77,10 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                     if ui
-                        .add_enabled(self.external_active_source.is_some(), egui::Button::new("Remove"))
+                        .add_enabled(
+                            self.external_active_source.is_some(),
+                            egui::Button::new("Remove"),
+                        )
                         .clicked()
                     {
                         if let Some(idx) = self.external_active_source {
@@ -95,7 +101,10 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                     if ui
-                        .add_enabled(!self.external_sources.is_empty(), egui::Button::new("Clear"))
+                        .add_enabled(
+                            !self.external_sources.is_empty(),
+                            egui::Button::new("Clear"),
+                        )
                         .clicked()
                     {
                         self.clear_external_data();
@@ -155,10 +164,8 @@ impl crate::app::WavesPreviewer {
                     }
                     ui.horizontal(|ui| {
                         ui.label("Header row (1-based, 0=auto)");
-                        let mut header_row = self
-                            .external_header_row
-                            .map(|v| v as i32 + 1)
-                            .unwrap_or(0);
+                        let mut header_row =
+                            self.external_header_row.map(|v| v as i32 + 1).unwrap_or(0);
                         if ui
                             .add_enabled(
                                 self.external_has_header,
@@ -181,10 +188,8 @@ impl crate::app::WavesPreviewer {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Data row (1-based, 0=auto)");
-                        let mut data_row = self
-                            .external_data_row
-                            .map(|v| v as i32 + 1)
-                            .unwrap_or(0);
+                        let mut data_row =
+                            self.external_data_row.map(|v| v as i32 + 1).unwrap_or(0);
                         if ui
                             .add(egui::DragValue::new(&mut data_row).range(0..=1_000_000))
                             .changed()
@@ -206,12 +211,16 @@ impl crate::app::WavesPreviewer {
                         ui.horizontal(|ui| {
                             ui.label("Settings changed.");
                             if ui
-                                .add_enabled(!self.external_load_inflight, egui::Button::new("Reload with settings"))
+                                .add_enabled(
+                                    !self.external_load_inflight,
+                                    egui::Button::new("Reload with settings"),
+                                )
                                 .clicked()
                             {
                                 if let Some(idx) = self.external_active_source {
-                                    self.external_load_target =
-                                        Some(crate::app::external_ops::ExternalLoadTarget::Reload(idx));
+                                    self.external_load_target = Some(
+                                        crate::app::external_ops::ExternalLoadTarget::Reload(idx),
+                                    );
                                 }
                                 if let Some(path) = self.external_source.clone() {
                                     self.pending_external_restore = None;
@@ -389,7 +398,10 @@ impl crate::app::WavesPreviewer {
                 }
                 ui.separator();
                 let mut show_unmatched = self.external_show_unmatched;
-                if ui.checkbox(&mut show_unmatched, "Show unmatched rows in list").changed() {
+                if ui
+                    .checkbox(&mut show_unmatched, "Show unmatched rows in list")
+                    .changed()
+                {
                     self.external_show_unmatched = show_unmatched;
                     self.refresh_external_unmatched_items();
                 }

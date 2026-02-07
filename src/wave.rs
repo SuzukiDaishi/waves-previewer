@@ -1,5 +1,3 @@
-use std::num::{NonZeroU32, NonZeroU8};
-use std::path::Path;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fdk_aac::enc::{
@@ -14,6 +12,8 @@ use mp4::{
     AacConfig, AudioObjectType as Mp4AudioObjectType, ChannelConfig, MediaConfig, Mp4Config,
     Mp4Sample, Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
 };
+use std::num::{NonZeroU32, NonZeroU8};
+use std::path::Path;
 use vorbis_rs::VorbisEncoderBuilder;
 
 use crate::audio::AudioEngine;
@@ -326,7 +326,9 @@ fn mixdown_channels_mono(chans: &[Vec<f32>]) -> Vec<f32> {
 
 pub fn build_minmax(out: &mut Vec<(f32, f32)>, samples: &[f32], bins: usize) {
     out.clear();
-    if samples.is_empty() || bins == 0 { return; }
+    if samples.is_empty() || bins == 0 {
+        return;
+    }
     let len = samples.len();
     let step = (len as f32 / bins as f32).max(1.0);
     let mut pos = 0.0f32;
@@ -334,54 +336,96 @@ pub fn build_minmax(out: &mut Vec<(f32, f32)>, samples: &[f32], bins: usize) {
         let start = pos as usize;
         let end = (pos + step) as usize;
         let end = end.min(len);
-        if start >= end { out.push((0.0, 0.0)); } else {
+        if start >= end {
+            out.push((0.0, 0.0));
+        } else {
             let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
-            for &v in &samples[start..end] { if v < mn { mn = v; } if v > mx { mx = v; } }
-            if !mn.is_finite() || !mx.is_finite() { out.push((0.0, 0.0)); } else { out.push((mn, mx)); }
+            for &v in &samples[start..end] {
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
+            }
+            if !mn.is_finite() || !mx.is_finite() {
+                out.push((0.0, 0.0));
+            } else {
+                out.push((mn, mx));
+            }
         }
-        pos += step; if (pos as usize) >= len { break; }
+        pos += step;
+        if (pos as usize) >= len {
+            break;
+        }
     }
 }
-
 
 // Parse RIFF WAVE 'smpl' chunk and extract the first loop's start/end in samples (if present).
 pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
     use std::fs;
     let data = fs::read(path).ok()?;
-    if data.len() < 12 { return None; }
-    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" { return None; }
+    if data.len() < 12 {
+        return None;
+    }
+    if &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return None;
+    }
     let mut pos = 12usize;
     while pos + 8 <= data.len() {
-        let id = &data[pos..pos+4];
-        let size = u32::from_le_bytes([data[pos+4], data[pos+5], data[pos+6], data[pos+7]]) as usize;
+        let id = &data[pos..pos + 4];
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
         let chunk_start = pos + 8;
         let chunk_end = chunk_start.saturating_add(size).min(data.len());
         if id == b"smpl" {
             // smpl header is 9 u32 (36 bytes) before loops
-            if chunk_end.saturating_sub(chunk_start) < 36 { return None; }
+            if chunk_end.saturating_sub(chunk_start) < 36 {
+                return None;
+            }
             let num_loops_off = chunk_start + 28;
-            if num_loops_off + 4 > data.len() { return None; }
+            if num_loops_off + 4 > data.len() {
+                return None;
+            }
             let num_loops = u32::from_le_bytes([
-                data[num_loops_off], data[num_loops_off+1], data[num_loops_off+2], data[num_loops_off+3]
+                data[num_loops_off],
+                data[num_loops_off + 1],
+                data[num_loops_off + 2],
+                data[num_loops_off + 3],
             ]) as usize;
             let loops_off = chunk_start + 36;
             // each loop entry: 6 u32 = 24 bytes
-            if num_loops == 0 || loops_off + 24 > data.len() { return None; }
-            let start_off = loops_off + 8;  // start at +8 bytes in loop struct
-            let end_off = loops_off + 12;   // end at +12 bytes in loop struct
-            if end_off + 4 > data.len() { return None; }
+            if num_loops == 0 || loops_off + 24 > data.len() {
+                return None;
+            }
+            let start_off = loops_off + 8; // start at +8 bytes in loop struct
+            let end_off = loops_off + 12; // end at +12 bytes in loop struct
+            if end_off + 4 > data.len() {
+                return None;
+            }
             let start = u32::from_le_bytes([
-                data[start_off], data[start_off+1], data[start_off+2], data[start_off+3]
+                data[start_off],
+                data[start_off + 1],
+                data[start_off + 2],
+                data[start_off + 3],
             ]);
             let end = u32::from_le_bytes([
-                data[end_off], data[end_off+1], data[end_off+2], data[end_off+3]
+                data[end_off],
+                data[end_off + 1],
+                data[end_off + 2],
+                data[end_off + 3],
             ]);
-            if end > start { return Some((start, end)); }
-            else { return None; }
+            if end > start {
+                return Some((start, end));
+            } else {
+                return None;
+            }
         }
         // chunks are word (2-byte) aligned
         let advance = 8 + size + (size & 1);
-        if pos + advance <= pos { break; }
+        if pos + advance <= pos {
+            break;
+        }
         pos = pos.saturating_add(advance);
     }
     None
@@ -389,30 +433,57 @@ pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
 
 /// Map loop markers (ls, le) from source sample rate `in_sr` to output `out_sr`,
 /// and clamp to [0, samples_len]. Returns normalized (start<=end) if valid and non-empty.
-pub fn map_loop_markers_between_sr(ls: u32, le: u32, in_sr: u32, out_sr: u32, samples_len: usize) -> Option<(usize, usize)> {
-    if in_sr == 0 || out_sr == 0 || samples_len == 0 { return None; }
+pub fn map_loop_markers_between_sr(
+    ls: u32,
+    le: u32,
+    in_sr: u32,
+    out_sr: u32,
+    samples_len: usize,
+) -> Option<(usize, usize)> {
+    if in_sr == 0 || out_sr == 0 || samples_len == 0 {
+        return None;
+    }
     let in_sr_u = in_sr as u64;
     let out_sr_u = out_sr as u64;
     let s = ((ls as u64) * out_sr_u + (in_sr_u / 2)) / in_sr_u;
     let e = ((le as u64) * out_sr_u + (in_sr_u / 2)) / in_sr_u;
     let mut s = s as usize;
     let mut e = e as usize;
-    if e < s { std::mem::swap(&mut s, &mut e); }
+    if e < s {
+        std::mem::swap(&mut s, &mut e);
+    }
     s = s.min(samples_len);
     e = e.min(samples_len);
-    if e > s { Some((s, e)) } else { None }
+    if e > s {
+        Some((s, e))
+    } else {
+        None
+    }
 }
 
 /// Map loop markers from output SR (device) to file SR.
-pub fn map_loop_markers_to_file_sr(s: usize, e: usize, out_sr: u32, file_sr: u32) -> Option<(u32, u32)> {
-    if out_sr == 0 || file_sr == 0 { return None; }
-    if e <= s { return None; }
+pub fn map_loop_markers_to_file_sr(
+    s: usize,
+    e: usize,
+    out_sr: u32,
+    file_sr: u32,
+) -> Option<(u32, u32)> {
+    if out_sr == 0 || file_sr == 0 {
+        return None;
+    }
+    if e <= s {
+        return None;
+    }
     let out_sr_u = out_sr as u64;
     let file_sr_u = file_sr as u64;
     let s = ((s as u64) * file_sr_u + (out_sr_u / 2)) / out_sr_u;
     let e = ((e as u64) * file_sr_u + (out_sr_u / 2)) / out_sr_u;
-    if e <= s { return None; }
-    if s > u32::MAX as u64 || e > u32::MAX as u64 { return None; }
+    if e <= s {
+        return None;
+    }
+    if s > u32::MAX as u64 || e > u32::MAX as u64 {
+        return None;
+    }
     Some((s as u32, e as u32))
 }
 
@@ -430,17 +501,22 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
     let mut pos = 12usize;
     while pos + 8 <= data.len() {
         let id = &data[pos..pos + 4];
-        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]) as usize;
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
         let chunk_start = pos + 8;
         let chunk_end = chunk_start.saturating_add(size).min(data.len());
         if id != b"smpl" {
             out.extend_from_slice(id);
             out.extend_from_slice(&(size as u32).to_le_bytes());
             out.extend_from_slice(&data[chunk_start..chunk_end]);
-            if size & 1 == 1 { out.push(0); }
+            if size & 1 == 1 {
+                out.push(0);
+            }
         }
         let advance = 8 + size + (size & 1);
-        if pos + advance <= pos { break; }
+        if pos + advance <= pos {
+            break;
+        }
         pos = pos.saturating_add(advance);
     }
     if let Some((ls, le)) = loop_opt {
@@ -456,7 +532,7 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
             chunk.extend_from_slice(&0u32.to_le_bytes()); // smpte_offset
             chunk.extend_from_slice(&1u32.to_le_bytes()); // num_sample_loops
             chunk.extend_from_slice(&0u32.to_le_bytes()); // sampler_data
-            // loop struct (6 u32)
+                                                          // loop struct (6 u32)
             chunk.extend_from_slice(&0u32.to_le_bytes()); // cue_point_id
             chunk.extend_from_slice(&0u32.to_le_bytes()); // type (0=forward)
             chunk.extend_from_slice(&ls.to_le_bytes()); // start
@@ -466,21 +542,29 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
             out.extend_from_slice(b"smpl");
             out.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
             out.extend_from_slice(&chunk);
-            if chunk.len() & 1 == 1 { out.push(0); }
+            if chunk.len() & 1 == 1 {
+                out.push(0);
+            }
         }
     }
     let riff_size = (out.len().saturating_sub(8)) as u32;
     out[4..8].copy_from_slice(&riff_size.to_le_bytes());
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join("._wvp_tmp_smpl.wav");
-    if tmp.exists() { let _ = fs::remove_file(&tmp); }
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
     fs::write(&tmp, out)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }
 
 // High level helper used by UI when a file is clicked
-pub fn prepare_for_playback(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>) -> Result<()> {
+pub fn prepare_for_playback(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+) -> Result<()> {
     prepare_for_playback_quality(path, audio, out_waveform, ResampleQuality::Good)
 }
 
@@ -527,7 +611,12 @@ pub fn prepare_for_list_preview_quality(
 }
 
 // Prepare with Speed mode (rate change without pitch preservation)
-pub fn prepare_for_speed(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, _rate: f32) -> Result<()> {
+pub fn prepare_for_speed(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    _rate: f32,
+) -> Result<()> {
     prepare_for_speed_quality(path, audio, out_waveform, _rate, ResampleQuality::Good)
 }
 
@@ -544,7 +633,12 @@ pub fn prepare_for_speed_quality(
 
 // Prepare with PitchShift mode (preserve duration, shift pitch in semitones)
 #[allow(dead_code)]
-pub fn prepare_for_pitchshift(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, semitones: f32) -> Result<()> {
+pub fn prepare_for_pitchshift(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    semitones: f32,
+) -> Result<()> {
     let (mono, in_sr) = decode_wav_mono(path)?;
     let out_sr = audio.shared.out_sample_rate;
     let mut out = process_pitchshift_offline(&mono, in_sr, out_sr, semitones);
@@ -557,7 +651,12 @@ pub fn prepare_for_pitchshift(path: &Path, audio: &AudioEngine, out_waveform: &m
 
 // Prepare with TimeStretch mode (preserve pitch, change duration by rate: 0.5 -> slower/longer)
 #[allow(dead_code)]
-pub fn prepare_for_timestretch(path: &Path, audio: &AudioEngine, out_waveform: &mut Vec<(f32, f32)>, rate: f32) -> Result<()> {
+pub fn prepare_for_timestretch(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    rate: f32,
+) -> Result<()> {
     let rate = rate.clamp(0.25, 4.0);
     let (mono, in_sr) = decode_wav_mono(path)?;
     let out_sr = audio.shared.out_sample_rate;
@@ -569,7 +668,12 @@ pub fn prepare_for_timestretch(path: &Path, audio: &AudioEngine, out_waveform: &
 }
 
 // Heavy offline: pitch-shift preserving duration
-pub fn process_pitchshift_offline(mono: &[f32], in_sr: u32, out_sr: u32, semitones: f32) -> Vec<f32> {
+pub fn process_pitchshift_offline(
+    mono: &[f32],
+    in_sr: u32,
+    out_sr: u32,
+    semitones: f32,
+) -> Vec<f32> {
     let resampled = resample_linear(mono, in_sr, out_sr);
     if resampled.is_empty() {
         return Vec::new();
@@ -652,7 +756,11 @@ fn stretch_seek_preroll(stretch: &mut Stretch, input: &[f32], playback_rate: f32
 pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     let (mut chans, in_sr) = decode_wav_multi(src)?;
     let g = 10.0f32.powf(gain_db / 20.0);
-    for c in chans.iter_mut() { for v in c.iter_mut() { *v = (*v * g).clamp(-1.0, 1.0); } }
+    for c in chans.iter_mut() {
+        for v in c.iter_mut() {
+            *v = (*v * g).clamp(-1.0, 1.0);
+        }
+    }
     // Preserve source WAV format when available; otherwise use a safe default.
     let default_spec = hound::WavSpec {
         channels: chans.len().max(1) as u16,
@@ -668,19 +776,33 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
         .then(|| hound::WavReader::open(src).ok().map(|r| r.spec()))
         .flatten()
         .unwrap_or(default_spec);
-    let mut writer = hound::WavWriter::create(dst, hound::WavSpec{
-        channels: spec.channels,
-        sample_rate: in_sr,
-        bits_per_sample: spec.bits_per_sample,
-        sample_format: spec.sample_format,
-    })?;
+    let mut writer = hound::WavWriter::create(
+        dst,
+        hound::WavSpec {
+            channels: spec.channels,
+            sample_rate: in_sr,
+            bits_per_sample: spec.bits_per_sample,
+            sample_format: spec.sample_format,
+        },
+    )?;
     let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
     match spec.sample_format {
         hound::SampleFormat::Float => {
-            for i in 0..frames { for ch in 0..(spec.channels as usize) { let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0); writer.write_sample::<f32>(s)?; } }
+            for i in 0..frames {
+                for ch in 0..(spec.channels as usize) {
+                    let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
+                    writer.write_sample::<f32>(s)?;
+                }
+            }
         }
         hound::SampleFormat::Int => {
-            let max_abs = match spec.bits_per_sample { 8 => 127.0, 16 => 32767.0, 24 => 8_388_607.0, 32 => 2_147_483_647.0, b => ((1u64 << (b - 1)) - 1) as f64 as f32 };
+            let max_abs = match spec.bits_per_sample {
+                8 => 127.0,
+                16 => 32767.0,
+                24 => 8_388_607.0,
+                32 => 2_147_483_647.0,
+                b => ((1u64 << (b - 1)) - 1) as f64 as f32,
+            };
             for i in 0..frames {
                 for ch in 0..(spec.channels as usize) {
                     let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
@@ -889,8 +1011,7 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
         },
         audio_object_type: FdkAudioObjectType::Mpeg4LowComplexity,
     };
-    let encoder = AacEncoder::new(params)
-        .map_err(|e| anyhow::anyhow!("aac encoder init: {e}"))?;
+    let encoder = AacEncoder::new(params).map_err(|e| anyhow::anyhow!("aac encoder init: {e}"))?;
     let info = encoder
         .info()
         .map_err(|e| anyhow::anyhow!("aac encoder info: {e}"))?;
@@ -901,8 +1022,7 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     let max_out = (info.maxOutBufBytes as usize).max(4096);
     let interleaved = interleave_i16(&chans);
     let frame_samples = frame_len * channels;
-    let file = File::create(dst)
-        .with_context(|| format!("create m4a: {}", dst.display()))?;
+    let file = File::create(dst).with_context(|| format!("create m4a: {}", dst.display()))?;
     let config = Mp4Config {
         major_brand: "M4A ".parse().expect("FourCC"),
         minor_version: 512,
@@ -914,8 +1034,8 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
         ],
         timescale: sr.max(1),
     };
-    let mut writer = Mp4Writer::write_start(file, &config)
-        .map_err(|e| anyhow::anyhow!("mp4 start: {e:?}"))?;
+    let mut writer =
+        Mp4Writer::write_start(file, &config).map_err(|e| anyhow::anyhow!("mp4 start: {e:?}"))?;
     let track_conf = TrackConfig {
         track_type: TrackType::Audio,
         timescale: sr.max(1),
@@ -1115,7 +1235,12 @@ fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
 
 // Export a selection from in-memory multi-channel samples (float32) to a WAV file.
 #[allow(dead_code)]
-pub fn export_selection_wav(chans: &[Vec<f32>], sample_rate: u32, range: (usize,usize), dst: &Path) -> Result<()> {
+pub fn export_selection_wav(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    range: (usize, usize),
+    dst: &Path,
+) -> Result<()> {
     export_selection_wav_with_depth(chans, sample_rate, range, dst, None)
 }
 
@@ -1146,7 +1271,11 @@ pub fn export_channels_audio_with_depth(
     dst: &Path,
     wav_depth: Option<WavBitDepth>,
 ) -> Result<()> {
-    let ext = dst.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let ext = dst
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     match ext.as_str() {
         "wav" => {
             let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
@@ -1199,17 +1328,21 @@ pub fn overwrite_audio_from_channels_with_depth(
     Ok(())
 }
 
-
 // Overwrite: apply gain and replace the source file safely with optional .bak
 pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> {
     use std::fs;
     let parent = src.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join("._wvp_tmp.wav");
-    if tmp.exists() { let _ = fs::remove_file(&tmp); }
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
     export_gain_wav(src, &tmp, gain_db)?;
     if backup {
         // backup as "<original>.wav.bak"
-        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup.wav");
+        let fname = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("backup.wav");
         let bak = src.with_file_name(format!("{}.bak", fname));
         let _ = fs::remove_file(&bak);
         let _ = fs::copy(src, &bak);
@@ -1258,12 +1391,18 @@ const KW_A2_2: f32 = 0.99007225;
 const K_CONST: f32 = -0.691; // 997Hz calibration constant
 
 fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) {
-    let mut x1 = 0.0f32; let mut x2 = 0.0f32; let mut y1 = 0.0f32; let mut y2 = 0.0f32;
+    let mut x1 = 0.0f32;
+    let mut x2 = 0.0f32;
+    let mut y1 = 0.0f32;
+    let mut y2 = 0.0f32;
     for n in 0..x.len() {
         let xn = x[n];
         let y = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
         x[n] = y;
-        x2 = x1; x1 = xn; y2 = y1; y1 = y;
+        x2 = x1;
+        x1 = xn;
+        y2 = y1;
+        y1 = y;
     }
 }
 
@@ -1275,7 +1414,9 @@ fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
 }
 
 fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
-    if in_sr == 48_000 { return (chans.to_vec(), in_sr); }
+    if in_sr == 48_000 {
+        return (chans.to_vec(), in_sr);
+    }
     let mut out = Vec::with_capacity(chans.len());
     for ch in chans {
         out.push(resample_linear(ch, in_sr, 48_000));
@@ -1284,11 +1425,16 @@ fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
 }
 
 fn block_means_power(power: &[f32], win: usize, hop: usize) -> Vec<f64> {
-    if power.len() < win || win == 0 || hop == 0 { return Vec::new(); }
+    if power.len() < win || win == 0 || hop == 0 {
+        return Vec::new();
+    }
     let mut cs = Vec::with_capacity(power.len() + 1);
     cs.push(0.0f64);
     let mut sum = 0.0f64;
-    for &v in power { sum += v as f64; cs.push(sum); }
+    for &v in power {
+        sum += v as f64;
+        cs.push(sum);
+    }
     let mut out = Vec::new();
     let mut i = 0usize;
     while i + win <= power.len() {
@@ -1300,16 +1446,23 @@ fn block_means_power(power: &[f32], win: usize, hop: usize) -> Vec<f64> {
 }
 
 pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f32> {
-    if chans_in.is_empty() { anyhow::bail!("empty channels"); }
+    if chans_in.is_empty() {
+        anyhow::bail!("empty channels");
+    }
     // Resample to 48k and copy
     let (mut chans, sr) = ensure_sr_48k(chans_in, in_sr);
     let _ = sr; // sr is 48k now
-    // K-weighting
+                // K-weighting
     k_weighting_apply_48k(&mut chans);
     // Sum weighted power across channels (weights=1.0, LFE not identified here)
     let n = chans[0].len();
     let mut p_sum = vec![0.0f32; n];
-    for ch in &chans { for i in 0..n { let v = ch[i]; p_sum[i] += v * v; } }
+    for ch in &chans {
+        for i in 0..n {
+            let v = ch[i];
+            p_sum[i] += v * v;
+        }
+    }
     // 400ms window with 100ms hop
     let win = (0.400 * 48_000.0) as usize;
     let hop = (0.100 * 48_000.0) as usize;
@@ -1318,28 +1471,55 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
         // Fallback for very short audio (< window): use whole-signal mean power.
         // This avoids returning +/-inf for short clips where BS.1770 windowing can't be applied.
         let mut acc = 0.0f64;
-        for &v in &p_sum { acc += v as f64; }
+        for &v in &p_sum {
+            acc += v as f64;
+        }
         let n = p_sum.len().max(1) as f64;
         let z = (acc / n).max(1e-24);
         let l = K_CONST + 10.0 * (z.log10() as f32);
         return Ok(l);
     }
-    let blocks_lufs: Vec<f32> = means.iter().map(|&m| K_CONST + 10.0 * (m.max(1e-24)).log10() as f32).collect();
+    let blocks_lufs: Vec<f32> = means
+        .iter()
+        .map(|&m| K_CONST + 10.0 * (m.max(1e-24)).log10() as f32)
+        .collect();
     // Absolute gate -70 LUFS
     let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > -70.0).collect();
-    if !sel.iter().any(|&b| b) { return Ok(f32::NEG_INFINITY); }
+    if !sel.iter().any(|&b| b) {
+        return Ok(f32::NEG_INFINITY);
+    }
     // Average of means after absolute gate
-    let mut num = 0usize; let mut acc = 0.0f64;
-    for (i, &ok) in sel.iter().enumerate() { if ok { acc += means[i]; num += 1; } }
-    let z_abs = if num>0 { acc / num as f64 } else { 0.0 };
-    if z_abs <= 0.0 { return Ok(f32::NEG_INFINITY); }
+    let mut num = 0usize;
+    let mut acc = 0.0f64;
+    for (i, &ok) in sel.iter().enumerate() {
+        if ok {
+            acc += means[i];
+            num += 1;
+        }
+    }
+    let z_abs = if num > 0 { acc / num as f64 } else { 0.0 };
+    if z_abs <= 0.0 {
+        return Ok(f32::NEG_INFINITY);
+    }
     let l_abs = K_CONST + 10.0 * (z_abs.max(1e-24)).log10() as f32;
     let thr = l_abs - 10.0;
-    for (i, l) in blocks_lufs.iter().enumerate() { sel[i] = sel[i] && (*l > thr); }
-    if !sel.iter().any(|&b| b) { return Ok(f32::NEG_INFINITY); }
-    let mut acc2 = 0.0f64; let mut n2 = 0usize;
-    for (i, &ok) in sel.iter().enumerate() { if ok { acc2 += means[i]; n2 += 1; } }
-    if n2 == 0 { return Ok(f32::NEG_INFINITY); }
+    for (i, l) in blocks_lufs.iter().enumerate() {
+        sel[i] = sel[i] && (*l > thr);
+    }
+    if !sel.iter().any(|&b| b) {
+        return Ok(f32::NEG_INFINITY);
+    }
+    let mut acc2 = 0.0f64;
+    let mut n2 = 0usize;
+    for (i, &ok) in sel.iter().enumerate() {
+        if ok {
+            acc2 += means[i];
+            n2 += 1;
+        }
+    }
+    if n2 == 0 {
+        return Ok(f32::NEG_INFINITY);
+    }
     let z_final = acc2 / n2 as f64;
     let l = K_CONST + 10.0 * (z_final.max(1e-24)).log10() as f32;
     Ok(l)

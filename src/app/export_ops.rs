@@ -205,16 +205,18 @@ impl super::WavesPreviewer {
                         if needs_audio {
                             ch_samples = Some(tab.ch_samples.clone());
                             let target_sr = sr_override.unwrap_or(out_sr);
-                            let scaled = (tab.samples_len as f64)
-                                * (target_sr as f64 / out_sr as f64);
+                            let scaled =
+                                (tab.samples_len as f64) * (target_sr as f64 / out_sr as f64);
                             max_file_samples = Some(scaled.round().max(0.0) as u64);
                         } else {
                             max_file_samples = self
                                 .meta_for_path(&p)
                                 .and_then(|m| m.duration_secs)
-                                .map(|secs| (secs * self.sample_rate_for_path(&p, out_sr) as f32)
-                                    .round()
-                                    .max(0.0) as u64);
+                                .map(|secs| {
+                                    (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                        .round()
+                                        .max(0.0) as u64
+                                });
                         }
                     }
                 } else if let Some(cached) = self.edited_cache.get(&p) {
@@ -237,34 +239,35 @@ impl super::WavesPreviewer {
                         if needs_audio {
                             ch_samples = Some(cached.ch_samples.clone());
                             let target_sr = sr_override.unwrap_or(out_sr);
-                            let scaled = (cached.samples_len as f64)
-                                * (target_sr as f64 / out_sr as f64);
+                            let scaled =
+                                (cached.samples_len as f64) * (target_sr as f64 / out_sr as f64);
                             max_file_samples = Some(scaled.round().max(0.0) as u64);
                         } else {
                             max_file_samples = self
                                 .meta_for_path(&p)
                                 .and_then(|m| m.duration_secs)
-                                .map(|secs| (secs * self.sample_rate_for_path(&p, out_sr) as f32)
-                                    .round()
-                                    .max(0.0) as u64);
+                                .map(|secs| {
+                                    (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                        .round()
+                                        .max(0.0) as u64
+                                });
                         }
                     }
                 }
-                let has_edits =
-                    dirty_audio
-                        || markers_dirty
-                        || loop_markers_dirty
-                        || sr_override.is_some()
-                        || bit_override.is_some();
+                let has_edits = dirty_audio
+                    || markers_dirty
+                    || loop_markers_dirty
+                    || sr_override.is_some()
+                    || bit_override.is_some();
                 if has_edits {
                     let write_audio = cfg.save_mode == SaveMode::NewFile
                         || dirty_audio
                         || db.abs() > 0.0001
                         || sr_override.is_some()
                         || bit_override.is_some();
-                    let audio = ch_samples.map(crate::audio::AudioBuffer::from_channels).map(
-                        std::sync::Arc::new,
-                    );
+                    let audio = ch_samples
+                        .map(crate::audio::AudioBuffer::from_channels)
+                        .map(std::sync::Arc::new);
                     let target_sr = sr_override.unwrap_or(out_sr).max(1);
                     let file_sr = if write_audio {
                         target_sr
@@ -315,7 +318,14 @@ impl super::WavesPreviewer {
         let virtual_jobs = virtual_tasks
             .iter()
             .map(|(src, dst, audio, db, sr, target_sr)| {
-                (src.clone(), dst.clone(), audio.clone(), *db, *sr, *target_sr)
+                (
+                    src.clone(),
+                    dst.clone(),
+                    audio.clone(),
+                    *db,
+                    *sr,
+                    *target_sr,
+                )
             })
             .collect::<Vec<_>>();
         let edit_jobs = edit_tasks;
@@ -545,8 +555,8 @@ impl super::WavesPreviewer {
                         failed_paths.push(task.src.clone());
                         continue;
                     }
-                    max_file_samples = max_file_samples
-                        .or_else(|| channels.get(0).map(|c| c.len() as u64));
+                    max_file_samples =
+                        max_file_samples.or_else(|| channels.get(0).map(|c| c.len() as u64));
                 } else if !task.src.is_file() {
                     failed += 1;
                     failed_paths.push(task.src.clone());
@@ -687,11 +697,7 @@ impl super::WavesPreviewer {
         self.refresh_audio_after_sample_rate_change(&targets);
     }
 
-    pub(super) fn spawn_convert_format_selected(
-        &mut self,
-        paths: Vec<PathBuf>,
-        target_ext: &str,
-    ) {
+    pub(super) fn spawn_convert_format_selected(&mut self, paths: Vec<PathBuf>, target_ext: &str) {
         let ext = target_ext.trim().to_ascii_lowercase();
         if !crate::audio_io::is_supported_extension(&ext) {
             return;
@@ -735,7 +741,9 @@ impl super::WavesPreviewer {
                 }
                 let success_set: std::collections::HashSet<PathBuf> =
                     res.success_paths.iter().cloned().collect();
-                if matches!(self.saving_mode, Some(SaveMode::Overwrite)) && self.export_cfg.backup_bak {
+                if matches!(self.saving_mode, Some(SaveMode::Overwrite))
+                    && self.export_cfg.backup_bak
+                {
                     let mut restore_batch: Vec<(PathBuf, PathBuf)> = Vec::new();
                     for src in &self.saving_sources {
                         if !success_set.contains(src) {

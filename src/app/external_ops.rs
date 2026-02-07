@@ -53,11 +53,7 @@ impl WavesPreviewer {
             let Some(row) = self.external_rows.get(row_idx) else {
                 continue;
             };
-            let key = row
-                .get(key_idx)
-                .map(|v| v.trim())
-                .unwrap_or("")
-                .to_string();
+            let key = row.get(key_idx).map(|v| v.trim()).unwrap_or("").to_string();
             if key.is_empty() {
                 continue;
             }
@@ -271,15 +267,13 @@ impl WavesPreviewer {
             }
             let mut hit = false;
             let mut row = None;
-            for key in
-                Self::external_keys_for_path_with_rule(
-                    &item.path,
-                    rule,
-                    self.external_match_input,
-                    re.as_ref(),
-                    &replace,
-                )
-            {
+            for key in Self::external_keys_for_path_with_rule(
+                &item.path,
+                rule,
+                self.external_match_input,
+                re.as_ref(),
+                &replace,
+            ) {
                 if let Some(found) = lookup.get(&key) {
                     row = Some(found.clone());
                     matched_keys.insert(key);

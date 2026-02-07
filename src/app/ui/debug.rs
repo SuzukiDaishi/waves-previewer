@@ -57,10 +57,7 @@ impl crate::app::WavesPreviewer {
                         ui.monospace(format!("raw.events_len: {}", self.debug.last_events_len));
                         ui.monospace(format!("wants_keyboard_input: {wants_kb}"));
                         ui.monospace(format!("wants_pointer_input: {wants_ptr}"));
-                        ui.monospace(format!(
-                            "suppress_list_enter: {}",
-                            self.suppress_list_enter
-                        ));
+                        ui.monospace(format!("suppress_list_enter: {}", self.suppress_list_enter));
                         ui.monospace(format!(
                             "mods: ctrl:{} shift:{} alt:{} command:{}",
                             mods.ctrl, mods.shift, mods.alt, mods.command
@@ -114,7 +111,8 @@ impl crate::app::WavesPreviewer {
                                     buf.push_str(line);
                                     buf.push('\n');
                                 }
-                                ui.ctx().send_cmd(egui::output::OutputCommand::CopyText(buf));
+                                ui.ctx()
+                                    .send_cmd(egui::output::OutputCommand::CopyText(buf));
                             }
                             if ui.button("Clear trace").clicked() {
                                 self.debug.input_trace.clear();

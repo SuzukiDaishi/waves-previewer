@@ -51,7 +51,11 @@ impl UiBridge {
     }
 
     pub fn send(&self, cmd: UiCommand) -> Result<UiCommandResult> {
-        self.tx.send(cmd).map_err(|e| anyhow!("bridge send failed: {e}"))?;
-        self.rx.recv().map_err(|e| anyhow!("bridge recv failed: {e}"))
+        self.tx
+            .send(cmd)
+            .map_err(|e| anyhow!("bridge send failed: {e}"))?;
+        self.rx
+            .recv()
+            .map_err(|e| anyhow!("bridge recv failed: {e}"))
     }
 }

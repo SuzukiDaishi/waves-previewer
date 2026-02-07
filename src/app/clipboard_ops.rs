@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use super::types::{
-    ClipboardItem, ClipboardPayload, MediaSource, VirtualSourceRef, VirtualState,
-};
+use super::types::{ClipboardItem, ClipboardPayload, MediaSource, VirtualSourceRef, VirtualState};
 
 impl super::WavesPreviewer {
     #[cfg(windows)]
@@ -35,12 +33,8 @@ impl super::WavesPreviewer {
         if !marker.is_empty() {
             let mut utf16: Vec<u16> = marker.encode_utf16().collect();
             utf16.push(0);
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    utf16.as_ptr() as *const u8,
-                    utf16.len() * 2,
-                )
-            };
+            let bytes =
+                unsafe { std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2) };
             raw::set_without_clear(CF_UNICODETEXT, bytes).map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -93,16 +87,17 @@ impl super::WavesPreviewer {
                 None
             };
             let edited_audio = self.edited_audio_for_path(&item.path);
-            let (mut audio, mut sample_rate, mut bits_per_sample) = if let Some(audio) = edited_audio.clone() {
-                (Some(audio), out_sr, 32)
-            } else {
-                let meta = item.meta.as_ref();
-                (
-                    None,
-                    meta.map(|m| m.sample_rate).unwrap_or(0),
-                    meta.map(|m| m.bits_per_sample).unwrap_or(0),
-                )
-            };
+            let (mut audio, mut sample_rate, mut bits_per_sample) =
+                if let Some(audio) = edited_audio.clone() {
+                    (Some(audio), out_sr, 32)
+                } else {
+                    let meta = item.meta.as_ref();
+                    (
+                        None,
+                        meta.map(|m| m.sample_rate).unwrap_or(0),
+                        meta.map(|m| m.bits_per_sample).unwrap_or(0),
+                    )
+                };
             if audio.is_none() {
                 if let Some(path) = source_path.as_ref() {
                     if let Some((decoded, sr, bits)) = self.decode_audio_for_virtual(path) {
@@ -155,8 +150,7 @@ impl super::WavesPreviewer {
         if !os_paths.is_empty() {
             #[cfg(windows)]
             {
-                if let Err(err) =
-                    self.set_clipboard_files_with_marker(&os_paths, CLIPBOARD_MARKER)
+                if let Err(err) = self.set_clipboard_files_with_marker(&os_paths, CLIPBOARD_MARKER)
                 {
                     self.debug_log(format!("clipboard error: {err}"));
                 }
@@ -242,8 +236,13 @@ impl super::WavesPreviewer {
                     channels: audio.channels.len().max(1) as u16,
                     bits_per_sample,
                 });
-                let vitem =
-                    self.make_virtual_item(name, audio, sample_rate, bits_per_sample, virtual_state);
+                let vitem = self.make_virtual_item(
+                    name,
+                    audio,
+                    sample_rate,
+                    bits_per_sample,
+                    virtual_state,
+                );
                 added_paths.push(vitem.path.clone());
                 self.add_virtual_item(vitem, Some(insert_idx));
                 insert_idx = insert_idx.saturating_add(1);
@@ -316,10 +315,9 @@ impl super::WavesPreviewer {
             return;
         }
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
-        let list_focus =
-            self.list_has_focus || ctx.memory(|m| m.has_focus(Self::list_focus_id()));
-        let allow =
-            !search_focused && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
+        let list_focus = self.list_has_focus || ctx.memory(|m| m.has_focus(Self::list_focus_id()));
+        let allow = !search_focused
+            && (list_focus || self.selected.is_some() || !self.selected_multi.is_empty());
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let down_c = ctx.input(|i| i.key_down(egui::Key::C));
         let down_v = ctx.input(|i| i.key_down(egui::Key::V));
@@ -363,14 +361,10 @@ impl super::WavesPreviewer {
         }
         let edge_c = allow && ctrl && down_c && !self.clipboard_c_was_down;
         let edge_v = allow && ctrl && down_v && !self.clipboard_v_was_down;
-        let consumed_copy = allow
-            && ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::C)
-            });
-        let consumed_paste = allow
-            && ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::V)
-            });
+        let consumed_copy =
+            allow && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
+        let consumed_paste =
+            allow && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
         let copy_trigger = consumed_copy_event || consumed_copy || edge_c;
         let paste_trigger = consumed_paste_event || consumed_paste || edge_v;
         let copy_source = if consumed_copy_event {

@@ -134,8 +134,12 @@ pub struct ListUndoItem {
 
 #[derive(Clone)]
 pub enum ListUndoActionKind {
-    Remove { items: Vec<ListUndoItem> },
-    Insert { items: Vec<ListUndoItem> },
+    Remove {
+        items: Vec<ListUndoItem>,
+    },
+    Insert {
+        items: Vec<ListUndoItem>,
+    },
     Update {
         before: Vec<ListUndoItem>,
         after: Vec<ListUndoItem>,
@@ -259,7 +263,7 @@ pub enum WindowFunction {
 pub struct SpectrogramConfig {
     pub fft_size: usize,
     pub window: WindowFunction,
-    pub overlap: f32,     // 0.0..0.95 (fraction)
+    pub overlap: f32, // 0.0..0.95 (fraction)
     pub max_frames: usize,
     pub scale: SpectrogramScale,
     pub mel_scale: SpectrogramScale,
@@ -296,6 +300,7 @@ pub enum ToolKind {
     Normalize,
     Loudness,
     Reverse,
+    PluginFx,
 }
 
 #[derive(Clone, Copy)]
@@ -308,6 +313,89 @@ pub struct ToolState {
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
     pub loop_repeat: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginParamUiState {
+    pub id: String,
+    pub name: String,
+    pub normalized: f32,
+    pub default_normalized: f32,
+    pub min: f32,
+    pub max: f32,
+    pub unit: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PluginFxDraft {
+    pub plugin_key: Option<String>,
+    pub plugin_name: String,
+    pub backend: Option<crate::plugin::PluginHostBackend>,
+    pub enabled: bool,
+    pub bypass: bool,
+    pub filter: String,
+    pub params: Vec<PluginParamUiState>,
+    pub state_blob: Option<Vec<u8>>,
+    pub last_error: Option<String>,
+    pub last_backend_log: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginCatalogEntry {
+    pub key: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub format: crate::plugin::PluginFormat,
+}
+
+pub struct PluginScanResult {
+    pub job_id: u64,
+    pub plugins: Vec<PluginCatalogEntry>,
+    pub error: Option<String>,
+}
+
+pub struct PluginProbeResult {
+    pub job_id: u64,
+    pub plugin_key: String,
+    pub plugin_name: String,
+    pub params: Vec<PluginParamUiState>,
+    pub state_blob: Option<Vec<u8>>,
+    pub backend: crate::plugin::PluginHostBackend,
+    pub backend_note: Option<String>,
+    pub error: Option<String>,
+}
+
+pub struct PluginProcessResult {
+    pub job_id: u64,
+    pub tab_idx: usize,
+    pub is_apply: bool,
+    pub channels: Vec<Vec<f32>>,
+    pub state_blob: Option<Vec<u8>>,
+    pub backend: crate::plugin::PluginHostBackend,
+    pub backend_note: Option<String>,
+    pub error: Option<String>,
+}
+
+pub struct PluginScanState {
+    pub job_id: u64,
+    pub started_at: Instant,
+    pub rx: std::sync::mpsc::Receiver<PluginScanResult>,
+}
+
+pub struct PluginProbeState {
+    pub job_id: u64,
+    pub tab_path: PathBuf,
+    pub started_at: Instant,
+    pub rx: std::sync::mpsc::Receiver<PluginProbeResult>,
+}
+
+pub struct PluginProcessState {
+    pub job_id: u64,
+    pub started_at: Instant,
+    pub tab_idx: usize,
+    pub is_apply: bool,
+    pub rx: std::sync::mpsc::Receiver<PluginProcessResult>,
+    pub undo: Option<EditorUndoState>,
 }
 
 #[derive(Clone)]
@@ -457,6 +545,7 @@ pub struct EditorTab {
     pub preview_offset_samples: Option<usize>,
     // Per-channel non-destructive preview overlay (green waveform)
     pub preview_overlay: Option<PreviewOverlay>,
+    pub plugin_fx_draft: PluginFxDraft,
     pub pending_loop_unwrap: Option<u32>,
     pub undo_stack: Vec<EditorUndoState>,
     pub undo_bytes: usize,
@@ -589,6 +678,7 @@ pub struct EditorUndoState {
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
+    pub plugin_fx_draft: PluginFxDraft,
     pub show_waveform_overlay: bool,
     pub dirty: bool,
     pub approx_bytes: usize,
@@ -628,6 +718,7 @@ pub struct CachedEdit {
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
+    pub plugin_fx_draft: PluginFxDraft,
     pub show_waveform_overlay: bool,
 }
 
@@ -956,8 +1047,15 @@ pub struct DebugState {
     pub list_select_started_path: Option<PathBuf>,
     pub select_to_preview_ms: VecDeque<f32>,
     pub select_to_play_ms: VecDeque<f32>,
+    pub plugin_scan_ms: VecDeque<f32>,
+    pub plugin_probe_ms: VecDeque<f32>,
+    pub plugin_preview_ms: VecDeque<f32>,
+    pub plugin_apply_ms: VecDeque<f32>,
     pub autoplay_pending_count: u64,
     pub stale_preview_cancel_count: u64,
+    pub plugin_stale_drop_count: u64,
+    pub plugin_worker_timeout_count: u64,
+    pub plugin_native_fallback_count: u64,
 }
 
 impl DebugState {
@@ -1018,8 +1116,15 @@ impl DebugState {
             list_select_started_path: None,
             select_to_preview_ms: VecDeque::new(),
             select_to_play_ms: VecDeque::new(),
+            plugin_scan_ms: VecDeque::new(),
+            plugin_probe_ms: VecDeque::new(),
+            plugin_preview_ms: VecDeque::new(),
+            plugin_apply_ms: VecDeque::new(),
             autoplay_pending_count: 0,
             stale_preview_cancel_count: 0,
+            plugin_stale_drop_count: 0,
+            plugin_worker_timeout_count: 0,
+            plugin_native_fallback_count: 0,
         }
     }
 }
@@ -1039,15 +1144,26 @@ pub enum DebugAction {
     ScreenshotAuto,
     ScreenshotPath(PathBuf),
     SetActiveTool(ToolKind),
-    SetSelection { start_frac: f32, end_frac: f32 },
-    SetTrimRange { start_frac: f32, end_frac: f32 },
-    SetLoopRegion { start_frac: f32, end_frac: f32 },
+    SetSelection {
+        start_frac: f32,
+        end_frac: f32,
+    },
+    SetTrimRange {
+        start_frac: f32,
+        end_frac: f32,
+    },
+    SetLoopRegion {
+        start_frac: f32,
+        end_frac: f32,
+    },
     SetLoopMode(LoopMode),
     SetLoopXfade {
         ms: f32,
         shape: LoopXfadeShape,
     },
-    AddMarker { frac: f32 },
+    AddMarker {
+        frac: f32,
+    },
     ClearMarkers,
     WriteMarkers,
     WriteLoopMarkers,
@@ -1066,8 +1182,12 @@ pub enum DebugAction {
         out_ms: f32,
         shape: FadeShape,
     },
-    ApplyGain { db: f32 },
-    ApplyNormalize { db: f32 },
+    ApplyGain {
+        db: f32,
+    },
+    ApplyNormalize {
+        db: f32,
+    },
     ApplyReverse,
     ApplyPitchShift(f32),
     ApplyTimeStretch(f32),

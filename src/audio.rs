@@ -12,7 +12,9 @@ pub struct AudioBuffer {
 
 impl AudioBuffer {
     pub fn from_mono(mono: Vec<f32>) -> Self {
-        Self { channels: vec![mono] }
+        Self {
+            channels: vec![mono],
+        }
     }
 
     pub fn from_channels(channels: Vec<Vec<f32>>) -> Self {
@@ -36,8 +38,8 @@ impl AudioBuffer {
 
 pub struct SharedAudio {
     pub samples: ArcSwapOption<AudioBuffer>, // multi-channel samples in [-1, 1]
-    pub vol: AtomicF32,                   // 0.0..1.0 linear gain
-    pub file_gain: AtomicF32,             // per-file gain factor (can be > 1.0)
+    pub vol: AtomicF32,                      // 0.0..1.0 linear gain
+    pub file_gain: AtomicF32,                // per-file gain factor (can be > 1.0)
     pub playing: std::sync::atomic::AtomicBool,
     pub play_pos: std::sync::atomic::AtomicUsize,
     pub play_pos_f: AtomicF32, // fractional position for rate control
@@ -237,12 +239,12 @@ impl AudioEngine {
                                             if (pos_f >= s_start && pos_f < s_end)
                                                 || (pos_f >= e_start && pos_f < e_end)
                                             {
-                                                let win_start =
-                                                    if pos_f < s_end && pos_f >= s_start {
-                                                        s_start
-                                                    } else {
-                                                        e_start
-                                                    };
+                                                let win_start = if pos_f < s_end && pos_f >= s_start
+                                                {
+                                                    s_start
+                                                } else {
+                                                    e_start
+                                                };
                                                 let offset = pos_f - win_start;
                                                 let tcf = (offset / win_len).clamp(0.0, 1.0);
                                                 let s_pf = s_start + offset;

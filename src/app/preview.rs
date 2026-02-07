@@ -25,6 +25,22 @@ impl WavesPreviewer {
         }
     }
 
+    pub(super) fn set_preview_channels(
+        &mut self,
+        tab_idx: usize,
+        tool: ToolKind,
+        channels: Vec<Vec<f32>>,
+    ) {
+        self.audio.stop();
+        self.audio.set_samples_channels(channels);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = Some(tool);
+        }
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
+    }
+
     pub(super) fn refresh_tool_preview_for_tab(&mut self, tab_idx: usize) {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;

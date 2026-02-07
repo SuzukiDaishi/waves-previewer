@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::markers::MarkerEntry;
 use super::types::{
-    ChannelView, ChannelViewMode, FadeShape, FileMeta, LoopMode, LoopXfadeShape,
-    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, ViewMode,
+    ChannelView, ChannelViewMode, FadeShape, FileMeta, LoopMode, LoopXfadeShape, PluginFxDraft,
+    PluginParamUiState, SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, ViewMode,
 };
+use crate::markers::MarkerEntry;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectFile {
@@ -120,6 +121,8 @@ pub struct ProjectEdit {
     pub bpm_value: f32,
     #[serde(default)]
     pub bpm_user_set: bool,
+    #[serde(default)]
+    pub plugin_fx_draft: ProjectPluginFxDraft,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -266,6 +269,50 @@ pub struct ProjectTab {
     pub samples_per_px: f32,
     pub dirty: bool,
     pub edited_audio: Option<String>,
+    #[serde(default)]
+    pub plugin_fx_draft: ProjectPluginFxDraft,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectPluginFxDraft {
+    #[serde(default)]
+    pub plugin_key: Option<String>,
+    #[serde(default)]
+    pub plugin_name: String,
+    #[serde(default)]
+    pub backend: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bypass: bool,
+    #[serde(default)]
+    pub filter: String,
+    #[serde(default)]
+    pub params: Vec<ProjectPluginParam>,
+    #[serde(default)]
+    pub state_blob_b64: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub last_backend_log: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectPluginParam {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub normalized: f32,
+    #[serde(default)]
+    pub default_normalized: f32,
+    #[serde(default)]
+    pub min: f32,
+    #[serde(default)]
+    pub max: f32,
+    #[serde(default)]
+    pub unit: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -299,9 +346,9 @@ fn component_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> boo
     {
         use std::path::Component;
         match (a, b) {
-            (Component::Normal(x), Component::Normal(y)) => {
-                x.to_string_lossy().eq_ignore_ascii_case(&y.to_string_lossy())
-            }
+            (Component::Normal(x), Component::Normal(y)) => x
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&y.to_string_lossy()),
             _ => a == b,
         }
     }
@@ -315,22 +362,18 @@ fn same_volume(path: &Path, base: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::path::Component;
-        let p = path
-            .components()
-            .find_map(|c| match c {
-                Component::Prefix(prefix) => {
-                    Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
-                }
-                _ => None,
-            });
-        let b = base
-            .components()
-            .find_map(|c| match c {
-                Component::Prefix(prefix) => {
-                    Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
-                }
-                _ => None,
-            });
+        let p = path.components().find_map(|c| match c {
+            Component::Prefix(prefix) => {
+                Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
+            }
+            _ => None,
+        });
+        let b = base.components().find_map(|c| match c {
+            Component::Prefix(prefix) => {
+                Some(prefix.as_os_str().to_string_lossy().to_ascii_lowercase())
+            }
+            _ => None,
+        });
         p == b
     }
     #[cfg(not(windows))]
@@ -599,6 +642,79 @@ pub fn project_tab_from_tab(
         samples_per_px: tab.samples_per_px,
         dirty: tab.dirty,
         edited_audio: edited_audio.map(|p| rel_path(&p, base)),
+        plugin_fx_draft: project_plugin_fx_draft_from_draft(&tab.plugin_fx_draft),
+    }
+}
+
+pub fn project_plugin_fx_draft_from_draft(draft: &PluginFxDraft) -> ProjectPluginFxDraft {
+    ProjectPluginFxDraft {
+        plugin_key: draft.plugin_key.clone(),
+        plugin_name: draft.plugin_name.clone(),
+        backend: draft.backend.map(|b| match b {
+            crate::plugin::PluginHostBackend::Generic => "generic".to_string(),
+            crate::plugin::PluginHostBackend::NativeVst3 => "native_vst3".to_string(),
+            crate::plugin::PluginHostBackend::NativeClap => "native_clap".to_string(),
+        }),
+        enabled: draft.enabled,
+        bypass: draft.bypass,
+        filter: draft.filter.clone(),
+        params: draft
+            .params
+            .iter()
+            .map(|p| ProjectPluginParam {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                normalized: p.normalized,
+                default_normalized: p.default_normalized,
+                min: p.min,
+                max: p.max,
+                unit: p.unit.clone(),
+            })
+            .collect(),
+        state_blob_b64: draft
+            .state_blob
+            .as_ref()
+            .map(|bytes| base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)),
+        last_error: draft.last_error.clone(),
+        last_backend_log: draft.last_backend_log.clone(),
+    }
+}
+
+pub fn project_plugin_fx_draft_to_draft(draft: &ProjectPluginFxDraft) -> PluginFxDraft {
+    PluginFxDraft {
+        plugin_key: draft.plugin_key.clone(),
+        plugin_name: draft.plugin_name.clone(),
+        backend: draft.backend.as_deref().and_then(|raw| {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "generic" => Some(crate::plugin::PluginHostBackend::Generic),
+                "native_vst3" => Some(crate::plugin::PluginHostBackend::NativeVst3),
+                "native_clap" => Some(crate::plugin::PluginHostBackend::NativeClap),
+                _ => None,
+            }
+        }),
+        enabled: draft.enabled,
+        bypass: draft.bypass,
+        filter: draft.filter.clone(),
+        params: draft
+            .params
+            .iter()
+            .map(|p| PluginParamUiState {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                normalized: p.normalized.clamp(0.0, 1.0),
+                default_normalized: p.default_normalized.clamp(0.0, 1.0),
+                min: p.min,
+                max: p.max,
+                unit: p.unit.clone(),
+            })
+            .collect(),
+        state_blob: draft.state_blob_b64.as_ref().and_then(|raw| {
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(raw.as_bytes())
+                .ok()
+        }),
+        last_error: draft.last_error.clone(),
+        last_backend_log: draft.last_backend_log.clone(),
     }
 }
 
@@ -650,7 +766,9 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "TimeStretch" => ToolKind::TimeStretch,
         "Gain" => ToolKind::Gain,
         "Normalize" => ToolKind::Normalize,
+        "Loudness" => ToolKind::Loudness,
         "Reverse" => ToolKind::Reverse,
+        "PluginFx" => ToolKind::PluginFx,
         _ => ToolKind::LoopEdit,
     }
 }
@@ -759,9 +877,7 @@ pub fn load_sidecar_audio(
     project_path: &Path,
     raw_path: &str,
 ) -> Result<(Vec<Vec<f32>>, u32, PathBuf)> {
-    let base = project_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let base = project_path.parent().unwrap_or_else(|| Path::new("."));
     let sidecar = resolve_path(raw_path, base);
     let (chans, sr) = crate::wave::decode_wav_multi(&sidecar)
         .with_context(|| format!("decode edited audio: {}", sidecar.display()))?;
@@ -908,5 +1024,58 @@ files = []
         assert_eq!(v.bits_per_sample, 24);
         assert_eq!(v.source.kind, "file");
         assert_eq!(v.op_chain.len(), 1);
+    }
+
+    #[test]
+    fn plugin_fx_draft_roundtrip() {
+        let src = PluginFxDraft {
+            plugin_key: Some("C:\\Plugins\\Demo.vst3".to_string()),
+            plugin_name: "Demo".to_string(),
+            backend: Some(crate::plugin::PluginHostBackend::NativeVst3),
+            enabled: true,
+            bypass: false,
+            filter: "gain".to_string(),
+            params: vec![PluginParamUiState {
+                id: "mix".to_string(),
+                name: "Mix".to_string(),
+                normalized: 0.75,
+                default_normalized: 1.0,
+                min: 0.0,
+                max: 1.0,
+                unit: String::new(),
+            }],
+            state_blob: Some(vec![1, 2, 3, 4, 5]),
+            last_error: None,
+            last_backend_log: Some("Probe: NativeVst3 params=1".to_string()),
+        };
+        let project = project_plugin_fx_draft_from_draft(&src);
+        let restored = project_plugin_fx_draft_to_draft(&project);
+        assert_eq!(src, restored);
+    }
+
+    #[test]
+    fn plugin_fx_draft_supports_native_clap_backend() {
+        let src = PluginFxDraft {
+            plugin_key: Some("C:\\Plugins\\Demo.clap".to_string()),
+            plugin_name: "Demo Clap".to_string(),
+            backend: Some(crate::plugin::PluginHostBackend::NativeClap),
+            enabled: true,
+            bypass: false,
+            filter: String::new(),
+            params: Vec::new(),
+            state_blob: None,
+            last_error: None,
+            last_backend_log: None,
+        };
+        let project = project_plugin_fx_draft_from_draft(&src);
+        assert_eq!(project.backend.as_deref(), Some("native_clap"));
+        let restored = project_plugin_fx_draft_to_draft(&project);
+        assert_eq!(restored.backend, Some(crate::plugin::PluginHostBackend::NativeClap));
+    }
+
+    #[test]
+    fn tool_kind_parser_supports_pluginfx_and_loudness() {
+        assert_eq!(tool_kind_from_str("PluginFx"), ToolKind::PluginFx);
+        assert_eq!(tool_kind_from_str("Loudness"), ToolKind::Loudness);
     }
 }

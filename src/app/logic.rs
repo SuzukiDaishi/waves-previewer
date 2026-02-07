@@ -173,6 +173,7 @@ impl super::WavesPreviewer {
                     snap_zero_cross: tab.snap_zero_cross,
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
+                    plugin_fx_draft: tab.plugin_fx_draft.clone(),
                     show_waveform_overlay: tab.show_waveform_overlay,
                 },
             )
@@ -499,6 +500,7 @@ impl super::WavesPreviewer {
         tab.active_tool_last = None;
         tab.preview_offset_samples = None;
         tab.preview_overlay = None;
+        tab.plugin_fx_draft = crate::app::types::PluginFxDraft::default();
         tab.pending_loop_unwrap = None;
         tab.undo_stack.clear();
         tab.undo_bytes = 0;
@@ -1070,22 +1072,14 @@ impl super::WavesPreviewer {
             self.list_preview_pending_path = None;
             self.audio.stop();
             self.audio.set_samples_mono(Vec::new());
-            self.spawn_list_preview_async(
-                path,
-                play_prefix_secs,
-                crate::app::LIST_PLAY_EMIT_SECS,
-            );
+            self.spawn_list_preview_async(path, play_prefix_secs, crate::app::LIST_PLAY_EMIT_SECS);
             self.apply_effective_volume();
             return false;
         }
         self.list_preview_pending_path = None;
         self.audio.stop();
         self.audio.set_samples_mono(Vec::new());
-        self.spawn_list_preview_async(
-            path,
-            play_prefix_secs,
-            crate::app::LIST_PLAY_EMIT_SECS,
-        );
+        self.spawn_list_preview_async(path, play_prefix_secs, crate::app::LIST_PLAY_EMIT_SECS);
         self.apply_effective_volume();
         false
     }
@@ -1614,6 +1608,7 @@ impl super::WavesPreviewer {
                     active_tool_last: None,
                     preview_offset_samples: None,
                     preview_overlay: None,
+                    plugin_fx_draft: cached.plugin_fx_draft,
                     pending_loop_unwrap: None,
                     undo_stack: Vec::new(),
                     undo_bytes: 0,
@@ -1702,6 +1697,7 @@ impl super::WavesPreviewer {
                 active_tool_last: None,
                 preview_offset_samples: None,
                 preview_overlay: None,
+                plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
                 pending_loop_unwrap: None,
                 undo_stack: Vec::new(),
                 undo_bytes: 0,
@@ -1798,6 +1794,7 @@ impl super::WavesPreviewer {
                 active_tool_last: None,
                 preview_offset_samples: None,
                 preview_overlay: None,
+                plugin_fx_draft: cached.plugin_fx_draft,
                 pending_loop_unwrap: None,
                 undo_stack: Vec::new(),
                 undo_bytes: 0,
@@ -1878,6 +1875,7 @@ impl super::WavesPreviewer {
             active_tool_last: None,
             preview_offset_samples: None,
             preview_overlay: None,
+            plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
             pending_loop_unwrap: None,
             undo_stack: Vec::new(),
             undo_bytes: 0,

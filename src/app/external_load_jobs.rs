@@ -6,14 +6,15 @@ impl super::WavesPreviewer {
         path: PathBuf,
         target: super::external_ops::ExternalLoadTarget,
     ) {
-        self.external_load_queue.push_back(super::ExternalLoadQueueItem {
-            path,
-            sheet_name: self.external_sheet_selected.clone(),
-            has_header: self.external_has_header,
-            header_row: self.external_header_row,
-            data_row: self.external_data_row,
-            target,
-        });
+        self.external_load_queue
+            .push_back(super::ExternalLoadQueueItem {
+                path,
+                sheet_name: self.external_sheet_selected.clone(),
+                has_header: self.external_has_header,
+                header_row: self.external_header_row,
+                data_row: self.external_data_row,
+                target,
+            });
     }
 
     pub(super) fn queue_external_load_with_settings(
@@ -25,14 +26,15 @@ impl super::WavesPreviewer {
         data_row: Option<usize>,
         target: super::external_ops::ExternalLoadTarget,
     ) {
-        self.external_load_queue.push_back(super::ExternalLoadQueueItem {
-            path,
-            sheet_name,
-            has_header,
-            header_row,
-            data_row,
-            target,
-        });
+        self.external_load_queue
+            .push_back(super::ExternalLoadQueueItem {
+                path,
+                sheet_name,
+                has_header,
+                header_row,
+                data_row,
+                target,
+            });
     }
 
     pub(super) fn start_next_external_load_from_queue(&mut self) -> bool {

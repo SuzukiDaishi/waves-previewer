@@ -107,8 +107,7 @@ impl super::WavesPreviewer {
                         }
                         if let Some(state) = &mut self.bulk_resample_state {
                             let total = state.targets.len().max(1);
-                            let pct =
-                                (state.index as f32 / total as f32).clamp(0.0, 1.0);
+                            let pct = (state.index as f32 / total as f32).clamp(0.0, 1.0);
                             ui.add(
                                 egui::ProgressBar::new(pct)
                                     .desired_width(180.0)
@@ -120,8 +119,7 @@ impl super::WavesPreviewer {
                         }
                         if let Some(csv) = &self.csv_export_state {
                             if csv.total > 0 {
-                                let pct = (csv.done as f32 / csv.total as f32)
-                                    .clamp(0.0, 1.0);
+                                let pct = (csv.done as f32 / csv.total as f32).clamp(0.0, 1.0);
                                 ui.add(
                                     egui::ProgressBar::new(pct)
                                         .desired_width(180.0)

@@ -72,41 +72,23 @@ impl super::WavesPreviewer {
         // Tab switching: Ctrl+1 = List, Ctrl+2.. = editor tabs
         if !search_focused || !wants_kb {
             let mut target: Option<usize> = None;
-            if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1)
-            }) {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num1)) {
                 target = Some(0);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num2)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num2)) {
                 target = Some(1);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num3)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num3)) {
                 target = Some(2);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num4)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num4)) {
                 target = Some(3);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num5)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num5)) {
                 target = Some(4);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num6)) {
                 target = Some(5);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num7)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num7)) {
                 target = Some(6);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num8)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num8)) {
                 target = Some(7);
-            } else if ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num9)
-            }) {
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num9)) {
                 target = Some(8);
             }
             if let Some(idx) = target {
@@ -163,15 +145,11 @@ impl super::WavesPreviewer {
             }
         }
 
-        if ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)
-        }) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
             self.trigger_save_selected();
         }
 
-        if ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-        }) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
             if let Some(active_idx) = self.active_tab {
                 self.close_tab_at(active_idx, ctx);
             }
@@ -341,7 +319,11 @@ impl super::WavesPreviewer {
         let tab = self.tabs.get(tab_idx)?;
         let (a0, b0) = tab.selection?;
         let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-        if b > a { Some((a, b)) } else { None }
+        if b > a {
+            Some((a, b))
+        } else {
+            None
+        }
     }
 
     fn has_selected_range(&self, tab_idx: usize) -> bool {
@@ -417,8 +399,8 @@ impl super::WavesPreviewer {
         let target_audio = self.map_display_to_audio_sample(tab, target_display);
         self.audio.seek_to_sample(target_audio);
         if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
-            let vis = (tab_mut.last_wave_w.max(1.0) * tab_mut.samples_per_px.max(0.0001)).ceil()
-                as usize;
+            let vis =
+                (tab_mut.last_wave_w.max(1.0) * tab_mut.samples_per_px.max(0.0001)).ceil() as usize;
             let max_left = tab_mut.samples_len.saturating_sub(vis);
             let left = target_display.saturating_sub(vis / 2);
             tab_mut.view_offset = left.min(max_left);
@@ -466,23 +448,28 @@ impl super::WavesPreviewer {
         if combo_down && self.undo_z_was_down {
             return;
         }
-        let undo = ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
-        });
+        let undo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z));
         let redo_z = ctx.input_mut(|i| {
-            i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z)
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::Z,
+            )
         });
-        let redo_y =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
+        let redo_y = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
         let redo = redo_z || redo_y;
-        self.undo_z_was_down = cmd_down && ((shift_down && z_down) || (!shift_down && z_down) || y_down);
+        self.undo_z_was_down =
+            cmd_down && ((shift_down && z_down) || (!shift_down && z_down) || y_down);
         if !(undo || redo) {
             return;
         }
         let mut handled = false;
         let prefer_list = self.last_undo_scope == UndoScope::List;
         if prefer_list {
-            handled = if redo { self.list_redo() } else { self.list_undo() };
+            handled = if redo {
+                self.list_redo()
+            } else {
+                self.list_undo()
+            };
         }
         if !handled {
             if let Some(tab_idx) = self.active_tab {
@@ -500,7 +487,11 @@ impl super::WavesPreviewer {
             }
         }
         if !handled {
-            handled = if redo { self.list_redo() } else { self.list_undo() };
+            handled = if redo {
+                self.list_redo()
+            } else {
+                self.list_undo()
+            };
         }
         if !handled && !redo {
             handled = self.undo_last_overwrite_export();

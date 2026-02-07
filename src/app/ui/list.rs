@@ -63,14 +63,20 @@ impl crate::app::WavesPreviewer {
                 .add_enabled(can_convert_bits, egui::Button::new("16-bit PCM"))
                 .clicked()
             {
-                self.spawn_convert_bits_selected(convert_targets.clone(), crate::wave::WavBitDepth::Pcm16);
+                self.spawn_convert_bits_selected(
+                    convert_targets.clone(),
+                    crate::wave::WavBitDepth::Pcm16,
+                );
                 ui.close();
             }
             if ui
                 .add_enabled(can_convert_bits, egui::Button::new("24-bit PCM"))
                 .clicked()
             {
-                self.spawn_convert_bits_selected(convert_targets.clone(), crate::wave::WavBitDepth::Pcm24);
+                self.spawn_convert_bits_selected(
+                    convert_targets.clone(),
+                    crate::wave::WavBitDepth::Pcm24,
+                );
                 ui.close();
             }
             if ui
@@ -222,8 +228,7 @@ impl crate::app::WavesPreviewer {
                     || i.key_pressed(egui::Key::Home)
                     || i.key_pressed(egui::Key::End)
                     || i.key_pressed(egui::Key::Delete)
-                    || ((i.modifiers.ctrl || i.modifiers.command)
-                        && i.key_pressed(egui::Key::A))
+                    || ((i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::A))
             })
         } else {
             false
@@ -418,9 +423,9 @@ impl crate::app::WavesPreviewer {
                 .values()
                 .any(|c| c.dirty || c.loop_markers_dirty || c.markers_dirty)
             || self
-            .items
-            .iter()
-            .any(|item| item.pending_gain_db.abs() > 0.0001)
+                .items
+                .iter()
+                .any(|item| item.pending_gain_db.abs() > 0.0001)
             || !self.sample_rate_override.is_empty()
             || !self.bit_depth_override.is_empty();
         let mut filler_cols = 0usize;
@@ -1495,7 +1500,10 @@ impl crate::app::WavesPreviewer {
             });
 
         if self.item_bg_mode != crate::app::types::ItemBgMode::Standard && !self.files.is_empty() {
-            let start = visible_first_row.or(self.selected).unwrap_or(0).min(self.files.len() - 1);
+            let start = visible_first_row
+                .or(self.selected)
+                .unwrap_or(0)
+                .min(self.files.len() - 1);
             let end = visible_last_row.unwrap_or(start).min(self.files.len() - 1);
             // Keep UI pass light; broad prefetch is handled by pump_list_meta_prefetch().
             let look_back = 8usize;

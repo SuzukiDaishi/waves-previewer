@@ -25,13 +25,14 @@ mod non_destructive_policy {
 
     fn assert_unchanged(path: &Path, before: &FileSnapshot) {
         let after = snapshot(path);
-        assert_eq!(after.len, before.len, "file size changed: {}", path.display());
+        assert_eq!(
+            after.len,
+            before.len,
+            "file size changed: {}",
+            path.display()
+        );
         if let (Some(b), Some(a)) = (before.modified, after.modified) {
-            assert_eq!(
-                a, b,
-                "file modified timestamp changed: {}",
-                path.display()
-            );
+            assert_eq!(a, b, "file modified timestamp changed: {}", path.display());
         }
     }
 
@@ -125,9 +126,14 @@ mod non_destructive_policy {
         assert!(harness.state_mut().test_select_and_load_row(0));
         harness.run_steps(2);
 
-        assert!(harness.state_mut().test_apply_selected_resample_override(44_100));
+        assert!(harness
+            .state_mut()
+            .test_apply_selected_resample_override(44_100));
         harness.run_steps(2);
-        assert_eq!(harness.state().test_selected_sample_rate_override(), Some(44_100));
+        assert_eq!(
+            harness.state().test_selected_sample_rate_override(),
+            Some(44_100)
+        );
         assert_eq!(
             std::fs::read_dir(&dir).expect("read dir").count(),
             1,
@@ -135,11 +141,9 @@ mod non_destructive_policy {
         );
         assert_unchanged(&path, &before);
 
-        assert!(
-            harness
-                .state_mut()
-                .test_convert_bits_selected_to(neowaves::wave::WavBitDepth::Pcm16)
-        );
+        assert!(harness
+            .state_mut()
+            .test_convert_bits_selected_to(neowaves::wave::WavBitDepth::Pcm16));
         harness.run_steps(2);
         assert_eq!(
             harness.state().test_selected_bit_depth_override(),

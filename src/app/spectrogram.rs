@@ -79,22 +79,22 @@ impl super::WavesPreviewer {
     fn apply_spectrogram_message(&mut self, ctx: &egui::Context, msg: SpectrogramJobMsg) {
         match msg {
             SpectrogramJobMsg::Tile(tile) => {
-                let spec_entry =
-                    self.spectro_cache
-                        .entry(tile.path.clone())
-                        .or_insert_with(|| {
-                            let mut specs = Vec::with_capacity(tile.channel_count.max(1));
-                            for _ in 0..tile.channel_count.max(1) {
-                                specs.push(SpectrogramData {
-                                    frames: 0,
-                                    bins: 0,
-                                    frame_step: tile.frame_step,
-                                    sample_rate: tile.sample_rate,
-                                    values_db: Vec::new(),
-                                });
-                            }
-                            std::sync::Arc::new(specs)
-                        });
+                let spec_entry = self
+                    .spectro_cache
+                    .entry(tile.path.clone())
+                    .or_insert_with(|| {
+                        let mut specs = Vec::with_capacity(tile.channel_count.max(1));
+                        for _ in 0..tile.channel_count.max(1) {
+                            specs.push(SpectrogramData {
+                                frames: 0,
+                                bins: 0,
+                                frame_step: tile.frame_step,
+                                sample_rate: tile.sample_rate,
+                                values_db: Vec::new(),
+                            });
+                        }
+                        std::sync::Arc::new(specs)
+                    });
                 let specs = std::sync::Arc::make_mut(spec_entry);
                 let mut size_changed = false;
                 if specs.len() < tile.channel_count.max(1) {
@@ -128,8 +128,7 @@ impl super::WavesPreviewer {
                         .min(spec.values_db.len());
                     let len = end.saturating_sub(base);
                     if len > 0 {
-                        spec.values_db[base..base + len]
-                            .copy_from_slice(&tile.values_db[..len]);
+                        spec.values_db[base..base + len].copy_from_slice(&tile.values_db[..len]);
                     }
                 }
                 if let Some(progress) = self.spectro_progress.get_mut(&tile.path) {

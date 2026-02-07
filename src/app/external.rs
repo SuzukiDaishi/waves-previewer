@@ -140,8 +140,8 @@ fn load_excel_with_progress(
     tx: &Sender<ExternalLoadMsg>,
 ) -> Result<ExternalTable, String> {
     use calamine::{open_workbook_auto, Reader};
-    let mut workbook = open_workbook_auto(&cfg.path)
-        .map_err(|e| format!("excel open failed: {e}"))?;
+    let mut workbook =
+        open_workbook_auto(&cfg.path).map_err(|e| format!("excel open failed: {e}"))?;
     let sheet_names = workbook.sheet_names().to_vec();
     let sheet = if let Some(name) = cfg.sheet_name.as_ref() {
         name.clone()

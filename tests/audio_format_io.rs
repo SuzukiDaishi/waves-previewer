@@ -35,7 +35,11 @@ fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
 fn assert_probe_and_decode(path: &std::path::Path) {
     let info = neowaves::audio_io::read_audio_info(path)
         .unwrap_or_else(|e| panic!("probe failed for {}: {e}", path.display()));
-    assert!(info.channels > 0, "channels should be > 0: {}", path.display());
+    assert!(
+        info.channels > 0,
+        "channels should be > 0: {}",
+        path.display()
+    );
     assert!(
         info.sample_rate > 0,
         "sample_rate should be > 0: {}",
@@ -48,7 +52,11 @@ fn assert_probe_and_decode(path: &std::path::Path) {
     );
     let (channels, sr) = neowaves::audio_io::decode_audio_multi(path)
         .unwrap_or_else(|e| panic!("decode failed for {}: {e}", path.display()));
-    assert!(sr > 0, "decoded sample_rate should be > 0: {}", path.display());
+    assert!(
+        sr > 0,
+        "decoded sample_rate should be > 0: {}",
+        path.display()
+    );
     assert!(
         !channels.is_empty(),
         "decoded channels should not be empty: {}",
@@ -74,4 +82,3 @@ fn audio_probe_decode_for_wav_mp3_m4a_ogg() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
-

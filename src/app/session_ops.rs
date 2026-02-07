@@ -6,15 +6,17 @@ use crate::ipc;
 
 use super::external_ops;
 use super::project::{
-    deserialize_project, describe_missing, fade_shape_from_str, load_sidecar_audio,
+    describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
-    project_channel_view_to_channel_view, project_marker_to_entry, project_spectrogram_from_cfg,
-    project_tab_from_tab, project_tool_state_to_tool_state, rel_path, resolve_path,
-    save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio, serialize_project,
-    spectro_config_from_project, tool_kind_from_str, view_mode_from_str, ProjectApp, ProjectEdit,
-    ProjectExportPolicy, ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectList,
-    ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectBitDepthOverride,
-    ProjectToolState, ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
+    project_channel_view_to_channel_view, project_marker_to_entry,
+    project_plugin_fx_draft_from_draft, project_plugin_fx_draft_to_draft,
+    project_spectrogram_from_cfg, project_tab_from_tab, project_tool_state_to_tool_state, rel_path,
+    resolve_path, save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio,
+    serialize_project, spectro_config_from_project, tool_kind_from_str, view_mode_from_str,
+    ProjectApp, ProjectBitDepthOverride, ProjectEdit, ProjectExportPolicy, ProjectExternalSource,
+    ProjectExternalState, ProjectFile, ProjectList, ProjectListColumns, ProjectListItem,
+    ProjectSampleRateOverride, ProjectToolState, ProjectVirtualItem, ProjectVirtualOp,
+    ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -543,6 +545,7 @@ impl super::WavesPreviewer {
                 bpm_enabled: cached.bpm_enabled,
                 bpm_value: cached.bpm_value,
                 bpm_user_set: cached.bpm_user_set,
+                plugin_fx_draft: project_plugin_fx_draft_from_draft(&cached.plugin_fx_draft),
             });
         }
 
@@ -580,10 +583,14 @@ impl super::WavesPreviewer {
             if base_path.is_absolute() {
                 base_path
             } else {
-                path.parent().unwrap_or_else(|| Path::new(".")).join(base_path)
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(base_path)
             }
         } else {
-            path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+            path.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf()
         };
 
         let project_path = path.clone();
@@ -691,7 +698,9 @@ impl super::WavesPreviewer {
                     match &source {
                         VirtualSourceRef::FilePath(src_path) => {
                             if src_path.is_file() {
-                                if let Ok((channels, sr)) = crate::audio_io::decode_audio_multi(src_path) {
+                                if let Ok((channels, sr)) =
+                                    crate::audio_io::decode_audio_multi(src_path)
+                                {
                                     channels_opt = Some(channels);
                                     sample_rate = sr.max(1);
                                 } else {
@@ -701,8 +710,10 @@ impl super::WavesPreviewer {
                                     ));
                                 }
                             } else {
-                                missing_errors
-                                    .push(format!("Missing virtual source: {}", src_path.display()));
+                                missing_errors.push(format!(
+                                    "Missing virtual source: {}",
+                                    src_path.display()
+                                ));
                             }
                         }
                         VirtualSourceRef::VirtualPath(src_path) => {
@@ -734,14 +745,14 @@ impl super::WavesPreviewer {
                                 .or(entry.source.path.as_ref())
                                 .cloned();
                             if let Some(raw) = sidecar_raw {
-                                if let Ok((channels, sr, _)) = load_sidecar_audio(&project_path, &raw) {
+                                if let Ok((channels, sr, _)) =
+                                    load_sidecar_audio(&project_path, &raw)
+                                {
                                     channels_opt = Some(channels);
                                     sample_rate = sr.max(1);
                                 } else {
-                                    missing_errors.push(format!(
-                                        "Virtual sidecar decode failed: {}",
-                                        raw
-                                    ));
+                                    missing_errors
+                                        .push(format!("Virtual sidecar decode failed: {}", raw));
                                 }
                             }
                         }
@@ -853,9 +864,10 @@ impl super::WavesPreviewer {
                             channels: entry.channels.max(1),
                             bits_per_sample: entry.bits_per_sample.max(16),
                         });
-                        item.virtual_audio = Some(std::sync::Arc::new(AudioBuffer::from_channels(
-                            vec![Vec::new()],
-                        )));
+                        item.virtual_audio =
+                            Some(std::sync::Arc::new(AudioBuffer::from_channels(vec![
+                                Vec::new(),
+                            ])));
                     }
                 }
             }
@@ -884,7 +896,9 @@ impl super::WavesPreviewer {
         }
         self.bit_depth_override.clear();
         for override_item in project.list.bit_depth_overrides.iter() {
-            let Some(depth) = crate::wave::WavBitDepth::from_project_value(&override_item.bit_depth) else {
+            let Some(depth) =
+                crate::wave::WavBitDepth::from_project_value(&override_item.bit_depth)
+            else {
                 continue;
             };
             let path = resolve_path(&override_item.path, &base_dir);
@@ -895,7 +909,8 @@ impl super::WavesPreviewer {
         self.external_load_error = None;
         if let Some(external_state) = project.app.external_state.as_ref() {
             self.external_key_rule = external_key_rule_from_project(&external_state.key_rule);
-            self.external_match_input = external_match_input_from_project(&external_state.match_input);
+            self.external_match_input =
+                external_match_input_from_project(&external_state.match_input);
             self.external_match_regex = external_state.match_regex.clone();
             self.external_match_replace = external_state.match_replace.clone();
             self.external_scope_regex = external_state.scope_regex.clone();
@@ -919,7 +934,10 @@ impl super::WavesPreviewer {
                         super::external_ops::ExternalLoadTarget::New,
                     );
                 } else {
-                    missing_errors.push(format!("Missing external source: {}", source_path.display()));
+                    missing_errors.push(format!(
+                        "Missing external source: {}",
+                        source_path.display()
+                    ));
                 }
             }
             if !missing_errors.is_empty() {
@@ -978,6 +996,7 @@ impl super::WavesPreviewer {
                     snap_zero_cross: edit.snap_zero_cross,
                     tool_state: project_tool_state_to_tool_state(&edit.tool_state),
                     active_tool: tool_kind_from_str(&edit.active_tool),
+                    plugin_fx_draft: project_plugin_fx_draft_to_draft(&edit.plugin_fx_draft),
                     show_waveform_overlay: edit.show_waveform_overlay,
                     bpm_enabled: edit.bpm_enabled,
                     bpm_value: edit.bpm_value,
@@ -1017,26 +1036,14 @@ impl super::WavesPreviewer {
                         loop_region_applied: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_markers_saved: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_markers_dirty: tab.loop_markers_dirty,
-                        markers: tab
-                            .markers
-                            .iter()
-                            .map(project_marker_to_entry)
-                            .collect(),
+                        markers: tab.markers.iter().map(project_marker_to_entry).collect(),
                         markers_committed: tab
                             .markers
                             .iter()
                             .map(project_marker_to_entry)
                             .collect(),
-                        markers_applied: tab
-                            .markers
-                            .iter()
-                            .map(project_marker_to_entry)
-                            .collect(),
-                        markers_saved: tab
-                            .markers
-                            .iter()
-                            .map(project_marker_to_entry)
-                            .collect(),
+                        markers_applied: tab.markers.iter().map(project_marker_to_entry).collect(),
+                        markers_saved: tab.markers.iter().map(project_marker_to_entry).collect(),
                         markers_dirty: tab.markers_dirty,
                         trim_range: tab.trim_range.map(|v| (v[0], v[1])),
                         loop_xfade_samples: tab.loop_xfade_samples,
@@ -1049,6 +1056,7 @@ impl super::WavesPreviewer {
                         snap_zero_cross: tab.snap_zero_cross,
                         tool_state: project_tool_state_to_tool_state(&tab.tool_state),
                         active_tool: tool_kind_from_str(&tab.active_tool),
+                        plugin_fx_draft: project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft),
                         show_waveform_overlay: tab.show_waveform_overlay,
                         bpm_enabled: tab.bpm_enabled,
                         bpm_value: tab.bpm_value,
@@ -1073,9 +1081,10 @@ impl super::WavesPreviewer {
                         });
                     }
                     if item.virtual_audio.is_none() {
-                        item.virtual_audio = Some(std::sync::Arc::new(AudioBuffer::from_channels(
-                            vec![Vec::new()],
-                        )));
+                        item.virtual_audio =
+                            Some(std::sync::Arc::new(AudioBuffer::from_channels(vec![
+                                Vec::new(),
+                            ])));
                     }
                 }
             }
@@ -1100,11 +1109,12 @@ impl super::WavesPreviewer {
                             .as_deref()
                             .map(tool_kind_from_str)
                             .unwrap_or(super::types::ToolKind::LoopEdit);
-                        preview_overlay = Some(super::WavesPreviewer::preview_overlay_from_channels(
-                            chans,
-                            tool,
-                            timeline_len,
-                        ));
+                        preview_overlay =
+                            Some(super::WavesPreviewer::preview_overlay_from_channels(
+                                chans,
+                                tool,
+                                timeline_len,
+                            ));
                         preview_tool = Some(tool);
                     }
                 }
@@ -1114,6 +1124,7 @@ impl super::WavesPreviewer {
                     t.channel_view = project_channel_view_to_channel_view(&tab.channel_view);
                     t.active_tool = tool_kind_from_str(&tab.active_tool);
                     t.tool_state = project_tool_state_to_tool_state(&tab.tool_state);
+                    t.plugin_fx_draft = project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft);
                     t.loop_mode = loop_mode_from_str(&tab.loop_mode);
                     t.loop_region = tab.loop_region.map(|v| (v[0], v[1]));
                     t.loop_xfade_samples = tab.loop_xfade_samples;
@@ -1156,11 +1167,7 @@ impl super::WavesPreviewer {
                 let mono = if let Some(m) = overlay.mixdown.as_ref() {
                     m.clone()
                 } else {
-                    overlay
-                        .channels
-                        .get(0)
-                        .cloned()
-                        .unwrap_or_default()
+                    overlay.channels.get(0).cloned().unwrap_or_default()
                 };
                 Some((tool, mono))
             });

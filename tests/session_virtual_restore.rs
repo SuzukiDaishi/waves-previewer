@@ -1,4 +1,4 @@
-﻿#[cfg(feature = "kittest")]
+#[cfg(feature = "kittest")]
 mod session_virtual_restore {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -68,7 +68,13 @@ mod session_virtual_restore {
         loop {
             harness.run_steps(1);
             if let Some(idx) = harness.state().active_tab {
-                if harness.state().tabs.get(idx).map(|t| t.samples_len > 0).unwrap_or(false) {
+                if harness
+                    .state()
+                    .tabs
+                    .get(idx)
+                    .map(|t| t.samples_len > 0)
+                    .unwrap_or(false)
+                {
                     break;
                 }
             }
@@ -96,11 +102,15 @@ mod session_virtual_restore {
         harness.run_steps(3);
 
         assert!(harness.state_mut().test_select_and_load_row(0));
-        assert!(harness.state_mut().test_set_selected_sample_rate_override(44_100));
+        assert!(harness
+            .state_mut()
+            .test_set_selected_sample_rate_override(44_100));
         harness.state_mut().test_set_external_show_unmatched(true);
         let export_dir = dir.join("exports");
         std::fs::create_dir_all(&export_dir).expect("create export dir");
-        harness.state_mut().test_set_export_save_mode_overwrite(true);
+        harness
+            .state_mut()
+            .test_set_export_save_mode_overwrite(true);
         harness.state_mut().test_set_export_conflict("skip");
         harness.state_mut().test_set_export_backup_bak(false);
         harness
@@ -115,8 +125,12 @@ mod session_virtual_restore {
 
         // Mutate runtime state and ensure load restores it.
         harness.state_mut().test_set_external_show_unmatched(false);
-        assert!(harness.state_mut().test_set_selected_sample_rate_override(0));
-        harness.state_mut().test_set_export_save_mode_overwrite(false);
+        assert!(harness
+            .state_mut()
+            .test_set_selected_sample_rate_override(0));
+        harness
+            .state_mut()
+            .test_set_export_save_mode_overwrite(false);
         harness.state_mut().test_set_export_conflict("rename");
         harness.state_mut().test_set_export_backup_bak(true);
         harness
@@ -139,7 +153,10 @@ mod session_virtual_restore {
             "{name}_session_restore"
         );
         assert_eq!(
-            harness.state().test_export_dest_folder().map(|p| p.as_path()),
+            harness
+                .state()
+                .test_export_dest_folder()
+                .map(|p| p.as_path()),
             Some(export_dir.as_path())
         );
         assert_eq!(

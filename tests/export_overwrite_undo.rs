@@ -86,9 +86,13 @@ mod export_overwrite_undo {
 
         assert!(harness.state_mut().test_select_and_load_row(0));
         harness.state_mut().test_set_export_first_prompt(false);
-        harness.state_mut().test_set_export_save_mode_overwrite(true);
+        harness
+            .state_mut()
+            .test_set_export_save_mode_overwrite(true);
         harness.state_mut().test_set_export_backup_bak(true);
-        assert!(harness.state_mut().test_set_selected_sample_rate_override(44_100));
+        assert!(harness
+            .state_mut()
+            .test_set_selected_sample_rate_override(44_100));
         harness.state_mut().test_trigger_save_selected();
         wait_for_export_finish(&mut harness);
         harness.run_steps(3);

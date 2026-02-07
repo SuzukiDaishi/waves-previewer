@@ -62,18 +62,20 @@ fn audio_convert_matrix_wav_mp3_m4a_ogg() {
                 )
             });
             assert!(dst.is_file(), "missing output: {}", dst.display());
-            let info = neowaves::audio_io::read_audio_info(&dst).unwrap_or_else(|e| {
-                panic!("probe failed for converted {}: {e}", dst.display())
-            });
+            let info = neowaves::audio_io::read_audio_info(&dst)
+                .unwrap_or_else(|e| panic!("probe failed for converted {}: {e}", dst.display()));
             assert!(
                 info.sample_rate > 0 && info.channels > 0,
                 "invalid info for {}",
                 dst.display()
             );
-            let (decoded, sr) = neowaves::audio_io::decode_audio_multi(&dst).unwrap_or_else(|e| {
-                panic!("decode failed for converted {}: {e}", dst.display())
-            });
-            assert!(sr > 0, "decoded sample rate should be > 0: {}", dst.display());
+            let (decoded, sr) = neowaves::audio_io::decode_audio_multi(&dst)
+                .unwrap_or_else(|e| panic!("decode failed for converted {}: {e}", dst.display()));
+            assert!(
+                sr > 0,
+                "decoded sample rate should be > 0: {}",
+                dst.display()
+            );
             assert!(
                 !decoded.is_empty() && !decoded[0].is_empty(),
                 "decoded frames should not be empty: {}",
@@ -84,4 +86,3 @@ fn audio_convert_matrix_wav_mp3_m4a_ogg() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-

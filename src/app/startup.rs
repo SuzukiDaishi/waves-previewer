@@ -39,7 +39,9 @@ impl WavesPreviewer {
             let base = std::path::PathBuf::from("debug");
             let path_a = base.join("external_dummy_a.csv");
             let path_b = base.join("external_dummy_b.csv");
-            if let Err(err) = write_external_merge_dummy_csvs(&path_a, &path_b, rows, cols, has_header) {
+            if let Err(err) =
+                write_external_merge_dummy_csvs(&path_a, &path_b, rows, cols, has_header)
+            {
                 self.external_load_error = Some(err);
             } else {
                 source_path = Some(path_a);

@@ -302,9 +302,7 @@ fn parse_startup_config() -> app::StartupConfig {
                 if path
                     .extension()
                     .and_then(|s| s.to_str())
-                    .map(|s| {
-                        s.eq_ignore_ascii_case("nwsess") || s.eq_ignore_ascii_case("nwproj")
-                    })
+                    .map(|s| s.eq_ignore_ascii_case("nwsess") || s.eq_ignore_ascii_case("nwproj"))
                     .unwrap_or(false)
                 {
                     cfg.open_project = Some(path);
@@ -344,10 +342,7 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
-    let app_title = format!(
-        "NeoWaves Audio List Editor v{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    let app_title = format!("NeoWaves Audio List Editor v{}", env!("CARGO_PKG_VERSION"));
     eframe::run_native(
         &app_title,
         native_options,

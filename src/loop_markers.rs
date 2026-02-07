@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use id3::{Tag, TagLike, Version};
 use id3::frame::{Content, ExtendedText, Frame};
+use id3::{Tag, TagLike, Version};
 use mp4ameta::{Data, FreeformIdent, Tag as Mp4Tag};
 
 const LOOPSTART_KEY: &str = "LOOPSTART";
@@ -21,8 +21,7 @@ pub fn read_loop_markers(path: &Path) -> Option<(u64, u64)> {
 pub fn write_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<()> {
     match ext_lower(path).as_deref() {
         Some("wav") => {
-            let loop_opt = loop_opt
-                .and_then(|(s, e)| u64_to_u32_pair(s, e));
+            let loop_opt = loop_opt.and_then(|(s, e)| u64_to_u32_pair(s, e));
             crate::wave::write_wav_loop_markers(path, loop_opt)
         }
         Some("mp3") => write_mp3_loop_markers(path, loop_opt),
@@ -32,7 +31,9 @@ pub fn write_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<(
 }
 
 fn ext_lower(path: &Path) -> Option<String> {
-    path.extension().and_then(|s| s.to_str()).map(|s| s.to_ascii_lowercase())
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
 }
 
 fn u64_to_u32_pair(s: u64, e: u64) -> Option<(u32, u32)> {

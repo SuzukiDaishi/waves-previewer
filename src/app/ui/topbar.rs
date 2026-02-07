@@ -248,9 +248,11 @@ impl crate::app::WavesPreviewer {
                             || self.list_preview_pending_path.is_some()
                             || (self.list_preview_rx.is_some()
                                 && self.playing_path.is_some()
-                                && !self.audio.shared.playing.load(
-                                    std::sync::atomic::Ordering::Relaxed,
-                                )));
+                                && !self
+                                    .audio
+                                    .shared
+                                    .playing
+                                    .load(std::sync::atomic::Ordering::Relaxed)));
                     let show_activity = self.scan_in_progress
                         || self.processing.is_some()
                         || self.editor_decode_state.is_some()
@@ -348,6 +350,17 @@ impl crate::app::WavesPreviewer {
                                 if ui.button("Cancel").clicked() {
                                     self.cancel_editor_apply();
                                 }
+                            } else if let Some(state) = &self.plugin_process_state {
+                                ui.add(egui::Spinner::new());
+                                let msg = if state.is_apply {
+                                    "Applying Plugin FX..."
+                                } else {
+                                    "Previewing Plugin FX..."
+                                };
+                                ui.label(RichText::new(msg).weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_plugin_process();
+                                }
                             }
                             if let Some(exp) = &self.export_state {
                                 ui.add(egui::Spinner::new());
@@ -357,8 +370,7 @@ impl crate::app::WavesPreviewer {
                                 ui.add(egui::Spinner::new());
                                 if csv.total > 0 {
                                     let elapsed = csv.started_at.elapsed().as_secs_f32();
-                                    let pct = (csv.done as f32 / csv.total as f32)
-                                        .clamp(0.0, 1.0);
+                                    let pct = (csv.done as f32 / csv.total as f32).clamp(0.0, 1.0);
                                     ui.label(
                                         RichText::new(format!(
                                             "CSV: {}/{} ({:.0}%, {:.1}s)",
@@ -379,16 +391,15 @@ impl crate::app::WavesPreviewer {
                                     let pct =
                                         (state.after_index as f32 / total as f32).clamp(0.0, 1.0);
                                     (
-                                        format!("Resample finalize: {}/{}", state.after_index, total),
+                                        format!(
+                                            "Resample finalize: {}/{}",
+                                            state.after_index, total
+                                        ),
                                         pct,
                                     )
                                 } else {
-                                    let pct =
-                                        (state.index as f32 / total as f32).clamp(0.0, 1.0);
-                                    (
-                                        format!("Resample: {}/{}", state.index, total),
-                                        pct,
-                                    )
+                                    let pct = (state.index as f32 / total as f32).clamp(0.0, 1.0);
+                                    (format!("Resample: {}/{}", state.index, total), pct)
                                 };
                                 ui.add(egui::Spinner::new());
                                 ui.label(RichText::new(label).weak());
@@ -428,10 +439,8 @@ impl crate::app::WavesPreviewer {
                                 let elapsed = state.started_at.elapsed().as_secs_f32();
                                 ui.add(egui::Spinner::new());
                                 ui.label(
-                                    RichText::new(format!(
-                                        "Opening session... ({elapsed:.1}s)"
-                                    ))
-                                    .weak(),
+                                    RichText::new(format!("Opening session... ({elapsed:.1}s)"))
+                                        .weak(),
                                 );
                             }
                         });
@@ -610,9 +619,7 @@ impl crate::app::WavesPreviewer {
                         self.list_has_focus = false;
                     }
                     if search_lost
-                        && ctx.input(|i| {
-                            i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
-                        })
+                        && ctx.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape))
                     {
                         self.suppress_list_enter = true;
                     }

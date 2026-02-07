@@ -106,11 +106,7 @@ pub fn write_markers(
     Ok(())
 }
 
-fn map_markers_to_output(
-    records: Vec<MarkerRecord>,
-    out_sr: u32,
-    src_sr: u32,
-) -> Vec<MarkerEntry> {
+fn map_markers_to_output(records: Vec<MarkerRecord>, out_sr: u32, src_sr: u32) -> Vec<MarkerEntry> {
     let dst_sr = out_sr.max(1);
     let ratio = dst_sr as f64 / src_sr.max(1) as f64;
     let mut markers: Vec<MarkerEntry> = records
@@ -125,11 +121,7 @@ fn map_markers_to_output(
     markers
 }
 
-fn map_markers_to_file(
-    markers: &[MarkerEntry],
-    out_sr: u32,
-    file_sr: u32,
-) -> Vec<MarkerRecord> {
+fn map_markers_to_file(markers: &[MarkerEntry], out_sr: u32, file_sr: u32) -> Vec<MarkerRecord> {
     let dst_sr = out_sr.max(1);
     let ratio = file_sr.max(1) as f64 / dst_sr as f64;
     let mut stored: Vec<MarkerRecord> = markers
@@ -154,12 +146,8 @@ fn read_wav_markers(path: &Path) -> Result<Vec<MarkerRecord>> {
     let mut pos = 12usize;
     while pos + 8 <= data.len() {
         let id = &data[pos..pos + 4];
-        let size = u32::from_le_bytes([
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]) as usize;
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
         let chunk_start = pos + 8;
         let chunk_end = chunk_start.saturating_add(size).min(data.len());
         if id == b"cue " && chunk_end >= chunk_start + 4 {
@@ -174,12 +162,8 @@ fn read_wav_markers(path: &Path) -> Result<Vec<MarkerRecord>> {
                 if off + 24 > chunk_end {
                     break;
                 }
-                let cue_id = u32::from_le_bytes([
-                    data[off],
-                    data[off + 1],
-                    data[off + 2],
-                    data[off + 3],
-                ]);
+                let cue_id =
+                    u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
                 let sample_offset = u32::from_le_bytes([
                     data[off + 20],
                     data[off + 21],
@@ -253,12 +237,8 @@ fn write_wav_markers(path: &Path, markers: &[MarkerRecord]) -> Result<()> {
     let mut pos = 12usize;
     while pos + 8 <= data.len() {
         let id = &data[pos..pos + 4];
-        let size = u32::from_le_bytes([
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ]) as usize;
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
         let chunk_start = pos + 8;
         let chunk_end = chunk_start.saturating_add(size).min(data.len());
         let is_cue = id == b"cue ";

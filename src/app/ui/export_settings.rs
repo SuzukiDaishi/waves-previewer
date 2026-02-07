@@ -259,10 +259,14 @@ impl crate::app::WavesPreviewer {
                         egui::ComboBox::from_id_salt("spectro_fft")
                             .selected_text(format!("{}", next_cfg.fft_size))
                             .show_ui(ui, |ui| {
-                                for size in [
-                                    256usize, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
-                                ] {
-                                    ui.selectable_value(&mut next_cfg.fft_size, size, format!("{size}"));
+                                for size in
+                                    [256usize, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
+                                {
+                                    ui.selectable_value(
+                                        &mut next_cfg.fft_size,
+                                        size,
+                                        format!("{size}"),
+                                    );
                                 }
                             });
                     });
@@ -346,7 +350,10 @@ impl crate::app::WavesPreviewer {
                                 );
                             });
                     });
-                    ui.checkbox(&mut next_cfg.show_note_labels, "Show note labels (C, C#...)");
+                    ui.checkbox(
+                        &mut next_cfg.show_note_labels,
+                        "Show note labels (C, C#...)",
+                    );
                     ui.horizontal_wrapped(|ui| {
                         ui.label("Dynamic Range Floor (dB):");
                         let mut floor = next_cfg.db_floor;
@@ -361,7 +368,11 @@ impl crate::app::WavesPreviewer {
                         ui.label("Max Frequency (Hz, 0=Nyquist):");
                         let mut max_hz = next_cfg.max_freq_hz;
                         if ui
-                            .add(egui::DragValue::new(&mut max_hz).range(0.0..=192000.0).speed(100.0))
+                            .add(
+                                egui::DragValue::new(&mut max_hz)
+                                    .range(0.0..=192000.0)
+                                    .speed(100.0),
+                            )
                             .changed()
                         {
                             next_cfg.max_freq_hz = max_hz;

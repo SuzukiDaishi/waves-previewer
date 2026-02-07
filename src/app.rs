@@ -3,24 +3,24 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::audio::AudioEngine;
-use crate::mcp;
 use crate::ipc;
+use crate::mcp;
 use crate::wave::build_minmax;
 use anyhow::Result;
 use egui::{Align, Color32, Key, RichText, Sense, TextStyle};
 use egui_extras::TableBuilder;
 // use walkdir::WalkDir; // unused here (used in logic.rs)
 
-mod capture;
 mod audio_ops;
+mod capture;
 mod clipboard_ops;
 mod debug_ops;
 mod dialogs;
 mod editor_ops;
 mod export_ops;
-mod external_load_ops;
-mod external_load_jobs;
 mod external;
+mod external_load_jobs;
+mod external_load_ops;
 mod external_ops;
 mod gain_ops;
 mod helpers;
@@ -28,20 +28,21 @@ mod input_ops;
 #[cfg(feature = "kittest")]
 mod kittest_ops;
 mod list_ops;
+mod list_preview_ops;
 mod list_state_ops;
 mod list_undo;
-mod list_preview_ops;
-mod loudnorm_ops;
 mod loading_ops;
 mod logic;
+mod loudnorm_ops;
 mod mcp_ops;
 mod meta;
 mod meta_ops;
+mod plugin_ops;
 mod preview;
 mod preview_ops;
 mod project;
-mod render;
 mod rename_ops;
+mod render;
 mod resample_ops;
 mod scan_ops;
 mod search_ops;
@@ -243,6 +244,14 @@ pub struct WavesPreviewer {
     list_preview_prefetch_inflight: HashSet<PathBuf>,
     list_preview_cache: HashMap<PathBuf, ListPreviewCacheEntry>,
     list_preview_cache_order: VecDeque<PathBuf>,
+    plugin_search_paths: Vec<PathBuf>,
+    plugin_search_path_input: String,
+    plugin_catalog: Vec<PluginCatalogEntry>,
+    plugin_scan_state: Option<PluginScanState>,
+    plugin_probe_state: Option<PluginProbeState>,
+    plugin_process_state: Option<PluginProcessState>,
+    plugin_job_id: u64,
+    plugin_temp_seq: u64,
     // background heavy apply for editor (pitch/stretch)
     editor_apply_state: Option<EditorApplyState>,
     // background decode for editor (prefix + full)
@@ -1142,7 +1151,9 @@ impl WavesPreviewer {
         let Some(state) = self.csv_export_state.take() else {
             return;
         };
-        if let Err(err) = self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols) {
+        if let Err(err) =
+            self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols)
+        {
             self.debug_log(format!("csv export error: {err}"));
         }
     }
@@ -1597,7 +1608,6 @@ impl WavesPreviewer {
         }
         self.setup_mcp_server(&cfg);
     }
-
 }
 // moved to types.rs
 
@@ -1732,6 +1742,14 @@ impl WavesPreviewer {
             list_preview_prefetch_inflight: HashSet::new(),
             list_preview_cache: HashMap::new(),
             list_preview_cache_order: VecDeque::new(),
+            plugin_search_paths: Self::default_plugin_search_paths(),
+            plugin_search_path_input: String::new(),
+            plugin_catalog: Vec::new(),
+            plugin_scan_state: None,
+            plugin_probe_state: None,
+            plugin_process_state: None,
+            plugin_job_id: 0,
+            plugin_temp_seq: 0,
             editor_apply_state: None,
             editor_decode_state: None,
             editor_decode_job_id: 0,
@@ -1843,6 +1861,7 @@ impl WavesPreviewer {
             snap_zero_cross: tab.snap_zero_cross,
             tool_state: tab.tool_state,
             active_tool: tab.active_tool,
+            plugin_fx_draft: tab.plugin_fx_draft.clone(),
             show_waveform_overlay: tab.show_waveform_overlay,
             dirty: tab.dirty,
             approx_bytes,
@@ -1881,12 +1900,7 @@ impl WavesPreviewer {
         state
     }
 
-    fn push_editor_undo_state(
-        &mut self,
-        tab_idx: usize,
-        state: EditorUndoState,
-        clear_redo: bool,
-    ) {
+    fn push_editor_undo_state(&mut self, tab_idx: usize, state: EditorUndoState, clear_redo: bool) {
         self.last_undo_scope = UndoScope::Editor;
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             Self::push_undo_state_from(tab, state, clear_redo);
@@ -1930,6 +1944,7 @@ impl WavesPreviewer {
             tab.snap_zero_cross = state.snap_zero_cross;
             tab.tool_state = state.tool_state;
             tab.active_tool = state.active_tool;
+            tab.plugin_fx_draft = state.plugin_fx_draft;
             tab.show_waveform_overlay = state.show_waveform_overlay;
             tab.markers = state.markers;
             tab.markers_committed = state.markers_committed;
@@ -2003,7 +2018,6 @@ impl WavesPreviewer {
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
     }
-
 }
 
 impl eframe::App for WavesPreviewer {
@@ -2065,6 +2079,7 @@ impl eframe::App for WavesPreviewer {
         self.drain_heavy_overlay_results();
         // Drain editor apply jobs (pitch/stretch)
         self.drain_editor_apply_jobs(ctx);
+        self.drain_plugin_jobs(ctx);
         // Drain metadata updates
         self.drain_meta_updates(ctx);
         self.drain_external_load_results(ctx);
@@ -2322,7 +2337,9 @@ impl eframe::App for WavesPreviewer {
                                                     rms_db: None,
                                                     peak_db: None,
                                                     lufs_i: None,
-                                                    bpm: crate::audio_io::read_audio_bpm(&path_owned),
+                                                    bpm: crate::audio_io::read_audio_bpm(
+                                                        &path_owned,
+                                                    ),
                                                     created_at: info.created_at,
                                                     modified_at: info.modified_at,
                                                     thumb: Vec::new(),

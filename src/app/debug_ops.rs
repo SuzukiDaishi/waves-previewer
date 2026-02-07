@@ -29,8 +29,7 @@ impl WavesPreviewer {
         self.external_sheet_selected = None;
         self.external_sheet_names.clear();
         self.external_settings_dirty = false;
-        self.external_load_target =
-            Some(crate::app::external_ops::ExternalLoadTarget::New);
+        self.external_load_target = Some(crate::app::external_ops::ExternalLoadTarget::New);
         self.show_external_dialog = true;
         self.external_load_error = None;
         self.begin_external_load(path_a);
@@ -154,7 +153,10 @@ impl WavesPreviewer {
             self.debug.input_trace.pop_front();
         }
         if self.debug.cfg.input_trace_to_console {
-            println!("{}", self.debug.input_trace.back().unwrap_or(&String::new()));
+            println!(
+                "{}",
+                self.debug.input_trace.back().unwrap_or(&String::new())
+            );
         }
     }
 
@@ -296,6 +298,22 @@ impl WavesPreviewer {
             "select_to_play_ms: {}",
             summarize(&self.debug.select_to_play_ms)
         ));
+        lines.push(format!(
+            "plugin_scan_ms: {}",
+            summarize(&self.debug.plugin_scan_ms)
+        ));
+        lines.push(format!(
+            "plugin_probe_ms: {}",
+            summarize(&self.debug.plugin_probe_ms)
+        ));
+        lines.push(format!(
+            "plugin_preview_ms: {}",
+            summarize(&self.debug.plugin_preview_ms)
+        ));
+        lines.push(format!(
+            "plugin_apply_ms: {}",
+            summarize(&self.debug.plugin_apply_ms)
+        ));
         if self.debug.select_to_preview_ms.is_empty() {
             lines.push(
                 "warning: select_to_preview_ms has no samples (run list selection scenario)"
@@ -308,9 +326,19 @@ impl WavesPreviewer {
                     .to_string(),
             );
         }
+        if self.debug.plugin_scan_ms.is_empty() {
+            lines.push("warning: plugin_scan_ms has no samples (run plugin scan scenario)".to_string());
+        }
+        if self.debug.plugin_probe_ms.is_empty() {
+            lines.push("warning: plugin_probe_ms has no samples (run plugin probe scenario)".to_string());
+        }
         lines.push(format!(
-            "autoplay_pending_count: {} stale_preview_cancel_count: {}",
-            self.debug.autoplay_pending_count, self.debug.stale_preview_cancel_count
+            "autoplay_pending_count: {} stale_preview_cancel_count: {} plugin_stale_drop_count: {} plugin_worker_timeout_count: {} plugin_native_fallback_count: {}",
+            self.debug.autoplay_pending_count,
+            self.debug.stale_preview_cancel_count,
+            self.debug.plugin_stale_drop_count,
+            self.debug.plugin_worker_timeout_count,
+            self.debug.plugin_native_fallback_count
         ));
         let source_count = self.external_sources.len();
         if source_count > 0 {
@@ -333,11 +361,17 @@ impl WavesPreviewer {
                 self.external_headers.len()
             ));
             if let Some(key_idx) = self.external_key_index {
-                let sample_col = self
-                    .external_headers
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, name)| if idx != key_idx { Some((idx, name)) } else { None });
+                let sample_col =
+                    self.external_headers
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, name)| {
+                            if idx != key_idx {
+                                Some((idx, name))
+                            } else {
+                                None
+                            }
+                        });
                 if let Some((col_idx, col_name)) = sample_col {
                     let mut samples = Vec::new();
                     for row in self.external_rows.iter().take(3) {
@@ -1020,10 +1054,7 @@ impl WavesPreviewer {
                         None
                     };
                     if let Some(samples) = applied {
-                        self.debug_log(format!(
-                            "auto: loop_xfade {}ms ({} samples)",
-                            ms, samples
-                        ));
+                        self.debug_log(format!("auto: loop_xfade {}ms ({} samples)", ms, samples));
                     }
                     if let Some(tab) = self.tabs.get(tab_idx) {
                         self.apply_loop_mode_for_tab(tab);
@@ -1038,12 +1069,10 @@ impl WavesPreviewer {
                         }
                         let pos = ((tab.samples_len as f32) * frac)
                             .round()
-                            .clamp(0.0, (tab.samples_len - 1) as f32) as usize;
+                            .clamp(0.0, (tab.samples_len - 1) as f32)
+                            as usize;
                         let label = Self::next_marker_label(&tab.markers);
-                        let entry = crate::markers::MarkerEntry {
-                            label,
-                            sample: pos,
-                        };
+                        let entry = crate::markers::MarkerEntry { label, sample: pos };
                         match tab.markers.binary_search_by_key(&pos, |m| m.sample) {
                             Ok(idx) => tab.markers[idx] = entry,
                             Err(idx) => tab.markers.insert(idx, entry),

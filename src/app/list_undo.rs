@@ -42,10 +42,7 @@ impl crate::app::WavesPreviewer {
         } else if let Some(first) = self.selected_multi.iter().next().copied() {
             self.selected = Some(first);
         }
-        self.select_anchor = snap
-            .anchor_path
-            .as_ref()
-            .and_then(|p| self.row_for_path(p));
+        self.select_anchor = snap.anchor_path.as_ref().and_then(|p| self.row_for_path(p));
         self.playing_path = snap.playing_path.clone();
         if self.files.is_empty() {
             self.selected = None;
@@ -346,7 +343,8 @@ impl crate::app::WavesPreviewer {
         }
         let mut changed = false;
         for item in &after_items {
-            if let Some((gain, lufs, dl, sr_override, bit_override)) = before_map.get(&item.item.path)
+            if let Some((gain, lufs, dl, sr_override, bit_override)) =
+                before_map.get(&item.item.path)
             {
                 if (item.item.pending_gain_db - gain).abs() > 1e-6
                     || item.lufs_override != *lufs
@@ -410,7 +408,8 @@ impl crate::app::WavesPreviewer {
         }
         let mut changed = false;
         for item in &after_items {
-            if let Some((gain, lufs, dl, sr_override, bit_override)) = before_map.get(&item.item.path)
+            if let Some((gain, lufs, dl, sr_override, bit_override)) =
+                before_map.get(&item.item.path)
             {
                 if (item.item.pending_gain_db - gain).abs() > 1e-6
                     || item.lufs_override != *lufs
