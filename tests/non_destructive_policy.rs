@@ -107,6 +107,20 @@ mod non_destructive_policy {
         }
     }
 
+    fn wait_for_export_finish(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_export_in_progress() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("export timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn sr_and_bits_convert_are_non_destructive_until_export() {
         let dir = make_temp_dir("sr_bits");
@@ -182,6 +196,128 @@ mod non_destructive_policy {
             "trim as virtual must add a virtual item"
         );
         assert_unchanged(&path, &before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_convert_sets_override_supports_undo_and_exports_audio() {
+        let dir = make_temp_dir("format_override");
+        let export_dir = dir.join("exports");
+        std::fs::create_dir_all(&export_dir).expect("create export dir");
+        let path = dir.join("fixture.wav");
+        let chans = synth_stereo(48_000, 2.0);
+        neowaves::wave::export_channels_audio(&chans, 48_000, &path).expect("write fixture");
+        let before = snapshot(&path);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+
+        assert!(harness.state_mut().test_convert_format_selected_to("mp3"));
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_selected_format_override().as_deref(),
+            Some("mp3")
+        );
+        let display = harness
+            .state()
+            .test_selected_display_name()
+            .expect("selected display name");
+        assert!(display.to_ascii_lowercase().ends_with(".mp3"));
+        assert_unchanged(&path, &before);
+
+        assert!(harness.state_mut().test_list_undo());
+        harness.run_steps(2);
+        assert!(harness.state().test_selected_format_override().is_none());
+        let display = harness
+            .state()
+            .test_selected_display_name()
+            .expect("selected display name after undo");
+        assert!(display.to_ascii_lowercase().ends_with(".wav"));
+        assert_unchanged(&path, &before);
+
+        assert!(harness.state_mut().test_convert_format_selected_to("mp3"));
+        harness.run_steps(2);
+        harness.state_mut().test_set_export_first_prompt(false);
+        harness
+            .state_mut()
+            .test_set_export_save_mode_overwrite(false);
+        harness.state_mut().test_set_export_conflict("rename");
+        harness
+            .state_mut()
+            .test_set_export_dest_folder(Some(&export_dir));
+        harness.state_mut().test_set_export_name_template("{name}_fmt");
+        harness.state_mut().test_trigger_save_selected();
+        wait_for_export_finish(&mut harness);
+
+        let mut found_mp3 = None;
+        for entry in std::fs::read_dir(&export_dir).expect("read export dir") {
+            let path = entry.expect("entry").path();
+            if path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("mp3"))
+                .unwrap_or(false)
+            {
+                found_mp3 = Some(path);
+                break;
+            }
+        }
+        let out = found_mp3.expect("missing exported mp3");
+        let info = neowaves::audio_io::read_audio_info(&out).expect("probe exported mp3");
+        assert!(info.sample_rate > 0);
+        assert!(info.channels > 0);
+        assert!(info.duration_secs.unwrap_or(0.0) > 0.0);
+        assert_unchanged(&path, &before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_apply_is_immediately_used_by_list_space_playback() {
+        let dir = make_temp_dir("editor_apply_list_playback");
+        let path = dir.join("fixture.wav");
+        let chans = synth_stereo(48_000, 4.0);
+        neowaves::wave::export_channels_audio(&chans, 48_000, &path).expect("write fixture");
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_and_load_row(0));
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before_len = harness.state().test_tab_samples_len();
+        assert!(harness.state_mut().test_apply_trim_frac(0.0, 0.25));
+        harness.run_steps(2);
+        let after_len = harness.state().test_tab_samples_len();
+        assert!(after_len < before_len);
+        assert!(harness.state().test_tab_dirty());
+
+        harness.state_mut().test_switch_to_list();
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_select_path(&path));
+        assert!(harness.state_mut().test_evict_selected_list_preview_cache());
+
+        let started_immediately = harness
+            .state_mut()
+            .test_force_load_selected_list_preview_for_play();
+        assert!(
+            started_immediately,
+            "dirty editor audio should be used immediately for list Space playback"
+        );
+
+        harness.run_steps(2);
+        let list_len = harness.state().test_audio_buffer_len();
+        assert!(list_len > 0);
+        assert!(
+            list_len.abs_diff(after_len) <= 2,
+            "list buffer length should match applied editor length: list={} editor={}",
+            list_len,
+            after_len
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

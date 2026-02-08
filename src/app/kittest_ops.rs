@@ -73,6 +73,14 @@ impl super::WavesPreviewer {
         self.force_load_selected_list_preview_for_play()
     }
 
+    pub fn test_evict_selected_list_preview_cache(&mut self) -> bool {
+        let Some(path) = self.test_selected_path().cloned() else {
+            return false;
+        };
+        self.evict_list_preview_cache_path(&path);
+        true
+    }
+
     pub fn test_sort_key_name(&self) -> &'static str {
         match self.sort_key {
             SortKey::File => "File",
@@ -426,6 +434,29 @@ impl super::WavesPreviewer {
     pub fn test_selected_bit_depth_override(&self) -> Option<crate::wave::WavBitDepth> {
         let path = self.test_selected_path()?;
         self.bit_depth_override.get(path).copied()
+    }
+
+    pub fn test_convert_format_selected_to(&mut self, ext: &str) -> bool {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            return false;
+        }
+        self.spawn_convert_format_selected(selected, ext);
+        true
+    }
+
+    pub fn test_selected_format_override(&self) -> Option<String> {
+        let path = self.test_selected_path()?;
+        self.format_override.get(path).cloned()
+    }
+
+    pub fn test_selected_display_name(&self) -> Option<String> {
+        let path = self.test_selected_path()?;
+        self.item_for_path(path).map(|item| item.display_name.clone())
+    }
+
+    pub fn test_list_undo(&mut self) -> bool {
+        self.list_undo()
     }
 
     pub fn test_select_path(&mut self, path: &Path) -> bool {

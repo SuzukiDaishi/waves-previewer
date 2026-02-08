@@ -1,4 +1,6 @@
-use neowaves::plugin::{PluginHostBackend, PluginParamValue, WorkerRequest, WorkerResponse};
+use neowaves::plugin::{
+    GuiCapabilities, PluginHostBackend, PluginParamValue, WorkerRequest, WorkerResponse,
+};
 
 #[test]
 fn protocol_processfx_roundtrip_keeps_state_blob_and_backend() {
@@ -65,6 +67,11 @@ fn protocol_backend_roundtrip_includes_native_clap() {
         params: Vec::new(),
         state_blob_b64: None,
         backend: PluginHostBackend::NativeClap,
+        capabilities: GuiCapabilities {
+            supports_native_gui: false,
+            supports_param_feedback: true,
+            supports_state_sync: false,
+        },
         backend_note: None,
     };
     let raw = serde_json::to_vec(&resp).expect("serialize");

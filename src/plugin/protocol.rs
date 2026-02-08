@@ -38,6 +38,22 @@ pub enum PluginHostBackend {
     NativeClap,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct GuiCapabilities {
+    pub supports_native_gui: bool,
+    pub supports_param_feedback: bool,
+    pub supports_state_sync: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GuiSessionStatus {
+    #[default]
+    Closed,
+    Opening,
+    Live,
+    Error,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WorkerRequest {
     Ping,
@@ -58,6 +74,18 @@ pub enum WorkerRequest {
         state_blob_b64: Option<String>,
         params: Vec<PluginParamValue>,
     },
+    GuiSessionOpen {
+        session_id: u64,
+        plugin_path: String,
+        state_blob_b64: Option<String>,
+        params: Vec<PluginParamValue>,
+    },
+    GuiSessionPoll {
+        session_id: u64,
+    },
+    GuiSessionClose {
+        session_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,6 +100,8 @@ pub enum WorkerResponse {
         state_blob_b64: Option<String>,
         backend: PluginHostBackend,
         #[serde(default)]
+        capabilities: GuiCapabilities,
+        #[serde(default)]
         backend_note: Option<String>,
     },
     ProcessResult {
@@ -80,6 +110,36 @@ pub enum WorkerResponse {
         backend: PluginHostBackend,
         #[serde(default)]
         backend_note: Option<String>,
+    },
+    GuiOpened {
+        session_id: u64,
+        backend: PluginHostBackend,
+        params: Vec<PluginParamInfo>,
+        state_blob_b64: Option<String>,
+        #[serde(default)]
+        capabilities: GuiCapabilities,
+        #[serde(default)]
+        backend_note: Option<String>,
+    },
+    GuiSnapshot {
+        session_id: u64,
+        params: Vec<PluginParamValue>,
+        state_blob_b64: Option<String>,
+        backend: PluginHostBackend,
+        closed: bool,
+        #[serde(default)]
+        backend_note: Option<String>,
+    },
+    GuiClosed {
+        session_id: u64,
+        state_blob_b64: Option<String>,
+        backend: PluginHostBackend,
+        #[serde(default)]
+        backend_note: Option<String>,
+    },
+    GuiError {
+        session_id: u64,
+        message: String,
     },
     Error {
         message: String,

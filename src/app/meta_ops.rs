@@ -236,7 +236,14 @@ impl super::WavesPreviewer {
         let mut refilter = false;
         for update in updates {
             match update {
-                meta::MetaUpdate::Header(p, m) => {
+                meta::MetaUpdate::Header {
+                    path: p,
+                    meta: m,
+                    finalized,
+                } => {
+                    if finalized {
+                        self.meta_inflight.remove(&p);
+                    }
                     if self.set_meta_for_path(&p, m) {
                         meta_sort_dirty = true;
                     }

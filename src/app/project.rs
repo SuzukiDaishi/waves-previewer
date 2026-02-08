@@ -35,6 +35,8 @@ pub struct ProjectList {
     #[serde(default)]
     pub bit_depth_overrides: Vec<ProjectBitDepthOverride>,
     #[serde(default)]
+    pub format_overrides: Vec<ProjectFormatOverride>,
+    #[serde(default)]
     pub virtual_items: Vec<ProjectVirtualItem>,
 }
 
@@ -54,6 +56,12 @@ pub struct ProjectSampleRateOverride {
 pub struct ProjectBitDepthOverride {
     pub path: String,
     pub bit_depth: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectFormatOverride {
+    pub path: String,
+    pub format: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -692,6 +700,8 @@ pub fn project_plugin_fx_draft_to_draft(draft: &ProjectPluginFxDraft) -> PluginF
                 _ => None,
             }
         }),
+        gui_capabilities: crate::plugin::GuiCapabilities::default(),
+        gui_status: crate::plugin::GuiSessionStatus::Closed,
         enabled: draft.enabled,
         bypass: draft.bypass,
         filter: draft.filter.clone(),
@@ -903,6 +913,7 @@ impl super::WavesPreviewer {
         self.select_anchor = None;
         self.sample_rate_override.clear();
         self.bit_depth_override.clear();
+        self.format_override.clear();
         self.list_undo_stack.clear();
         self.list_redo_stack.clear();
         self.overwrite_undo_stack.clear();
@@ -920,6 +931,7 @@ impl super::WavesPreviewer {
         self.transcript_inflight.clear();
         self.sample_rate_override.clear();
         self.bit_depth_override.clear();
+        self.format_override.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.spectro_progress.clear();
@@ -996,6 +1008,7 @@ files = []
             items: Vec::new(),
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
+            format_overrides: Vec::new(),
             virtual_items: vec![ProjectVirtualItem {
                 path: "virtual://trim_0001".to_string(),
                 display_name: "trim_0001".to_string(),
@@ -1032,6 +1045,8 @@ files = []
             plugin_key: Some("C:\\Plugins\\Demo.vst3".to_string()),
             plugin_name: "Demo".to_string(),
             backend: Some(crate::plugin::PluginHostBackend::NativeVst3),
+            gui_capabilities: crate::plugin::GuiCapabilities::default(),
+            gui_status: crate::plugin::GuiSessionStatus::Closed,
             enabled: true,
             bypass: false,
             filter: "gain".to_string(),
@@ -1059,6 +1074,12 @@ files = []
             plugin_key: Some("C:\\Plugins\\Demo.clap".to_string()),
             plugin_name: "Demo Clap".to_string(),
             backend: Some(crate::plugin::PluginHostBackend::NativeClap),
+            gui_capabilities: crate::plugin::GuiCapabilities {
+                supports_native_gui: false,
+                supports_param_feedback: true,
+                supports_state_sync: false,
+            },
+            gui_status: crate::plugin::GuiSessionStatus::Closed,
             enabled: true,
             bypass: false,
             filter: String::new(),

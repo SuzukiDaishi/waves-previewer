@@ -70,6 +70,40 @@ impl WavesPreviewer {
             .filter(|v| *v > 0)
     }
 
+    pub(super) fn effective_format_override_for_path(&self, path: &Path) -> Option<&str> {
+        self.format_override.get(path).map(|v| v.as_str())
+    }
+
+    pub(super) fn display_name_for_path_with_format_override(
+        path: &Path,
+        format_override: Option<&str>,
+    ) -> String {
+        let mut base = PathBuf::from(Self::display_name_for_path(path));
+        if let Some(ext) = format_override {
+            let ext = ext.trim().trim_start_matches('.');
+            if !ext.is_empty() {
+                base.set_extension(ext);
+            }
+        }
+        base.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("(invalid)")
+            .to_string()
+    }
+
+    pub(super) fn refresh_display_name_for_path(&mut self, path: &Path) {
+        let format_override = self.effective_format_override_for_path(path);
+        let display = Self::display_name_for_path_with_format_override(path, format_override);
+        if let Some(item) = self.item_for_path_mut(path) {
+            item.display_name = display.clone();
+        }
+        for tab in self.tabs.iter_mut() {
+            if tab.path.as_path() == path {
+                tab.display_name = display.clone();
+            }
+        }
+    }
+
     pub(super) fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);

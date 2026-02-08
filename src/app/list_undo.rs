@@ -72,6 +72,7 @@ impl crate::app::WavesPreviewer {
             let lufs_deadline = self.lufs_recalc_deadline.get(path).copied();
             let sample_rate_override = self.sample_rate_override.get(path).copied();
             let bit_depth_override = self.bit_depth_override.get(path).copied();
+            let format_override = self.format_override.get(path).cloned();
             out.push(ListUndoItem {
                 item,
                 item_index: item_idx,
@@ -80,6 +81,7 @@ impl crate::app::WavesPreviewer {
                 lufs_deadline,
                 sample_rate_override,
                 bit_depth_override,
+                format_override,
             });
         }
         out
@@ -102,6 +104,7 @@ impl crate::app::WavesPreviewer {
             let lufs_deadline = self.lufs_recalc_deadline.get(path).copied();
             let sample_rate_override = self.sample_rate_override.get(path).copied();
             let bit_depth_override = self.bit_depth_override.get(path).copied();
+            let format_override = self.format_override.get(path).cloned();
             out.push(ListUndoItem {
                 item,
                 item_index: item_idx,
@@ -110,6 +113,7 @@ impl crate::app::WavesPreviewer {
                 lufs_deadline,
                 sample_rate_override,
                 bit_depth_override,
+                format_override,
             });
         }
         out
@@ -141,6 +145,9 @@ impl crate::app::WavesPreviewer {
             }
             if let Some(v) = entry.bit_depth_override {
                 self.bit_depth_override.insert(entry.item.path.clone(), v);
+            }
+            if let Some(v) = entry.format_override.as_ref() {
+                self.format_override.insert(entry.item.path.clone(), v.clone());
             }
         }
         if !self.external_sources.is_empty() {
@@ -208,6 +215,14 @@ impl crate::app::WavesPreviewer {
                 }
                 None => {
                     self.bit_depth_override.remove(&entry.item.path);
+                }
+            }
+            match entry.format_override.as_ref() {
+                Some(v) => {
+                    self.format_override.insert(entry.item.path.clone(), v.clone());
+                }
+                None => {
+                    self.format_override.remove(&entry.item.path);
                 }
             }
         }
@@ -327,6 +342,7 @@ impl crate::app::WavesPreviewer {
                 Option<std::time::Instant>,
                 Option<u32>,
                 Option<crate::wave::WavBitDepth>,
+                Option<String>,
             ),
         > = HashMap::new();
         for item in &before_items {
@@ -338,12 +354,13 @@ impl crate::app::WavesPreviewer {
                     item.lufs_deadline,
                     item.sample_rate_override,
                     item.bit_depth_override,
+                    item.format_override.clone(),
                 ),
             );
         }
         let mut changed = false;
         for item in &after_items {
-            if let Some((gain, lufs, dl, sr_override, bit_override)) =
+            if let Some((gain, lufs, dl, sr_override, bit_override, format_override)) =
                 before_map.get(&item.item.path)
             {
                 if (item.item.pending_gain_db - gain).abs() > 1e-6
@@ -351,6 +368,7 @@ impl crate::app::WavesPreviewer {
                     || item.lufs_deadline != *dl
                     || item.sample_rate_override != *sr_override
                     || item.bit_depth_override != *bit_override
+                    || item.format_override.as_ref() != format_override.as_ref()
                 {
                     changed = true;
                     break;
@@ -392,6 +410,7 @@ impl crate::app::WavesPreviewer {
                 Option<std::time::Instant>,
                 Option<u32>,
                 Option<crate::wave::WavBitDepth>,
+                Option<String>,
             ),
         > = HashMap::new();
         for item in &before_items {
@@ -403,12 +422,13 @@ impl crate::app::WavesPreviewer {
                     item.lufs_deadline,
                     item.sample_rate_override,
                     item.bit_depth_override,
+                    item.format_override.clone(),
                 ),
             );
         }
         let mut changed = false;
         for item in &after_items {
-            if let Some((gain, lufs, dl, sr_override, bit_override)) =
+            if let Some((gain, lufs, dl, sr_override, bit_override, format_override)) =
                 before_map.get(&item.item.path)
             {
                 if (item.item.pending_gain_db - gain).abs() > 1e-6
@@ -416,6 +436,7 @@ impl crate::app::WavesPreviewer {
                     || item.lufs_deadline != *dl
                     || item.sample_rate_override != *sr_override
                     || item.bit_depth_override != *bit_override
+                    || item.format_override.as_ref() != format_override.as_ref()
                 {
                     changed = true;
                     break;

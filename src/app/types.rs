@@ -130,6 +130,7 @@ pub struct ListUndoItem {
     pub lufs_deadline: Option<Instant>,
     pub sample_rate_override: Option<u32>,
     pub bit_depth_override: Option<crate::wave::WavBitDepth>,
+    pub format_override: Option<String>,
 }
 
 #[derive(Clone)]
@@ -331,6 +332,8 @@ pub struct PluginFxDraft {
     pub plugin_key: Option<String>,
     pub plugin_name: String,
     pub backend: Option<crate::plugin::PluginHostBackend>,
+    pub gui_capabilities: crate::plugin::GuiCapabilities,
+    pub gui_status: crate::plugin::GuiSessionStatus,
     pub enabled: bool,
     pub bypass: bool,
     pub filter: String,
@@ -338,6 +341,50 @@ pub struct PluginFxDraft {
     pub state_blob: Option<Vec<u8>>,
     pub last_error: Option<String>,
     pub last_backend_log: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PluginGuiCommand {
+    SyncNow,
+    Close,
+}
+
+#[derive(Clone, Debug)]
+pub enum PluginGuiEvent {
+    Opened {
+        session_id: u64,
+        backend: crate::plugin::PluginHostBackend,
+        capabilities: crate::plugin::GuiCapabilities,
+        params: Vec<PluginParamUiState>,
+        state_blob: Option<Vec<u8>>,
+        backend_note: Option<String>,
+    },
+    Snapshot {
+        session_id: u64,
+        params: Vec<crate::plugin::PluginParamValue>,
+        state_blob: Option<Vec<u8>>,
+        backend: crate::plugin::PluginHostBackend,
+        closed: bool,
+        backend_note: Option<String>,
+    },
+    Closed {
+        session_id: u64,
+        state_blob: Option<Vec<u8>>,
+        backend: crate::plugin::PluginHostBackend,
+        backend_note: Option<String>,
+    },
+    Error {
+        session_id: u64,
+        message: String,
+    },
+}
+
+pub struct PluginGuiSessionState {
+    pub tab_path: PathBuf,
+    pub session_id: u64,
+    pub started_at: Instant,
+    pub cmd_tx: std::sync::mpsc::Sender<PluginGuiCommand>,
+    pub rx: std::sync::mpsc::Receiver<PluginGuiEvent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,6 +408,7 @@ pub struct PluginProbeResult {
     pub params: Vec<PluginParamUiState>,
     pub state_blob: Option<Vec<u8>>,
     pub backend: crate::plugin::PluginHostBackend,
+    pub capabilities: crate::plugin::GuiCapabilities,
     pub backend_note: Option<String>,
     pub error: Option<String>,
 }
@@ -758,6 +806,8 @@ pub struct ListPreviewSettings {
     pub target_sr: Option<u32>,
     pub bit_depth: Option<crate::wave::WavBitDepth>,
     pub quality: SrcQuality,
+    pub mode: RateMode,
+    pub source_variant: u64,
 }
 
 #[derive(Clone)]
@@ -1043,10 +1093,21 @@ pub struct DebugState {
     pub frame_sum_ms: f64,
     pub frame_samples: u64,
     pub started_at: Instant,
+    pub ui_input_started_at: Option<Instant>,
+    pub ui_input_to_paint_ms: VecDeque<f32>,
     pub list_select_started_at: Option<Instant>,
     pub list_select_started_path: Option<PathBuf>,
+    pub tab_switch_started_at: Option<Instant>,
+    pub tab_switch_started_path: Option<PathBuf>,
+    pub tab_switch_to_interactive_ms: VecDeque<f32>,
     pub select_to_preview_ms: VecDeque<f32>,
     pub select_to_play_ms: VecDeque<f32>,
+    pub metadata_probe_ms: VecDeque<f32>,
+    pub bg_lufs_job_ms: VecDeque<f32>,
+    pub bg_dbfs_job_ms: VecDeque<f32>,
+    pub src_resample_ms: VecDeque<f32>,
+    pub src_cache_hits: u64,
+    pub src_cache_misses: u64,
     pub plugin_scan_ms: VecDeque<f32>,
     pub plugin_probe_ms: VecDeque<f32>,
     pub plugin_preview_ms: VecDeque<f32>,
@@ -1112,10 +1173,21 @@ impl DebugState {
             frame_sum_ms: 0.0,
             frame_samples: 0,
             started_at: Instant::now(),
+            ui_input_started_at: None,
+            ui_input_to_paint_ms: VecDeque::new(),
             list_select_started_at: None,
             list_select_started_path: None,
+            tab_switch_started_at: None,
+            tab_switch_started_path: None,
+            tab_switch_to_interactive_ms: VecDeque::new(),
             select_to_preview_ms: VecDeque::new(),
             select_to_play_ms: VecDeque::new(),
+            metadata_probe_ms: VecDeque::new(),
+            bg_lufs_job_ms: VecDeque::new(),
+            bg_dbfs_job_ms: VecDeque::new(),
+            src_resample_ms: VecDeque::new(),
+            src_cache_hits: 0,
+            src_cache_misses: 0,
             plugin_scan_ms: VecDeque::new(),
             plugin_probe_ms: VecDeque::new(),
             plugin_preview_ms: VecDeque::new(),

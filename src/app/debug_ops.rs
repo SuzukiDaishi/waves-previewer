@@ -187,6 +187,49 @@ impl WavesPreviewer {
         self.debug.list_select_started_path = Some(path.to_path_buf());
     }
 
+    pub(super) fn debug_mark_tab_switch_start(&mut self, path: &Path) {
+        self.debug.tab_switch_started_at = Some(std::time::Instant::now());
+        self.debug.tab_switch_started_path = Some(path.to_path_buf());
+    }
+
+    pub(super) fn debug_mark_tab_switch_interactive(&mut self, path: &Path) {
+        let Some(started_at) = self.debug.tab_switch_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .tab_switch_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(&mut self.debug.tab_switch_to_interactive_ms, elapsed_ms);
+            self.debug.tab_switch_started_at = None;
+            self.debug.tab_switch_started_path = None;
+        }
+    }
+
+    pub(super) fn debug_push_ui_input_to_paint_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.ui_input_to_paint_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_metadata_probe_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.metadata_probe_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_bg_lufs_job_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.bg_lufs_job_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_bg_dbfs_job_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.bg_dbfs_job_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_src_resample_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.src_resample_ms, value_ms);
+    }
+
     pub(super) fn debug_mark_list_preview_ready(&mut self, path: &Path) {
         let Some(started_at) = self.debug.list_select_started_at else {
             return;
@@ -291,12 +334,46 @@ impl WavesPreviewer {
             format!("n={} p50={:.1} p95={:.1} max={:.1}", n, p50, p95, max_v)
         };
         lines.push(format!(
+            "ui_input_to_paint_ms: {}",
+            summarize(&self.debug.ui_input_to_paint_ms)
+        ));
+        lines.push(format!(
+            "tab_switch_to_interactive_ms: {}",
+            summarize(&self.debug.tab_switch_to_interactive_ms)
+        ));
+        lines.push(format!(
             "select_to_preview_ms: {}",
             summarize(&self.debug.select_to_preview_ms)
         ));
         lines.push(format!(
             "select_to_play_ms: {}",
             summarize(&self.debug.select_to_play_ms)
+        ));
+        lines.push(format!(
+            "metadata_probe_ms: {}",
+            summarize(&self.debug.metadata_probe_ms)
+        ));
+        lines.push(format!(
+            "bg_lufs_job_ms: {}",
+            summarize(&self.debug.bg_lufs_job_ms)
+        ));
+        lines.push(format!(
+            "bg_dbfs_job_ms: {}",
+            summarize(&self.debug.bg_dbfs_job_ms)
+        ));
+        lines.push(format!(
+            "src_resample_ms: {}",
+            summarize(&self.debug.src_resample_ms)
+        ));
+        let src_total = self.debug.src_cache_hits.saturating_add(self.debug.src_cache_misses);
+        let src_hit_rate = if src_total > 0 {
+            (self.debug.src_cache_hits as f64 / src_total as f64) * 100.0
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "src_cache_hit_rate: {:.1}% (hits={} misses={})",
+            src_hit_rate, self.debug.src_cache_hits, self.debug.src_cache_misses
         ));
         lines.push(format!(
             "plugin_scan_ms: {}",
@@ -320,11 +397,32 @@ impl WavesPreviewer {
                     .to_string(),
             );
         }
+        if self.debug.ui_input_to_paint_ms.is_empty() {
+            lines.push(
+                "warning: ui_input_to_paint_ms has no samples (interact with UI and capture summary)"
+                    .to_string(),
+            );
+        }
+        if self.debug.tab_switch_to_interactive_ms.is_empty() {
+            lines.push(
+                "warning: tab_switch_to_interactive_ms has no samples (switch editor tabs)"
+                    .to_string(),
+            );
+        }
         if self.debug.select_to_play_ms.is_empty() {
             lines.push(
                 "warning: select_to_play_ms has no samples (run Space/AutoPlay scenario)"
                     .to_string(),
             );
+        }
+        if self.debug.metadata_probe_ms.is_empty() {
+            lines.push(
+                "warning: metadata_probe_ms has no samples (run sample-rate dependent operations)"
+                    .to_string(),
+            );
+        }
+        if self.debug.src_resample_ms.is_empty() {
+            lines.push("warning: src_resample_ms has no samples (run SRC path)".to_string());
         }
         if self.debug.plugin_scan_ms.is_empty() {
             lines.push("warning: plugin_scan_ms has no samples (run plugin scan scenario)".to_string());

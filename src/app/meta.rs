@@ -18,7 +18,11 @@ pub enum MetaTask {
 
 #[derive(Clone, Debug)]
 pub enum MetaUpdate {
-    Header(PathBuf, FileMeta),
+    Header {
+        path: PathBuf,
+        meta: FileMeta,
+        finalized: bool,
+    },
     Full(PathBuf, FileMeta),
     Transcript(PathBuf, Option<Transcript>),
 }
@@ -320,7 +324,11 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                 if do_header {
                     match header_meta(&p) {
                         Ok(meta) => {
-                            let _ = tx.send(MetaUpdate::Header(p.clone(), meta.clone()));
+                            let _ = tx.send(MetaUpdate::Header {
+                                path: p.clone(),
+                                meta: meta.clone(),
+                                finalized: !do_decode,
+                            });
                             header_meta_opt = Some(meta);
                         }
                         Err(err_meta) => {

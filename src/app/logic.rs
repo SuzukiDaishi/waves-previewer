@@ -82,7 +82,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn apply_sample_rate_preview_for_path(
-        &self,
+        &mut self,
         path: &Path,
         channels: &mut Vec<Vec<f32>>,
         in_sr: u32,
@@ -93,32 +93,22 @@ impl super::WavesPreviewer {
             .get(path)
             .copied()
             .filter(|v| *v > 0);
-        if let Some(target) = target {
-            let target = target.max(1);
-            if in_sr != target {
-                for ch in channels.iter_mut() {
-                    *ch = crate::wave::resample_quality(
-                        ch,
-                        in_sr,
-                        target,
-                        crate::wave::ResampleQuality::Best,
-                    );
-                }
-            }
-            if target != out_sr {
-                for ch in channels.iter_mut() {
-                    *ch = crate::wave::resample_quality(
-                        ch,
-                        target,
-                        out_sr,
-                        crate::wave::ResampleQuality::Best,
-                    );
-                }
-            }
-        } else if in_sr != out_sr {
+        let resample_quality = if target.is_some() {
+            crate::wave::ResampleQuality::Best
+        } else {
+            Self::to_wave_resample_quality(self.src_quality)
+        };
+        let mut did_resample = false;
+        let resample_started = std::time::Instant::now();
+        if in_sr != out_sr {
             for ch in channels.iter_mut() {
-                *ch = self.resample_mono_with_quality(ch, in_sr, out_sr);
+                *ch = crate::wave::resample_quality(ch, in_sr, out_sr, resample_quality);
             }
+            did_resample = true;
+        }
+        if did_resample {
+            let elapsed_ms = resample_started.elapsed().as_secs_f32() * 1000.0;
+            self.debug_push_src_resample_sample(elapsed_ms);
         }
         if let Some(depth) = self.bit_depth_override.get(path).copied() {
             crate::wave::quantize_channels_in_place(channels, depth);
@@ -420,6 +410,7 @@ impl super::WavesPreviewer {
         self.has_pending_gain(path)
             || self.sample_rate_override.contains_key(path)
             || self.bit_depth_override.contains_key(path)
+            || self.format_override.contains_key(path)
             || self
                 .edited_cache
                 .get(path)
@@ -633,6 +624,8 @@ impl super::WavesPreviewer {
             self.sample_rate_override.remove(p);
             self.sample_rate_probe_cache.remove(p);
             self.bit_depth_override.remove(p);
+            self.format_override.remove(p);
+            self.refresh_display_name_for_path(p);
             if self.playing_path.as_ref() == Some(p) {
                 affect_playing = true;
             }
@@ -708,11 +701,14 @@ impl super::WavesPreviewer {
         if let Some(sr) = self.sample_rate_probe_cache.get(path).copied() {
             return sr;
         }
+        let probe_started = std::time::Instant::now();
         let sr = audio_io::read_audio_info(path)
             .ok()
             .map(|i| i.sample_rate)
             .filter(|v| *v > 0)
             .unwrap_or(fallback.max(1));
+        let elapsed_ms = probe_started.elapsed().as_secs_f32() * 1000.0;
+        self.debug_push_metadata_probe_sample(elapsed_ms);
         self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
         sr
     }
@@ -792,6 +788,8 @@ impl super::WavesPreviewer {
         self.sample_rate_override.remove(path);
         self.sample_rate_probe_cache.remove(path);
         self.bit_depth_override.remove(path);
+        self.format_override.remove(path);
+        self.refresh_display_name_for_path(path);
     }
     // multi-select aware selection update for list clicks (moved from app.rs)
     pub(super) fn update_selection_on_click(&mut self, row_idx: usize, mods: egui::Modifiers) {
@@ -1011,6 +1009,13 @@ impl super::WavesPreviewer {
         if matches!(source, Some(crate::app::types::MediaSource::External)) {
             return false;
         }
+        // Keep Space/AutoPlay behavior consistent with row-click selection:
+        // edited tab/cached dirty audio must win over file decode/cache.
+        if self.apply_dirty_tab_preview_for_list(&path) {
+            self.debug_mark_list_preview_ready(&path);
+            self.list_play_pending = false;
+            return true;
+        }
         if matches!(source, Some(crate::app::types::MediaSource::Virtual)) {
             if let Some(row) = selected_row {
                 self.select_and_load(row, false);
@@ -1084,7 +1089,7 @@ impl super::WavesPreviewer {
         false
     }
 
-    fn spawn_editor_decode(&mut self, path: PathBuf) {
+    pub(super) fn spawn_editor_decode(&mut self, path: PathBuf) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};
         self.cancel_editor_decode();
@@ -1370,6 +1375,7 @@ impl super::WavesPreviewer {
         self.sample_rate_override.remove(&path_buf);
         self.sample_rate_probe_cache.remove(&path_buf);
         self.bit_depth_override.remove(&path_buf);
+        self.format_override.remove(&path_buf);
         self.evict_list_preview_cache_path(&path_buf);
         if was_playing {
             self.playing_path = None;
@@ -1464,6 +1470,7 @@ impl super::WavesPreviewer {
             self.sample_rate_override.remove(path);
             self.sample_rate_probe_cache.remove(path);
             self.bit_depth_override.remove(path);
+            self.format_override.remove(path);
             self.evict_list_preview_cache_path(path);
         }
         if was_playing {
@@ -1526,6 +1533,7 @@ impl super::WavesPreviewer {
         self.sample_rate_override.clear();
         self.sample_rate_probe_cache.clear();
         self.bit_depth_override.clear();
+        self.format_override.clear();
         if let Some(root) = &self.root {
             self.start_scan_folder(root.clone());
         } else {
@@ -2231,11 +2239,12 @@ impl super::WavesPreviewer {
                     return;
                 }
                 if !tab.ch_samples.is_empty() {
+                    let tab_path = tab.path.clone();
                     let mut channels = tab.ch_samples.clone();
                     match self.mode {
                         RateMode::Speed => {
                             self.apply_sample_rate_preview_for_path(
-                                &tab.path,
+                                &tab_path,
                                 &mut channels,
                                 self.audio.shared.out_sample_rate,
                             );
@@ -2244,7 +2253,7 @@ impl super::WavesPreviewer {
                         }
                         _ => {
                             self.audio.set_rate(1.0);
-                            self.spawn_heavy_processing_from_channels(tab.path.clone(), channels);
+                            self.spawn_heavy_processing_from_channels(tab_path, channels);
                         }
                     }
                     self.apply_effective_volume();
@@ -2279,28 +2288,24 @@ impl super::WavesPreviewer {
             }
             match self.mode {
                 RateMode::Speed => {
-                    let _ = crate::wave::prepare_for_speed_quality(
-                        &p,
-                        &self.audio,
-                        &mut Vec::new(),
-                        self.playback_rate,
-                        Self::to_wave_resample_quality(self.src_quality),
-                    );
+                    if let Some(tab_idx) = self.active_tab {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            if tab.path == p && !tab.loading {
+                                tab.loading = true;
+                                self.spawn_editor_decode(p.clone());
+                            }
+                        }
+                    } else if let Some(row_idx) = self.row_for_path(&p) {
+                        self.select_and_load(row_idx, false);
+                    }
                     self.audio.set_rate(self.playback_rate);
                 }
                 _ => {
-                    if self.is_decode_failed_path(&p) {
-                        let _ = crate::wave::prepare_for_speed_quality(
-                            &p,
-                            &self.audio,
-                            &mut Vec::new(),
-                            1.0,
-                            Self::to_wave_resample_quality(self.src_quality),
-                        );
-                        self.audio.set_rate(1.0);
-                    } else {
+                    if !self.is_decode_failed_path(&p) {
                         self.audio.set_rate(1.0);
                         self.spawn_heavy_processing(&p);
+                    } else {
+                        self.audio.set_rate(1.0);
                     }
                 }
             }

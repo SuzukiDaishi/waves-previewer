@@ -77,6 +77,7 @@ impl super::WavesPreviewer {
             write_audio: bool,
             write_markers: bool,
             write_loop_markers: bool,
+            format_override: Option<String>,
         }
         let cfg = self.export_cfg.clone();
         let format_override = cfg
@@ -102,6 +103,11 @@ impl super::WavesPreviewer {
             };
             let p = item.path.clone();
             let db = item.pending_gain_db;
+            let path_format_override = self
+                .format_override
+                .get(&p)
+                .map(|v| v.trim().trim_start_matches('.').to_ascii_lowercase())
+                .filter(|v| crate::audio_io::is_supported_extension(v));
             if item.source == MediaSource::Virtual {
                 let audio = self
                     .edited_audio_for_path(&p)
@@ -127,7 +133,10 @@ impl super::WavesPreviewer {
                 name = name.replace("{gain}", &format!("{:+.1}", db));
                 let name = crate::app::helpers::sanitize_filename_component(&name);
                 let mut dst = parent.join(name);
-                let target_ext = format_override.as_deref().unwrap_or("wav");
+                let target_ext = path_format_override
+                    .as_deref()
+                    .or(format_override.as_deref())
+                    .unwrap_or("wav");
                 dst.set_extension(target_ext);
                 if dst.exists() {
                     match self.export_cfg.conflict {
@@ -196,12 +205,14 @@ impl super::WavesPreviewer {
                         || loop_markers_dirty
                         || sr_override.is_some()
                         || bit_override.is_some()
+                        || path_format_override.is_some()
                     {
                         let needs_audio = cfg.save_mode == SaveMode::NewFile
                             || dirty_audio
                             || db.abs() > 0.0001
                             || sr_override.is_some()
-                            || bit_override.is_some();
+                            || bit_override.is_some()
+                            || path_format_override.is_some();
                         if needs_audio {
                             ch_samples = Some(tab.ch_samples.clone());
                             let target_sr = sr_override.unwrap_or(out_sr);
@@ -230,12 +241,14 @@ impl super::WavesPreviewer {
                         || loop_markers_dirty
                         || sr_override.is_some()
                         || bit_override.is_some()
+                        || path_format_override.is_some()
                     {
                         let needs_audio = cfg.save_mode == SaveMode::NewFile
                             || dirty_audio
                             || db.abs() > 0.0001
                             || sr_override.is_some()
-                            || bit_override.is_some();
+                            || bit_override.is_some()
+                            || path_format_override.is_some();
                         if needs_audio {
                             ch_samples = Some(cached.ch_samples.clone());
                             let target_sr = sr_override.unwrap_or(out_sr);
@@ -258,13 +271,15 @@ impl super::WavesPreviewer {
                     || markers_dirty
                     || loop_markers_dirty
                     || sr_override.is_some()
-                    || bit_override.is_some();
+                    || bit_override.is_some()
+                    || path_format_override.is_some();
                 if has_edits {
                     let write_audio = cfg.save_mode == SaveMode::NewFile
                         || dirty_audio
                         || db.abs() > 0.0001
                         || sr_override.is_some()
-                        || bit_override.is_some();
+                        || bit_override.is_some()
+                        || path_format_override.is_some();
                     let audio = ch_samples
                         .map(crate::audio::AudioBuffer::from_channels)
                         .map(std::sync::Arc::new);
@@ -291,6 +306,7 @@ impl super::WavesPreviewer {
                         write_audio,
                         write_markers,
                         write_loop_markers,
+                        format_override: path_format_override,
                     });
                     edit_sources.push(p);
                 } else if db.abs() > 0.0001 {
@@ -305,6 +321,31 @@ impl super::WavesPreviewer {
             SaveMode::NewFile
         } else {
             cfg.save_mode
+        };
+        self.saving_format_targets = if matches!(save_mode, SaveMode::Overwrite) {
+            edit_tasks
+                .iter()
+                .filter_map(|task| {
+                    let forced_ext = task
+                        .format_override
+                        .as_deref()
+                        .or(format_override.as_deref())?;
+                    let src_ext = task
+                        .src
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if src_ext == forced_ext {
+                        return None;
+                    }
+                    let mut dst = task.src.clone();
+                    dst.set_extension(forced_ext);
+                    Some((task.src.clone(), dst))
+                })
+                .collect()
+        } else {
+            Vec::new()
         };
         // remember sources for post-save cleanup + reload
         self.saving_sources = items.iter().map(|(p, _)| p.clone()).collect();
@@ -427,7 +468,17 @@ impl super::WavesPreviewer {
             }
             for task in edit_jobs {
                 let dst = match save_mode {
-                    SaveMode::Overwrite => task.src.clone(),
+                    SaveMode::Overwrite => {
+                        let mut dst = task.src.clone();
+                        if let Some(ext) = task
+                            .format_override
+                            .as_deref()
+                            .or(format_override.as_deref())
+                        {
+                            dst.set_extension(ext);
+                        }
+                        dst
+                    }
                     SaveMode::NewFile => {
                         let parent = cfg.dest_folder.clone().unwrap_or_else(|| {
                             task.src
@@ -452,7 +503,10 @@ impl super::WavesPreviewer {
                             .extension()
                             .and_then(|e| e.to_str())
                             .unwrap_or("wav");
-                        let forced_ext = format_override.as_deref();
+                        let forced_ext = task
+                            .format_override
+                            .as_deref()
+                            .or(format_override.as_deref());
                         let dst_ext = dst.extension().and_then(|e| e.to_str());
                         let use_dst_ext = dst_ext
                             .map(|e| crate::audio_io::is_supported_extension(e))
@@ -702,25 +756,34 @@ impl super::WavesPreviewer {
         if !crate::audio_io::is_supported_extension(&ext) {
             return;
         }
-        let mut indices = std::collections::BTreeSet::new();
+        let mut targets: Vec<PathBuf> = Vec::new();
         for path in paths {
-            if let Some(row) = self.row_for_path(&path) {
-                indices.insert(row);
+            if self.row_for_path(&path).is_some() {
+                targets.push(path);
             }
         }
-        if indices.is_empty() {
+        if targets.is_empty() {
             return;
         }
-        let prev_mode = self.export_cfg.save_mode;
-        let prev_prompt = self.export_cfg.first_prompt;
-        let prev_format = self.export_cfg.format_override.clone();
-        self.export_cfg.save_mode = SaveMode::NewFile;
-        self.export_cfg.first_prompt = false;
-        self.export_cfg.format_override = Some(ext);
-        self.spawn_save_selected(indices);
-        self.export_cfg.save_mode = prev_mode;
-        self.export_cfg.first_prompt = prev_prompt;
-        self.export_cfg.format_override = prev_format;
+        targets.sort();
+        targets.dedup();
+        let before = self.capture_list_selection_snapshot();
+        let before_items = self.capture_list_undo_items_by_paths(&targets);
+        for path in &targets {
+            let src_ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            if src_ext == ext {
+                self.format_override.remove(path);
+            } else {
+                self.format_override.insert(path.clone(), ext.clone());
+            }
+            self.refresh_display_name_for_path(path);
+        }
+        self.record_list_update_from_paths(&targets, before_items, before);
+        self.refresh_audio_after_sample_rate_change(&targets);
     }
 
     pub(super) fn drain_export_results(&mut self, ctx: &egui::Context) {
@@ -738,6 +801,8 @@ impl super::WavesPreviewer {
                     self.sample_rate_override.remove(p);
                     self.sample_rate_probe_cache.remove(p);
                     self.bit_depth_override.remove(p);
+                    self.format_override.remove(p);
+                    self.refresh_display_name_for_path(p);
                 }
                 let success_set: std::collections::HashSet<PathBuf> =
                     res.success_paths.iter().cloned().collect();
@@ -768,6 +833,21 @@ impl super::WavesPreviewer {
                         }
                     }
                 }
+                let mut format_success: Vec<(PathBuf, PathBuf)> = Vec::new();
+                for (src, dst) in &self.saving_format_targets {
+                    if success_set.contains(dst) {
+                        format_success.push((src.clone(), dst.clone()));
+                    }
+                }
+                for (src, dst) in &format_success {
+                    self.mark_edit_saved_for_path(src);
+                    self.replace_path_in_state(src, dst);
+                    self.sample_rate_override.remove(dst);
+                    self.sample_rate_probe_cache.remove(dst);
+                    self.bit_depth_override.remove(dst);
+                    self.format_override.remove(dst);
+                    self.refresh_display_name_for_path(dst);
+                }
                 let mut virtual_success: Vec<(PathBuf, PathBuf)> = Vec::new();
                 for (src, dst) in &self.saving_virtual {
                     if success_set.contains(dst) {
@@ -780,23 +860,34 @@ impl super::WavesPreviewer {
                     self.sample_rate_override.remove(src);
                     self.sample_rate_probe_cache.remove(src);
                     self.bit_depth_override.remove(src);
+                    self.format_override.remove(src);
                     self.replace_path_in_state(src, dst);
                     self.sample_rate_override.remove(dst);
                     self.sample_rate_probe_cache.remove(dst);
                     self.bit_depth_override.remove(dst);
+                    self.format_override.remove(dst);
                 }
                 match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                     SaveMode::Overwrite => {
-                        if !self.saving_sources.is_empty() {
+                        let mut reload_paths = self.saving_sources.clone();
+                        for (_src, dst) in &format_success {
+                            reload_paths.push(dst.clone());
+                        }
+                        reload_paths.sort();
+                        reload_paths.dedup();
+                        if !reload_paths.is_empty() {
                             self.ensure_meta_pool();
-                            let sources = self.saving_sources.clone();
-                            for p in sources {
+                            for p in reload_paths.iter() {
                                 self.clear_meta_for_path(&p);
-                                self.meta_inflight.remove(&p);
-                                self.queue_meta_for_path(&p, false);
+                                self.meta_inflight.remove(p);
+                                self.queue_meta_for_path(p, false);
                             }
                         }
-                        if let Some(path) = self.saving_sources.get(0).cloned() {
+                        if let Some(path) = format_success
+                            .first()
+                            .map(|(_, dst)| dst.clone())
+                            .or_else(|| self.saving_sources.get(0).cloned())
+                        {
                             if let Some(idx) = self.row_for_path(&path) {
                                 self.select_and_load(idx, true);
                             }
@@ -833,6 +924,7 @@ impl super::WavesPreviewer {
                 }
                 self.saving_sources.clear();
                 self.saving_virtual.clear();
+                self.saving_format_targets.clear();
                 self.saving_edit_sources.clear();
                 self.saving_mode = None;
             }

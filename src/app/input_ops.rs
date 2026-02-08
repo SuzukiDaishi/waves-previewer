@@ -97,6 +97,8 @@ impl super::WavesPreviewer {
                         self.clear_preview_if_any(prev);
                     }
                     self.active_tab = None;
+                    self.pending_activate_path = None;
+                    self.pending_activate_ready = false;
                     self.audio.stop();
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
@@ -109,9 +111,11 @@ impl super::WavesPreviewer {
                             }
                         }
                         if let Some(tab) = self.tabs.get(tab_idx) {
+                            let tab_path = tab.path.clone();
                             self.active_tab = Some(tab_idx);
                             self.audio.stop();
-                            self.pending_activate_path = Some(tab.path.clone());
+                            self.debug_mark_tab_switch_start(&tab_path);
+                            self.queue_tab_activation(tab_path);
                         }
                     }
                 }

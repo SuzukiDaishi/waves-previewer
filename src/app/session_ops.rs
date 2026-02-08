@@ -14,9 +14,9 @@ use super::project::{
     resolve_path, save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio,
     serialize_project, spectro_config_from_project, tool_kind_from_str, view_mode_from_str,
     ProjectApp, ProjectBitDepthOverride, ProjectEdit, ProjectExportPolicy, ProjectExternalSource,
-    ProjectExternalState, ProjectFile, ProjectList, ProjectListColumns, ProjectListItem,
-    ProjectSampleRateOverride, ProjectToolState, ProjectVirtualItem, ProjectVirtualOp,
-    ProjectVirtualSource,
+    ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns,
+    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectVirtualItem,
+    ProjectVirtualOp, ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -255,6 +255,21 @@ impl super::WavesPreviewer {
             })
             .collect();
         bit_depth_overrides.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut format_overrides: Vec<ProjectFormatOverride> = self
+            .format_override
+            .iter()
+            .filter_map(|(path, format)| {
+                let ext = format.trim().trim_start_matches('.').to_ascii_lowercase();
+                if ext.is_empty() || !crate::audio_io::is_supported_extension(&ext) {
+                    return None;
+                }
+                Some(ProjectFormatOverride {
+                    path: rel_path(path, base_dir),
+                    format: ext,
+                })
+            })
+            .collect();
+        format_overrides.sort_by(|a, b| a.path.cmp(&b.path));
         let mut virtual_items: Vec<ProjectVirtualItem> = Vec::new();
         let mut virtual_sidecar_index = 0usize;
         for item in self
@@ -338,6 +353,7 @@ impl super::WavesPreviewer {
             items: list_items,
             sample_rate_overrides,
             bit_depth_overrides,
+            format_overrides,
             virtual_items,
         };
         let key_column = self
@@ -903,6 +919,20 @@ impl super::WavesPreviewer {
             };
             let path = resolve_path(&override_item.path, &base_dir);
             self.bit_depth_override.insert(path, depth);
+        }
+        self.format_override.clear();
+        for override_item in project.list.format_overrides.iter() {
+            let ext = override_item
+                .format
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase();
+            if ext.is_empty() || !crate::audio_io::is_supported_extension(&ext) {
+                continue;
+            }
+            let path = resolve_path(&override_item.path, &base_dir);
+            self.format_override.insert(path.clone(), ext);
+            self.refresh_display_name_for_path(&path);
         }
         self.external_load_queue.clear();
         self.pending_external_restore = None;

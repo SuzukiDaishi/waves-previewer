@@ -1,11 +1,13 @@
 use std::path::Path;
 
-use crate::plugin::protocol::{PluginDescriptorInfo, PluginParamInfo, PluginParamValue};
+use crate::plugin::protocol::{GuiCapabilities, PluginDescriptorInfo, PluginParamInfo, PluginParamValue};
 
 #[cfg(feature = "plugin_native_vst3")]
 mod native {
     use super::*;
+    use std::collections::HashMap;
     use std::mem::ManuallyDrop;
+    use std::sync::{Arc, Mutex};
     use std::ffi::c_void;
     use std::ffi::OsStr;
     use std::path::PathBuf;
@@ -15,12 +17,25 @@ mod native {
     use crate::plugin::backends::plugin_display_name;
     use crate::plugin::PluginFormat;
     use vst3::{Class, ComPtr, ComWrapper, Interface, Steinberg};
+    use vst3::Steinberg::{IPlugView, IPlugViewTrait};
     use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
     use vst3::Steinberg::Vst::{
         AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IAudioProcessorTrait, IComponent,
         IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint, IConnectionPointTrait,
         IEditController, IEditControllerTrait, IHostApplication, IHostApplicationTrait, ParameterInfo, ProcessData, ProcessSetup,
         TChar,
+    };
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    #[cfg(windows)]
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    #[cfg(windows)]
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsWindow,
+        PeekMessageW,
+        RegisterClassW, SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+        CW_USEDEFAULT, MSG, PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSW,
+        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
     fn debug_enabled() -> bool {
@@ -75,7 +90,16 @@ mod native {
         }
     }
 
-    struct ComponentHandler;
+    type ParamQueue = Arc<Mutex<Vec<(Steinberg::Vst::ParamID, f32)>>>;
+
+    struct ComponentHandler {
+        queue: Option<ParamQueue>,
+    }
+    impl ComponentHandler {
+        fn new(queue: Option<ParamQueue>) -> Self {
+            Self { queue }
+        }
+    }
     impl Class for ComponentHandler {
         type Interfaces = (IComponentHandler,);
     }
@@ -85,9 +109,14 @@ mod native {
         }
         unsafe fn performEdit(
             &self,
-            _id: Steinberg::Vst::ParamID,
-            _value_normalized: Steinberg::Vst::ParamValue,
+            id: Steinberg::Vst::ParamID,
+            value_normalized: Steinberg::Vst::ParamValue,
         ) -> Steinberg::tresult {
+            if let Some(queue) = self.queue.as_ref() {
+                if let Ok(mut guard) = queue.lock() {
+                    guard.push((id, value_normalized as f32));
+                }
+            }
             Steinberg::kResultOk
         }
         unsafe fn endEdit(&self, _id: Steinberg::Vst::ParamID) -> Steinberg::tresult {
@@ -183,6 +212,81 @@ mod native {
     fn tchar_array_to_string(chars: &[TChar]) -> String {
         let end = chars.iter().position(|&v| v == 0).unwrap_or(chars.len());
         String::from_utf16_lossy(&chars[..end]).trim().to_string()
+    }
+
+    #[cfg(windows)]
+    fn to_wide_null(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(windows)]
+    unsafe extern "system" fn gui_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_CLOSE => {
+                DestroyWindow(hwnd);
+                0
+            }
+            WM_DESTROY => 0,
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_native_gui_window(title: &str, width: i32, height: i32) -> Result<HWND, String> {
+        unsafe {
+            let class_name = to_wide_null("NeoWavesPluginGuiHostWindow");
+            let hinstance = GetModuleHandleW(std::ptr::null());
+            let wc = WNDCLASSW {
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(gui_wnd_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinstance,
+                hIcon: 0,
+                hCursor: 0,
+                hbrBackground: 0,
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+            };
+            let _ = RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                0,
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                width.max(300),
+                height.max(180),
+                0,
+                0,
+                hinstance,
+                std::ptr::null(),
+            );
+            if hwnd == 0 {
+                return Err("CreateWindowExW failed".to_string());
+            }
+            let title_w = to_wide_null(title);
+            let _ = SetWindowTextW(hwnd, title_w.as_ptr());
+            ShowWindow(hwnd, SW_SHOW);
+            Ok(hwnd)
+        }
+    }
+
+    #[cfg(windows)]
+    fn pump_gui_window_messages() {
+        unsafe {
+            let mut msg = std::mem::zeroed::<MSG>();
+            while PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
     }
 
     struct LoadedFactory {
@@ -473,6 +577,14 @@ mod native {
         Ok(out)
     }
 
+    pub(crate) fn gui_capabilities(plugin_path: &Path) -> GuiCapabilities {
+        GuiCapabilities {
+            supports_native_gui: cfg!(windows) && find_valid_binary(plugin_path).is_some(),
+            supports_param_feedback: true,
+            supports_state_sync: false,
+        }
+    }
+
     pub(crate) fn probe(
         plugin_path: &Path,
     ) -> Result<(PluginDescriptorInfo, Vec<PluginParamInfo>, Option<String>), String> {
@@ -545,7 +657,7 @@ mod native {
             let host = ComWrapper::new(HostApplication)
                 .to_com_ptr::<IHostApplication>()
                 .ok_or_else(|| "failed to create IHostApplication".to_string())?;
-            let handler = ComWrapper::new(ComponentHandler)
+            let handler = ComWrapper::new(ComponentHandler::new(None))
                 .to_com_ptr::<IComponentHandler>()
                 .ok_or_else(|| "failed to create IComponentHandler".to_string())?;
 
@@ -701,6 +813,282 @@ mod native {
         Ok(state_blob_b64.map(|v| v.to_string()))
     }
 
+    pub(crate) struct GuiSession {
+        _loaded: ManuallyDrop<LoadedFactory>,
+        _host: ComPtr<IHostApplication>,
+        _handler: ComPtr<IComponentHandler>,
+        component: ComPtr<IComponent>,
+        controller: ComPtr<IEditController>,
+        controller_from_component: bool,
+        view: ComPtr<IPlugView>,
+        #[cfg(windows)]
+        hwnd: HWND,
+        #[cfg(windows)]
+        last_client_width: i32,
+        #[cfg(windows)]
+        last_client_height: i32,
+        param_ids: Vec<(String, Steinberg::Vst::ParamID)>,
+        last_values: HashMap<Steinberg::Vst::ParamID, f32>,
+        queue: ParamQueue,
+        state_blob_b64: Option<String>,
+    }
+
+    #[cfg(windows)]
+    fn current_client_size(hwnd: HWND) -> Option<(i32, i32)> {
+        unsafe {
+            let mut rect = std::mem::zeroed::<RECT>();
+            if GetClientRect(hwnd, &mut rect) == 0 {
+                return None;
+            }
+            let w = (rect.right - rect.left).max(1);
+            let h = (rect.bottom - rect.top).max(1);
+            Some((w, h))
+        }
+    }
+
+    fn read_param_snapshot(
+        controller: &ComPtr<IEditController>,
+        param_ids: &[(String, Steinberg::Vst::ParamID)],
+    ) -> Vec<PluginParamValue> {
+        let mut out = Vec::with_capacity(param_ids.len());
+        for (id, pid) in param_ids {
+            let mut value = unsafe { controller.getParamNormalized(*pid) as f32 };
+            if !value.is_finite() {
+                value = 0.0;
+            }
+            out.push(PluginParamValue {
+                id: id.clone(),
+                normalized: value.clamp(0.0, 1.0),
+            });
+        }
+        out
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn gui_open(
+        plugin_path: &Path,
+        state_blob_b64: Option<&str>,
+        params: &[PluginParamValue],
+    ) -> Result<(GuiSession, Vec<PluginParamInfo>, Option<String>), String> {
+        if !is_audio_effect_plugin(plugin_path).unwrap_or(true) {
+            return Err(format!(
+                "instrument/synth plugins are excluded from Plugin FX ({})",
+                plugin_path.display()
+            ));
+        }
+        let binary = find_valid_binary(plugin_path).ok_or_else(|| {
+            format!(
+                "vst3 GUI failed: GetPluginFactory not found ({})",
+                plugin_path.display()
+            )
+        })?;
+        unsafe {
+            let loaded = ManuallyDrop::new(load_factory(&binary)?);
+            let (component_cid, controller_cid) = find_component_and_controller_cids(&loaded.factory)?;
+            let host = ComWrapper::new(HostApplication)
+                .to_com_ptr::<IHostApplication>()
+                .ok_or_else(|| "failed to create IHostApplication".to_string())?;
+            let queue: ParamQueue = Arc::new(Mutex::new(Vec::new()));
+            let handler = ComWrapper::new(ComponentHandler::new(Some(queue.clone())))
+                .to_com_ptr::<IComponentHandler>()
+                .ok_or_else(|| "failed to create IComponentHandler".to_string())?;
+            let component = create_component_from_class(&loaded.factory, &component_cid)
+                .ok_or_else(|| "failed to create VST3 IComponent".to_string())?;
+            let init_r = component.initialize(host.as_ptr() as *mut Steinberg::FUnknown);
+            if init_r != Steinberg::kResultOk && init_r != Steinberg::kResultTrue {
+                return Err(format!("component.initialize failed: {init_r}"));
+            }
+            let mut controller_from_component = true;
+            let controller = if let Some(ctrl) = component.cast::<IEditController>() {
+                ctrl
+            } else if let Some(cid) = controller_cid {
+                controller_from_component = false;
+                let ctrl = create_controller_from_class(&loaded.factory, &cid)
+                    .ok_or_else(|| "failed to create VST3 IEditController".to_string())?;
+                let r = ctrl.initialize(host.as_ptr() as *mut Steinberg::FUnknown);
+                if r != Steinberg::kResultOk && r != Steinberg::kResultTrue {
+                    return Err(format!("controller.initialize failed: {r}"));
+                }
+                ctrl
+            } else {
+                return Err("controller not available".to_string());
+            };
+            let _ = controller.setComponentHandler(handler.as_ptr());
+            if let (Some(comp_cp), Some(ctrl_cp)) = (
+                component.cast::<IConnectionPoint>(),
+                controller.cast::<IConnectionPoint>(),
+            ) {
+                let _ = comp_cp.connect(ctrl_cp.as_ptr());
+                let _ = ctrl_cp.connect(comp_cp.as_ptr());
+                std::mem::forget(comp_cp);
+                std::mem::forget(ctrl_cp);
+            }
+            let mut ui_params = collect_controller_params(&controller);
+            for p in params {
+                if let Some(pid) = parse_param_id(&p.id) {
+                    let _ = controller.setParamNormalized(pid, p.normalized.clamp(0.0, 1.0) as f64);
+                }
+            }
+
+            let view_raw = controller.createView(Steinberg::Vst::ViewType::kEditor);
+            let view = ComPtr::from_raw(view_raw)
+                .ok_or_else(|| "plugin does not expose an editor view".to_string())?;
+            let platform_ok = view.isPlatformTypeSupported(Steinberg::kPlatformTypeHWND);
+            if platform_ok != Steinberg::kResultOk && platform_ok != Steinberg::kResultTrue {
+                return Err("plugin GUI does not support HWND host".to_string());
+            }
+            let mut rect = Steinberg::ViewRect {
+                left: 0,
+                top: 0,
+                right: 640,
+                bottom: 420,
+            };
+            let _ = view.getSize(&mut rect);
+            let width = (rect.right - rect.left).max(360);
+            let height = (rect.bottom - rect.top).max(220);
+            let hwnd = create_native_gui_window(&plugin_display_name(plugin_path), width, height)?;
+            let attach_r = view.attached(hwnd as *mut c_void, Steinberg::kPlatformTypeHWND);
+            if attach_r != Steinberg::kResultOk && attach_r != Steinberg::kResultTrue {
+                let _ = DestroyWindow(hwnd);
+                return Err(format!("view.attached failed: {attach_r}"));
+            }
+            let _ = view.onSize(&mut rect);
+            let _ = component.setActive(1);
+            let (last_client_width, last_client_height) =
+                current_client_size(hwnd).unwrap_or((width.max(1), height.max(1)));
+            let param_ids: Vec<(String, Steinberg::Vst::ParamID)> = ui_params
+                .iter()
+                .filter_map(|p| parse_param_id(&p.id).map(|pid| (p.id.clone(), pid)))
+                .collect();
+            if ui_params.is_empty() {
+                ui_params = Vec::new();
+            }
+            let mut last_values = HashMap::new();
+            for (id, pid) in &param_ids {
+                let mut value = controller.getParamNormalized(*pid) as f32;
+                if !value.is_finite() {
+                    value = 0.0;
+                }
+                last_values.insert(*pid, value.clamp(0.0, 1.0));
+                let _ = id;
+            }
+            Ok((
+                GuiSession {
+                    _loaded: loaded,
+                    _host: host,
+                    _handler: handler,
+                    component,
+                    controller,
+                    controller_from_component,
+                    view,
+                    hwnd,
+                    last_client_width,
+                    last_client_height,
+                    param_ids,
+                    last_values,
+                    queue,
+                    state_blob_b64: state_blob_b64.map(|s| s.to_string()),
+                },
+                ui_params,
+                None,
+            ))
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn gui_open(
+        _plugin_path: &Path,
+        _state_blob_b64: Option<&str>,
+        _params: &[PluginParamValue],
+    ) -> Result<(GuiSession, Vec<PluginParamInfo>, Option<String>), String> {
+        Err("VST3 native GUI is currently Windows-only".to_string())
+    }
+
+    pub(crate) fn gui_poll(
+        session: &mut GuiSession,
+    ) -> Result<(Vec<PluginParamValue>, Option<Vec<PluginParamValue>>, Option<String>, bool), String> {
+        #[cfg(windows)]
+        {
+            pump_gui_window_messages();
+            if unsafe { IsWindow(session.hwnd) } == 0 {
+                let snapshot = read_param_snapshot(&session.controller, &session.param_ids);
+                return Ok((Vec::new(), Some(snapshot), session.state_blob_b64.clone(), true));
+            }
+            if let Some((w, h)) = current_client_size(session.hwnd) {
+                if w != session.last_client_width || h != session.last_client_height {
+                    session.last_client_width = w;
+                    session.last_client_height = h;
+                    let mut rect = Steinberg::ViewRect {
+                        left: 0,
+                        top: 0,
+                        right: w,
+                        bottom: h,
+                    };
+                    unsafe {
+                        let _ = session.view.onSize(&mut rect);
+                    }
+                }
+            }
+        }
+        let mut deltas: HashMap<Steinberg::Vst::ParamID, f32> = HashMap::new();
+        if let Ok(mut guard) = session.queue.lock() {
+            for (pid, val) in guard.drain(..) {
+                deltas.insert(pid, val.clamp(0.0, 1.0));
+            }
+        }
+        for (id, pid) in &session.param_ids {
+            let mut value = unsafe { session.controller.getParamNormalized(*pid) as f32 };
+            if !value.is_finite() {
+                value = 0.0;
+            }
+            value = value.clamp(0.0, 1.0);
+            let changed = session
+                .last_values
+                .get(pid)
+                .map(|prev| (value - *prev).abs() > 0.000_01)
+                .unwrap_or(true);
+            if changed {
+                deltas.insert(*pid, value);
+                session.last_values.insert(*pid, value);
+            }
+            let _ = id;
+        }
+        let mut out = Vec::with_capacity(deltas.len());
+        for (id, pid) in &session.param_ids {
+            if let Some(value) = deltas.get(pid) {
+                out.push(PluginParamValue {
+                    id: id.clone(),
+                    normalized: value.clamp(0.0, 1.0),
+                });
+            }
+        }
+        Ok((out, None, session.state_blob_b64.clone(), false))
+    }
+
+    pub(crate) fn gui_close(
+        mut session: GuiSession,
+    ) -> Result<(Option<Vec<PluginParamValue>>, Option<String>), String> {
+        let snapshot = read_param_snapshot(&session.controller, &session.param_ids);
+        #[cfg(windows)]
+        unsafe {
+            let _ = session.view.removed();
+            if IsWindow(session.hwnd) != 0 {
+                let _ = DestroyWindow(session.hwnd);
+            }
+        }
+        let _ = unsafe { session.component.setActive(0) };
+        if !session.controller_from_component {
+            let _ = unsafe { session.controller.terminate() };
+        }
+        let _ = unsafe { session.component.terminate() };
+        std::mem::forget(session._host);
+        std::mem::forget(session._handler);
+        std::mem::forget(session.view);
+        std::mem::forget(session.controller);
+        std::mem::forget(session.component);
+        Ok((Some(snapshot), session.state_blob_b64.take()))
+    }
+
     pub(crate) fn is_audio_effect_plugin(plugin_path: &Path) -> Result<bool, String> {
         let binary = find_valid_binary(plugin_path).ok_or_else(|| {
             format!(
@@ -765,9 +1153,42 @@ mod native {
     pub(crate) fn is_audio_effect_plugin(_plugin_path: &Path) -> Result<bool, String> {
         Err("native vst3 backend unavailable".to_string())
     }
+
+    pub(crate) fn gui_capabilities(_plugin_path: &Path) -> GuiCapabilities {
+        GuiCapabilities {
+            supports_native_gui: false,
+            supports_param_feedback: false,
+            supports_state_sync: false,
+        }
+    }
+
+    pub(crate) struct GuiSession;
+
+    pub(crate) fn gui_open(
+        _plugin_path: &Path,
+        _state_blob_b64: Option<&str>,
+        _params: &[PluginParamValue],
+    ) -> Result<(GuiSession, Vec<PluginParamInfo>, Option<String>), String> {
+        Err("native vst3 backend unavailable".to_string())
+    }
+
+    pub(crate) fn gui_poll(
+        _session: &mut GuiSession,
+    ) -> Result<(Vec<PluginParamValue>, Option<Vec<PluginParamValue>>, Option<String>, bool), String> {
+        Err("native vst3 backend unavailable".to_string())
+    }
+
+    pub(crate) fn gui_close(
+        _session: GuiSession,
+    ) -> Result<(Option<Vec<PluginParamValue>>, Option<String>), String> {
+        Err("native vst3 backend unavailable".to_string())
+    }
 }
 
-pub(crate) use native::{is_audio_effect_plugin, probe, process, scan_paths};
+pub(crate) use native::{
+    gui_capabilities, gui_close, gui_open, gui_poll, is_audio_effect_plugin, probe, process,
+    scan_paths, GuiSession,
+};
 
 #[cfg(test)]
 mod tests {

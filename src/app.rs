@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::audio::AudioEngine;
@@ -58,6 +59,7 @@ mod transcript;
 mod transcript_ops;
 mod types;
 mod ui;
+mod zoo_ops;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
 use self::session_ops::ProjectOpenState;
@@ -105,6 +107,18 @@ struct PendingExternalRestore {
     visible_columns: Vec<String>,
     key_column: Option<String>,
     show_unmatched: bool,
+}
+
+#[derive(Clone)]
+struct ZooFrameImage {
+    image: egui::ColorImage,
+    delay_s: f32,
+}
+
+#[derive(Clone)]
+struct ZooFrameTexture {
+    texture: egui::TextureHandle,
+    delay_s: f32,
 }
 
 pub struct WavesPreviewer {
@@ -250,8 +264,31 @@ pub struct WavesPreviewer {
     plugin_scan_state: Option<PluginScanState>,
     plugin_probe_state: Option<PluginProbeState>,
     plugin_process_state: Option<PluginProcessState>,
+    plugin_gui_state: Option<PluginGuiSessionState>,
     plugin_job_id: u64,
     plugin_temp_seq: u64,
+    zoo_enabled: bool,
+    zoo_walk_enabled: bool,
+    zoo_voice_enabled: bool,
+    zoo_use_bpm: bool,
+    zoo_gif_path: Option<PathBuf>,
+    zoo_voice_path: Option<PathBuf>,
+    zoo_scale: f32,
+    zoo_opacity: f32,
+    zoo_speed: f32,
+    zoo_flip_manual: bool,
+    zoo_anim_clock: f32,
+    zoo_pos_x: f32,
+    zoo_dir: f32,
+    zoo_last_tick: std::time::Instant,
+    zoo_squish_until: Option<std::time::Instant>,
+    zoo_last_error: Option<String>,
+    zoo_texture_gen: u64,
+    zoo_frames_raw: Vec<ZooFrameImage>,
+    zoo_frames_tex: Vec<ZooFrameTexture>,
+    zoo_voice_cache_path: Option<PathBuf>,
+    zoo_voice_cache: Option<Arc<crate::audio::AudioBuffer>>,
+    zoo_voice_audio: Option<AudioEngine>,
     // background heavy apply for editor (pitch/stretch)
     editor_apply_state: Option<EditorApplyState>,
     // background decode for editor (prefix + full)
@@ -286,6 +323,7 @@ pub struct WavesPreviewer {
     batch_rename_error: Option<String>,
     saving_sources: Vec<PathBuf>,
     saving_virtual: Vec<(PathBuf, PathBuf)>,
+    saving_format_targets: Vec<(PathBuf, PathBuf)>,
     saving_edit_sources: Vec<PathBuf>,
     saving_mode: Option<SaveMode>,
     overwrite_undo_stack: Vec<Vec<(PathBuf, PathBuf)>>,
@@ -293,12 +331,13 @@ pub struct WavesPreviewer {
     // LUFS with Gain recompute support
     lufs_override: HashMap<PathBuf, f32>,
     lufs_recalc_deadline: HashMap<PathBuf, std::time::Instant>,
-    lufs_rx2: Option<std::sync::mpsc::Receiver<(PathBuf, f32)>>,
+    lufs_rx2: Option<std::sync::mpsc::Receiver<(PathBuf, f32, f32)>>,
     lufs_worker_busy: bool,
     // Sample rate conversion (non-destructive)
     sample_rate_override: HashMap<PathBuf, u32>,
     sample_rate_probe_cache: HashMap<PathBuf, u32>,
     bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
+    format_override: HashMap<PathBuf, String>,
     src_quality: SrcQuality,
     show_resample_dialog: bool,
     resample_targets: Vec<PathBuf>,
@@ -309,6 +348,7 @@ pub struct WavesPreviewer {
     leave_intent: Option<LeaveIntent>,
     show_leave_prompt: bool,
     pending_activate_path: Option<PathBuf>,
+    pending_activate_ready: bool,
     // Heavy preview worker for Pitch/Stretch (mono)
     heavy_preview_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
     heavy_preview_tool: Option<ToolKind>,
@@ -336,7 +376,13 @@ pub struct WavesPreviewer {
 }
 
 impl WavesPreviewer {
+    fn queue_tab_activation(&mut self, path: PathBuf) {
+        self.pending_activate_path = Some(path);
+        self.pending_activate_ready = false;
+    }
+
     fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
+        self.close_plugin_gui_for_tab(idx);
         self.clear_preview_if_any(idx);
         self.cache_dirty_tab_at(idx);
         self.audio.stop();
@@ -1748,8 +1794,31 @@ impl WavesPreviewer {
             plugin_scan_state: None,
             plugin_probe_state: None,
             plugin_process_state: None,
+            plugin_gui_state: None,
             plugin_job_id: 0,
             plugin_temp_seq: 0,
+            zoo_enabled: false,
+            zoo_walk_enabled: true,
+            zoo_voice_enabled: false,
+            zoo_use_bpm: true,
+            zoo_gif_path: None,
+            zoo_voice_path: None,
+            zoo_scale: 1.0,
+            zoo_opacity: 1.0,
+            zoo_speed: 140.0,
+            zoo_flip_manual: false,
+            zoo_anim_clock: 0.0,
+            zoo_pos_x: 0.0,
+            zoo_dir: 1.0,
+            zoo_last_tick: std::time::Instant::now(),
+            zoo_squish_until: None,
+            zoo_last_error: None,
+            zoo_texture_gen: 0,
+            zoo_frames_raw: Vec::new(),
+            zoo_frames_tex: Vec::new(),
+            zoo_voice_cache_path: None,
+            zoo_voice_cache: None,
+            zoo_voice_audio: None,
             editor_apply_state: None,
             editor_decode_state: None,
             editor_decode_job_id: 0,
@@ -1786,6 +1855,7 @@ impl WavesPreviewer {
             batch_rename_error: None,
             saving_sources: Vec::new(),
             saving_virtual: Vec::new(),
+            saving_format_targets: Vec::new(),
             saving_edit_sources: Vec::new(),
             saving_mode: None,
             overwrite_undo_stack: Vec::new(),
@@ -1797,6 +1867,7 @@ impl WavesPreviewer {
             sample_rate_override: HashMap::new(),
             sample_rate_probe_cache: HashMap::new(),
             bit_depth_override: HashMap::new(),
+            format_override: HashMap::new(),
             src_quality: SrcQuality::Good,
             show_resample_dialog: false,
             resample_targets: Vec::new(),
@@ -1806,6 +1877,7 @@ impl WavesPreviewer {
             leave_intent: None,
             show_leave_prompt: false,
             pending_activate_path: None,
+            pending_activate_ready: false,
             heavy_preview_rx: None,
             heavy_preview_tool: None,
             heavy_overlay_rx: None,
@@ -1827,6 +1899,7 @@ impl WavesPreviewer {
             test_dialogs: TestDialogQueue::default(),
         };
         app.load_prefs();
+        app.reload_zoo_gif_frames();
         app.load_tools_config();
         app.apply_startup_paths();
         app.setup_debug_automation();
@@ -2023,6 +2096,15 @@ impl WavesPreviewer {
 impl eframe::App for WavesPreviewer {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
+        let had_ui_input = ctx.input(|i| {
+            !i.events.is_empty()
+                || i.pointer.any_pressed()
+                || i.pointer.any_released()
+                || i.pointer.delta() != egui::Vec2::ZERO
+        });
+        if had_ui_input {
+            self.debug.ui_input_started_at = Some(frame_started);
+        }
         self.suppress_list_enter = false;
         if ctx.dragged_id().is_some() && !ctx.input(|i| i.pointer.any_down()) {
             if self.debug.cfg.enabled {
@@ -2122,6 +2204,8 @@ impl eframe::App for WavesPreviewer {
                         self.clear_preview_if_any(idx);
                     }
                     self.active_tab = None;
+                    self.pending_activate_path = None;
+                    self.pending_activate_ready = false;
                     self.audio.stop();
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
@@ -2152,6 +2236,7 @@ impl eframe::App for WavesPreviewer {
                             }
                             // mutate self safely here
                             self.active_tab = Some(i);
+                            self.debug_mark_tab_switch_start(&path_for_activate);
                             activate_path = Some(path_for_activate.clone());
                             self.audio.stop();
                         }
@@ -2723,72 +2808,78 @@ impl eframe::App for WavesPreviewer {
         });
         // When switching tabs, ensure the active tab's audio is loaded and loop state applied.
         let mut activated_tab_idx: Option<usize> = None;
-        if activate_path.is_none() {
-            if let Some(pending) = self.pending_activate_path.take() {
-                activate_path = Some(pending);
-            }
-        }
         if let Some(p) = activate_path {
-            if !self.apply_dirty_tab_audio_with_mode(&p) {
-                // Reload audio for the activated tab only; do not touch stored waveform
-                if self.is_virtual_path(&p) {
-                    let mut channels = self
-                        .active_tab
-                        .and_then(|idx| self.tabs.get(idx))
-                        .filter(|tab| tab.path == p)
-                        .map(|tab| tab.ch_samples.clone())
-                        .unwrap_or_default();
-                    if !channels.is_empty() {
-                        let virtual_in_sr = self
-                            .item_for_path(&p)
-                            .and_then(|item| item.virtual_state.as_ref().map(|v| v.sample_rate))
-                            .or_else(|| self.meta_for_path(&p).map(|m| m.sample_rate))
-                            .filter(|v| *v > 0)
-                            .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            self.queue_tab_activation(p);
+            ctx.request_repaint();
+        }
+        if let Some(pending) = self.pending_activate_path.clone() {
+            if !self.pending_activate_ready {
+                self.pending_activate_ready = true;
+                ctx.request_repaint();
+            } else {
+                let p = pending;
+                self.pending_activate_path = None;
+                self.pending_activate_ready = false;
+                if !self.apply_dirty_tab_audio_with_mode(&p) {
+                    // Reload the activated tab from in-memory samples first.
+                    let mut used_tab_samples = false;
+                    if let Some(idx) = self.active_tab {
+                        if let Some(tab) = self.tabs.get(idx) {
+                            if tab.path == p && !tab.ch_samples.is_empty() {
+                                used_tab_samples = true;
+                                let mut channels = tab.ch_samples.clone();
+                                let in_sr = self
+                                    .effective_sample_rate_for_path(&p)
+                                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                                match self.mode {
+                                    RateMode::Speed => {
+                                        self.apply_sample_rate_preview_for_path(
+                                            &p,
+                                            &mut channels,
+                                            in_sr,
+                                        );
+                                        self.audio.set_rate(self.playback_rate);
+                                        self.audio.set_samples_channels(channels);
+                                        self.audio.stop();
+                                    }
+                                    _ => {
+                                        self.audio.set_rate(1.0);
+                                        self.spawn_heavy_processing_from_channels(
+                                            p.clone(),
+                                            channels,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !used_tab_samples {
+                        // Defer decode to background worker to keep tab switching responsive.
+                        if let Some(idx) = self.active_tab {
+                            if let Some(tab) = self.tabs.get_mut(idx) {
+                                if tab.path == p && !tab.loading {
+                                    tab.loading = true;
+                                    self.spawn_editor_decode(p.clone());
+                                }
+                            }
+                        }
                         match self.mode {
-                            RateMode::Speed => {
-                                self.apply_sample_rate_preview_for_path(
-                                    &p,
-                                    &mut channels,
-                                    virtual_in_sr,
-                                );
-                                self.audio.set_rate(self.playback_rate);
-                                self.audio.set_samples_channels(channels);
-                                self.audio.stop();
-                            }
-                            _ => {
-                                self.audio.set_rate(1.0);
-                                self.spawn_heavy_processing_from_channels(p.clone(), channels);
-                            }
+                            RateMode::Speed => self.audio.set_rate(self.playback_rate),
+                            _ => self.audio.set_rate(1.0),
+                        }
+                        self.audio.stop();
+                    }
+                    if let Some(idx) = self.active_tab {
+                        if let Some(tab) = self.tabs.get(idx) {
+                            self.apply_loop_mode_for_tab(tab);
                         }
                     }
-                } else {
-                    match self.mode {
-                        RateMode::Speed => {
-                            let _ = crate::wave::prepare_for_speed_quality(
-                                &p,
-                                &self.audio,
-                                &mut Vec::new(),
-                                self.playback_rate,
-                                Self::to_wave_resample_quality(self.src_quality),
-                            );
-                            self.audio.set_rate(self.playback_rate);
-                        }
-                        _ => {
-                            self.audio.set_rate(1.0);
-                            self.spawn_heavy_processing(&p);
-                        }
-                    }
+                    // Update effective volume to include per-file gain for the activated tab
+                    self.apply_effective_volume();
                 }
-                if let Some(idx) = self.active_tab {
-                    if let Some(tab) = self.tabs.get(idx) {
-                        self.apply_loop_mode_for_tab(tab);
-                    }
-                }
-                // Update effective volume to include per-file gain for the activated tab
-                self.apply_effective_volume();
+                self.debug_mark_tab_switch_interactive(&p);
+                activated_tab_idx = self.active_tab;
             }
-            activated_tab_idx = self.active_tab;
         }
         if let Some(tab_idx) = activated_tab_idx {
             self.refresh_tool_preview_for_tab(tab_idx);
@@ -2797,11 +2888,40 @@ impl eframe::App for WavesPreviewer {
 
         if let Some(tab_idx) = self.active_tab {
             self.queue_spectrogram_for_tab(tab_idx);
+        } else {
+            self.ui_editor_zoo_overlay(ctx, None, ctx.content_rect());
         }
 
         // Busy overlay (only for blocking operations like export/apply)
         self.ui_busy_overlay(ctx);
-        ctx.request_repaint_after(Duration::from_millis(16));
+        let playing = self
+            .audio
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let fast_repaint = playing
+            || self.scan_in_progress
+            || self.processing.is_some()
+            || self.list_preview_rx.is_some()
+            || self.list_preview_pending_path.is_some()
+            || self.editor_decode_state.is_some()
+            || self.heavy_preview_rx.is_some()
+            || self.heavy_overlay_rx.is_some()
+            || self.editor_apply_state.is_some()
+            || self.plugin_process_state.is_some()
+            || self.export_state.is_some()
+            || self.csv_export_state.is_some()
+            || self.bulk_resample_state.is_some();
+        let repaint_ms = if fast_repaint {
+            16
+        } else if self.zoo_enabled && self.active_tab.is_none() {
+            50
+        } else if self.zoo_enabled {
+            33
+        } else {
+            80
+        };
+        ctx.request_repaint_after(Duration::from_millis(repaint_ms));
 
         // Leave dirty editor confirmation
         if self.show_leave_prompt {
@@ -2826,7 +2946,7 @@ impl eframe::App for WavesPreviewer {
                                     if let Some(t) = self.tabs.get(i) {
                                         self.active_tab = Some(i);
                                         self.audio.stop();
-                                        self.pending_activate_path = Some(t.path.clone());
+                                        self.queue_tab_activation(t.path.clone());
                                     }
                                     self.rebuild_current_buffer_with_mode();
                                 }
@@ -3099,6 +3219,10 @@ impl eframe::App for WavesPreviewer {
         // Hotkeys after UI so focus state is accurate
         self.handle_clipboard_hotkeys(ctx);
         self.handle_undo_redo_hotkeys(ctx);
+        if let Some(started_at) = self.debug.ui_input_started_at.take() {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            self.debug_push_ui_input_to_paint_sample(elapsed_ms);
+        }
         let frame_ms = frame_started.elapsed().as_secs_f64() * 1000.0;
         self.debug.frame_last_ms = frame_ms as f32;
         self.debug.frame_sum_ms += frame_ms;

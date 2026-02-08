@@ -6,3 +6,4 @@ pub(super) mod list;
 pub(super) mod tools;
 pub(super) mod topbar;
 pub(super) mod transcript;
+pub(super) mod zoo;

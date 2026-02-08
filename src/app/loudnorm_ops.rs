@@ -12,13 +12,22 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_lufs_recalc_results(&mut self) {
+        let Some(rx) = self.lufs_rx2.take() else {
+            return;
+        };
         let mut got_any = false;
-        if let Some(rx) = &self.lufs_rx2 {
-            while let Ok((p, v)) = rx.try_recv() {
-                self.lufs_override.insert(p, v);
-                got_any = true;
-            }
+        let mut drained = 0usize;
+        while drained < 64 {
+            let Ok((p, v, elapsed_ms)) = rx.try_recv() else {
+                break;
+            };
+            self.lufs_override.insert(p, v);
+            self.debug_push_bg_lufs_job_sample(elapsed_ms);
+            self.debug_push_bg_dbfs_job_sample(elapsed_ms);
+            got_any = true;
+            drained += 1;
         }
+        self.lufs_rx2 = Some(rx);
         if got_any {
             self.lufs_worker_busy = false;
         }
@@ -49,6 +58,7 @@ impl super::WavesPreviewer {
         self.lufs_rx2 = Some(rx);
         self.lufs_worker_busy = true;
         std::thread::spawn(move || {
+            let started = std::time::Instant::now();
             let res = (|| -> anyhow::Result<f32> {
                 let (mut chans, sr) = crate::wave::decode_wav_multi(&path)?;
                 // Apply pending gain before LUFS measurement to reflect effective loudness.
@@ -64,7 +74,8 @@ impl super::WavesPreviewer {
                 Ok(v) => v,
                 Err(_) => f32::NEG_INFINITY,
             };
-            let _ = tx.send((path, val));
+            let elapsed_ms = started.elapsed().as_secs_f32() * 1000.0;
+            let _ = tx.send((path, val, elapsed_ms));
         });
     }
 }

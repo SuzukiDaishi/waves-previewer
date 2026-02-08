@@ -158,6 +158,8 @@ impl crate::app::WavesPreviewer {
                             ui.close();
                         }
                         ui.separator();
+                        self.ui_zoo_menu(ui, ctx);
+                        ui.separator();
                         let mcp_on = self.mcp_cmd_rx.is_some();
                         if !mcp_on {
                             if ui.button("Start MCP (stdio)").clicked() {
@@ -253,6 +255,13 @@ impl crate::app::WavesPreviewer {
                                     .shared
                                     .playing
                                     .load(std::sync::atomic::Ordering::Relaxed)));
+                    let list_loading_elapsed = self
+                        .debug
+                        .list_select_started_at
+                        .map(|t| t.elapsed())
+                        .unwrap_or_default();
+                    let list_loading_visible =
+                        list_loading && list_loading_elapsed >= Duration::from_millis(120);
                     let show_activity = self.scan_in_progress
                         || self.processing.is_some()
                         || self.editor_decode_state.is_some()
@@ -264,7 +273,7 @@ impl crate::app::WavesPreviewer {
                         || !self.spectro_inflight.is_empty()
                         || self.project_open_state.is_some()
                         || self.bulk_resample_state.is_some()
-                        || list_loading;
+                        || list_loading_visible;
                     if show_activity {
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
@@ -310,12 +319,8 @@ impl crate::app::WavesPreviewer {
                                     }
                                 }
                             }
-                            if list_loading {
-                                let elapsed = self
-                                    .debug
-                                    .list_select_started_at
-                                    .map(|t| t.elapsed().as_secs_f32())
-                                    .unwrap_or(0.0);
+                            if list_loading_visible {
+                                let elapsed = list_loading_elapsed.as_secs_f32();
                                 ui.add(egui::Spinner::new());
                                 let label = if elapsed >= 0.1 {
                                     format!("Loading audio... ({elapsed:.1}s)")

@@ -215,6 +215,44 @@ impl WavesPreviewer {
                 if !raw.is_empty() {
                     plugin_paths.push(PathBuf::from(raw));
                 }
+            } else if let Some(rest) = line.strip_prefix("zoo_enabled=") {
+                self.zoo_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("zoo_walk_enabled=") {
+                self.zoo_walk_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("zoo_voice_enabled=") {
+                self.zoo_voice_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("zoo_use_bpm=") {
+                self.zoo_use_bpm = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("zoo_gif_path=") {
+                let raw = rest.trim().trim_matches('"');
+                if !raw.is_empty() {
+                    self.zoo_gif_path = Some(PathBuf::from(raw));
+                }
+            } else if let Some(rest) = line.strip_prefix("zoo_voice_path=") {
+                let raw = rest.trim().trim_matches('"');
+                if !raw.is_empty() {
+                    self.zoo_voice_path = Some(PathBuf::from(raw));
+                }
+            } else if let Some(rest) = line.strip_prefix("zoo_scale=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.zoo_scale = v.clamp(0.25, 2.5);
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("zoo_opacity=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.zoo_opacity = v.clamp(0.3, 1.0);
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("zoo_speed=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.zoo_speed = v.clamp(40.0, 360.0);
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("zoo_flip_manual=") {
+                self.zoo_flip_manual = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             }
         }
         Self::normalize_spectro_cfg(&mut self.spectro_cfg);
@@ -260,6 +298,11 @@ impl WavesPreviewer {
             SrcQuality::Good => "good",
             SrcQuality::Best => "best",
         };
+        let zoo_enabled = if self.zoo_enabled { "1" } else { "0" };
+        let zoo_walk_enabled = if self.zoo_walk_enabled { "1" } else { "0" };
+        let zoo_voice_enabled = if self.zoo_voice_enabled { "1" } else { "0" };
+        let zoo_use_bpm = if self.zoo_use_bpm { "1" } else { "0" };
+        let zoo_flip_manual = if self.zoo_flip_manual { "1" } else { "0" };
         let mut out = format!(
                 "theme={}\nskip_dotfiles={}\n\
 zero_cross_eps={:.6}\n\
@@ -273,7 +316,15 @@ spectro_db_floor={:.1}\n\
 spectro_max_hz={:.1}\n\
 spectro_note_labels={}\n\
 item_bg_mode={}\n\
-src_quality={}\n",
+src_quality={}\n\
+zoo_enabled={}\n\
+zoo_walk_enabled={}\n\
+zoo_voice_enabled={}\n\
+zoo_use_bpm={}\n\
+zoo_scale={:.3}\n\
+zoo_opacity={:.3}\n\
+zoo_speed={:.1}\n\
+zoo_flip_manual={}\n",
                 theme,
                 skip,
                 self.zero_cross_epsilon,
@@ -287,8 +338,26 @@ src_quality={}\n",
                 self.spectro_cfg.max_freq_hz,
                 note_labels,
                 item_bg_mode,
-                src_quality
-            );
+                src_quality,
+                zoo_enabled,
+                zoo_walk_enabled,
+                zoo_voice_enabled,
+                zoo_use_bpm,
+            self.zoo_scale,
+            self.zoo_opacity,
+            self.zoo_speed,
+            zoo_flip_manual
+        );
+        if let Some(path) = &self.zoo_gif_path {
+            out.push_str("zoo_gif_path=");
+            out.push_str(&path.to_string_lossy().replace('\n', " "));
+            out.push('\n');
+        }
+        if let Some(path) = &self.zoo_voice_path {
+            out.push_str("zoo_voice_path=");
+            out.push_str(&path.to_string_lossy().replace('\n', " "));
+            out.push('\n');
+        }
         for p in &self.plugin_search_paths {
             let path_text = p.to_string_lossy().replace('\n', " ");
             out.push_str("plugin_search_path=");

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::plugin::backends::{clap, generic, vst3};
 use crate::plugin::protocol::{
-    PluginHostBackend, WorkerRequest, WorkerResponse,
+    GuiCapabilities, PluginHostBackend, WorkerRequest, WorkerResponse,
 };
 
 fn format_from_plugin_path(path: &str) -> Option<crate::plugin::PluginFormat> {
@@ -80,6 +80,11 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                                 params,
                                 state_blob_b64,
                                 backend: PluginHostBackend::NativeVst3,
+                                capabilities: GuiCapabilities {
+                                    supports_native_gui: cfg!(all(feature = "plugin_native_vst3", windows)),
+                                    supports_param_feedback: cfg!(feature = "plugin_native_vst3"),
+                                    supports_state_sync: false,
+                                },
                                 backend_note: None,
                             };
                         }
@@ -96,6 +101,11 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                                 params,
                                 state_blob_b64,
                                 backend: PluginHostBackend::NativeClap,
+                                capabilities: GuiCapabilities {
+                                    supports_native_gui: false,
+                                    supports_param_feedback: cfg!(feature = "plugin_native_clap"),
+                                    supports_state_sync: false,
+                                },
                                 backend_note: None,
                             };
                         }
@@ -111,6 +121,7 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                 params: Vec::new(),
                 state_blob_b64,
                 backend: PluginHostBackend::Generic,
+                capabilities: GuiCapabilities::default(),
                 backend_note: native_error,
             }
         }
@@ -219,5 +230,10 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                 },
             }
         }
+        WorkerRequest::GuiSessionOpen { .. }
+        | WorkerRequest::GuiSessionPoll { .. }
+        | WorkerRequest::GuiSessionClose { .. } => WorkerResponse::Error {
+            message: "GUI session requests require neowaves_plugin_gui_worker".to_string(),
+        },
     }
 }

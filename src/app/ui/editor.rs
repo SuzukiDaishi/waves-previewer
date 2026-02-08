@@ -128,6 +128,7 @@ impl crate::app::WavesPreviewer {
         ctx: &egui::Context,
         tab_idx: usize,
     ) {
+        let editor_panel_rect = ui.max_rect();
         let mut apply_pending_loop = false;
         let mut do_commit_loop = false;
         let mut do_preview_unwrap: Option<u32> = None;
@@ -669,6 +670,9 @@ impl crate::app::WavesPreviewer {
                 let mut pending_plugin_probe: Option<String> = None;
                 let mut pending_plugin_preview = false;
                 let mut pending_plugin_apply = false;
+                let mut pending_plugin_gui_open = false;
+                let mut pending_plugin_gui_sync = false;
+                let mut pending_plugin_gui_close = false;
                 let mut pending_plugin_add_path: Option<PathBuf> = None;
                 let mut pending_plugin_remove_index: Option<usize> = None;
                 let mut pending_plugin_reset_paths = false;
@@ -3354,15 +3358,42 @@ impl crate::app::WavesPreviewer {
                                             if ui.button("Rescan").clicked() {
                                                 pending_plugin_scan = true;
                                             }
+                                            let gui_live = draft.gui_status
+                                                == crate::plugin::GuiSessionStatus::Live;
                                             let can_reload = draft.plugin_key.is_some()
                                                 && !plugin_probe_busy
                                                 && !plugin_scan_busy;
                                             if ui
-                                                .add_enabled(can_reload, egui::Button::new("Reload Params"))
+                                                .add_enabled(
+                                                    can_reload,
+                                                    egui::Button::new(if gui_live {
+                                                        "Sync Now"
+                                                    } else {
+                                                        "Reload Params"
+                                                    }),
+                                                )
                                                 .clicked()
                                             {
-                                                pending_plugin_probe = draft.plugin_key.clone();
-                                                draft.last_backend_log = None;
+                                                if gui_live {
+                                                    pending_plugin_gui_sync = true;
+                                                } else {
+                                                    pending_plugin_probe = draft.plugin_key.clone();
+                                                    draft.last_backend_log = None;
+                                                }
+                                            }
+                                            let can_open_gui = can_reload
+                                                && draft.gui_capabilities.supports_native_gui;
+                                            if ui
+                                                .add_enabled(can_open_gui, egui::Button::new("Open Native GUI"))
+                                                .clicked()
+                                            {
+                                                pending_plugin_gui_open = true;
+                                            }
+                                            if ui
+                                                .add_enabled(gui_live, egui::Button::new("Close GUI"))
+                                                .clicked()
+                                            {
+                                                pending_plugin_gui_close = true;
                                             }
                                         });
                                         ui.collapsing("Search Paths", |ui| {
@@ -3420,6 +3451,7 @@ impl crate::app::WavesPreviewer {
                                         if selected_changed {
                                             stop_playback = true;
                                             need_restore_preview = true;
+                                            pending_plugin_gui_close = true;
                                         }
                                         ui.horizontal_wrapped(|ui| {
                                             ui.checkbox(&mut draft.enabled, "Enable");
@@ -3431,7 +3463,19 @@ impl crate::app::WavesPreviewer {
                                                         .weak(),
                                                 );
                                             }
+                                            ui.label(
+                                                RichText::new(format!("GUI: {:?}", draft.gui_status))
+                                                    .small()
+                                                    .weak(),
+                                            );
                                         });
+                                        if !draft.gui_capabilities.supports_native_gui {
+                                            ui.label(
+                                                RichText::new("Native GUI unsupported for current plugin/backend")
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                        }
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label("Param Filter");
                                             ui.text_edit_singleline(&mut draft.filter);
@@ -3656,6 +3700,15 @@ impl crate::app::WavesPreviewer {
                 if let Some(plugin_key) = pending_plugin_probe {
                     self.spawn_plugin_probe_for_tab(tab_idx, plugin_key);
                 }
+                if pending_plugin_gui_open {
+                    self.open_plugin_gui_for_tab(tab_idx);
+                }
+                if pending_plugin_gui_sync {
+                    self.sync_plugin_gui_for_tab(tab_idx);
+                }
+                if pending_plugin_gui_close {
+                    self.close_plugin_gui_for_tab(tab_idx);
+                }
                 if pending_plugin_preview {
                     self.spawn_plugin_preview_for_tab(tab_idx);
                 }
@@ -3879,5 +3932,6 @@ impl crate::app::WavesPreviewer {
                 self.apply_loop_mode_for_tab(tab_ro);
             }
         }
+        self.ui_editor_zoo_overlay(ctx, Some(tab_idx), editor_panel_rect);
     }
 }

@@ -74,6 +74,7 @@ fn worker_probe_vst3_uses_generic_backend_when_native_unavailable() {
             params,
             state_blob_b64,
             backend,
+            capabilities: _,
             backend_note,
         } => {
             assert_eq!(plugin.path, vst.to_string_lossy());

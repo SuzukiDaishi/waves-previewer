@@ -81,6 +81,9 @@ impl WavesPreviewer {
         if let Some(v) = self.bit_depth_override.remove(from) {
             self.bit_depth_override.insert(new_path.clone(), v);
         }
+        if let Some(v) = self.format_override.remove(from) {
+            self.format_override.insert(new_path.clone(), v);
+        }
         for p in self.saving_sources.iter_mut() {
             if p.as_path() == from {
                 *p = new_path.clone();
@@ -102,6 +105,7 @@ impl WavesPreviewer {
         if self.playing_path.as_ref().map(|p| p.as_path()) == Some(from) {
             self.playing_path = Some(new_path);
         }
+        self.refresh_display_name_for_path(to);
     }
 
     pub(super) fn rename_file_path(

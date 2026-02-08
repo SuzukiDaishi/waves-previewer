@@ -7,6 +7,33 @@ use super::types::{
 };
 
 impl super::WavesPreviewer {
+    fn list_preview_source_variant(&self, path: &Path) -> u64 {
+        let mut variant = 0u64;
+        if let Some(item) = self.item_for_path(path) {
+            variant ^= item.id;
+            if let Some(audio) = item.virtual_audio.as_ref() {
+                variant ^= (audio.len() as u64).wrapping_mul(31);
+                variant ^= (audio.channels.len() as u64).wrapping_mul(131);
+            }
+        }
+        if let Some(cached) = self.edited_cache.get(path) {
+            variant ^= (cached.samples_len as u64).wrapping_mul(17);
+        }
+        if let Some(tab) = self.tabs.iter().find(|t| t.path.as_path() == path) {
+            variant ^= (tab.samples_len as u64).wrapping_mul(19);
+            if tab.dirty || tab.markers_dirty || tab.loop_markers_dirty {
+                variant ^= 0x9e37_79b9_7f4a_7c15;
+            }
+        }
+        if let Some(sr) = self.sample_rate_override.get(path).copied() {
+            variant ^= (sr as u64).wrapping_mul(23);
+        }
+        if let Some(bits) = self.bit_depth_override.get(path).copied() {
+            variant ^= (bits.bits_per_sample() as u64).wrapping_mul(29);
+        }
+        variant
+    }
+
     fn list_preview_quality_for_path(&self, path: &Path) -> SrcQuality {
         let ext = path
             .extension()
@@ -82,6 +109,8 @@ impl super::WavesPreviewer {
                 .filter(|v| *v > 0),
             bit_depth: self.bit_depth_override.get(path).copied(),
             quality: self.list_preview_quality_for_path(path),
+            mode: self.mode,
+            source_variant: self.list_preview_source_variant(path),
         }
     }
 
@@ -131,10 +160,12 @@ impl super::WavesPreviewer {
             .map(|entry| entry.settings == settings)
             .unwrap_or(false);
         if !matches {
+            self.debug.src_cache_misses = self.debug.src_cache_misses.saturating_add(1);
             self.evict_list_preview_cache_path(path);
             return None;
         }
         let entry = self.list_preview_cache.get(path)?.clone();
+        self.debug.src_cache_hits = self.debug.src_cache_hits.saturating_add(1);
         self.touch_list_preview_cache_path(path);
         Some((entry.audio, entry.truncated, entry.play_sr.max(1)))
     }
@@ -147,9 +178,11 @@ impl super::WavesPreviewer {
             .map(|entry| entry.settings == settings)
             .unwrap_or(false);
         if matches {
+            self.debug.src_cache_hits = self.debug.src_cache_hits.saturating_add(1);
             self.touch_list_preview_cache_path(path);
             true
         } else {
+            self.debug.src_cache_misses = self.debug.src_cache_misses.saturating_add(1);
             if self.list_preview_cache.contains_key(path) {
                 self.evict_list_preview_cache_path(path);
             }
