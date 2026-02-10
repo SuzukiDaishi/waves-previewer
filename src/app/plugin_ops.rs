@@ -277,6 +277,9 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn request_plugin_scan_if_needed(&mut self) {
+        if self.plugin_scan_error.is_some() {
+            return;
+        }
         if self.plugin_catalog.is_empty() && self.plugin_scan_state.is_none() {
             self.spawn_plugin_scan();
         }
@@ -286,6 +289,7 @@ impl crate::app::WavesPreviewer {
         if self.plugin_scan_state.is_some() {
             return;
         }
+        self.plugin_scan_error = None;
         let job_id = self.plugin_next_job_id();
         let search_paths: Vec<String> = self
             .plugin_search_paths
@@ -1063,8 +1067,10 @@ impl crate::app::WavesPreviewer {
                             self.debug.plugin_stale_drop_count.saturating_add(1);
                     } else if let Some(err) = result.error {
                         self.debug_log(format!("plugin scan error: {err}"));
+                        self.plugin_scan_error = Some(err);
                     } else {
                         self.plugin_catalog = result.plugins;
+                        self.plugin_scan_error = None;
                     }
                     let elapsed_ms = state.started_at.elapsed().as_secs_f32() * 1000.0;
                     Self::plugin_push_metric(&mut self.debug.plugin_scan_ms, elapsed_ms);

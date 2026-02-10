@@ -1113,9 +1113,17 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     writer
         .write_end()
         .map_err(|e| anyhow::anyhow!("mp4 finalize: {e:?}"))?;
-    // Some mp4 readers are strict about esds descriptors. If probe/decode fails,
-    // fall back to ADTS AAC payload (kept under the requested extension).
-    if crate::audio_io::read_audio_info(dst).is_err() {
+    // Some mp4 readers are strict about esds descriptors. Avoid replacing the mp4
+    // output by default; allow optional ADTS fallback via env toggle.
+    if crate::audio_io::read_audio_info(dst).is_err()
+        && std::env::var("NEOWAVES_AAC_ADTS_FALLBACK")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "off")
+            })
+            .unwrap_or(false)
+    {
         encode_aac_to_adts(dst, &chans, sr)?;
     }
     Ok(())

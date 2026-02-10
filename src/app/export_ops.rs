@@ -1,8 +1,35 @@
 use std::path::{Path, PathBuf};
 
-use super::types::{ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode};
+use super::types::{ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode, VirtualSourceRef};
 
 impl super::WavesPreviewer {
+    fn resolve_virtual_export_parent(&self, item: &super::types::MediaItem) -> Option<PathBuf> {
+        let mut current = item.virtual_state.as_ref().map(|v| v.source.clone())?;
+        for _ in 0..8 {
+            match current {
+                VirtualSourceRef::FilePath(path) => {
+                    return path.parent().map(|p| p.to_path_buf());
+                }
+                VirtualSourceRef::VirtualPath(path) => {
+                    let next = self
+                        .item_for_path(&path)
+                        .and_then(|it| it.virtual_state.as_ref())
+                        .map(|v| v.source.clone());
+                    if let Some(next) = next {
+                        current = next;
+                        continue;
+                    }
+                    return None;
+                }
+                VirtualSourceRef::Sidecar(path) => {
+                    let p = PathBuf::from(path);
+                    return p.parent().map(|p| p.to_path_buf());
+                }
+            }
+        }
+        None
+    }
+
     fn overwrite_backup_path(src: &Path) -> PathBuf {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
         src.with_file_name(format!("{}.bak", fname))
@@ -119,8 +146,15 @@ impl super::WavesPreviewer {
                     .export_cfg
                     .dest_folder
                     .clone()
+                    .or_else(|| self.resolve_virtual_export_parent(item))
                     .or_else(|| self.root.clone())
                     .unwrap_or_else(|| PathBuf::from("."));
+                if let Err(err) = std::fs::create_dir_all(&parent) {
+                    eprintln!(
+                        "virtual export: failed to ensure output folder {}: {err:?}",
+                        parent.display()
+                    );
+                }
                 let display_name = item.display_name.clone();
                 let stem = std::path::Path::new(&display_name)
                     .file_stem()
@@ -214,11 +248,25 @@ impl super::WavesPreviewer {
                             || bit_override.is_some()
                             || path_format_override.is_some();
                         if needs_audio {
-                            ch_samples = Some(tab.ch_samples.clone());
-                            let target_sr = sr_override.unwrap_or(out_sr);
-                            let scaled =
-                                (tab.samples_len as f64) * (target_sr as f64 / out_sr as f64);
-                            max_file_samples = Some(scaled.round().max(0.0) as u64);
+                            let tab_ready = tab.samples_len > 0
+                                && !tab.ch_samples.is_empty()
+                                && tab.ch_samples[0].len() > 0;
+                            if tab_ready {
+                                ch_samples = Some(tab.ch_samples.clone());
+                                let target_sr = sr_override.unwrap_or(out_sr);
+                                let scaled =
+                                    (tab.samples_len as f64) * (target_sr as f64 / out_sr as f64);
+                                max_file_samples = Some(scaled.round().max(0.0) as u64);
+                            } else {
+                                max_file_samples = self
+                                    .meta_for_path(&p)
+                                    .and_then(|m| m.duration_secs)
+                                    .map(|secs| {
+                                        (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                            .round()
+                                            .max(0.0) as u64
+                                    });
+                            }
                         } else {
                             max_file_samples = self
                                 .meta_for_path(&p)
@@ -250,11 +298,25 @@ impl super::WavesPreviewer {
                             || bit_override.is_some()
                             || path_format_override.is_some();
                         if needs_audio {
-                            ch_samples = Some(cached.ch_samples.clone());
-                            let target_sr = sr_override.unwrap_or(out_sr);
-                            let scaled =
-                                (cached.samples_len as f64) * (target_sr as f64 / out_sr as f64);
-                            max_file_samples = Some(scaled.round().max(0.0) as u64);
+                            let cache_ready = cached.samples_len > 0
+                                && !cached.ch_samples.is_empty()
+                                && cached.ch_samples[0].len() > 0;
+                            if cache_ready {
+                                ch_samples = Some(cached.ch_samples.clone());
+                                let target_sr = sr_override.unwrap_or(out_sr);
+                                let scaled = (cached.samples_len as f64)
+                                    * (target_sr as f64 / out_sr as f64);
+                                max_file_samples = Some(scaled.round().max(0.0) as u64);
+                            } else {
+                                max_file_samples = self
+                                    .meta_for_path(&p)
+                                    .and_then(|m| m.duration_secs)
+                                    .map(|secs| {
+                                        (secs * self.sample_rate_for_path(&p, out_sr) as f32)
+                                            .round()
+                                            .max(0.0) as u64
+                                    });
+                            }
                         } else {
                             max_file_samples = self
                                 .meta_for_path(&p)
@@ -690,7 +752,14 @@ impl super::WavesPreviewer {
                         ok += 1;
                         success_paths.push(dst.clone());
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        eprintln!(
+                            "virtual export failed {}: sr={} ch={} err={:?}",
+                            dst.display(),
+                            out_sr,
+                            channels.len(),
+                            err
+                        );
                         failed += 1;
                         failed_paths.push(dst.clone());
                     }

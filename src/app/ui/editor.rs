@@ -566,6 +566,7 @@ impl crate::app::WavesPreviewer {
         let plugin_search_paths = self.plugin_search_paths.clone();
         let mut plugin_search_path_input = self.plugin_search_path_input.clone();
         let plugin_scan_busy = self.plugin_scan_state.is_some();
+        let plugin_scan_error = self.plugin_scan_error.clone();
         let plugin_probe_busy = self
             .plugin_probe_state
             .as_ref()
@@ -3301,6 +3302,11 @@ impl crate::app::WavesPreviewer {
                                                 ui.add(egui::Spinner::new());
                                                 ui.label(RichText::new("Scanning plugins...").weak());
                                             });
+                                        } else if let Some(err) = plugin_scan_error.as_ref() {
+                                            ui.label(
+                                                RichText::new(format!("Plugin scan failed: {err}"))
+                                                    .color(egui::Color32::LIGHT_RED),
+                                            );
                                         }
                                         let draft = &mut tab.plugin_fx_draft;
                                         let mut selected_changed = false;

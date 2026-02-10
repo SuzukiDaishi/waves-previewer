@@ -178,6 +178,62 @@ mod virtual_export_behavior {
     }
 
     #[test]
+    fn virtual_export_from_compressed_sources() {
+        for ext in ["mp3", "m4a", "ogg"] {
+            let dir = make_temp_dir(&format!("virtual_from_{ext}"));
+            let src = dir.join(format!("source.{ext}"));
+            let chans = synth_stereo(44_100, 3.0, 220.0, 440.0);
+            neowaves::wave::export_channels_audio(&chans, 44_100, &src)
+                .unwrap_or_else(|e| panic!("export {ext} source failed: {e}"));
+            let export_dir = dir.join("exports");
+            std::fs::create_dir_all(&export_dir).expect("create export dir");
+
+            let mut harness = harness_with_folder(dir.clone());
+            wait_for_scan(&mut harness);
+            assert!(harness.state_mut().test_open_first_tab());
+            wait_for_tab_ready(&mut harness);
+            assert!(harness.state_mut().test_add_trim_virtual_frac(0.2, 0.6));
+            harness.run_steps(3);
+            harness.state_mut().test_switch_to_list();
+
+            let current = harness
+                .state()
+                .test_selected_path()
+                .cloned()
+                .expect("selected virtual path should exist");
+            assert!(harness.state_mut().test_select_path(&current));
+            harness.state_mut().test_set_export_first_prompt(false);
+            harness
+                .state_mut()
+                .test_set_export_save_mode_overwrite(false);
+            harness.state_mut().test_set_export_conflict("rename");
+            harness
+                .state_mut()
+                .test_set_export_dest_folder(Some(&export_dir));
+            harness
+                .state_mut()
+                .test_set_export_name_template("{name}_virt_export");
+            harness
+                .state_mut()
+                .test_set_export_format_override(Some(ext));
+            harness.state_mut().test_trigger_save_selected();
+            wait_for_export_finish(&mut harness);
+            harness.run_steps(2);
+
+            let out = newest_file_with_ext(&export_dir, ext)
+                .unwrap_or_else(|| panic!("missing exported .{ext}"));
+            let info = neowaves::audio_io::read_audio_info(&out)
+                .unwrap_or_else(|e| panic!("probe failed for {}: {e}", out.display()));
+            assert!(info.sample_rate > 0 && info.channels > 0);
+            let (decoded, sr) = neowaves::audio_io::decode_audio_multi(&out)
+                .unwrap_or_else(|e| panic!("decode failed for {}: {e}", out.display()));
+            assert!(sr > 0);
+            assert!(!decoded.is_empty() && !decoded[0].is_empty());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
     fn virtual_length_does_not_leak_to_other_file_playback() {
         let dir = make_temp_dir("virtual_length_leak");
         let src_short = dir.join("a_short.wav");

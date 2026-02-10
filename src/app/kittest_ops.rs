@@ -180,6 +180,14 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_open_tab_for_path(&mut self, path: &Path) -> bool {
+        if self.row_for_path(path).is_none() {
+            return false;
+        }
+        self.open_or_activate_tab(path);
+        true
+    }
+
     pub fn test_set_active_tool(&mut self, tool: ToolKind) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -360,6 +368,20 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).map(|t| t.samples_len).unwrap_or(0)
     }
 
+    pub fn test_tab_loading(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs.get(tab_idx).map(|t| t.loading).unwrap_or(false)
+    }
+
+    pub fn test_active_tab_path(&self) -> Option<PathBuf> {
+        let Some(tab_idx) = self.active_tab else {
+            return None;
+        };
+        self.tabs.get(tab_idx).map(|t| t.path.clone())
+    }
+
     pub fn test_tab_dirty(&self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -464,6 +486,34 @@ impl super::WavesPreviewer {
             return false;
         };
         self.select_and_load(row, true);
+        true
+    }
+
+    pub fn test_select_paths_multi(&mut self, paths: &[PathBuf]) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let mut rows = Vec::new();
+        for path in paths {
+            if let Some(row) = self.row_for_path(path) {
+                rows.push(row);
+            }
+        }
+        if rows.is_empty() {
+            return false;
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        self.selected_multi.clear();
+        for row in &rows {
+            self.selected_multi.insert(*row);
+        }
+        let first = *rows.first().unwrap_or(&rows[0]);
+        self.selected = Some(first);
+        self.select_anchor = Some(first);
+        if let Some(path) = self.path_for_row(first).cloned() {
+            self.open_or_activate_tab(&path);
+        }
         true
     }
 

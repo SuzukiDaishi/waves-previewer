@@ -3,6 +3,7 @@ param(
     [string]$IsccPath = "",
     [string]$OutputDir = "",
     [string]$AppVersion = "",
+    [string]$BuildId = "",
     [switch]$NoAutoVersion,
     [switch]$Quiet
 )
@@ -143,26 +144,66 @@ if (-not $version) {
     }
 }
 
-$args = @()
-if ($OutputDir) {
-    $outFull = Resolve-Path -Path $OutputDir -ErrorAction SilentlyContinue
-    if (-not $outFull) {
-        New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
-        $outFull = Resolve-Path $OutputDir
-    }
-    $args += "/O$outFull"
+function New-BuildId {
+    return (Get-Date).ToString("yyyyMMdd_HHmmss")
 }
-if ($Quiet) { $args += "/Q" }
-$args += "/DMyAppVersion=$version"
-$args += $issFull
+
+function Build-Args {
+    param(
+        [string]$OutDir,
+        [string]$Ver,
+        [string]$Id
+    )
+    $localArgs = @()
+    if ($OutDir) {
+        $outFull = Resolve-Path -Path $OutDir -ErrorAction SilentlyContinue
+        if (-not $outFull) {
+            New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+            $outFull = Resolve-Path $OutDir
+        }
+        $localArgs += "/O$outFull"
+    }
+    if ($Quiet) { $localArgs += "/Q" }
+    if ($Id) { $localArgs += "/DMyAppBuildId=$Id" }
+    $localArgs += "/DMyAppVersion=$Ver"
+    $localArgs += $issFull
+    return $localArgs
+}
+
+if (-not $BuildId) {
+    $BuildId = New-BuildId
+}
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
+}
+
+$args = Build-Args -OutDir $OutputDir -Ver $version -Id $BuildId
 
 Write-Host "Using ISCC: $iscc"
 Write-Host "Building: $issFull"
 Write-Host "AppVersion: $version"
+Write-Host "BuildId: $BuildId"
+Write-Host "OutputDir: $OutputDir"
 
-$proc = Start-Process -FilePath $iscc -ArgumentList $args -WorkingDirectory $workdir -NoNewWindow -PassThru -Wait
-if ($proc.ExitCode -ne 0) {
-    throw "ISCC failed with exit code $($proc.ExitCode)"
+$attempts = 0
+$maxAttempts = 3
+while ($true) {
+    $attempts++
+    $output = & $iscc @args 2>&1
+    $code = $LASTEXITCODE
+    if ($code -eq 0) {
+        if ($output) { $output | Write-Host }
+        break
+    }
+    if ($code -ne 2 -or $attempts -ge $maxAttempts) {
+        if ($output) { $output | Write-Host }
+        throw "ISCC failed with exit code $code"
+    }
+    Write-Host "ISCC resource update failed (110). Retrying with new BuildId..."
+    Start-Sleep -Milliseconds 800
+    $BuildId = New-BuildId
+    $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
+    $args = Build-Args -OutDir $OutputDir -Ver $version -Id $BuildId
 }
 
 Write-Host "Done."

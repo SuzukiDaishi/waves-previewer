@@ -9,6 +9,15 @@ use crate::plugin::protocol::{WorkerRequest, WorkerResponse};
 static WORKER_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
 static WORKER_SPAWN_SEQ: AtomicU64 = AtomicU64::new(0);
 
+fn apply_no_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 pub fn worker_timeout_count() -> u64 {
     WORKER_TIMEOUT_COUNT.load(Ordering::Relaxed)
 }
@@ -128,7 +137,9 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
     let mut last_spawn_err: Option<std::io::Error> = None;
     let mut child_opt = None;
     for attempt in 0..5usize {
-        match Command::new(&worker_path)
+        let mut cmd = Command::new(&worker_path);
+        apply_no_window(&mut cmd);
+        match cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -248,7 +259,9 @@ impl GuiWorkerClient {
             return Err("gui worker path resolve failed".to_string());
         };
         let (worker_path, cleanup_temp) = prepare_worker_executable_named(path)?;
-        let mut child = Command::new(&worker_path)
+        let mut cmd = Command::new(&worker_path);
+        apply_no_window(&mut cmd);
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

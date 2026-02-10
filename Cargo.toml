@@ -1,6 +1,6 @@
 ﻿[package]
 name = "neowaves"
-version = "0.20260201.1"
+version = "0.20260210.8"
 edition = "2021"
 default-run = "neowaves"
 build = "build.rs"

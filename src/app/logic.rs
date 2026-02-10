@@ -1108,8 +1108,10 @@ impl super::WavesPreviewer {
         let path_for_thread = path.clone();
         let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
         std::thread::spawn(move || {
-            let prefix =
-                crate::wave::decode_wav_multi_prefix(&path_for_thread, EDITOR_PREVIEW_PREFIX_SECS);
+            let prefix = crate::audio_io::decode_audio_multi_prefix(
+                &path_for_thread,
+                EDITOR_PREVIEW_PREFIX_SECS,
+            );
             let (mut chans, in_sr, truncated) = match prefix {
                 Ok(v) => v,
                 Err(err) => {
@@ -1156,7 +1158,7 @@ impl super::WavesPreviewer {
             if !truncated || cancel_thread.load(Ordering::Relaxed) {
                 return;
             }
-            let full = crate::wave::decode_wav_multi(&path_for_thread);
+            let full = crate::audio_io::decode_audio_multi(&path_for_thread);
             let (mut chans, in_sr) = match full {
                 Ok(v) => v,
                 Err(err) => {

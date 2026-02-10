@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use fdk_aac::dec::{Decoder as AacDecoder, DecoderError as AacDecoderError, Transport as AacTransport};
 use id3::TagLike;
+use mp4::{ChannelConfig, Mp4Reader, TrackType};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -109,6 +111,222 @@ pub fn is_supported_audio_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn is_m4a_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("m4a"))
+        .unwrap_or(false)
+}
+
+fn channel_config_count(cfg: ChannelConfig) -> u16 {
+    match cfg {
+        ChannelConfig::Mono => 1,
+        ChannelConfig::Stereo => 2,
+        ChannelConfig::Three => 3,
+        ChannelConfig::Four => 4,
+        ChannelConfig::Five => 5,
+        ChannelConfig::FiveOne => 6,
+        ChannelConfig::SevenOne => 8,
+    }
+}
+
+fn read_audio_info_m4a_mp4(
+    path: &Path,
+    created_at: Option<SystemTime>,
+    modified_at: Option<SystemTime>,
+    file_size: Option<u64>,
+) -> Result<AudioInfo> {
+    let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
+    let size = file_size.unwrap_or_else(|| file.metadata().map(|m| m.len()).unwrap_or(0));
+    let reader = Mp4Reader::read_header(file, size)
+        .map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
+    let mut picked = None;
+    for (&track_id, track) in reader.tracks() {
+        if let Ok(TrackType::Audio) = track.track_type() {
+            picked = Some((track_id, track));
+            break;
+        }
+    }
+    let (_, track) = picked.context("m4a: no audio track")?;
+    let sample_rate = track
+        .sample_freq_index()
+        .map(|idx| idx.freq())
+        .unwrap_or_else(|_| track.timescale())
+        .max(1);
+    let channels = track
+        .channel_config()
+        .map(channel_config_count)
+        .or_else(|_| {
+            track
+                .trak
+                .mdia
+                .minf
+                .stbl
+                .stsd
+                .mp4a
+                .as_ref()
+                .map(|m| m.channelcount)
+                .ok_or_else(|| anyhow::anyhow!("m4a: channel config missing"))
+        })
+        .unwrap_or(2);
+    let duration_secs = track.duration().as_secs_f32();
+    let bit_rate_bps = if duration_secs.is_finite() && duration_secs > 0.0 {
+        file_size
+            .map(|bytes| ((bytes as f64) * 8.0 / duration_secs as f64).round() as u32)
+            .filter(|v| *v > 0)
+    } else {
+        None
+    };
+    Ok(AudioInfo {
+        channels,
+        sample_rate,
+        bits_per_sample: 16,
+        bit_rate_bps,
+        duration_secs: Some(duration_secs),
+        created_at,
+        modified_at,
+    })
+}
+
+fn audio_specific_config_bytes(profile: u8, freq_index: u8, chan_conf: u8) -> [u8; 2] {
+    let byte_a = (profile << 3) | (freq_index >> 1);
+    let byte_b = (freq_index << 7) | (chan_conf << 3);
+    [byte_a, byte_b]
+}
+
+fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut reader =
+        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
+    let mut picked = None;
+    for (&track_id, track) in reader.tracks() {
+        if let Ok(TrackType::Audio) = track.track_type() {
+            picked = Some((track_id, track));
+            break;
+        }
+    }
+    let (track_id, track) = picked.context("m4a: no audio track")?;
+    let sample_rate = track
+        .sample_freq_index()
+        .map(|idx| idx.freq())
+        .unwrap_or_else(|_| track.timescale())
+        .max(1);
+    let channel_cfg = track.channel_config().unwrap_or(ChannelConfig::Stereo);
+    let channels = channel_config_count(channel_cfg).max(1) as usize;
+    let profile = track
+        .trak
+        .mdia
+        .minf
+        .stbl
+        .stsd
+        .mp4a
+        .as_ref()
+        .and_then(|m| m.esds.as_ref())
+        .map(|esds| esds.es_desc.dec_config.dec_specific.profile)
+        .unwrap_or(2);
+    let freq_index = track
+        .sample_freq_index()
+        .map(|idx| idx as u8)
+        .unwrap_or(mp4::SampleFreqIndex::Freq44100 as u8);
+    let chan_conf = channel_cfg as u8;
+    let asc = audio_specific_config_bytes(profile, freq_index, chan_conf);
+    let mut decoder = AacDecoder::new(AacTransport::Raw);
+    decoder
+        .config_raw(&asc)
+        .map_err(|e| anyhow::anyhow!("m4a decoder config: {e}"))?;
+    let sample_count = reader.sample_count(track_id)?;
+    let mut chans: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let max_frames = max_secs
+        .and_then(|s| {
+            if s <= 0.0 {
+                None
+            } else {
+                Some(((sample_rate as f32) * s).ceil() as usize)
+            }
+        })
+        .filter(|v| *v > 0);
+    let mut reached_eof = true;
+    for sample_id in 1..=sample_count {
+        let Some(sample) = reader.read_sample(track_id, sample_id)? else {
+            continue;
+        };
+        let mut offset = 0usize;
+        while offset < sample.bytes.len() {
+            let used = decoder
+                .fill(&sample.bytes[offset..])
+                .map_err(|e| anyhow::anyhow!("m4a decoder fill: {e}"))?;
+            if used == 0 {
+                break;
+            }
+            offset += used;
+            let mut frame_size = decoder.decoded_frame_size();
+            if frame_size == 0 {
+                frame_size = 2048 * channels;
+            }
+            let mut pcm = vec![0i16; frame_size];
+            match decoder.decode_frame(&mut pcm) {
+                Ok(()) => {
+                    let info = decoder.stream_info();
+                    let ch = info.numChannels.max(1) as usize;
+                    let frames = info.frameSize as usize;
+                    let needed = ch.saturating_mul(frames);
+                    if needed == 0 || pcm.len() < needed {
+                        continue;
+                    }
+                    if chans.len() != ch {
+                        chans = vec![Vec::new(); ch];
+                    }
+                    for i in 0..frames {
+                        for c in 0..ch {
+                            let v = pcm[i * ch + c] as f32 / i16::MAX as f32;
+                            chans[c].push(v);
+                        }
+                    }
+                    if let Some(limit) = max_frames {
+                        if chans[0].len() >= limit {
+                            reached_eof = false;
+                            for ch in &mut chans {
+                                ch.truncate(limit);
+                            }
+                            return Ok((chans, sample_rate, reached_eof));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if err == AacDecoderError::NOT_ENOUGH_BITS
+                        || err == AacDecoderError::TRANSPORT_SYNC_ERROR
+                    {
+                        break;
+                    }
+                    return Err(anyhow::anyhow!("m4a decode: {err}"));
+                }
+            }
+        }
+    }
+    Ok((chans, sample_rate, reached_eof))
+}
+
+fn mixdown_to_mono(chans: &[Vec<f32>]) -> Vec<f32> {
+    if chans.is_empty() {
+        return Vec::new();
+    }
+    let frames = chans.iter().map(|c| c.len()).min().unwrap_or(0);
+    let mut mono = Vec::with_capacity(frames);
+    for i in 0..frames {
+        let mut acc = 0.0f32;
+        let mut c = 0usize;
+        for ch in chans {
+            if let Some(&v) = ch.get(i) {
+                acc += v;
+                c += 1;
+            }
+        }
+        mono.push(if c > 0 { acc / (c as f32) } else { 0.0 });
+    }
+    mono
+}
+
 pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     let metadata = std::fs::metadata(path).ok();
     let created_at = metadata.as_ref().and_then(|m| m.created().ok());
@@ -134,13 +352,31 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     let probed = match probe_once(ext_hint) {
         Ok(v) => v,
         Err(first_err) => {
+            if is_m4a_path(path) {
+                if let Ok(info) = read_audio_info_m4a_mp4(path, created_at, modified_at, file_size)
+                {
+                    return Ok(info);
+                }
+            }
             if ext_hint.is_some() {
-                probe_once(None).with_context(|| {
-                    format!(
-                        "probe audio failed with and without hint: {}",
-                        path.display()
-                    )
-                })?
+                match probe_once(None) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        if is_m4a_path(path) {
+                            if let Ok(info) =
+                                read_audio_info_m4a_mp4(path, created_at, modified_at, file_size)
+                            {
+                                return Ok(info);
+                            }
+                        }
+                        return Err(err).with_context(|| {
+                            format!(
+                                "probe audio failed with and without hint: {}",
+                                path.display()
+                            )
+                        });
+                    }
+                }
             } else {
                 return Err(first_err);
             }
@@ -394,6 +630,21 @@ fn open_decoder(
 }
 
 pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
+    if is_m4a_path(path) {
+        let (chans, sr) = decode_audio_multi(path)?;
+        let mono = mixdown_to_mono(&chans);
+        io_trace(
+            "decode_mono_m4a",
+            path,
+            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+            "aac",
+            sr,
+            1,
+            16,
+            Some(mono.len()),
+        );
+        return Ok((mono, sr));
+    }
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut mono: Vec<f32> = Vec::new();
     let mut decode_errors = 0u32;
@@ -461,6 +712,22 @@ pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
 }
 
 pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>, u32, bool)> {
+    if is_m4a_path(path) {
+        let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
+        let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
+        let mono = mixdown_to_mono(&chans);
+        io_trace(
+            "decode_mono_prefix_m4a",
+            path,
+            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+            "aac",
+            sr,
+            1,
+            16,
+            Some(mono.len()),
+        );
+        return Ok((mono, sr, reached_eof));
+    }
     if max_secs <= 0.0 {
         let (mono, sr) = decode_audio_mono(path)?;
         return Ok((mono, sr, false));
@@ -566,74 +833,115 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
 }
 
 pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
-    let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
-    let mut chans: Vec<Vec<f32>> = Vec::new();
-    let mut decode_errors = 0u32;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymphoniaError::DecodeError(_)) => {
-                decode_errors = decode_errors.saturating_add(1);
+    if is_m4a_path(path) {
+        let (mut chans, sr, _) = decode_m4a_fdk(path, None)?;
+        #[cfg(debug_assertions)]
+        sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
+        io_trace(
+            "decode_multi_m4a",
+            path,
+            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+            "aac",
+            sr,
+            chans.len() as u16,
+            16,
+            chans.get(0).map(|c| c.len()),
+        );
+        return Ok((chans, sr));
+    }
+    let res = (|| {
+        let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
+        let mut chans: Vec<Vec<f32>> = Vec::new();
+        let mut decode_errors = 0u32;
+        loop {
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(SymphoniaError::DecodeError(_)) => {
+                    decode_errors = decode_errors.saturating_add(1);
+                    continue;
+                }
+                Err(SymphoniaError::IoError(err))
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    break;
+                }
+                Err(SymphoniaError::ResetRequired) => break,
+                Err(err) => return Err(err.into()),
+            };
+            if packet.track_id() != track_id {
                 continue;
             }
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
+            let decoded = match decoder.decode(&packet) {
+                Ok(d) => d,
+                Err(SymphoniaError::DecodeError(_)) => {
+                    decode_errors += 1;
+                    continue;
+                }
+                Err(SymphoniaError::IoError(err))
+                    if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    break;
+                }
+                Err(err) => return Err(err.into()),
+            };
+            if sample_rate == 0 {
+                sample_rate = decoded.spec().rate;
             }
-            Err(SymphoniaError::ResetRequired) => break,
-            Err(err) => return Err(err.into()),
-        };
-        if packet.track_id() != track_id {
-            continue;
+            let channels = decoded.spec().channels.count().max(1);
+            if chans.is_empty() {
+                chans = vec![Vec::new(); channels];
+            }
+            let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+            buf.copy_interleaved_ref(decoded);
+            for frame in buf.samples().chunks(channels) {
+                for (ci, &v) in frame.iter().enumerate() {
+                    chans[ci].push(v);
+                }
+            }
         }
-        let decoded = match decoder.decode(&packet) {
-            Ok(d) => d,
-            Err(SymphoniaError::DecodeError(_)) => {
-                decode_errors += 1;
-                continue;
-            }
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(err) => return Err(err.into()),
-        };
         if sample_rate == 0 {
-            sample_rate = decoded.spec().rate;
+            anyhow::bail!("unknown sample rate: {}", path.display());
         }
-        let channels = decoded.spec().channels.count().max(1);
-        if chans.is_empty() {
-            chans = vec![Vec::new(); channels];
-        }
-        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-        buf.copy_interleaved_ref(decoded);
-        for frame in buf.samples().chunks(channels) {
-            for (ci, &v) in frame.iter().enumerate() {
-                chans[ci].push(v);
-            }
+        #[cfg(debug_assertions)]
+        sanitize_non_finite_multi(path, "decode_multi", &mut chans);
+        io_trace(
+            "decode_multi",
+            path,
+            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+            "-",
+            sample_rate,
+            chans.len() as u16,
+            32,
+            chans.get(0).map(|c| c.len()),
+        );
+        Ok((chans, sample_rate))
+    })();
+    if res.is_err() && is_m4a_path(path) {
+        if let Ok((mut chans, sr, _)) = decode_m4a_fdk(path, None) {
+            #[cfg(debug_assertions)]
+            sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
+            io_trace(
+                "decode_multi_m4a",
+                path,
+                path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+                "aac",
+                sr,
+                chans.len() as u16,
+                16,
+                chans.get(0).map(|c| c.len()),
+            );
+            return Ok((chans, sr));
         }
     }
-    if sample_rate == 0 {
-        anyhow::bail!("unknown sample rate: {}", path.display());
-    }
-    #[cfg(debug_assertions)]
-    sanitize_non_finite_multi(path, "decode_multi", &mut chans);
-    io_trace(
-        "decode_multi",
-        path,
-        path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
-        "-",
-        sample_rate,
-        chans.len() as u16,
-        32,
-        chans.get(0).map(|c| c.len()),
-    );
-    Ok((chans, sample_rate))
+    res
 }
 
 pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
+    if is_m4a_path(path) {
+        let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
+        let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
+        return Ok((chans, sr, reached_eof));
+    }
     if max_secs <= 0.0 {
         let (chans, sr) = decode_audio_multi(path)?;
         return Ok((chans, sr, false));
@@ -753,6 +1061,32 @@ where
     C: FnMut() -> bool,
     F: FnMut(Vec<Vec<f32>>, u32, bool) -> bool,
 {
+    if is_m4a_path(path) {
+        let (chans, sr, _) = decode_m4a_fdk(path, None)?;
+        let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+        if frames == 0 {
+            return Ok(());
+        }
+        if prefix_secs > 0.0 {
+            let target = ((sr as f32) * prefix_secs).ceil() as usize;
+            let prefix_frames = target.max(1).min(frames);
+            let mut prefix = Vec::with_capacity(chans.len());
+            for ch in &chans {
+                prefix.push(ch[..prefix_frames].to_vec());
+            }
+            let is_final = prefix_frames >= frames;
+            if !on_chunk(prefix, sr, is_final) {
+                return Ok(());
+            }
+            if is_final {
+                return Ok(());
+            }
+        }
+        let _ = emit_every_secs;
+        let _ = should_cancel;
+        let _ = on_chunk(chans, sr, true);
+        return Ok(());
+    }
     let wants_prefix = prefix_secs > 0.0;
     let wants_emit = emit_every_secs > 0.0;
     if !wants_prefix && !wants_emit {
@@ -842,7 +1176,10 @@ where
         if let Some(threshold) = next_emit_frames {
             if frames_read >= threshold {
                 let is_prefix = !prefix_sent && prefix_frames.is_some();
+                #[cfg(debug_assertions)]
                 let mut chunk = chans.clone();
+                #[cfg(not(debug_assertions))]
+                let chunk = chans.clone();
                 #[cfg(debug_assertions)]
                 sanitize_non_finite_multi(path, "decode_multi_progressive_chunk", &mut chunk);
                 io_trace(
@@ -875,7 +1212,10 @@ where
     if should_cancel() {
         return Ok(());
     }
+    #[cfg(debug_assertions)]
     let mut final_chunk = chans;
+    #[cfg(not(debug_assertions))]
+    let final_chunk = chans;
     #[cfg(debug_assertions)]
     sanitize_non_finite_multi(path, "decode_multi_progressive_final", &mut final_chunk);
     io_trace(
@@ -896,6 +1236,12 @@ pub fn decode_audio_mono_prefix_with_errors(
     path: &Path,
     max_secs: f32,
 ) -> Result<(Vec<f32>, u32, bool, u32)> {
+    if is_m4a_path(path) {
+        let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
+        let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
+        let mono = mixdown_to_mono(&chans);
+        return Ok((mono, sr, reached_eof, 0));
+    }
     if max_secs <= 0.0 {
         let (mono, sr, err) = decode_audio_mono_with_errors(path)?;
         return Ok((mono, sr, false, err));
@@ -1032,6 +1378,22 @@ pub fn decode_audio_mono_with_errors(path: &Path) -> Result<(Vec<f32>, u32, u32)
 }
 
 pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32, u32)> {
+    if is_m4a_path(path) {
+        let (mut chans, sr, _) = decode_m4a_fdk(path, None)?;
+        #[cfg(debug_assertions)]
+        sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
+        io_trace(
+            "decode_multi_m4a",
+            path,
+            path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+            "aac",
+            sr,
+            chans.len() as u16,
+            16,
+            chans.get(0).map(|c| c.len()),
+        );
+        return Ok((chans, sr, 0));
+    }
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut chans: Vec<Vec<f32>> = Vec::new();
     let mut decode_errors = 0u32;

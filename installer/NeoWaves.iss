@@ -6,8 +6,17 @@
 #ifndef MyAppVersion
 #define MyAppVersion "0.0.0"
 #endif
+#ifndef MyAppBuildId
+#define MyAppBuildId ""
+#endif
 #define MyAppExeName "neowaves.exe"
 #define MyAppAssoc "NeoWaves.Audio"
+
+#if MyAppBuildId != ""
+#define MyAppBuildSuffix "-" + MyAppBuildId
+#else
+#define MyAppBuildSuffix ""
+#endif
 
 [Setup]
 AppId={{8E0A3D0A-6A1B-4E2E-8C5A-2D6D9A6A0A11}}
@@ -16,8 +25,8 @@ AppVersion={#MyAppVersion}
 AppPublisher=NeoWaves
 DefaultDirName={commonappdata}\{#MyAppShort}
 DefaultGroupName={#MyAppShort}
-OutputDir=..\target\release
-OutputBaseFilename={#MyAppShort}-Setup-{#MyAppVersion}
+OutputDir=..\target\installer
+OutputBaseFilename={#MyAppShort}-Setup-{#MyAppVersion}{#MyAppBuildSuffix}
 Compression=lzma2
 SolidCompression=yes
 Uninstallable=yes
@@ -32,6 +41,8 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\neowaves_plugin_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\neowaves_plugin_gui_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\commands\*"; DestDir: "{app}\commands"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\icons\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
