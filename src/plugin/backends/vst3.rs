@@ -21,21 +21,23 @@ mod native {
     use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
     use vst3::Steinberg::Vst::{
         AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IAudioProcessorTrait, IComponent,
-        IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint, IConnectionPointTrait,
-        IEditController, IEditControllerTrait, IHostApplication, IHostApplicationTrait, ParameterInfo, ProcessData, ProcessSetup,
-        TChar,
+        IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
+        IConnectionPointTrait, IEditController, IEditControllerTrait, IHostApplication,
+        IHostApplicationTrait, ParameterInfo, ProcessData, ProcessSetup, TChar,
     };
+    use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
     #[cfg(windows)]
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     #[cfg(windows)]
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     #[cfg(windows)]
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IsWindow,
-        PeekMessageW,
+        AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+        GetClientRect, GetWindowLongW, IsWindow, PeekMessageW, SetWindowPos,
         RegisterClassW, SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-        CW_USEDEFAULT, MSG, PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSW,
-        WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        CW_USEDEFAULT, GWL_EXSTYLE, GWL_STYLE, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOZORDER, SWP_FRAMECHANGED, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_CLIPCHILDREN,
+        WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME, WS_VISIBLE,
     };
 
     fn debug_enabled() -> bool {
@@ -91,6 +93,87 @@ mod native {
     }
 
     type ParamQueue = Arc<Mutex<Vec<(Steinberg::Vst::ParamID, f32)>>>;
+
+    #[cfg(windows)]
+    struct PlugFrame {
+        hwnd: HWND,
+        fixed_client_width: i32,
+        fixed_client_height: i32,
+    }
+
+    #[cfg(windows)]
+    impl Class for PlugFrame {
+        type Interfaces = (IPlugFrame,);
+    }
+
+    #[cfg(windows)]
+    impl IPlugFrameTrait for PlugFrame {
+        unsafe fn resizeView(
+            &self,
+            _view: *mut IPlugView,
+            new_size: *mut Steinberg::ViewRect,
+        ) -> Steinberg::tresult {
+            if new_size.is_null() {
+                return Steinberg::kInvalidArgument;
+            }
+            // Fixed-size host window: always clamp to the initial client size.
+            // Some plugins rely on resizeView callbacks for their layout; returning OK
+            // while enforcing the fixed size keeps the GUI responsive without allowing
+            // user resizes that break rendering.
+            let rect = &mut *new_size;
+            rect.left = 0;
+            rect.top = 0;
+            rect.right = self.fixed_client_width.max(1);
+            rect.bottom = self.fixed_client_height.max(1);
+            let style = GetWindowLongW(self.hwnd, GWL_STYLE) as u32;
+            let ex_style = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            let (win_w, win_h) = calc_window_size_for_client(
+                style,
+                ex_style,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            );
+            let _ = SetWindowPos(
+                self.hwnd,
+                0,
+                0,
+                0,
+                win_w,
+                win_h,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            Steinberg::kResultOk
+        }
+    }
+
+    #[cfg(windows)]
+    impl PlugFrame {
+        #[allow(dead_code)]
+        unsafe fn resize_view_allow(
+            &self,
+            new_size: *mut Steinberg::ViewRect,
+        ) -> Steinberg::tresult {
+            if new_size.is_null() {
+                return Steinberg::kInvalidArgument;
+            }
+            let rect = &mut *new_size;
+            let width = (rect.right - rect.left).max(1);
+            let height = (rect.bottom - rect.top).max(1);
+            let style = GetWindowLongW(self.hwnd, GWL_STYLE) as u32;
+            let ex_style = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            let (win_w, win_h) = calc_window_size_for_client(style, ex_style, width, height);
+            let _ = SetWindowPos(
+                self.hwnd,
+                0,
+                0,
+                0,
+                win_w,
+                win_h,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            Steinberg::kResultOk
+        }
+    }
 
     struct ComponentHandler {
         queue: Option<ParamQueue>,
@@ -237,7 +320,34 @@ mod native {
     }
 
     #[cfg(windows)]
-    fn create_native_gui_window(title: &str, width: i32, height: i32) -> Result<HWND, String> {
+    fn calc_window_size_for_client(
+        style: u32,
+        ex_style: u32,
+        width: i32,
+        height: i32,
+    ) -> (i32, i32) {
+        unsafe {
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: width.max(1),
+                bottom: height.max(1),
+            };
+            let _ = AdjustWindowRectEx(&mut rect, style, 0, ex_style);
+            (
+                (rect.right - rect.left).max(1),
+                (rect.bottom - rect.top).max(1),
+            )
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_native_gui_window(
+        title: &str,
+        width: i32,
+        height: i32,
+        resizable: bool,
+    ) -> Result<HWND, String> {
         unsafe {
             let class_name = to_wide_null("NeoWavesPluginGuiHostWindow");
             let hinstance = GetModuleHandleW(std::ptr::null());
@@ -254,15 +364,21 @@ mod native {
                 lpszClassName: class_name.as_ptr(),
             };
             let _ = RegisterClassW(&wc);
+            let mut style = WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
+            if !resizable {
+                style &= !(WS_THICKFRAME | WS_MAXIMIZEBOX);
+            }
+            let ex_style = 0u32;
+            let (win_w, win_h) = calc_window_size_for_client(style, ex_style, width, height);
             let hwnd = CreateWindowExW(
-                0,
+                ex_style,
                 class_name.as_ptr(),
                 class_name.as_ptr(),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                style,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                width.max(300),
-                height.max(180),
+                win_w.max(300),
+                win_h.max(180),
                 0,
                 0,
                 hinstance,
@@ -827,6 +943,10 @@ mod native {
         last_client_width: i32,
         #[cfg(windows)]
         last_client_height: i32,
+        #[cfg(windows)]
+        resizable: bool,
+        #[cfg(windows)]
+        frame: Option<ComPtr<IPlugFrame>>,
         param_ids: Vec<(String, Steinberg::Vst::ParamID)>,
         last_values: HashMap<Steinberg::Vst::ParamID, f32>,
         queue: ParamQueue,
@@ -944,15 +1064,33 @@ mod native {
                 bottom: 420,
             };
             let _ = view.getSize(&mut rect);
+            let can_resize = false;
             let width = (rect.right - rect.left).max(360);
             let height = (rect.bottom - rect.top).max(220);
-            let hwnd = create_native_gui_window(&plugin_display_name(plugin_path), width, height)?;
+            let hwnd =
+                create_native_gui_window(&plugin_display_name(plugin_path), width, height, can_resize)?;
             let attach_r = view.attached(hwnd as *mut c_void, Steinberg::kPlatformTypeHWND);
             if attach_r != Steinberg::kResultOk && attach_r != Steinberg::kResultTrue {
                 let _ = DestroyWindow(hwnd);
                 return Err(format!("view.attached failed: {attach_r}"));
             }
-            let _ = view.onSize(&mut rect);
+            let (fixed_w, fixed_h) =
+                current_client_size(hwnd).unwrap_or((width.max(1), height.max(1)));
+            let frame = ComWrapper::new(PlugFrame {
+                hwnd,
+                fixed_client_width: fixed_w,
+                fixed_client_height: fixed_h,
+            })
+                .to_com_ptr::<IPlugFrame>()
+                .ok_or_else(|| "failed to create VST3 IPlugFrame".to_string())?;
+            let _ = view.setFrame(frame.as_ptr());
+            let mut sized = Steinberg::ViewRect {
+                left: 0,
+                top: 0,
+                right: fixed_w,
+                bottom: fixed_h,
+            };
+            let _ = view.onSize(&mut sized);
             let _ = component.setActive(1);
             let (last_client_width, last_client_height) =
                 current_client_size(hwnd).unwrap_or((width.max(1), height.max(1)));
@@ -984,6 +1122,8 @@ mod native {
                     hwnd,
                     last_client_width,
                     last_client_height,
+                    resizable: can_resize,
+                    frame: Some(frame),
                     param_ids,
                     last_values,
                     queue,
@@ -1016,16 +1156,62 @@ mod native {
             }
             if let Some((w, h)) = current_client_size(session.hwnd) {
                 if w != session.last_client_width || h != session.last_client_height {
-                    session.last_client_width = w;
-                    session.last_client_height = h;
-                    let mut rect = Steinberg::ViewRect {
-                        left: 0,
-                        top: 0,
-                        right: w,
-                        bottom: h,
-                    };
-                    unsafe {
-                        let _ = session.view.onSize(&mut rect);
+                    if !session.resizable {
+                        // Fixed-size GUI: snap back to the initial client size to avoid
+                        // plugin layouts breaking when users try to resize the window.
+                        unsafe {
+                            let style = GetWindowLongW(session.hwnd, GWL_STYLE) as u32;
+                            let ex_style = GetWindowLongW(session.hwnd, GWL_EXSTYLE) as u32;
+                            let (win_w, win_h) = calc_window_size_for_client(
+                                style,
+                                ex_style,
+                                session.last_client_width,
+                                session.last_client_height,
+                            );
+                            let _ = SetWindowPos(
+                                session.hwnd,
+                                0,
+                                0,
+                                0,
+                                win_w,
+                                win_h,
+                                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                            );
+                        }
+                    } else {
+                        let mut rect = Steinberg::ViewRect {
+                            left: 0,
+                            top: 0,
+                            right: w,
+                            bottom: h,
+                        };
+                        let check_r = unsafe { session.view.checkSizeConstraint(&mut rect) };
+                        if check_r == Steinberg::kResultOk || check_r == Steinberg::kResultTrue {
+                            let new_w = (rect.right - rect.left).max(1);
+                            let new_h = (rect.bottom - rect.top).max(1);
+                            if new_w != w || new_h != h {
+                                unsafe {
+                                    let style = GetWindowLongW(session.hwnd, GWL_STYLE) as u32;
+                                    let ex_style = GetWindowLongW(session.hwnd, GWL_EXSTYLE) as u32;
+                                    let (win_w, win_h) =
+                                        calc_window_size_for_client(style, ex_style, new_w, new_h);
+                                    let _ = SetWindowPos(
+                                        session.hwnd,
+                                        0,
+                                        0,
+                                        0,
+                                        win_w,
+                                        win_h,
+                                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                                    );
+                                }
+                            }
+                        }
+                        session.last_client_width = (rect.right - rect.left).max(1);
+                        session.last_client_height = (rect.bottom - rect.top).max(1);
+                        unsafe {
+                            let _ = session.view.onSize(&mut rect);
+                        }
                     }
                 }
             }
@@ -1071,6 +1257,10 @@ mod native {
         let snapshot = read_param_snapshot(&session.controller, &session.param_ids);
         #[cfg(windows)]
         unsafe {
+            if let Some(frame) = session.frame.take() {
+                let _ = session.view.setFrame(std::ptr::null_mut());
+                std::mem::forget(frame);
+            }
             let _ = session.view.removed();
             if IsWindow(session.hwnd) != 0 {
                 let _ = DestroyWindow(session.hwnd);
