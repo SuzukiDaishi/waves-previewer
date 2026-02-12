@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::app::types::{EditorApplyResult, EditorUndoState, ToolKind};
 
 impl crate::app::WavesPreviewer {
@@ -887,6 +889,7 @@ impl crate::app::WavesPreviewer {
             }
         }
         if let Some((res, undo)) = apply_done {
+            let mut spectro_reset_path: Option<PathBuf> = None;
             if res.tab_idx < self.tabs.len() {
                 let mut applied_channels = res.channels;
                 if applied_channels.is_empty() && !res.samples.is_empty() {
@@ -918,6 +921,7 @@ impl crate::app::WavesPreviewer {
                     if let Some(v) = res.lufs_override {
                         self.lufs_override.insert(tab.path.clone(), v);
                     }
+                    spectro_reset_path = Some(tab.path.clone());
                 }
                 self.heavy_preview_rx = None;
                 self.heavy_preview_tool = None;
@@ -930,6 +934,9 @@ impl crate::app::WavesPreviewer {
                 } else if !res.samples.is_empty() {
                     self.audio.set_samples_mono(res.samples);
                 }
+            }
+            if let Some(path) = spectro_reset_path {
+                self.cancel_spectrogram_for_path(&path);
             }
             self.editor_apply_state = None;
             ctx.request_repaint();

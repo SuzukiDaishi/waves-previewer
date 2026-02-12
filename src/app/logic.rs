@@ -1223,6 +1223,7 @@ impl super::WavesPreviewer {
         let mut decode_error: Option<(PathBuf, String)> = None;
         let mut decode_done = false;
         let mut marker_updates: Vec<(usize, PathBuf)> = Vec::new();
+        let mut spectro_reset_paths: Vec<PathBuf> = Vec::new();
         if let Some(state) = &mut self.editor_decode_state {
             while let Ok(res) = state.rx.try_recv() {
                 if res.job_id != state.job_id {
@@ -1249,6 +1250,9 @@ impl super::WavesPreviewer {
                         let old_spp = tab.samples_per_px;
                         tab.ch_samples = res.channels;
                         tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                        if tab.samples_len != old_len {
+                            spectro_reset_paths.push(tab.path.clone());
+                        }
                         if res.is_final {
                             marker_updates.push((idx, res.path.clone()));
                         }
@@ -1282,6 +1286,9 @@ impl super::WavesPreviewer {
                     state.partial_ready = true;
                 }
             }
+        }
+        for path in spectro_reset_paths {
+            self.cancel_spectrogram_for_path(&path);
         }
         if let Some((path, err)) = decode_error {
             self.debug_log(format!("editor decode failed: {} ({err})", path.display()));

@@ -726,7 +726,7 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
             16,
             Some(mono.len()),
         );
-        return Ok((mono, sr, reached_eof));
+        return Ok((mono, sr, !reached_eof));
     }
     if max_secs <= 0.0 {
         let (mono, sr) = decode_audio_mono(path)?;
@@ -940,7 +940,7 @@ pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<
     if is_m4a_path(path) {
         let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
         let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
-        return Ok((chans, sr, reached_eof));
+        return Ok((chans, sr, !reached_eof));
     }
     if max_secs <= 0.0 {
         let (chans, sr) = decode_audio_multi(path)?;

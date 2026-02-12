@@ -79,6 +79,9 @@ impl super::WavesPreviewer {
     fn apply_spectrogram_message(&mut self, ctx: &egui::Context, msg: SpectrogramJobMsg) {
         match msg {
             SpectrogramJobMsg::Tile(tile) => {
+                if !self.spectro_inflight.contains(&tile.path) {
+                    return;
+                }
                 let spec_entry = self
                     .spectro_cache
                     .entry(tile.path.clone())

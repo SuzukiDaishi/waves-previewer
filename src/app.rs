@@ -1655,6 +1655,28 @@ impl WavesPreviewer {
         }
         self.setup_mcp_server(&cfg);
     }
+
+    pub(super) fn open_new_window(&mut self) {
+        // Spawn a fresh process of the current executable (no args) to open a new window.
+        // This keeps state isolated and avoids blocking the current UI thread.
+        let exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(err) => {
+                self.debug_log(format!("new window: current_exe failed: {err}"));
+                return;
+            }
+        };
+        let mut cmd = std::process::Command::new(exe);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // Prevent a console flash when launching a GUI child.
+            cmd.creation_flags(0x08000000);
+        }
+        if let Err(err) = cmd.spawn() {
+            self.debug_log(format!("new window: spawn failed: {err}"));
+        }
+    }
 }
 // moved to types.rs
 

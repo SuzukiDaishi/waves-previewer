@@ -128,6 +128,11 @@ impl super::WavesPreviewer {
                 egui::Key::S,
             )
         });
+        if ctx
+            .input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::N))
+        {
+            self.open_new_window();
+        }
         let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
         if save_as {
             if let Some(mut path) = self.pick_project_save_dialog() {

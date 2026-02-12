@@ -8,6 +8,10 @@ impl crate::app::WavesPreviewer {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.menu_button("File", |ui| {
+                        if ui.button("New Window (Ctrl+Shift+N)").clicked() {
+                            self.open_new_window();
+                            ui.close();
+                        }
                         if ui.button("Session Open...").clicked() {
                             if let Some(path) = self.pick_project_open_dialog() {
                                 self.queue_project_open(path);
