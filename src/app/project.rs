@@ -822,6 +822,7 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         channels: 0,
         sample_rate: 0,
         bits_per_sample: 0,
+        sample_value_kind: super::types::SampleValueKind::Unknown,
         bit_rate_bps: None,
         duration_secs: None,
         rms_db: None,
@@ -1091,7 +1092,10 @@ files = []
         let project = project_plugin_fx_draft_from_draft(&src);
         assert_eq!(project.backend.as_deref(), Some("native_clap"));
         let restored = project_plugin_fx_draft_to_draft(&project);
-        assert_eq!(restored.backend, Some(crate::plugin::PluginHostBackend::NativeClap));
+        assert_eq!(
+            restored.backend,
+            Some(crate::plugin::PluginHostBackend::NativeClap)
+        );
     }
 
     #[test]

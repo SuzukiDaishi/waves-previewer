@@ -20,6 +20,13 @@ pub enum MediaSource {
     External,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SampleValueKind {
+    Unknown,
+    Int,
+    Float,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VirtualSourceRef {
     FilePath(PathBuf),
@@ -606,6 +613,7 @@ pub struct FileMeta {
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
+    pub sample_value_kind: SampleValueKind,
     pub bit_rate_bps: Option<u32>,
     pub duration_secs: Option<f32>,
     #[allow(dead_code)]
@@ -630,6 +638,7 @@ pub struct SpectrogramData {
 
 pub struct SpectrogramTile {
     pub path: PathBuf,
+    pub generation: u64,
     pub channel_index: usize,
     pub channel_count: usize,
     pub frames: usize,
@@ -642,7 +651,7 @@ pub struct SpectrogramTile {
 
 pub enum SpectrogramJobMsg {
     Tile(SpectrogramTile),
-    Done(PathBuf),
+    Done { path: PathBuf, generation: u64 },
 }
 
 pub struct SpectrogramProgress {

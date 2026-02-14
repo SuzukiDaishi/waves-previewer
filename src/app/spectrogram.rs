@@ -46,6 +46,7 @@ impl super::WavesPreviewer {
         }
         self.spectro_inflight.remove(path);
         self.spectro_progress.remove(path);
+        self.spectro_generation.remove(path);
         self.spectro_cache.remove(path);
         if let Some(prev) = self.spectro_cache_sizes.remove(path) {
             self.spectro_cache_bytes = self.spectro_cache_bytes.saturating_sub(prev);
@@ -79,6 +80,17 @@ impl super::WavesPreviewer {
     fn apply_spectrogram_message(&mut self, ctx: &egui::Context, msg: SpectrogramJobMsg) {
         match msg {
             SpectrogramJobMsg::Tile(tile) => {
+                if self.spectro_generation.get(&tile.path).copied() != Some(tile.generation) {
+                    if self.debug.cfg.enabled {
+                        self.debug_log(format!(
+                            "spectro_tile_drop_stale path={} tile_gen={} expected={:?}",
+                            tile.path.display(),
+                            tile.generation,
+                            self.spectro_generation.get(&tile.path).copied()
+                        ));
+                    }
+                    return;
+                }
                 if !self.spectro_inflight.contains(&tile.path) {
                     return;
                 }
@@ -148,7 +160,18 @@ impl super::WavesPreviewer {
                 }
                 ctx.request_repaint();
             }
-            SpectrogramJobMsg::Done(path) => {
+            SpectrogramJobMsg::Done { path, generation } => {
+                if self.spectro_generation.get(&path).copied() != Some(generation) {
+                    if self.debug.cfg.enabled {
+                        self.debug_log(format!(
+                            "spectro_tile_drop_stale path={} done_gen={} expected={:?}",
+                            path.display(),
+                            generation,
+                            self.spectro_generation.get(&path).copied()
+                        ));
+                    }
+                    return;
+                }
                 self.spectro_inflight.remove(&path);
                 self.spectro_progress.remove(&path);
                 self.spectro_cancel.remove(&path);

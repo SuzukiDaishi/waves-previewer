@@ -42,11 +42,12 @@ impl super::WavesPreviewer {
                 self.audio.set_loop_region(0, buf.len());
             }
             self.processing = None;
-            if autoplay_when_ready
-                && self.auto_play_list_nav
+            let should_resume_list_play = self.active_tab.is_none()
                 && self.selected_path_buf().as_ref() == Some(&path)
-            {
+                && (autoplay_when_ready || self.list_play_pending);
+            if should_resume_list_play {
                 self.audio.play();
+                self.list_play_pending = false;
                 self.debug_mark_list_play_start(&path);
             }
             ctx.request_repaint();

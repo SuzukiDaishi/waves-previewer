@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::app::types::{LoopMode, LoopXfadeShape, SortDir, SortKey, ToolKind, ViewMode};
+use crate::app::types::{LoopMode, LoopXfadeShape, RateMode, SortDir, SortKey, ToolKind, ViewMode};
 
 #[cfg(feature = "kittest")]
 impl super::WavesPreviewer {
@@ -71,6 +71,59 @@ impl super::WavesPreviewer {
 
     pub fn test_force_load_selected_list_preview_for_play(&mut self) -> bool {
         self.force_load_selected_list_preview_for_play()
+    }
+
+    pub fn test_set_rate_mode(&mut self, mode: RateMode) {
+        self.mode = mode;
+    }
+
+    pub fn test_set_mode_pitch_shift(&mut self) {
+        self.mode = RateMode::PitchShift;
+    }
+
+    pub fn test_set_mode_time_stretch(&mut self) {
+        self.mode = RateMode::TimeStretch;
+    }
+
+    pub fn test_set_mode_speed(&mut self) {
+        self.mode = RateMode::Speed;
+    }
+
+    pub fn test_set_pitch_semitones(&mut self, semitones: f32) {
+        self.pitch_semitones = semitones;
+    }
+
+    pub fn test_set_playback_rate(&mut self, rate: f32) {
+        self.playback_rate = rate;
+    }
+
+    pub fn test_processing_autoplay_when_ready(&self) -> bool {
+        self.processing
+            .as_ref()
+            .map(|p| p.autoplay_when_ready)
+            .unwrap_or(false)
+    }
+
+    pub fn test_set_sort(&mut self, key: SortKey, dir: SortDir) {
+        self.sort_key = key;
+        self.sort_dir = dir;
+        self.apply_sort();
+    }
+
+    pub fn test_sort_sample_rate_asc(&mut self) {
+        self.sort_key = SortKey::SampleRate;
+        self.sort_dir = SortDir::Asc;
+        self.apply_sort();
+    }
+
+    pub fn test_sort_sample_rate_desc(&mut self) {
+        self.sort_key = SortKey::SampleRate;
+        self.sort_dir = SortDir::Desc;
+        self.apply_sort();
+    }
+
+    pub fn test_row_path(&self, row: usize) -> Option<PathBuf> {
+        self.path_for_row(row).cloned()
     }
 
     pub fn test_evict_selected_list_preview_cache(&mut self) -> bool {
@@ -474,7 +527,20 @@ impl super::WavesPreviewer {
 
     pub fn test_selected_display_name(&self) -> Option<String> {
         let path = self.test_selected_path()?;
-        self.item_for_path(path).map(|item| item.display_name.clone())
+        self.item_for_path(path)
+            .map(|item| item.display_name.clone())
+    }
+
+    pub fn test_selected_bits_label(&self) -> Option<String> {
+        let path = self.test_selected_path()?;
+        self.effective_bits_label_for_path(path)
+    }
+
+    pub fn test_rename_selected_to(&mut self, new_name: &str) -> bool {
+        let Some(path) = self.test_selected_path().cloned() else {
+            return false;
+        };
+        self.rename_file_path(&path, new_name).is_ok()
     }
 
     pub fn test_list_undo(&mut self) -> bool {

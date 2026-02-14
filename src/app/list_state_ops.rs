@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use super::types::{FileMeta, MediaId, MediaItem, MediaSource, SortDir, SortKey, Transcript};
+use super::types::{
+    FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SortDir, SortKey, Transcript,
+};
 use super::WavesPreviewer;
 
 impl WavesPreviewer {
@@ -49,6 +51,12 @@ impl WavesPreviewer {
             .unwrap_or(false)
     }
 
+    pub(super) fn is_external_path(&self, path: &Path) -> bool {
+        self.item_for_path(path)
+            .map(|item| item.source == MediaSource::External)
+            .unwrap_or(false)
+    }
+
     pub(super) fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
         self.item_for_path(path).and_then(|item| item.meta.as_ref())
     }
@@ -68,6 +76,35 @@ impl WavesPreviewer {
             .map(|v| v.bits_per_sample())
             .or_else(|| self.meta_for_path(path).map(|m| m.bits_per_sample))
             .filter(|v| *v > 0)
+    }
+
+    pub(super) fn effective_bits_label_for_path(&self, path: &Path) -> Option<String> {
+        let override_depth = self.bit_depth_override.get(path).copied();
+        let bits = override_depth
+            .map(|v| v.bits_per_sample())
+            .or_else(|| self.meta_for_path(path).map(|m| m.bits_per_sample))
+            .filter(|v| *v > 0)?;
+        let kind = if let Some(depth) = override_depth {
+            match depth {
+                crate::wave::WavBitDepth::Float32 => SampleValueKind::Float,
+                crate::wave::WavBitDepth::Pcm16 | crate::wave::WavBitDepth::Pcm24 => {
+                    SampleValueKind::Int
+                }
+            }
+        } else {
+            self.meta_for_path(path)
+                .map(|m| m.sample_value_kind)
+                .unwrap_or(SampleValueKind::Unknown)
+        };
+        if bits == 32 {
+            let label = match kind {
+                SampleValueKind::Float => "32f",
+                SampleValueKind::Int => "32i",
+                SampleValueKind::Unknown => "32",
+            };
+            return Some(label.to_string());
+        }
+        Some(bits.to_string())
     }
 
     pub(super) fn effective_format_override_for_path(&self, path: &Path) -> Option<&str> {
@@ -215,6 +252,13 @@ impl WavesPreviewer {
         self.selected_paths()
             .into_iter()
             .filter(|p| !self.is_virtual_path(p))
+            .collect()
+    }
+
+    pub(super) fn selected_renameable_paths(&self) -> Vec<PathBuf> {
+        self.selected_paths()
+            .into_iter()
+            .filter(|p| !self.is_external_path(p))
             .collect()
     }
 

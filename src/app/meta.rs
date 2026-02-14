@@ -4,8 +4,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use super::transcript;
-use super::types::{FileMeta, Transcript};
+use super::types::{FileMeta, SampleValueKind, Transcript};
 use crate::audio_io;
+
+fn map_sample_value_kind(kind: audio_io::SampleValueKind) -> SampleValueKind {
+    match kind {
+        audio_io::SampleValueKind::Unknown => SampleValueKind::Unknown,
+        audio_io::SampleValueKind::Int => SampleValueKind::Int,
+        audio_io::SampleValueKind::Float => SampleValueKind::Float,
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum MetaTask {
@@ -101,6 +109,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             channels: info.channels,
             sample_rate: info.sample_rate,
             bits_per_sample: info.bits_per_sample,
+            sample_value_kind: map_sample_value_kind(info.sample_value_kind),
             bit_rate_bps: info.bit_rate_bps,
             duration_secs: info.duration_secs,
             rms_db: None,
@@ -116,6 +125,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             channels: 0,
             sample_rate: 0,
             bits_per_sample: 0,
+            sample_value_kind: SampleValueKind::Unknown,
             bit_rate_bps: None,
             duration_secs: None,
             rms_db: None,
@@ -192,6 +202,10 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             .as_ref()
             .map(|info| (info.channels, info.bits_per_sample))
             .unwrap_or((chans.len() as u16, 0));
+        let sample_value_kind = info
+            .as_ref()
+            .map(|info| map_sample_value_kind(info.sample_value_kind))
+            .unwrap_or(SampleValueKind::Unknown);
         let length_secs = if sr > 0 {
             mono.len() as f32 / sr as f32
         } else {
@@ -201,6 +215,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             channels: ch,
             sample_rate: sr,
             bits_per_sample: bits,
+            sample_value_kind,
             bit_rate_bps: info.as_ref().and_then(|i| i.bit_rate_bps),
             duration_secs: Some(length_secs),
             rms_db: Some(rms_db),
@@ -255,6 +270,10 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
                 info.as_ref().map(|i| i.sample_rate).unwrap_or(0)
             },
             bits_per_sample: info.as_ref().map(|i| i.bits_per_sample).unwrap_or(0),
+            sample_value_kind: info
+                .as_ref()
+                .map(|i| map_sample_value_kind(i.sample_value_kind))
+                .unwrap_or(SampleValueKind::Unknown),
             bit_rate_bps: info.as_ref().and_then(|i| i.bit_rate_bps),
             duration_secs: info.as_ref().and_then(|i| i.duration_secs),
             rms_db: Some(rms_db),

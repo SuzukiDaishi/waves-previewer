@@ -5,6 +5,13 @@ use super::types::{
 };
 
 impl super::WavesPreviewer {
+    fn bump_spectrogram_generation(&mut self, path: &PathBuf) -> u64 {
+        self.spectro_generation_counter = self.spectro_generation_counter.wrapping_add(1);
+        let generation = self.spectro_generation_counter;
+        self.spectro_generation.insert(path.clone(), generation);
+        generation
+    }
+
     fn ensure_spectro_channel(&mut self) {
         if self.spectro_tx.is_none() || self.spectro_rx.is_none() {
             let (tx, rx) = std::sync::mpsc::channel::<super::types::SpectrogramJobMsg>();
@@ -19,6 +26,7 @@ impl super::WavesPreviewer {
         channels: Vec<Vec<f32>>,
         sample_rate: u32,
         cfg: SpectrogramConfig,
+        generation: u64,
     ) {
         self.ensure_spectro_channel();
         let Some(tx) = self.spectro_tx.as_ref().cloned() else {
@@ -34,7 +42,7 @@ impl super::WavesPreviewer {
             let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
             let params = crate::app::render::spectrogram::spectrogram_params(len, &cfg);
             if params.frames == 0 {
-                let _ = tx.send(super::types::SpectrogramJobMsg::Done(path));
+                let _ = tx.send(super::types::SpectrogramJobMsg::Done { path, generation });
                 return;
             }
             let tile_frames = super::SPECTRO_TILE_FRAMES;
@@ -59,6 +67,7 @@ impl super::WavesPreviewer {
                     let _ = tx.send(super::types::SpectrogramJobMsg::Tile(
                         super::types::SpectrogramTile {
                             path: path.clone(),
+                            generation,
                             channel_index: ci,
                             channel_count,
                             frames: params.frames,
@@ -72,7 +81,7 @@ impl super::WavesPreviewer {
                     start = end;
                 }
             }
-            let _ = tx.send(super::types::SpectrogramJobMsg::Done(path));
+            let _ = tx.send(super::types::SpectrogramJobMsg::Done { path, generation });
         });
     }
 
@@ -155,7 +164,8 @@ impl super::WavesPreviewer {
             path.clone(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
+        let generation = self.bump_spectrogram_generation(&path);
         self.spectro_inflight.insert(path.clone());
-        self.spawn_spectrogram_job(path, channels, sr, self.spectro_cfg.clone());
+        self.spawn_spectrogram_job(path, channels, sr, self.spectro_cfg.clone(), generation);
     }
 }

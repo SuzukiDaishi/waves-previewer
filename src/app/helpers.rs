@@ -68,8 +68,8 @@ pub fn sortable_header(
     let is_active = *sort_key == key && *sort_dir != SortDir::None;
     let arrow = if is_active {
         match *sort_dir {
-            SortDir::Asc => " ▲",
-            SortDir::Desc => " ▼",
+            SortDir::Asc => " \u{25B2}",
+            SortDir::Desc => " \u{25BC}",
             SortDir::None => "",
         }
     } else {
@@ -113,10 +113,6 @@ pub fn sortable_header(
         return true;
     }
     false
-}
-
-pub fn num_order(a: f32, b: f32) -> std::cmp::Ordering {
-    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 pub fn format_duration(secs: f32) -> String {
@@ -234,7 +230,7 @@ pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::R
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        // Windows: /select パラメータでファイルを選択状態でフォルダを開く
+        // Windows: /select parameter opens folder and selects the file.
         Command::new("explorer")
             .arg("/select,")
             .arg(file_path)
@@ -244,14 +240,14 @@ pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::R
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        // macOS: -R フラグでFinderでファイルを選択状態で開く
+        // macOS: -R opens Finder with the file selected.
         Command::new("open").arg("-R").arg(file_path).spawn()?;
         Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         use std::process::Command;
-        // Linux: ファイルマネージャーでフォルダを開く (ファイル選択は一般的にサポートされていない)
+        // Linux: open parent folder in file manager (file selection is generally unsupported).
         if let Some(parent) = file_path.parent() {
             Command::new("xdg-open").arg(parent).spawn()?;
         }
@@ -287,3 +283,5 @@ pub fn sanitize_filename_component(name: &str) -> String {
     }
     s
 }
+
+

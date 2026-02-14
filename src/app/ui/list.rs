@@ -32,10 +32,10 @@ impl crate::app::WavesPreviewer {
             self.trigger_save_selected();
             ui.close();
         }
-        let real_selected = self.selected_real_paths();
-        if real_selected.len() == 1 {
+        let renameable_selected = self.selected_renameable_paths();
+        if renameable_selected.len() == 1 {
             if ui.button("Rename...").clicked() {
-                self.open_rename_dialog(real_selected[0].clone());
+                self.open_rename_dialog(renameable_selected[0].clone());
                 ui.close();
             }
         }
@@ -193,11 +193,12 @@ impl crate::app::WavesPreviewer {
         let list_focus_now = ctx.memory(|m| m.has_focus(list_focus_id));
         let search_focused =
             ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
+        let rename_modal_open = self.show_rename_dialog || self.show_batch_rename_dialog;
         let focus_resp = ui.interact(list_rect, list_focus_id, Sense::click());
-        if self.list_has_focus && !list_focus_now && !search_focused {
+        if self.list_has_focus && !list_focus_now && !search_focused && !rename_modal_open {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
         }
-        if focus_resp.clicked() {
+        if focus_resp.clicked() && !rename_modal_open {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             self.search_has_focus = false;
         }
@@ -207,6 +208,7 @@ impl crate::app::WavesPreviewer {
             && self.selected.is_some()
             && !self.search_has_focus
             && !search_focused
+            && !rename_modal_open
         {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             list_has_focus = true;
@@ -233,7 +235,7 @@ impl crate::app::WavesPreviewer {
         } else {
             false
         };
-        if allow_list_keys && list_key_intent {
+        if allow_list_keys && list_key_intent && !rename_modal_open {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             list_has_focus = true;
             self.list_has_focus = true;
@@ -1142,12 +1144,12 @@ impl crate::app::WavesPreviewer {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
                                 ui.visuals_mut().override_text_color = row_fg;
-                                let bits = self.effective_bits_for_path(&path_owned);
+                                let bits = self.effective_bits_label_for_path(&path_owned);
                                 let resp = ui
                                     .add(
                                         egui::Label::new(
                                             RichText::new(
-                                                bits.map(|v| format!("{v}"))
+                                                bits
                                                     .unwrap_or_else(|| "-".into()),
                                             )
                                             .monospace(),
@@ -1536,6 +1538,7 @@ impl crate::app::WavesPreviewer {
             }
         }
         if sort_changed {
+            self.list_meta_prefetch_cursor = 0;
             self.apply_sort();
         }
         if let Some(p) = to_open.as_ref() {

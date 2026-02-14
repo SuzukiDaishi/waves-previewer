@@ -1196,42 +1196,38 @@ impl crate::app::WavesPreviewer {
                 let drag_started = resp.drag_started_by(egui::PointerButton::Primary);
                 let dragging = resp.dragged_by(egui::PointerButton::Primary);
                 let drag_released = resp.drag_stopped_by(egui::PointerButton::Primary);
+                let spp = tab.samples_per_px.max(0.0001);
+                let vis = (wave_w * spp).ceil() as usize;
+                let playhead_display = playhead_display_now.min(tab.samples_len);
+                let playhead_x = wave_left
+                    + (((playhead_display.saturating_sub(tab.view_offset)) as f32 / spp)
+                        .clamp(0.0, wave_w));
+                let snap_radius_px = 8.0f32;
+                let to_display_sample_snapped = |x: f32| -> usize {
+                    let x = x.clamp(wave_left, wave_left + wave_w);
+                    if (x - playhead_x).abs() <= snap_radius_px {
+                        return playhead_display;
+                    }
+                    tab.view_offset
+                        .saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize)
+                        .min(tab.samples_len)
+                };
                 if drag_started {
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        let spp = tab.samples_per_px.max(0.0001);
-                        let vis = (wave_w * spp).ceil() as usize;
-                        let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                        let samp = tab
-                            .view_offset
-                            .saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize)
-                            .min(tab.samples_len);
+                        let samp = to_display_sample_snapped(pos.x);
                         tab.drag_select_anchor = Some(samp);
                     }
                 }
                 if dragging {
                     let anchor = tab.drag_select_anchor.or_else(|| {
-                        resp.interact_pointer_pos().map(|pos| {
-                            let spp = tab.samples_per_px.max(0.0001);
-                            let vis = (wave_w * spp).ceil() as usize;
-                            let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                            tab.view_offset
-                                .saturating_add(
-                                    (((x - wave_left) / wave_w) * vis as f32) as usize,
-                                )
-                                .min(tab.samples_len)
-                        })
+                        resp.interact_pointer_pos()
+                            .map(|pos| to_display_sample_snapped(pos.x))
                     });
                     if tab.drag_select_anchor.is_none() {
                         tab.drag_select_anchor = anchor;
                     }
                     if let (Some(anchor), Some(pos)) = (anchor, resp.interact_pointer_pos()) {
-                        let spp = tab.samples_per_px.max(0.0001);
-                        let vis = (wave_w * spp).ceil() as usize;
-                        let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                        let samp = tab
-                            .view_offset
-                            .saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize)
-                            .min(tab.samples_len);
+                        let samp = to_display_sample_snapped(pos.x);
                         let (s, e) = if samp >= anchor {
                             (anchor, samp)
                         } else {
@@ -1259,11 +1255,8 @@ impl crate::app::WavesPreviewer {
                                 (((x - wave_left) / wave_w) * vis as f32) as usize,
                             )
                             .min(tab.samples_len);
-                        if let Some((a0, b0)) = tab.selection {
-                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                            if pos_samp < a || pos_samp > b {
-                                tab.selection = None;
-                            }
+                        if tab.selection.is_some() {
+                            tab.selection = None;
                         }
                         request_seek = Some(map_display_to_audio(pos_samp));
                     }
@@ -3789,10 +3782,7 @@ impl crate::app::WavesPreviewer {
                     tab.loop_region = None;
                 } else {
                     tab.loop_region = Some((s, e));
-                    if tab.loop_mode == LoopMode::Marker {
-                        self.audio.set_loop_enabled(true);
-                        self.audio.set_loop_region(s, e);
-                    }
+                    apply_pending_loop = true;
                 }
                 Self::update_loop_markers_dirty(tab);
             }

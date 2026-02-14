@@ -283,6 +283,22 @@ impl crate::app::WavesPreviewer {
             .or_else(|| source_meta.as_ref().map(|m| m.bits_per_sample))
             .filter(|v| *v > 0)
             .unwrap_or(32);
+        let sample_value_kind = self
+            .bit_depth_override
+            .get(&source_path)
+            .copied()
+            .map(|depth| match depth {
+                crate::wave::WavBitDepth::Float32 => crate::app::types::SampleValueKind::Float,
+                crate::wave::WavBitDepth::Pcm16 | crate::wave::WavBitDepth::Pcm24 => {
+                    crate::app::types::SampleValueKind::Int
+                }
+            })
+            .or_else(|| source_meta.as_ref().map(|m| m.sample_value_kind))
+            .unwrap_or(if bits_per_sample == 32 {
+                crate::app::types::SampleValueKind::Float
+            } else {
+                crate::app::types::SampleValueKind::Int
+            });
         let mut channels = Vec::with_capacity(tab.ch_samples.len());
         for ch in tab.ch_samples.iter() {
             channels.push(ch[s..e].to_vec());
@@ -356,6 +372,7 @@ impl crate::app::WavesPreviewer {
         if let Some(meta) = item.meta.as_mut() {
             meta.sample_rate = source_sr;
             meta.bits_per_sample = bits_per_sample;
+            meta.sample_value_kind = sample_value_kind;
             if !explicit_sr_override && !explicit_bits_override {
                 meta.bit_rate_bps = source_meta.as_ref().and_then(|m| m.bit_rate_bps);
             } else {
@@ -370,7 +387,15 @@ impl crate::app::WavesPreviewer {
         self.record_list_insert_from_paths(&[added_path.clone()], before);
         if let Some(row) = self.row_for_path(&added_path) {
             self.update_selection_on_click(row, egui::Modifiers::NONE);
-            self.select_and_load(row, true);
+        }
+        if self.debug.cfg.enabled {
+            self.debug_log(format!(
+                "virtual_trim_create source={} trim={}..{} new_virtual={}",
+                source_path.display(),
+                source_start,
+                source_end,
+                added_path.display()
+            ));
         }
     }
 
@@ -733,7 +758,7 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_delete_range_and_join(&mut self, tab_idx: usize, range: (usize, usize)) {
-        let (channels, loop_mode, lr, len, undo_state) = {
+        let (channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
@@ -750,35 +775,14 @@ impl crate::app::WavesPreviewer {
             tab.loop_region = None;
             tab.dirty = true;
             Self::editor_clamp_ranges(tab);
-            (
-                tab.ch_samples.clone(),
-                tab.loop_mode,
-                tab.loop_region,
-                tab.samples_len,
-                undo_state,
-            )
+            (tab.ch_samples.clone(), undo_state)
         };
         self.push_editor_undo_state(tab_idx, undo_state, true);
         self.audio.set_samples_channels(channels);
         self.audio.stop();
         self.on_audio_length_changed(tab_idx);
-        match loop_mode {
-            crate::app::types::LoopMode::OnWhole => {
-                self.audio.set_loop_enabled(true);
-                self.audio.set_loop_region(0, len);
-            }
-            crate::app::types::LoopMode::Marker => {
-                if let Some((a, b)) = lr {
-                    let (s, e) = if a <= b { (a, b) } else { (b, a) };
-                    self.audio.set_loop_enabled(true);
-                    self.audio.set_loop_region(s, e);
-                } else {
-                    self.audio.set_loop_enabled(false);
-                }
-            }
-            crate::app::types::LoopMode::Off => {
-                self.audio.set_loop_enabled(false);
-            }
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
         }
     }
 

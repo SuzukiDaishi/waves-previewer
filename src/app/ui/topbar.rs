@@ -98,8 +98,10 @@ impl crate::app::WavesPreviewer {
                         ui.separator();
                         let selected = self.selected_paths();
                         let real_selected = self.selected_real_paths();
+                        let renameable_selected = self.selected_renameable_paths();
                         let has_selection = !selected.is_empty();
-                        let has_real_selection = !real_selected.is_empty();
+                        let can_rename_selected =
+                            renameable_selected.len() == 1 || real_selected.len() > 1;
                         if ui
                             .add_enabled(
                                 has_selection,
@@ -125,13 +127,13 @@ impl crate::app::WavesPreviewer {
                         }
                         if ui
                             .add_enabled(
-                                has_real_selection,
+                                can_rename_selected,
                                 egui::Button::new("Rename Selected..."),
                             )
                             .clicked()
                         {
-                            if real_selected.len() == 1 {
-                                self.open_rename_dialog(real_selected[0].clone());
+                            if renameable_selected.len() == 1 {
+                                self.open_rename_dialog(renameable_selected[0].clone());
                             } else {
                                 self.open_batch_rename_dialog(real_selected.clone());
                             }
@@ -221,6 +223,17 @@ impl crate::app::WavesPreviewer {
                     let total_vis = self.files.len();
                     let total_all = self.items.len();
                     let dirty_gains = self.pending_gain_count();
+                    let now = std::time::Instant::now();
+                    let sort_loading_visible = self.sort_loading_started_at.is_some()
+                        || self
+                            .sort_loading_hold_until
+                            .map(|until| until > now)
+                            .unwrap_or(false)
+                        || (self.sort_key_uses_meta() && !self.meta_inflight.is_empty())
+                        || (self.sort_key_uses_transcript() && !self.transcript_inflight.is_empty());
+                    if !sort_loading_visible && self.sort_loading_hold_until.is_some() {
+                        self.sort_loading_hold_until = None;
+                    }
                     let has_status = total_all > 0 || dirty_gains > 0;
                     if has_status {
                         ui.separator();
@@ -241,6 +254,16 @@ impl crate::app::WavesPreviewer {
                                 }
                             };
                             ui.label(RichText::new(label).monospace());
+                            if sort_loading_visible {
+                                ui.add(egui::Spinner::new());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Sorting... ({:.0} ms)",
+                                        self.sort_loading_last_ms
+                                    ))
+                                    .weak(),
+                                );
+                            }
                         }
                         if dirty_gains > 0 {
                             ui.separator();
@@ -277,7 +300,8 @@ impl crate::app::WavesPreviewer {
                         || !self.spectro_inflight.is_empty()
                         || self.project_open_state.is_some()
                         || self.bulk_resample_state.is_some()
-                        || list_loading_visible;
+                        || list_loading_visible
+                        || sort_loading_visible;
                     if show_activity {
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
@@ -291,6 +315,16 @@ impl crate::app::WavesPreviewer {
                                     RichText::new(format!(
                                         "Scanning: {} files ({:.1}s)",
                                         self.scan_found_count, elapsed
+                                    ))
+                                    .weak(),
+                                );
+                            }
+                            if sort_loading_visible {
+                                ui.add(egui::Spinner::new());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Sorting... ({:.0} ms)",
+                                        self.sort_loading_last_ms
                                     ))
                                     .weak(),
                                 );

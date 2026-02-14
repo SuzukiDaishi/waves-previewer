@@ -199,6 +199,8 @@ pub struct WavesPreviewer {
     pub spectro_cache_order: VecDeque<PathBuf>,
     pub spectro_cache_sizes: HashMap<PathBuf, usize>,
     pub spectro_cache_bytes: usize,
+    pub spectro_generation: HashMap<PathBuf, u64>,
+    spectro_generation_counter: u64,
     pub spectro_cfg: SpectrogramConfig,
     pub spectro_tx: Option<std::sync::mpsc::Sender<SpectrogramJobMsg>>,
     pub spectro_rx: Option<std::sync::mpsc::Receiver<SpectrogramJobMsg>>,
@@ -225,6 +227,9 @@ pub struct WavesPreviewer {
     // sorting
     sort_key: SortKey,
     sort_dir: SortDir,
+    sort_loading_started_at: Option<std::time::Instant>,
+    sort_loading_hold_until: Option<std::time::Instant>,
+    sort_loading_last_ms: f32,
     // scroll behavior
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
@@ -315,6 +320,7 @@ pub struct WavesPreviewer {
     show_rename_dialog: bool,
     rename_target: Option<PathBuf>,
     rename_input: String,
+    rename_focus_next: bool,
     rename_error: Option<String>,
     show_batch_rename_dialog: bool,
     batch_rename_targets: Vec<PathBuf>,
@@ -564,17 +570,33 @@ impl WavesPreviewer {
         cf
     }
     fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
+        let audio_len = self
+            .audio
+            .shared
+            .samples
+            .load()
+            .as_ref()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let map_display_count_to_audio = |display_count: usize| -> usize {
+            if audio_len == 0 || tab.samples_len == 0 || audio_len == tab.samples_len {
+                return display_count;
+            }
+            ((display_count as u128)
+                .saturating_mul(audio_len as u128)
+                .saturating_add((tab.samples_len / 2) as u128)
+                / (tab.samples_len as u128)) as usize
+        };
         match tab.loop_mode {
             LoopMode::Off => {
                 self.audio.set_loop_enabled(false);
             }
             LoopMode::OnWhole => {
                 self.audio.set_loop_enabled(true);
-                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
-                    let len = buf.len();
-                    self.audio.set_loop_region(0, len);
-                    let cf =
-                        Self::effective_loop_xfade_samples(0, len, len, tab.loop_xfade_samples);
+                if audio_len > 0 {
+                    self.audio.set_loop_region(0, audio_len);
+                    let requested = map_display_count_to_audio(tab.loop_xfade_samples);
+                    let cf = Self::effective_loop_xfade_samples(0, audio_len, audio_len, requested);
                     self.audio.set_loop_crossfade(
                         cf,
                         match tab.loop_xfade_shape {
@@ -587,14 +609,25 @@ impl WavesPreviewer {
             LoopMode::Marker => {
                 if let Some((a, b)) = tab.loop_region {
                     if a != b {
-                        let (s, e) = if a <= b { (a, b) } else { (b, a) };
+                        let (display_s, display_e) = if a <= b { (a, b) } else { (b, a) };
+                        let mut audio_s = self.map_display_to_audio_sample(tab, display_s);
+                        let mut audio_e = self.map_display_to_audio_sample(tab, display_e);
+                        if audio_len > 0 {
+                            audio_s = audio_s.min(audio_len.saturating_sub(1));
+                            audio_e = audio_e.min(audio_len);
+                            if audio_e <= audio_s {
+                                audio_e = (audio_s + 1).min(audio_len);
+                            }
+                        }
+                        if audio_len == 0 || audio_e <= audio_s {
+                            self.audio.set_loop_enabled(false);
+                            return;
+                        }
                         self.audio.set_loop_enabled(true);
-                        self.audio.set_loop_region(s, e);
+                        self.audio.set_loop_region(audio_s, audio_e);
+                        let requested = map_display_count_to_audio(tab.loop_xfade_samples);
                         let cf = Self::effective_loop_xfade_samples(
-                            s,
-                            e,
-                            tab.samples_len,
-                            tab.loop_xfade_samples,
+                            audio_s, audio_e, audio_len, requested,
                         );
                         self.audio.set_loop_crossfade(
                             cf,
@@ -603,6 +636,18 @@ impl WavesPreviewer {
                                 crate::app::types::LoopXfadeShape::EqualPower => 1,
                             },
                         );
+                        if self.debug.cfg.enabled {
+                            eprintln!(
+                                "loop_apply_map path={} display={}..{} audio={}..{} display_len={} audio_len={}",
+                                tab.path.display(),
+                                display_s,
+                                display_e,
+                                audio_s,
+                                audio_e,
+                                tab.samples_len,
+                                audio_len
+                            );
+                        }
                         return;
                     }
                 }
@@ -754,6 +799,11 @@ impl WavesPreviewer {
             channels: channels.len().max(1) as u16,
             sample_rate,
             bits_per_sample,
+            sample_value_kind: if bits_per_sample == 32 {
+                SampleValueKind::Float
+            } else {
+                SampleValueKind::Int
+            },
             bit_rate_bps: None,
             duration_secs,
             rms_db: Some(rms_db),
@@ -1570,6 +1620,8 @@ impl WavesPreviewer {
         self.spectro_cache_order.clear();
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
+        self.spectro_generation.clear();
+        self.spectro_generation_counter = 0;
         self.lufs_override.clear();
         self.lufs_recalc_deadline.clear();
         self.selected = None;
@@ -1764,6 +1816,8 @@ impl WavesPreviewer {
             spectro_cache_order: VecDeque::new(),
             spectro_cache_sizes: HashMap::new(),
             spectro_cache_bytes: 0,
+            spectro_generation: HashMap::new(),
+            spectro_generation_counter: 0,
             spectro_cfg: SpectrogramConfig::default(),
             spectro_tx: None,
             spectro_rx: None,
@@ -1785,6 +1839,9 @@ impl WavesPreviewer {
             last_undo_scope: UndoScope::Editor,
             sort_key: SortKey::File,
             sort_dir: SortDir::None,
+            sort_loading_started_at: None,
+            sort_loading_hold_until: None,
+            sort_loading_last_ms: 0.0,
             scroll_to_selected: false,
             last_list_scroll_at: None,
             auto_play_list_nav: false,
@@ -1870,6 +1927,7 @@ impl WavesPreviewer {
             show_rename_dialog: false,
             rename_target: None,
             rename_input: String::new(),
+            rename_focus_next: false,
             rename_error: None,
             show_batch_rename_dialog: false,
             batch_rename_targets: Vec::new(),
@@ -2441,6 +2499,18 @@ impl eframe::App for WavesPreviewer {
                                                     channels: info.channels,
                                                     sample_rate: info.sample_rate,
                                                     bits_per_sample: info.bits_per_sample,
+                                                    sample_value_kind: match info.sample_value_kind
+                                                    {
+                                                        crate::audio_io::SampleValueKind::Unknown => {
+                                                            SampleValueKind::Unknown
+                                                        }
+                                                        crate::audio_io::SampleValueKind::Int => {
+                                                            SampleValueKind::Int
+                                                        }
+                                                        crate::audio_io::SampleValueKind::Float => {
+                                                            SampleValueKind::Float
+                                                        }
+                                                    },
                                                     bit_rate_bps: info.bit_rate_bps,
                                                     duration_secs: info.duration_secs,
                                                     rms_db: None,
@@ -3051,10 +3121,16 @@ impl eframe::App for WavesPreviewer {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
+                    let rename_edit_id = egui::Id::new("rename_input_text");
                     if let Some(path) = self.rename_target.as_ref() {
                         ui.label(path.display().to_string());
                     }
-                    let resp = ui.text_edit_singleline(&mut self.rename_input);
+                    let resp = ui
+                        .add(egui::TextEdit::singleline(&mut self.rename_input).id(rename_edit_id));
+                    if self.rename_focus_next {
+                        resp.request_focus();
+                        self.rename_focus_next = false;
+                    }
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         do_rename = true;
                     }
@@ -3078,6 +3154,7 @@ impl eframe::App for WavesPreviewer {
                         Ok(_) => {
                             self.show_rename_dialog = false;
                             self.rename_target = None;
+                            self.rename_focus_next = false;
                             self.rename_error = None;
                         }
                         Err(err) => {
@@ -3094,6 +3171,7 @@ impl eframe::App for WavesPreviewer {
             if !open {
                 self.show_rename_dialog = false;
                 self.rename_target = None;
+                self.rename_focus_next = false;
                 self.rename_error = None;
             }
         }

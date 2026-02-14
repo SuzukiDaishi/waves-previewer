@@ -153,23 +153,41 @@ impl super::WavesPreviewer {
         if self.scan_in_progress {
             return;
         }
-        if self.active_tab.is_some()
-            || self.item_bg_mode == crate::app::types::ItemBgMode::Standard
-            || self.files.is_empty()
-        {
+        let sort_meta_prefetch = self.sort_key_uses_meta();
+        let sort_transcript_prefetch = self.sort_key_uses_transcript();
+        let need_prefetch = self.item_bg_mode != crate::app::types::ItemBgMode::Standard
+            || sort_meta_prefetch
+            || sort_transcript_prefetch;
+        if self.active_tab.is_some() || self.files.is_empty() || !need_prefetch {
             self.list_meta_prefetch_cursor = 0;
             return;
         }
-        if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
+        if !sort_meta_prefetch
+            && !sort_transcript_prefetch
+            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
+        {
             // Visible-window prefetch in `ui/list.rs` is enough for very large lists.
             self.list_meta_prefetch_cursor = 0;
             return;
         }
         let total = self.files.len();
         self.list_meta_prefetch_cursor %= total;
+        let queue_budget = if sort_meta_prefetch || sort_transcript_prefetch {
+            crate::app::LIST_META_PREFETCH_BUDGET.saturating_mul(4)
+        } else {
+            crate::app::LIST_META_PREFETCH_BUDGET
+        };
+        let inflight_cap = if sort_meta_prefetch || sort_transcript_prefetch {
+            crate::app::LIST_BG_META_INFLIGHT_LIMIT.saturating_mul(2)
+        } else {
+            crate::app::LIST_BG_META_INFLIGHT_LIMIT
+        };
         let mut scanned = 0usize;
         let mut queued = 0usize;
-        while scanned < total && queued < crate::app::LIST_META_PREFETCH_BUDGET {
+        while scanned < total && queued < queue_budget {
+            if self.meta_inflight.len() >= inflight_cap {
+                break;
+            }
             let idx = (self.list_meta_prefetch_cursor + scanned) % total;
             scanned += 1;
             let Some(path) = self.path_for_row(idx).cloned() else {
@@ -178,11 +196,40 @@ impl super::WavesPreviewer {
             if self.is_virtual_path(&path) {
                 continue;
             }
-            if self.meta_for_path(&path).is_some() || self.meta_inflight.contains(&path) {
-                continue;
+            if sort_meta_prefetch {
+                let full_meta_attempted = self
+                    .meta_for_path(&path)
+                    .map(|m| {
+                        m.rms_db.is_some()
+                            || m.lufs_i.is_some()
+                            || m.decode_error.is_some()
+                            || !m.thumb.is_empty()
+                    })
+                    .unwrap_or(false);
+                if !self.meta_inflight.contains(&path) {
+                    if self.meta_for_path(&path).is_none() {
+                        self.queue_meta_for_path(&path, false);
+                        queued += 1;
+                    } else if !full_meta_attempted {
+                        // Sort mode: force one full decode pass so unknown values are resolved.
+                        self.queue_full_meta_for_path(&path, false);
+                        queued += 1;
+                    }
+                }
             }
-            self.queue_meta_for_path(&path, false);
-            queued += 1;
+            if sort_transcript_prefetch && !self.transcript_inflight.contains(&path) {
+                if self.transcript_for_path(&path).is_none() {
+                    self.queue_transcript_for_path(&path, false);
+                    queued += 1;
+                }
+            }
+            if !sort_meta_prefetch && !sort_transcript_prefetch {
+                if self.meta_for_path(&path).is_some() || self.meta_inflight.contains(&path) {
+                    continue;
+                }
+                self.queue_meta_for_path(&path, false);
+                queued += 1;
+            }
         }
         self.list_meta_prefetch_cursor = (self.list_meta_prefetch_cursor + scanned) % total;
     }

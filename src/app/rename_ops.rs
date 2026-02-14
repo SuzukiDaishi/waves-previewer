@@ -5,14 +5,19 @@ use super::WavesPreviewer;
 
 impl WavesPreviewer {
     pub(super) fn open_rename_dialog(&mut self, path: PathBuf) {
-        self.rename_input = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
+        self.rename_input = self
+            .item_for_path(&path)
+            .map(|item| item.display_name.clone())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
         self.rename_target = Some(path);
         self.rename_error = None;
         self.show_rename_dialog = true;
+        self.rename_focus_next = true;
     }
 
     pub(super) fn open_batch_rename_dialog(&mut self, paths: Vec<PathBuf>) {
@@ -62,6 +67,9 @@ impl WavesPreviewer {
         self.spectro_inflight.remove(from);
         if let Some(v) = self.spectro_progress.remove(from) {
             self.spectro_progress.insert(new_path.clone(), v);
+        }
+        if let Some(v) = self.spectro_generation.remove(from) {
+            self.spectro_generation.insert(new_path.clone(), v);
         }
         if let Some(v) = self.spectro_cancel.remove(from) {
             self.spectro_cancel.insert(new_path.clone(), v);
@@ -117,20 +125,56 @@ impl WavesPreviewer {
         if name.is_empty() {
             return Err("Name is empty.".to_string());
         }
-        let mut name = name.to_string();
-        let has_ext = std::path::Path::new(&name).extension().is_some();
-        if !has_ext {
-            if let Some(ext) = from.extension().and_then(|s| s.to_str()) {
-                name.push('.');
-                name.push_str(ext);
-            } else {
-                name.push_str(".wav");
-            }
+        if name.contains('/') || name.contains('\\') {
+            return Err("Name must not include path separators.".to_string());
         }
+        let Some(item) = self.item_for_path(from) else {
+            return Err("Item not found.".to_string());
+        };
+        if item.source == MediaSource::External {
+            return Err("External rows cannot be renamed.".to_string());
+        }
+        let source_display_name = item.display_name.clone();
+        let source_kind = item.source;
+        let source_ext = from
+            .extension()
+            .and_then(|s| s.to_str())
+            .or_else(|| {
+                std::path::Path::new(&source_display_name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+            })
+            .map(|s| s.to_string());
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "Name is empty.".to_string())?;
+        let final_name = if let Some(ext) = source_ext.filter(|s| !s.is_empty()) {
+            format!("{stem}.{ext}")
+        } else {
+            stem.to_string()
+        };
+
+        if source_kind == MediaSource::Virtual {
+            if let Some(item) = self.item_for_path_mut(from) {
+                item.display_name = final_name.clone();
+            }
+            for tab in self.tabs.iter_mut() {
+                if tab.path == *from {
+                    tab.display_name = final_name.clone();
+                }
+            }
+            self.apply_filter_from_search();
+            self.apply_sort();
+            return Ok(from.clone());
+        }
+
         let Some(parent) = from.parent() else {
             return Err("Missing parent folder.".to_string());
         };
-        let to = parent.join(name);
+        let to = parent.join(&final_name);
         if to == *from {
             return Ok(to);
         }

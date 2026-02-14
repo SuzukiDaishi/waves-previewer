@@ -4,7 +4,9 @@ use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use fdk_aac::dec::{Decoder as AacDecoder, DecoderError as AacDecoderError, Transport as AacTransport};
+use fdk_aac::dec::{
+    Decoder as AacDecoder, DecoderError as AacDecoderError, Transport as AacTransport,
+};
 use id3::TagLike;
 use mp4::{ChannelConfig, Mp4Reader, TrackType};
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
@@ -14,6 +16,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::sample::SampleFormat;
 use symphonia::default::{get_codecs, get_probe};
 
 pub const SUPPORTED_EXTS: &[&str] = &["wav", "mp3", "m4a", "ogg"];
@@ -90,10 +93,18 @@ fn sanitize_non_finite_multi(path: &Path, stage: &str, channels: &mut [Vec<f32>]
 }
 
 #[derive(Clone, Copy, Debug)]
+pub enum SampleValueKind {
+    Unknown,
+    Int,
+    Float,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct AudioInfo {
     pub channels: u16,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
+    pub sample_value_kind: SampleValueKind,
     pub bit_rate_bps: Option<u32>,
     pub duration_secs: Option<f32>,
     pub created_at: Option<SystemTime>,
@@ -138,8 +149,8 @@ fn read_audio_info_m4a_mp4(
 ) -> Result<AudioInfo> {
     let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
     let size = file_size.unwrap_or_else(|| file.metadata().map(|m| m.len()).unwrap_or(0));
-    let reader = Mp4Reader::read_header(file, size)
-        .map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
+    let reader =
+        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
     let mut picked = None;
     for (&track_id, track) in reader.tracks() {
         if let Ok(TrackType::Audio) = track.track_type() {
@@ -181,8 +192,54 @@ fn read_audio_info_m4a_mp4(
         channels,
         sample_rate,
         bits_per_sample: 16,
+        sample_value_kind: SampleValueKind::Unknown,
         bit_rate_bps,
         duration_secs: Some(duration_secs),
+        created_at,
+        modified_at,
+    })
+}
+
+fn read_audio_info_wav(
+    path: &Path,
+    created_at: Option<SystemTime>,
+    modified_at: Option<SystemTime>,
+    file_size: Option<u64>,
+) -> Result<AudioInfo> {
+    let reader =
+        hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
+    let spec = reader.spec();
+    let frames = reader.duration() as usize;
+    let duration_secs = if spec.sample_rate > 0 {
+        Some((frames as f64 / spec.sample_rate as f64) as f32)
+    } else {
+        None
+    };
+    let bit_rate_bps = if let (Some(secs), Some(bytes)) = (duration_secs, file_size) {
+        if secs.is_finite() && secs > 0.0 {
+            let bps = ((bytes as f64) * 8.0 / secs as f64).round() as u64;
+            if bps > 0 {
+                Some(bps.min(u32::MAX as u64) as u32)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let sample_value_kind = match spec.sample_format {
+        hound::SampleFormat::Float => SampleValueKind::Float,
+        hound::SampleFormat::Int => SampleValueKind::Int,
+    };
+    Ok(AudioInfo {
+        channels: spec.channels,
+        sample_rate: spec.sample_rate,
+        bits_per_sample: spec.bits_per_sample,
+        sample_value_kind,
+        bit_rate_bps,
+        duration_secs,
         created_at,
         modified_at,
     })
@@ -333,6 +390,24 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     let modified_at = metadata.as_ref().and_then(|m| m.modified().ok());
     let file_size = metadata.as_ref().map(|m| m.len());
     let ext_hint = path.extension().and_then(|s| s.to_str());
+    if ext_hint
+        .map(|ext| ext.eq_ignore_ascii_case("wav"))
+        .unwrap_or(false)
+    {
+        if let Ok(info) = read_audio_info_wav(path, created_at, modified_at, file_size) {
+            io_trace(
+                "probe_wav",
+                path,
+                "wav",
+                "pcm",
+                info.sample_rate,
+                info.channels,
+                info.bits_per_sample,
+                None,
+            );
+            return Ok(info);
+        }
+    }
     let probe_once = |hint_ext: Option<&str>| -> Result<_> {
         let file = File::open(path).with_context(|| format!("open audio: {}", path.display()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -389,6 +464,13 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     let mut channels = cp.channels.map(|c| c.count() as u16).unwrap_or(0);
     let mut sample_rate = cp.sample_rate.unwrap_or(0);
     let mut bits_per_sample = cp.bits_per_sample.unwrap_or(0) as u16;
+    let mut sample_value_kind = cp
+        .sample_format
+        .map(|fmt| match fmt {
+            SampleFormat::F32 | SampleFormat::F64 => SampleValueKind::Float,
+            _ => SampleValueKind::Int,
+        })
+        .unwrap_or(SampleValueKind::Unknown);
     let duration_secs = match (cp.time_base, cp.n_frames) {
         (Some(tb), Some(n)) => {
             let secs = (n as f64) * (tb.numer as f64) / (tb.denom as f64);
@@ -396,8 +478,12 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         }
         _ => None,
     };
-    if channels == 0 || sample_rate == 0 || bits_per_sample == 0 {
-        if let Some((head_channels, head_sr, head_bits)) = decode_audio_head_info(path) {
+    if channels == 0
+        || sample_rate == 0
+        || bits_per_sample == 0
+        || matches!(sample_value_kind, SampleValueKind::Unknown)
+    {
+        if let Some((head_channels, head_sr, head_bits, head_kind)) = decode_audio_head_info(path) {
             if channels == 0 {
                 channels = head_channels;
             }
@@ -406,6 +492,9 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
             }
             if bits_per_sample == 0 {
                 bits_per_sample = head_bits;
+            }
+            if matches!(sample_value_kind, SampleValueKind::Unknown) {
+                sample_value_kind = head_kind;
             }
         }
     }
@@ -432,6 +521,7 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         channels,
         sample_rate,
         bits_per_sample,
+        sample_value_kind,
         bit_rate_bps,
         duration_secs,
         created_at,
@@ -439,7 +529,7 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
     })
 }
 
-fn decoded_bits_per_sample(decoded: AudioBufferRef<'_>) -> u16 {
+fn decoded_bits_per_sample(decoded: &AudioBufferRef<'_>) -> u16 {
     match decoded {
         AudioBufferRef::U8(_) | AudioBufferRef::S8(_) => 8,
         AudioBufferRef::U16(_) | AudioBufferRef::S16(_) => 16,
@@ -449,7 +539,14 @@ fn decoded_bits_per_sample(decoded: AudioBufferRef<'_>) -> u16 {
     }
 }
 
-fn decode_audio_head_info(path: &Path) -> Option<(u16, u32, u16)> {
+fn decoded_sample_value_kind(decoded: &AudioBufferRef<'_>) -> SampleValueKind {
+    match decoded {
+        AudioBufferRef::F32(_) | AudioBufferRef::F64(_) => SampleValueKind::Float,
+        _ => SampleValueKind::Int,
+    }
+}
+
+fn decode_audio_head_info(path: &Path) -> Option<(u16, u32, u16, SampleValueKind)> {
     let (mut format, mut decoder, track_id, mut sample_rate_hint) = open_decoder(path).ok()?;
     loop {
         let packet = match format.next_packet() {
@@ -472,8 +569,9 @@ fn decode_audio_head_info(path: &Path) -> Option<(u16, u32, u16)> {
         }
         let channels = spec.channels.count().max(1) as u16;
         let sample_rate = sample_rate_hint.max(1);
-        let bits_per_sample = decoded_bits_per_sample(decoded).max(16);
-        return Some((channels, sample_rate, bits_per_sample));
+        let bits_per_sample = decoded_bits_per_sample(&decoded).max(16);
+        let sample_value_kind = decoded_sample_value_kind(&decoded);
+        return Some((channels, sample_rate, bits_per_sample, sample_value_kind));
     }
 }
 
@@ -713,7 +811,11 @@ pub fn decode_audio_mono(path: &Path) -> Result<(Vec<f32>, u32)> {
 
 pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>, u32, bool)> {
     if is_m4a_path(path) {
-        let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
+        let max = if max_secs <= 0.0 {
+            None
+        } else {
+            Some(max_secs)
+        };
         let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
         let mono = mixdown_to_mono(&chans);
         io_trace(
@@ -938,7 +1040,11 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
 
 pub fn decode_audio_multi_prefix(path: &Path, max_secs: f32) -> Result<(Vec<Vec<f32>>, u32, bool)> {
     if is_m4a_path(path) {
-        let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
+        let max = if max_secs <= 0.0 {
+            None
+        } else {
+            Some(max_secs)
+        };
         let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
         return Ok((chans, sr, !reached_eof));
     }
@@ -1237,7 +1343,11 @@ pub fn decode_audio_mono_prefix_with_errors(
     max_secs: f32,
 ) -> Result<(Vec<f32>, u32, bool, u32)> {
     if is_m4a_path(path) {
-        let max = if max_secs <= 0.0 { None } else { Some(max_secs) };
+        let max = if max_secs <= 0.0 {
+            None
+        } else {
+            Some(max_secs)
+        };
         let (chans, sr, reached_eof) = decode_m4a_fdk(path, max)?;
         let mono = mixdown_to_mono(&chans);
         return Ok((mono, sr, reached_eof, 0));
