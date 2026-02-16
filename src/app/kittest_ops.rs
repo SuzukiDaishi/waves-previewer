@@ -49,8 +49,28 @@ impl super::WavesPreviewer {
         self.show_export_settings
     }
 
+    pub fn test_show_transcription_settings(&self) -> bool {
+        self.show_transcription_settings
+    }
+
+    pub fn test_set_show_export_settings(&mut self, show: bool) {
+        self.show_export_settings = show;
+    }
+
+    pub fn test_set_show_transcription_settings(&mut self, show: bool) {
+        self.show_transcription_settings = show;
+    }
+
     pub fn test_pending_gain_count(&self) -> usize {
         self.pending_gain_count()
+    }
+
+    pub fn test_selected_multi_len(&self) -> usize {
+        self.selected_multi.len()
+    }
+
+    pub fn test_files_len(&self) -> usize {
+        self.files.len()
     }
 
     pub fn test_auto_play_list_nav(&self) -> bool {
@@ -59,6 +79,10 @@ impl super::WavesPreviewer {
 
     pub fn test_volume_db(&self) -> f32 {
         self.volume_db
+    }
+
+    pub fn test_set_list_gain_column_visible(&mut self, visible: bool) {
+        self.list_columns.gain = visible;
     }
 
     pub fn test_select_and_load_row(&mut self, row: usize) -> bool {
@@ -95,6 +119,15 @@ impl super::WavesPreviewer {
 
     pub fn test_set_playback_rate(&mut self, rate: f32) {
         self.playback_rate = rate;
+    }
+
+    pub fn test_playback_rate(&self) -> f32 {
+        self.playback_rate
+    }
+
+    pub fn test_selected_pending_gain_db(&self) -> Option<f32> {
+        let path = self.test_selected_path()?;
+        Some(self.pending_gain_db_for_path(path))
     }
 
     pub fn test_processing_autoplay_when_ready(&self) -> bool {
@@ -706,6 +739,26 @@ impl super::WavesPreviewer {
 
     pub fn test_export_name_template(&self) -> &str {
         &self.export_cfg.name_template
+    }
+
+    pub fn test_set_transcript_language(&mut self, language: &str) {
+        self.transcript_ai_cfg.language = language.to_string();
+    }
+
+    pub fn test_transcript_language(&self) -> &str {
+        &self.transcript_ai_cfg.language
+    }
+
+    pub fn test_set_selected_item_transcript_language(&mut self, lang: Option<&str>) -> bool {
+        let Some(path) = self.test_selected_path().cloned() else {
+            return false;
+        };
+        self.set_transcript_language_for_path(&path, lang.map(|v| v.to_string()))
+    }
+
+    pub fn test_selected_item_transcript_language(&self) -> Option<String> {
+        let path = self.test_selected_path()?;
+        self.transcript_language_for_path(path).map(|v| v.to_string())
     }
 
     pub fn test_set_export_dest_folder(&mut self, dest: Option<&Path>) {

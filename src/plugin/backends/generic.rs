@@ -60,8 +60,7 @@ fn param_to_gain_db(norm: f32) -> f32 {
 }
 
 fn has_ott_signature(params: &[PluginParamValue]) -> bool {
-    find_param(params, "vst3:00000000").is_some()
-        && find_param(params, "vst3:00000013").is_some()
+    find_param(params, "vst3:00000000").is_some() && find_param(params, "vst3:00000013").is_some()
 }
 
 fn norm_to_db(norm: f32, min_db: f32, max_db: f32) -> f32 {
@@ -94,8 +93,16 @@ fn apply_ott_fallback(channels: &mut [Vec<f32>], params: &[PluginParamValue]) {
     }
 
     // Conservative mapping to avoid the fallback saturating into a near-square waveform.
-    let in_gain_db = norm_to_db(find_param(params, "vst3:00000002").unwrap_or(0.5), -12.0, 12.0);
-    let out_gain_db = norm_to_db(find_param(params, "vst3:00000003").unwrap_or(0.5), -12.0, 12.0);
+    let in_gain_db = norm_to_db(
+        find_param(params, "vst3:00000002").unwrap_or(0.5),
+        -12.0,
+        12.0,
+    );
+    let out_gain_db = norm_to_db(
+        find_param(params, "vst3:00000003").unwrap_or(0.5),
+        -12.0,
+        12.0,
+    );
     let in_gain = 10.0f32.powf(in_gain_db / 20.0);
     let out_gain = 10.0f32.powf(out_gain_db / 20.0);
     let shape = 1.0 + depth * 1.5; // 1.0..2.5

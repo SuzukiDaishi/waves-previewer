@@ -98,7 +98,7 @@
 
 ### 大規模 Update: オプトイン解析 AI ① 文字起こし
 - オプトインで有効化（ヘッダからモデルダウンロード。必要ファイル不足時は機能非表示）
-- 文字起こし AI: `https://huggingface.co/zukky/LiteASR-ONNX-DLL`（ONNX + 前後処理 DLL）
+- 文字起こし AI: `https://huggingface.co/onnx-community/whisper-large-v3-turbo`（Whisper ONNX）
 - リスト右クリック `Transcript` で実行可能
 - 結果を Transcript 行に表示
 - 保存時の SRT 同時出力（設定で on/off）

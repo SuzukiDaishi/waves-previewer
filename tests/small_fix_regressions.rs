@@ -270,10 +270,7 @@ mod small_fix_regressions {
         harness.run_steps(2);
         let files_len = harness.state().files.len();
         assert!(files_len >= 3, "expected all fixture files in list");
-        let first_asc = harness
-            .state()
-            .test_row_path(0)
-            .expect("first row asc");
+        let first_asc = harness.state().test_row_path(0).expect("first row asc");
         let last_asc = harness
             .state()
             .test_row_path(files_len - 1)
@@ -283,10 +280,7 @@ mod small_fix_regressions {
 
         harness.state_mut().test_sort_sample_rate_desc();
         harness.run_steps(2);
-        let first_desc = harness
-            .state()
-            .test_row_path(0)
-            .expect("first row desc");
+        let first_desc = harness.state().test_row_path(0).expect("first row desc");
         let last_desc = harness
             .state()
             .test_row_path(files_len - 1)
@@ -310,7 +304,9 @@ mod small_fix_regressions {
 
         harness.state_mut().test_set_mode_pitch_shift();
         harness.state_mut().test_set_pitch_semitones(5.0);
-        let immediate = harness.state_mut().test_force_load_selected_list_preview_for_play();
+        let immediate = harness
+            .state_mut()
+            .test_force_load_selected_list_preview_for_play();
         assert!(
             !immediate,
             "pitch/time mode should enqueue heavy processing for normal list play"

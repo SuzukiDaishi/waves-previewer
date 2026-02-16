@@ -86,6 +86,7 @@ impl super::WavesPreviewer {
         self.original_files.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.transcript_ai_inflight.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.spectro_progress.clear();

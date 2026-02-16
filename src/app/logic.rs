@@ -1414,6 +1414,28 @@ impl super::WavesPreviewer {
         }
     }
 
+    pub(super) fn nudge_list_selection(&mut self, delta: isize, auto_scroll: bool) -> bool {
+        if self.active_tab.is_some() || self.files.is_empty() {
+            return false;
+        }
+        let len = self.files.len();
+        let cur = self.selected.unwrap_or(0).min(len.saturating_sub(1));
+        let target = if delta >= 0 {
+            (cur + (delta as usize)).min(len.saturating_sub(1))
+        } else {
+            cur.saturating_sub((-delta) as usize)
+        };
+        if target == cur {
+            return false;
+        }
+        self.update_selection_on_click(target, egui::Modifiers::NONE);
+        self.select_and_load(target, auto_scroll);
+        if self.auto_play_list_nav {
+            self.request_list_autoplay();
+        }
+        true
+    }
+
     pub(super) fn remove_missing_path(&mut self, path: &Path) {
         if self.is_virtual_path(path) {
             return;
@@ -1454,6 +1476,7 @@ impl super::WavesPreviewer {
 
         self.meta_inflight.remove(&path_buf);
         self.transcript_inflight.remove(&path_buf);
+        self.transcript_ai_inflight.remove(&path_buf);
         self.purge_spectro_cache_entry(&path_buf);
         self.edited_cache.remove(&path_buf);
         self.lufs_override.remove(&path_buf);
@@ -1549,6 +1572,7 @@ impl super::WavesPreviewer {
         for path in unique.iter() {
             self.meta_inflight.remove(path);
             self.transcript_inflight.remove(path);
+            self.transcript_ai_inflight.remove(path);
             self.purge_spectro_cache_entry(path);
             self.edited_cache.remove(path);
             self.lufs_override.remove(path);
@@ -1607,6 +1631,7 @@ impl super::WavesPreviewer {
         self.original_files.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.transcript_ai_inflight.clear();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
         self.spectro_progress.clear();
@@ -2260,12 +2285,14 @@ impl super::WavesPreviewer {
                         let va = if let Some(v) = lufs_override.get(&pa_item.path).copied() {
                             v
                         } else {
-                            ma.and_then(|m| m.lufs_i.map(|x| x + ga)).unwrap_or(f32::NAN)
+                            ma.and_then(|m| m.lufs_i.map(|x| x + ga))
+                                .unwrap_or(f32::NAN)
                         };
                         let vb = if let Some(v) = lufs_override.get(&pb_item.path).copied() {
                             v
                         } else {
-                            mb.and_then(|m| m.lufs_i.map(|x| x + gb)).unwrap_or(f32::NAN)
+                            mb.and_then(|m| m.lufs_i.map(|x| x + gb))
+                                .unwrap_or(f32::NAN)
                         };
                         Self::option_num_order(
                             if va.is_finite() { Some(va) } else { None },

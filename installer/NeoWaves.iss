@@ -43,6 +43,11 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\neowaves_plugin_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\neowaves_plugin_gui_worker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\target\release\onnxruntime*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\target\release\onnxruntime_providers*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\target\release\dnnl*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\target\release\mklml*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\target\release\onig*.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\commands\*"; DestDir: "{app}\commands"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\icons\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 

@@ -9,9 +9,7 @@ struct ComInitGuard {
 impl ComInitGuard {
     fn init() -> Self {
         use windows_sys::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
-        use windows_sys::Win32::System::Com::{
-            CoInitializeEx, COINIT_MULTITHREADED,
-        };
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
         let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), COINIT_MULTITHREADED as u32) };
         let ok = hr == S_OK || hr == S_FALSE;
         let changed_mode = hr == RPC_E_CHANGED_MODE;

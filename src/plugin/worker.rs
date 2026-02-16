@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::plugin::backends::{clap, generic, vst3};
-use crate::plugin::protocol::{
-    GuiCapabilities, PluginHostBackend, WorkerRequest, WorkerResponse,
-};
+use crate::plugin::protocol::{GuiCapabilities, PluginHostBackend, WorkerRequest, WorkerResponse};
 
 fn format_from_plugin_path(path: &str) -> Option<crate::plugin::PluginFormat> {
     generic::format_from_path(&PathBuf::from(path))
@@ -72,48 +70,43 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                 };
             }
             let native_error = match format {
-                crate::plugin::PluginFormat::Vst3 => {
-                    match vst3::probe(&path) {
-                        Ok((plugin, params, state_blob_b64)) => {
-                            return WorkerResponse::ProbeResult {
-                                plugin,
-                                params,
-                                state_blob_b64,
-                                backend: PluginHostBackend::NativeVst3,
-                                capabilities: GuiCapabilities {
-                                    supports_native_gui: cfg!(all(feature = "plugin_native_vst3", windows)),
-                                    supports_param_feedback: cfg!(feature = "plugin_native_vst3"),
-                                    supports_state_sync: false,
-                                },
-                                backend_note: None,
-                            };
-                        }
-                        Err(err) => {
-                            Some(format!("native VST3 probe failed, fallback=Generic: {err}"))
-                        }
+                crate::plugin::PluginFormat::Vst3 => match vst3::probe(&path) {
+                    Ok((plugin, params, state_blob_b64)) => {
+                        return WorkerResponse::ProbeResult {
+                            plugin,
+                            params,
+                            state_blob_b64,
+                            backend: PluginHostBackend::NativeVst3,
+                            capabilities: GuiCapabilities {
+                                supports_native_gui: cfg!(all(
+                                    feature = "plugin_native_vst3",
+                                    windows
+                                )),
+                                supports_param_feedback: cfg!(feature = "plugin_native_vst3"),
+                                supports_state_sync: false,
+                            },
+                            backend_note: None,
+                        };
                     }
-                }
-                crate::plugin::PluginFormat::Clap => {
-                    match clap::probe(&path) {
-                        Ok((plugin, params, state_blob_b64)) => {
-                            return WorkerResponse::ProbeResult {
-                                plugin,
-                                params,
-                                state_blob_b64,
-                                backend: PluginHostBackend::NativeClap,
-                                capabilities: GuiCapabilities {
-                                    supports_native_gui: false,
-                                    supports_param_feedback: cfg!(feature = "plugin_native_clap"),
-                                    supports_state_sync: false,
-                                },
-                                backend_note: None,
-                            };
-                        }
-                        Err(err) => {
-                            Some(format!("native CLAP probe failed, fallback=Generic: {err}"))
-                        }
+                    Err(err) => Some(format!("native VST3 probe failed, fallback=Generic: {err}")),
+                },
+                crate::plugin::PluginFormat::Clap => match clap::probe(&path) {
+                    Ok((plugin, params, state_blob_b64)) => {
+                        return WorkerResponse::ProbeResult {
+                            plugin,
+                            params,
+                            state_blob_b64,
+                            backend: PluginHostBackend::NativeClap,
+                            capabilities: GuiCapabilities {
+                                supports_native_gui: false,
+                                supports_param_feedback: cfg!(feature = "plugin_native_clap"),
+                                supports_state_sync: false,
+                            },
+                            backend_note: None,
+                        };
                     }
-                }
+                    Err(err) => Some(format!("native CLAP probe failed, fallback=Generic: {err}")),
+                },
             };
             let (plugin, _params, state_blob_b64) = generic::default_probe_result(&path, format);
             WorkerResponse::ProbeResult {

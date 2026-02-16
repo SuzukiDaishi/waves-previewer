@@ -1,24 +1,23 @@
 use std::path::Path;
 
-use crate::plugin::protocol::{GuiCapabilities, PluginDescriptorInfo, PluginParamInfo, PluginParamValue};
+use crate::plugin::protocol::{
+    GuiCapabilities, PluginDescriptorInfo, PluginParamInfo, PluginParamValue,
+};
 
 #[cfg(feature = "plugin_native_vst3")]
 mod native {
     use super::*;
     use std::collections::HashMap;
-    use std::mem::ManuallyDrop;
-    use std::sync::{Arc, Mutex};
     use std::ffi::c_void;
     use std::ffi::OsStr;
+    use std::mem::ManuallyDrop;
     use std::path::PathBuf;
     use std::ptr;
+    use std::sync::{Arc, Mutex};
 
-    use libloading::Library;
     use crate::plugin::backends::plugin_display_name;
     use crate::plugin::PluginFormat;
-    use vst3::{Class, ComPtr, ComWrapper, Interface, Steinberg};
-    use vst3::Steinberg::{IPlugView, IPlugViewTrait};
-    use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
+    use libloading::Library;
     use vst3::Steinberg::Vst::{
         AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IAudioProcessorTrait, IComponent,
         IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
@@ -26,6 +25,9 @@ mod native {
         IHostApplicationTrait, ParameterInfo, ProcessData, ProcessSetup, TChar,
     };
     use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
+    use vst3::Steinberg::{IPlugView, IPlugViewTrait};
+    use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
+    use vst3::{Class, ComPtr, ComWrapper, Interface, Steinberg};
     #[cfg(windows)]
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     #[cfg(windows)]
@@ -33,11 +35,11 @@ mod native {
     #[cfg(windows)]
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetClientRect, GetWindowLongW, IsWindow, PeekMessageW, SetWindowPos,
-        RegisterClassW, SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-        CW_USEDEFAULT, GWL_EXSTYLE, GWL_STYLE, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOZORDER, SWP_FRAMECHANGED, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_CLIPCHILDREN,
-        WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_THICKFRAME, WS_VISIBLE,
+        GetClientRect, GetWindowLongW, IsWindow, PeekMessageW, RegisterClassW, SetWindowPos,
+        SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+        GWL_EXSTYLE, GWL_STYLE, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_CLIPCHILDREN, WS_MAXIMIZEBOX,
+        WS_OVERLAPPEDWINDOW, WS_THICKFRAME, WS_VISIBLE,
     };
 
     fn debug_enabled() -> bool {
@@ -473,7 +475,8 @@ mod native {
         factory: &ComPtr<Steinberg::IPluginFactory>,
         class_id: &Steinberg::TUID,
     ) -> Option<ComPtr<IEditController>> {
-        let raw = create_raw_instance(factory, class_id, &Steinberg::Vst::IEditController_iid).ok()?;
+        let raw =
+            create_raw_instance(factory, class_id, &Steinberg::Vst::IEditController_iid).ok()?;
         ComPtr::from_raw(raw as *mut IEditController)
     }
 
@@ -533,11 +536,15 @@ mod native {
                 controller_cid = Some(info.cid);
             }
         }
-        let cid = component_cid.or(first_cid).ok_or_else(|| "no VST3 class found".to_string())?;
+        let cid = component_cid
+            .or(first_cid)
+            .ok_or_else(|| "no VST3 class found".to_string())?;
         Ok((cid, controller_cid))
     }
 
-    unsafe fn collect_controller_params(controller: &ComPtr<IEditController>) -> Vec<PluginParamInfo> {
+    unsafe fn collect_controller_params(
+        controller: &ComPtr<IEditController>,
+    ) -> Vec<PluginParamInfo> {
         let count = controller.getParameterCount().max(0) as usize;
         let mut out = Vec::with_capacity(count);
         for idx in 0..count {
@@ -581,7 +588,9 @@ mod native {
         out
     }
 
-    fn collect_params_from_binary(binary: &Path) -> Result<(Option<String>, Vec<PluginParamInfo>), String> {
+    fn collect_params_from_binary(
+        binary: &Path,
+    ) -> Result<(Option<String>, Vec<PluginParamInfo>), String> {
         debug_log(&format!("collect_params begin: {}", binary.display()));
         let loaded = ManuallyDrop::new(load_factory(binary)?);
         unsafe {
@@ -610,7 +619,9 @@ mod native {
                     }
                 }
 
-                if let Some(component) = create_component_from_class(&loaded.factory, &class_info.cid) {
+                if let Some(component) =
+                    create_component_from_class(&loaded.factory, &class_info.cid)
+                {
                     debug_log(&format!("class[{idx}] create_component ok"));
                     if let Some(controller) = component.cast::<IEditController>() {
                         debug_log(&format!("class[{idx}] cast component->controller ok"));
@@ -629,7 +640,9 @@ mod native {
 
                 let controller_like = category_lc.contains("controller");
                 if controller_like {
-                    if let Some(controller) = create_controller_from_class(&loaded.factory, &class_info.cid) {
+                    if let Some(controller) =
+                        create_controller_from_class(&loaded.factory, &class_info.cid)
+                    {
                         debug_log(&format!("class[{idx}] create_controller(direct) ok"));
                         let params = collect_controller_params(&controller);
                         debug_log(&format!("class[{idx}] direct params={}", params.len()));
@@ -675,9 +688,7 @@ mod native {
                 if ext != "vst3" {
                     continue;
                 }
-                if find_valid_binary(p).is_some()
-                    && is_audio_effect_plugin(p).unwrap_or(true)
-                {
+                if find_valid_binary(p).is_some() && is_audio_effect_plugin(p).unwrap_or(true) {
                     let path_str = p.to_string_lossy().to_string();
                     out.push(PluginDescriptorInfo {
                         key: path_str.clone(),
@@ -753,13 +764,21 @@ mod native {
             if let Some(parent) = output_audio_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            crate::wave::export_channels_audio(&in_channels, sample_rate.max(input_sr).max(1), output_audio_path)
-                .map_err(|e| format!("encode failed: {e}"))?;
+            crate::wave::export_channels_audio(
+                &in_channels,
+                sample_rate.max(input_sr).max(1),
+                output_audio_path,
+            )
+            .map_err(|e| format!("encode failed: {e}"))?;
             return Ok(state_blob_b64.map(|v| v.to_string()));
         }
 
-        let binary = find_valid_binary(plugin_path)
-            .ok_or_else(|| format!("vst3 process failed: GetPluginFactory not found ({})", plugin_path.display()))?;
+        let binary = find_valid_binary(plugin_path).ok_or_else(|| {
+            format!(
+                "vst3 process failed: GetPluginFactory not found ({})",
+                plugin_path.display()
+            )
+        })?;
 
         let mut out_channels = in_channels.clone();
         let frame_count = out_channels.get(0).map(|c| c.len()).unwrap_or(0);
@@ -768,7 +787,8 @@ mod native {
 
         unsafe {
             let loaded = ManuallyDrop::new(load_factory(&binary)?);
-            let (component_cid, controller_cid) = find_component_and_controller_cids(&loaded.factory)?;
+            let (component_cid, controller_cid) =
+                find_component_and_controller_cids(&loaded.factory)?;
 
             let host = ComWrapper::new(HostApplication)
                 .to_com_ptr::<IHostApplication>()
@@ -862,8 +882,10 @@ mod native {
                     .map(|ch| ch[cursor..cursor + frames_now].to_vec())
                     .collect();
                 let mut out_block: Vec<Vec<f32>> = vec![vec![0.0f32; frames_now]; ch_count];
-                let mut in_ptrs: Vec<*mut f32> = in_block.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
-                let mut out_ptrs: Vec<*mut f32> = out_block.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
+                let mut in_ptrs: Vec<*mut f32> =
+                    in_block.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
+                let mut out_ptrs: Vec<*mut f32> =
+                    out_block.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
 
                 let mut in_bus = AudioBusBuffers {
                     numChannels: ch_count as i32,
@@ -1004,7 +1026,8 @@ mod native {
         })?;
         unsafe {
             let loaded = ManuallyDrop::new(load_factory(&binary)?);
-            let (component_cid, controller_cid) = find_component_and_controller_cids(&loaded.factory)?;
+            let (component_cid, controller_cid) =
+                find_component_and_controller_cids(&loaded.factory)?;
             let host = ComWrapper::new(HostApplication)
                 .to_com_ptr::<IHostApplication>()
                 .ok_or_else(|| "failed to create IHostApplication".to_string())?;
@@ -1067,8 +1090,12 @@ mod native {
             let can_resize = false;
             let width = (rect.right - rect.left).max(360);
             let height = (rect.bottom - rect.top).max(220);
-            let hwnd =
-                create_native_gui_window(&plugin_display_name(plugin_path), width, height, can_resize)?;
+            let hwnd = create_native_gui_window(
+                &plugin_display_name(plugin_path),
+                width,
+                height,
+                can_resize,
+            )?;
             let attach_r = view.attached(hwnd as *mut c_void, Steinberg::kPlatformTypeHWND);
             if attach_r != Steinberg::kResultOk && attach_r != Steinberg::kResultTrue {
                 let _ = DestroyWindow(hwnd);
@@ -1081,8 +1108,8 @@ mod native {
                 fixed_client_width: fixed_w,
                 fixed_client_height: fixed_h,
             })
-                .to_com_ptr::<IPlugFrame>()
-                .ok_or_else(|| "failed to create VST3 IPlugFrame".to_string())?;
+            .to_com_ptr::<IPlugFrame>()
+            .ok_or_else(|| "failed to create VST3 IPlugFrame".to_string())?;
             let _ = view.setFrame(frame.as_ptr());
             let mut sized = Steinberg::ViewRect {
                 left: 0,
@@ -1146,13 +1173,26 @@ mod native {
 
     pub(crate) fn gui_poll(
         session: &mut GuiSession,
-    ) -> Result<(Vec<PluginParamValue>, Option<Vec<PluginParamValue>>, Option<String>, bool), String> {
+    ) -> Result<
+        (
+            Vec<PluginParamValue>,
+            Option<Vec<PluginParamValue>>,
+            Option<String>,
+            bool,
+        ),
+        String,
+    > {
         #[cfg(windows)]
         {
             pump_gui_window_messages();
             if unsafe { IsWindow(session.hwnd) } == 0 {
                 let snapshot = read_param_snapshot(&session.controller, &session.param_ids);
-                return Ok((Vec::new(), Some(snapshot), session.state_blob_b64.clone(), true));
+                return Ok((
+                    Vec::new(),
+                    Some(snapshot),
+                    session.state_blob_b64.clone(),
+                    true,
+                ));
             }
             if let Some((w, h)) = current_client_size(session.hwnd) {
                 if w != session.last_client_width || h != session.last_client_height {
@@ -1202,7 +1242,10 @@ mod native {
                                         0,
                                         win_w,
                                         win_h,
-                                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                                        SWP_NOMOVE
+                                            | SWP_NOZORDER
+                                            | SWP_NOACTIVATE
+                                            | SWP_FRAMECHANGED,
                                     );
                                 }
                             }
@@ -1315,7 +1358,9 @@ mod native {
 mod native {
     use super::*;
 
-    pub(crate) fn scan_paths(_search_paths: &[String]) -> Result<Vec<PluginDescriptorInfo>, String> {
+    pub(crate) fn scan_paths(
+        _search_paths: &[String],
+    ) -> Result<Vec<PluginDescriptorInfo>, String> {
         Err("native vst3 backend unavailable (build without plugin_native_vst3)".to_string())
     }
 
@@ -1364,7 +1409,15 @@ mod native {
 
     pub(crate) fn gui_poll(
         _session: &mut GuiSession,
-    ) -> Result<(Vec<PluginParamValue>, Option<Vec<PluginParamValue>>, Option<String>, bool), String> {
+    ) -> Result<
+        (
+            Vec<PluginParamValue>,
+            Option<Vec<PluginParamValue>>,
+            Option<String>,
+            bool,
+        ),
+        String,
+    > {
         Err("native vst3 backend unavailable".to_string())
     }
 

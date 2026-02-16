@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::plugin::backends::{clap, vst3};
-use crate::plugin::protocol::{
-    GuiCapabilities, PluginHostBackend, WorkerRequest, WorkerResponse,
-};
+use crate::plugin::protocol::{GuiCapabilities, PluginHostBackend, WorkerRequest, WorkerResponse};
 
 enum GuiSession {
     Vst3(vst3::GuiSession),

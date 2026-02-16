@@ -35,4 +35,3 @@ fn ott_vst3_probe_returns_native_params_when_installed() {
         other => panic!("unexpected response: {other:?}"),
     }
 }
-

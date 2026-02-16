@@ -32,6 +32,45 @@ impl crate::app::WavesPreviewer {
             self.trigger_save_selected();
             ui.close();
         }
+        let transcript_targets: Vec<_> = selected
+            .iter()
+            .filter(|path| {
+                self.item_for_path(path)
+                    .map(|item| item.source == crate::app::types::MediaSource::File)
+                    .unwrap_or(false)
+                    && path.is_file()
+                    && crate::audio_io::is_supported_audio_path(path)
+            })
+            .cloned()
+            .collect();
+        let transcript_running = self.transcript_ai_is_running();
+        let transcript_ready = self.transcript_ai_menu_enabled();
+        let has_transcript_targets = !transcript_targets.is_empty();
+        let transcript_enabled = transcript_running || (transcript_ready && has_transcript_targets);
+        let transcript_label = if transcript_running {
+            "Transcript (AI) - Cancel"
+        } else {
+            "Transcript (AI)"
+        };
+        let transcript_resp =
+            ui.add_enabled(transcript_enabled, egui::Button::new(transcript_label));
+        if transcript_resp.clicked() {
+            if transcript_running {
+                self.cancel_transcript_ai_run();
+            } else {
+                self.run_transcript_ai_for_selected(transcript_targets);
+            }
+            ui.close();
+        }
+        if !transcript_enabled {
+            let reason = if !has_transcript_targets {
+                "Select at least one real audio file.".to_string()
+            } else {
+                self.transcript_ai_unavailable_reason()
+                    .unwrap_or_else(|| "Transcript AI is unavailable.".to_string())
+            };
+            transcript_resp.on_hover_text(reason);
+        }
         let renameable_selected = self.selected_renameable_paths();
         if renameable_selected.len() == 1 {
             if ui.button("Rename...").clicked() {
@@ -191,24 +230,33 @@ impl crate::app::WavesPreviewer {
         }
         let list_focus_id = crate::app::WavesPreviewer::list_focus_id();
         let list_focus_now = ctx.memory(|m| m.has_focus(list_focus_id));
+        let focused_id = ctx.memory(|m| m.focused());
         let search_focused =
             ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
-        let rename_modal_open = self.show_rename_dialog || self.show_batch_rename_dialog;
+        let has_non_list_focus = focused_id.is_some() && focused_id != Some(list_focus_id);
+        let rename_modal_open = self.show_rename_dialog
+            || self.show_batch_rename_dialog
+            || self.show_export_settings
+            || self.show_transcription_settings
+            || self.show_resample_dialog
+            || self.show_leave_prompt
+            || self.show_external_dialog;
+        // Keep list focus reclaim from stealing keyboard focus from active text inputs
+        // (DragValue text-edit mode, settings text fields, etc.).
+        let allow_focus_reclaim = !rename_modal_open && !search_focused && !has_non_list_focus;
         let focus_resp = ui.interact(list_rect, list_focus_id, Sense::click());
-        if self.list_has_focus && !list_focus_now && !search_focused && !rename_modal_open {
+        if self.list_has_focus && !list_focus_now && allow_focus_reclaim {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
         }
-        if focus_resp.clicked() && !rename_modal_open {
-            ctx.memory_mut(|m| m.request_focus(list_focus_id));
-            self.search_has_focus = false;
-        }
+        // NOTE: Do not force list focus on generic panel clicks.
+        // It breaks in-place numeric text editing (e.g. top-bar rate and gain cells).
+        let _ = focus_resp;
         let mut list_has_focus = list_focus_now || self.list_has_focus;
         if !list_has_focus
             && self.active_tab.is_none()
             && self.selected.is_some()
             && !self.search_has_focus
-            && !search_focused
-            && !rename_modal_open
+            && allow_focus_reclaim
         {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
             list_has_focus = true;
@@ -216,8 +264,27 @@ impl crate::app::WavesPreviewer {
         }
         let mut key_moved = false;
         // Keyboard navigation & per-file gain adjust in list view
-        let allow_list_keys =
-            self.active_tab.is_none() && !self.files.is_empty() && !search_focused;
+        // Do not gate on non-list text focus here: Up/Down must always recover list navigation
+        // in list mode (e.g. after DragValue text-entry focus in topbar/list cells).
+        let allow_list_keys = self.active_tab.is_none()
+            && !self.files.is_empty()
+            && !search_focused
+            && !rename_modal_open;
+        if self.debug.cfg.enabled && self.active_tab.is_none() && !self.files.is_empty() {
+            let nav_key_pressed = ctx.input(|i| {
+                i.key_pressed(egui::Key::ArrowDown)
+                    || i.key_pressed(egui::Key::ArrowUp)
+                    || i.key_pressed(egui::Key::PageDown)
+                    || i.key_pressed(egui::Key::PageUp)
+                    || i.key_pressed(egui::Key::Home)
+                    || i.key_pressed(egui::Key::End)
+            });
+            if nav_key_pressed && !allow_list_keys {
+                self.debug_trace_input(&format!(
+                    "list nav blocked (search_focused={search_focused}, has_non_list_focus={has_non_list_focus}, rename_modal_open={rename_modal_open})"
+                ));
+            }
+        }
         let list_key_intent = if allow_list_keys {
             ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
@@ -253,16 +320,39 @@ impl crate::app::WavesPreviewer {
                 );
             });
         }
-        let pressed_down = if allow_list_keys {
+        let mut pressed_down = if allow_list_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
         } else {
             false
         };
-        let pressed_up = if allow_list_keys {
+        let mut pressed_up = if allow_list_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
         } else {
             false
         };
+        // Some focused widgets (e.g. DragValue text-edit) may consume arrow keys before list handlers.
+        // Use raw events as a fallback so list navigation never gets stuck in list mode.
+        if allow_list_keys && (!pressed_down || !pressed_up) {
+            let raw_arrow = ctx.input(|i| {
+                let mut down = false;
+                let mut up = false;
+                for ev in &i.raw.events {
+                    if let egui::Event::Key {
+                        key, pressed: true, ..
+                    } = ev
+                    {
+                        if *key == egui::Key::ArrowDown {
+                            down = true;
+                        } else if *key == egui::Key::ArrowUp {
+                            up = true;
+                        }
+                    }
+                }
+                (down, up)
+            });
+            pressed_down |= raw_arrow.0;
+            pressed_up |= raw_arrow.1;
+        }
         let pressed_enter = if allow_list_keys {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         } else {
@@ -454,6 +544,10 @@ impl crate::app::WavesPreviewer {
             table = table.column(egui_extras::Column::initial(280.0).resizable(true));
             filler_cols += 1;
         }
+        if cols.transcript_language {
+            table = table.column(egui_extras::Column::initial(56.0).resizable(true));
+            filler_cols += 1;
+        }
         if cols.external {
             for _ in 0..external_cols.len() {
                 table = table.column(egui_extras::Column::initial(140.0).resizable(true));
@@ -569,6 +663,11 @@ impl crate::app::WavesPreviewer {
                             SortKey::Transcript,
                             true,
                         );
+                    });
+                }
+                if cols.transcript_language {
+                    header.col(|ui| {
+                        ui.label(RichText::new("Lang").strong());
                     });
                 }
                 if cols.external {
@@ -747,10 +846,14 @@ impl crate::app::WavesPreviewer {
                         if !is_virtual {
                             if large_bg_list {
                                 self.queue_header_meta_for_path(&path_owned, near_selected);
-                                self.queue_transcript_for_path(&path_owned, near_selected);
+                                if !self.transcript_ai_inflight.contains(&path_owned) {
+                                    self.queue_transcript_for_path(&path_owned, near_selected);
+                                }
                             } else {
                                 self.queue_meta_for_path(&path_owned, true);
-                                self.queue_transcript_for_path(&path_owned, true);
+                                if !self.transcript_ai_inflight.contains(&path_owned) {
+                                    self.queue_transcript_for_path(&path_owned, true);
+                                }
                             }
                         }
                         let Some(item) = self.item_for_id(id).cloned() else {
@@ -974,10 +1077,20 @@ impl crate::app::WavesPreviewer {
                                     .as_ref()
                                     .map(|t| t.full_text.as_str())
                                     .unwrap_or("");
-                                let display = if transcript_text.is_empty()
-                                    && self.transcript_inflight.contains(&path_owned)
-                                {
-                                    "..."
+                                let inflight = self.transcript_ai_inflight.contains(&path_owned);
+                                let queued = self
+                                    .transcript_ai_state
+                                    .as_ref()
+                                    .map(|s| s.pending.contains(&path_owned))
+                                    .unwrap_or(false);
+                                let display = if transcript_text.is_empty() {
+                                    if inflight {
+                                        "[Transcribing...]"
+                                    } else if queued {
+                                        "[Queued...]"
+                                    } else {
+                                        ""
+                                    }
                                 } else {
                                     transcript_text
                                 };
@@ -1010,6 +1123,24 @@ impl crate::app::WavesPreviewer {
                                 if label_resp.hovered() && !transcript_text.is_empty() {
                                     label_resp.on_hover_text(transcript_text);
                                 }
+                            });
+                        }
+                        if cols.transcript_language {
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let lang = item
+                                    .transcript_language
+                                    .as_deref()
+                                    .filter(|v| !v.is_empty())
+                                    .unwrap_or("-");
+                                ui.label(
+                                    RichText::new(lang)
+                                        .monospace()
+                                        .size(text_height * 0.98),
+                                );
                             });
                         }
                         if cols.external {
@@ -1350,9 +1481,6 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" dB"),
                                 );
                                 let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
                                 if resp.changed() {
                                     let new = crate::app::WavesPreviewer::clamp_gain_db(g);
                                     let delta = new - old;
@@ -1539,6 +1667,7 @@ impl crate::app::WavesPreviewer {
         }
         if sort_changed {
             self.list_meta_prefetch_cursor = 0;
+            self.prime_sort_metadata_prefetch();
             self.apply_sort();
         }
         if let Some(p) = to_open.as_ref() {

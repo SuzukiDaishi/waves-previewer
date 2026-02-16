@@ -178,19 +178,51 @@ impl WavesPreviewer {
         path: &Path,
         transcript: Option<Transcript>,
     ) -> bool {
+        let has_transcript = transcript.is_some();
         if let Some(item) = self.item_for_path_mut(path) {
             item.transcript = transcript;
-            if item.transcript.is_some() && !self.list_columns.transcript {
-                self.list_columns.transcript = true;
+            if item.transcript.is_none() {
+                item.transcript_language = None;
             }
-            return true;
+        } else {
+            return false;
         }
-        false
+        if has_transcript && !self.list_columns.transcript {
+            self.list_columns.transcript = true;
+        }
+        true
+    }
+
+    #[cfg_attr(not(feature = "kittest"), allow(dead_code))]
+    pub(super) fn transcript_language_for_path(&self, path: &Path) -> Option<&str> {
+        self.item_for_path(path)
+            .and_then(|item| item.transcript_language.as_deref())
+    }
+
+    pub(super) fn set_transcript_language_for_path(
+        &mut self,
+        path: &Path,
+        language: Option<String>,
+    ) -> bool {
+        let normalized = language
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        let has_language = normalized.is_some();
+        if let Some(item) = self.item_for_path_mut(path) {
+            item.transcript_language = normalized;
+        } else {
+            return false;
+        }
+        if has_language && !self.list_columns.transcript_language {
+            self.list_columns.transcript_language = true;
+        }
+        true
     }
 
     pub(super) fn clear_transcript_for_path(&mut self, path: &Path) {
         if let Some(item) = self.item_for_path_mut(path) {
             item.transcript = None;
+            item.transcript_language = None;
         }
     }
 

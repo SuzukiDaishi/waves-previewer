@@ -4,6 +4,7 @@ param(
     [string]$OutputDir = "",
     [string]$AppVersion = "",
     [string]$BuildId = "",
+    [switch]$SkipCargoBuild,
     [switch]$NoAutoVersion,
     [switch]$Quiet
 )
@@ -131,6 +132,7 @@ $root = Split-Path -Parent $issFull
 $workdir = $root
 $iscc = Resolve-Iscc $IsccPath
 
+$cargoToml = $null
 $version = $AppVersion
 if (-not $version) {
     $cargoToml = Find-CargoToml $root
@@ -143,9 +145,54 @@ if (-not $version) {
         $version = Get-AppVersionFromCargo $cargoToml
     }
 }
+if (-not $cargoToml) {
+    $cargoToml = Find-CargoToml $root
+    if (-not $cargoToml) {
+        throw "Cargo.toml not found (run from repo root)."
+    }
+}
+$repoRoot = Split-Path -Parent $cargoToml
 
 function New-BuildId {
     return (Get-Date).ToString("yyyyMMdd_HHmmss")
+}
+
+function Sync-RuntimeDlls {
+    param([string]$RepoRoot)
+    $releaseDir = Join-Path $RepoRoot "target\release"
+    $depsDir = Join-Path $releaseDir "deps"
+    if (-not (Test-Path $releaseDir)) {
+        return
+    }
+    $patterns = @(
+        "onnxruntime*.dll",
+        "onnxruntime_providers*.dll",
+        "dnnl*.dll",
+        "mklml*.dll",
+        "onig*.dll"
+    )
+    $copied = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($pat in $patterns) {
+        $sources = @()
+        if (Test-Path $depsDir) {
+            $sources += Get-ChildItem -Path $depsDir -Filter $pat -File -ErrorAction SilentlyContinue
+        }
+        $sources += Get-ChildItem -Path $releaseDir -Filter $pat -File -ErrorAction SilentlyContinue
+        foreach ($src in $sources) {
+            $name = $src.Name.ToLowerInvariant()
+            if ($copied.Contains($name)) { continue }
+            $dst = Join-Path $releaseDir $src.Name
+            if ($src.FullName -ne $dst) {
+                Copy-Item -Path $src.FullName -Destination $dst -Force
+            }
+            [void]$copied.Add($name)
+        }
+    }
+    if ($copied.Count -gt 0) {
+        Write-Host ("Runtime DLLs prepared: " + (($copied | Sort-Object) -join ", "))
+    } else {
+        Write-Host "Runtime DLLs prepared: none found"
+    }
 }
 
 function Build-Args {
@@ -175,6 +222,20 @@ if (-not $BuildId) {
 }
 if (-not $OutputDir) {
     $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
+}
+
+if (-not $SkipCargoBuild) {
+    Write-Host "Building release binaries (cargo build --release --bins)..."
+    Push-Location $repoRoot
+    try {
+        & cargo build --release --bins
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
+    Sync-RuntimeDlls -RepoRoot $repoRoot
 }
 
 $args = Build-Args -OutDir $OutputDir -Ver $version -Id $BuildId

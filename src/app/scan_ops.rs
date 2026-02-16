@@ -17,6 +17,7 @@ impl WavesPreviewer {
         self.original_files.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.transcript_ai_inflight.clear();
         self.cancel_list_preview_job();
         self.list_preview_pending_path = None;
         self.list_preview_prefetch_tx = None;

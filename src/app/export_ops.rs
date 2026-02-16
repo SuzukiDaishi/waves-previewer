@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::types::{ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode, VirtualSourceRef};
+use super::types::{
+    ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode, VirtualSourceRef,
+};
 
 impl super::WavesPreviewer {
     fn resolve_virtual_export_parent(&self, item: &super::types::MediaItem) -> Option<PathBuf> {
@@ -434,8 +437,41 @@ impl super::WavesPreviewer {
         let edit_jobs = edit_tasks;
         // File export prioritizes output quality over realtime speed.
         let resample_quality = crate::wave::ResampleQuality::Best;
+        // Transcript sidecar export toggle is deprecated for now.
+        let export_srt = false;
+        let transcript_cache: HashMap<PathBuf, super::types::Transcript> = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.transcript
+                    .as_ref()
+                    .map(|t| (item.path.clone(), t.clone()))
+            })
+            .collect();
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
+            let write_transcript_sidecar =
+                |src: &Path, dst: &Path, cache: &HashMap<PathBuf, super::types::Transcript>| {
+                    if !export_srt {
+                        return;
+                    }
+                    let transcript = cache.get(src).cloned().or_else(|| {
+                        super::transcript::srt_path_for_audio(src)
+                            .and_then(|p| super::transcript::load_srt(&p))
+                    });
+                    let Some(transcript) = transcript else {
+                        return;
+                    };
+                    let mut srt_path = dst.to_path_buf();
+                    srt_path.set_extension("srt");
+                    if let Err(err) = super::transcript::write_srt(&srt_path, &transcript) {
+                        eprintln!(
+                            "write transcript failed {} -> {}: {err:?}",
+                            src.display(),
+                            srt_path.display()
+                        );
+                    }
+                };
             let mut ok = 0usize;
             let mut failed = 0usize;
             let mut success_paths = Vec::new();
@@ -447,6 +483,7 @@ impl super::WavesPreviewer {
                             Ok(()) => {
                                 ok += 1;
                                 success_paths.push(src.clone());
+                                write_transcript_sidecar(&src, &src, &transcript_cache);
                             }
                             Err(_) => {
                                 failed += 1;
@@ -519,6 +556,7 @@ impl super::WavesPreviewer {
                             Ok(()) => {
                                 ok += 1;
                                 success_paths.push(dst.clone());
+                                write_transcript_sidecar(&src, &dst, &transcript_cache);
                             }
                             Err(_) => {
                                 failed += 1;
@@ -719,12 +757,13 @@ impl super::WavesPreviewer {
                 if marker_ok {
                     ok += 1;
                     success_paths.push(dst.clone());
+                    write_transcript_sidecar(&task.src, &dst, &transcript_cache);
                 } else {
                     failed += 1;
                     failed_paths.push(dst.clone());
                 }
             }
-            for (_src, dst, audio, db, sr, target_sr) in virtual_jobs {
+            for (src, dst, audio, db, sr, target_sr) in virtual_jobs {
                 let mut channels = audio.channels.clone();
                 if db.abs() > 0.0001 {
                     let gain = 10.0f32.powf(db / 20.0);
@@ -751,6 +790,7 @@ impl super::WavesPreviewer {
                     Ok(()) => {
                         ok += 1;
                         success_paths.push(dst.clone());
+                        write_transcript_sidecar(&src, &dst, &transcript_cache);
                     }
                     Err(err) => {
                         eprintln!(

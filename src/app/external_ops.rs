@@ -67,6 +67,7 @@ impl WavesPreviewer {
                 pending_gain_db: 0.0,
                 status: crate::app::types::MediaStatus::Ok,
                 transcript: None,
+                transcript_language: None,
                 external: HashMap::new(),
                 virtual_audio: None,
                 virtual_state: None,

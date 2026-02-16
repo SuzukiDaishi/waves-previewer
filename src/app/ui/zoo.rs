@@ -7,7 +7,10 @@ impl crate::app::WavesPreviewer {
             if ui.checkbox(&mut self.zoo_enabled, "Enable Zoo").changed() {
                 prefs_dirty = true;
             }
-            if ui.checkbox(&mut self.zoo_walk_enabled, "Walk in Editor").changed() {
+            if ui
+                .checkbox(&mut self.zoo_walk_enabled, "Walk in Editor")
+                .changed()
+            {
                 prefs_dirty = true;
             }
             if ui
@@ -19,7 +22,10 @@ impl crate::app::WavesPreviewer {
             if ui.checkbox(&mut self.zoo_use_bpm, "Follow BPM").changed() {
                 prefs_dirty = true;
             }
-            if ui.checkbox(&mut self.zoo_flip_manual, "Flip Image").changed() {
+            if ui
+                .checkbox(&mut self.zoo_flip_manual, "Flip Image")
+                .changed()
+            {
                 prefs_dirty = true;
             }
             ui.separator();
@@ -146,7 +152,12 @@ impl crate::app::WavesPreviewer {
         let anim_mul = if playing { 0.8 + energy * 1.8 } else { 0.5 };
 
         let frame_count = self.zoo_frames_tex.len();
-        let total_anim_s: f32 = self.zoo_frames_tex.iter().map(|f| f.delay_s).sum::<f32>().max(0.016);
+        let total_anim_s: f32 = self
+            .zoo_frames_tex
+            .iter()
+            .map(|f| f.delay_s)
+            .sum::<f32>()
+            .max(0.016);
         self.zoo_anim_clock =
             (self.zoo_anim_clock + dt * anim_mul.max(bpm_mul)).rem_euclid(total_anim_s);
         let mut acc = 0.0f32;
@@ -204,8 +215,7 @@ impl crate::app::WavesPreviewer {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                 }
                 if resp.clicked() {
-                    self.zoo_squish_until =
-                        Some(now + std::time::Duration::from_millis(150));
+                    self.zoo_squish_until = Some(now + std::time::Duration::from_millis(150));
                     self.play_zoo_voice();
                 }
                 let alpha = (self.zoo_opacity.clamp(0.3, 1.0) * 255.0).round() as u8;

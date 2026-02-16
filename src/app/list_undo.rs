@@ -147,7 +147,8 @@ impl crate::app::WavesPreviewer {
                 self.bit_depth_override.insert(entry.item.path.clone(), v);
             }
             if let Some(v) = entry.format_override.as_ref() {
-                self.format_override.insert(entry.item.path.clone(), v.clone());
+                self.format_override
+                    .insert(entry.item.path.clone(), v.clone());
             }
         }
         if !self.external_sources.is_empty() {
@@ -219,7 +220,8 @@ impl crate::app::WavesPreviewer {
             }
             match entry.format_override.as_ref() {
                 Some(v) => {
-                    self.format_override.insert(entry.item.path.clone(), v.clone());
+                    self.format_override
+                        .insert(entry.item.path.clone(), v.clone());
                 }
                 None => {
                     self.format_override.remove(&entry.item.path);

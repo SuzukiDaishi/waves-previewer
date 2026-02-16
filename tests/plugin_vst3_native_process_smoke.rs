@@ -92,9 +92,7 @@ fn ott_vst3_process_runs_on_native_backend() {
 
     let params = match probe {
         WorkerResponse::ProbeResult {
-            backend,
-            params,
-            ..
+            backend, params, ..
         } => {
             assert_eq!(backend, PluginHostBackend::NativeVst3);
             assert!(!params.is_empty(), "OTT params should not be empty");

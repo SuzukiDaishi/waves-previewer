@@ -64,6 +64,7 @@ impl WavesPreviewer {
         }
         self.meta_inflight.remove(from);
         self.transcript_inflight.remove(from);
+        self.transcript_ai_inflight.remove(from);
         self.spectro_inflight.remove(from);
         if let Some(v) = self.spectro_progress.remove(from) {
             self.spectro_progress.insert(new_path.clone(), v);

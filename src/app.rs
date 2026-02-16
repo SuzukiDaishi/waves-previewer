@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +57,8 @@ mod theme_ops;
 mod tool_ops;
 mod tooling;
 mod transcript;
+mod transcript_ai_ops;
+mod transcript_onnx;
 mod transcript_ops;
 mod types;
 mod ui;
@@ -121,6 +124,40 @@ struct ZooFrameTexture {
     delay_s: f32,
 }
 
+struct TranscriptAiItemResult {
+    path: PathBuf,
+    srt_path: Option<PathBuf>,
+    detected_language: Option<String>,
+    error: Option<String>,
+}
+
+enum TranscriptAiRunResult {
+    Started(PathBuf),
+    Item(TranscriptAiItemResult),
+    Finished,
+}
+
+struct TranscriptAiRunState {
+    started_at: std::time::Instant,
+    total: usize,
+    process_total: usize,
+    skipped_total: usize,
+    done: usize,
+    pending: HashSet<PathBuf>,
+    cancel_requested: Arc<AtomicBool>,
+    rx: std::sync::mpsc::Receiver<TranscriptAiRunResult>,
+}
+
+struct TranscriptModelDownloadResult {
+    model_dir: Option<PathBuf>,
+    error: Option<String>,
+}
+
+struct TranscriptModelDownloadState {
+    started_at: std::time::Instant,
+    rx: std::sync::mpsc::Receiver<TranscriptModelDownloadResult>,
+}
+
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
@@ -144,8 +181,18 @@ pub struct WavesPreviewer {
     meta_sort_last_applied: Option<std::time::Instant>,
     list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,
+    transcript_ai_inflight: HashSet<PathBuf>,
     pub show_transcript_window: bool,
     pub pending_transcript_seek: Option<(PathBuf, u64)>,
+    transcript_ai_opt_in: bool,
+    transcript_ai_model_dir: Option<PathBuf>,
+    transcript_ai_available: bool,
+    transcript_ai_state: Option<TranscriptAiRunState>,
+    transcript_model_download_state: Option<TranscriptModelDownloadState>,
+    transcript_ai_last_error: Option<String>,
+    transcript_ai_cfg: TranscriptAiConfig,
+    transcript_supported_languages: Vec<String>,
+    transcript_supported_tasks: Vec<String>,
     pub external_sources: Vec<ExternalSource>,
     pub external_active_source: Option<usize>,
     pub external_source: Option<PathBuf>,
@@ -311,6 +358,7 @@ pub struct WavesPreviewer {
     // export/save settings (simple, in-memory)
     export_cfg: ExportConfig,
     show_export_settings: bool,
+    show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,
     project_open_pending: Option<PathBuf>,
@@ -732,6 +780,7 @@ impl WavesPreviewer {
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
+            transcript_language: None,
             external: HashMap::new(),
             virtual_audio: None,
             virtual_state: None,
@@ -843,6 +892,7 @@ impl WavesPreviewer {
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
+            transcript_language: None,
             external: HashMap::new(),
             virtual_audio: Some(audio),
             virtual_state,
@@ -1761,8 +1811,18 @@ impl WavesPreviewer {
             meta_sort_last_applied: None,
             list_meta_prefetch_cursor: 0,
             transcript_inflight: HashSet::new(),
+            transcript_ai_inflight: HashSet::new(),
             show_transcript_window: false,
             pending_transcript_seek: None,
+            transcript_ai_opt_in: false,
+            transcript_ai_model_dir: None,
+            transcript_ai_available: false,
+            transcript_ai_state: None,
+            transcript_model_download_state: None,
+            transcript_ai_last_error: None,
+            transcript_ai_cfg: TranscriptAiConfig::default(),
+            transcript_supported_languages: Vec::new(),
+            transcript_supported_tasks: Vec::new(),
             external_sources: Vec::new(),
             external_active_source: None,
             external_source: None,
@@ -1916,8 +1976,10 @@ impl WavesPreviewer {
                 format_override: None,
                 conflict: ConflictPolicy::Rename,
                 backup_bak: true,
+                export_srt: false,
             },
             show_export_settings: false,
+            show_transcription_settings: false,
             show_first_save_prompt: false,
             project_path: None,
             project_open_pending: None,
@@ -1981,6 +2043,7 @@ impl WavesPreviewer {
             test_dialogs: TestDialogQueue::default(),
         };
         app.load_prefs();
+        app.refresh_transcript_ai_status();
         app.reload_zoo_gif_frames();
         app.load_tools_config();
         app.apply_startup_paths();
@@ -2244,6 +2307,8 @@ impl eframe::App for WavesPreviewer {
         // Drain editor apply jobs (pitch/stretch)
         self.drain_editor_apply_jobs(ctx);
         self.drain_plugin_jobs(ctx);
+        self.drain_transcript_model_download_results(ctx);
+        self.drain_transcript_ai_results(ctx);
         // Drain metadata updates
         self.drain_meta_updates(ctx);
         self.drain_external_load_results(ctx);
@@ -3106,6 +3171,7 @@ impl eframe::App for WavesPreviewer {
 
         // Export settings window (in separate UI module)
         self.ui_export_settings_window(ctx);
+        self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);
         self.ui_tool_palette_window(ctx);

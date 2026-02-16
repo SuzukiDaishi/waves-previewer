@@ -99,9 +99,8 @@ fn prepare_worker_executable_named(worker_path: PathBuf) -> Result<(PathBuf, boo
         if is_exe {
             let seq = WORKER_SPAWN_SEQ.fetch_add(1, Ordering::Relaxed);
             let pid = std::process::id();
-            let temp_path = std::env::temp_dir().join(format!(
-                "neowaves_plugin_worker_{pid}_{seq}.exe"
-            ));
+            let temp_path =
+                std::env::temp_dir().join(format!("neowaves_plugin_worker_{pid}_{seq}.exe"));
             match std::fs::copy(&worker_path, &temp_path) {
                 Ok(_) => return Ok((temp_path, true)),
                 Err(_) => {
@@ -205,8 +204,8 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
                         err
                     });
                 }
-                let decoded =
-                    serde_json::from_slice(&stdout).map_err(|e| format!("decode worker output failed: {e}"));
+                let decoded = serde_json::from_slice(&stdout)
+                    .map_err(|e| format!("decode worker output failed: {e}"));
                 if cleanup_temp {
                     let _ = std::fs::remove_file(&worker_path);
                 }
@@ -220,10 +219,7 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
                     if cleanup_temp {
                         let _ = std::fs::remove_file(&worker_path);
                     }
-                    return Err(format!(
-                        "worker timeout after {} ms",
-                        timeout.as_millis()
-                    ));
+                    return Err(format!("worker timeout after {} ms", timeout.as_millis()));
                 }
                 std::thread::sleep(Duration::from_millis(8));
             }

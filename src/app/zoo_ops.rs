@@ -84,7 +84,8 @@ impl WavesPreviewer {
                             crate::wave::ResampleQuality::Best,
                         );
                     }
-                    self.zoo_voice_cache = Some(Arc::new(crate::audio::AudioBuffer::from_mono(mono)));
+                    self.zoo_voice_cache =
+                        Some(Arc::new(crate::audio::AudioBuffer::from_mono(mono)));
                     self.zoo_voice_cache_path = Some(path.clone());
                 }
                 Err(err) => {
@@ -145,7 +146,8 @@ fn decode_zoo_frames(path: &Path) -> anyhow::Result<Vec<ZooFrameImage>> {
         }
         return Ok(out);
     }
-    let image = image::open(path).with_context(|| format!("open image failed: {}", path.display()))?;
+    let image =
+        image::open(path).with_context(|| format!("open image failed: {}", path.display()))?;
     let rgba = image.to_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
     Ok(vec![ZooFrameImage {

@@ -3,7 +3,9 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use neowaves::plugin::{PluginHostBackend, PluginParamInfo, PluginParamValue, WorkerRequest, WorkerResponse};
+use neowaves::plugin::{
+    PluginHostBackend, PluginParamInfo, PluginParamValue, WorkerRequest, WorkerResponse,
+};
 
 const VST3_PATHS: &[&str] = &[
     r"C:\Program Files\Common Files\VST3\OTT.vst3",
@@ -54,11 +56,35 @@ fn plugin_keywords(path: &str) -> &'static [&'static str] {
     if low.contains("ott") {
         &["depth", "mix", "upwd", "dnwd", "strength", "gain", "amount"]
     } else if low.contains("colourizer") || low.contains("colorizer") {
-        &["color", "colour", "saturation", "drive", "mix", "amount", "gain"]
+        &[
+            "color",
+            "colour",
+            "saturation",
+            "drive",
+            "mix",
+            "amount",
+            "gain",
+        ]
     } else if low.contains("condenser") {
-        &["threshold", "ratio", "mix", "amount", "attack", "release", "gain"]
+        &[
+            "threshold",
+            "ratio",
+            "mix",
+            "amount",
+            "attack",
+            "release",
+            "gain",
+        ]
     } else if low.contains("diffuser") {
-        &["diffusion", "size", "feedback", "mix", "amount", "gain", "time"]
+        &[
+            "diffusion",
+            "size",
+            "feedback",
+            "mix",
+            "amount",
+            "gain",
+            "time",
+        ]
     } else {
         &["mix", "amount", "gain", "depth"]
     }
@@ -110,7 +136,9 @@ fn named_vst3_plugins_native_process_smoke() {
         })
         .expect("probe response");
         let params = match probe {
-            WorkerResponse::ProbeResult { backend, params, .. } => {
+            WorkerResponse::ProbeResult {
+                backend, params, ..
+            } => {
                 assert_eq!(
                     backend,
                     PluginHostBackend::NativeVst3,
@@ -147,18 +175,31 @@ fn named_vst3_plugins_native_process_smoke() {
                 "process should use native backend for {}",
                 plugin_path
             ),
-            other => panic!("unexpected process response for {}: {:?}", plugin_path, other),
+            other => panic!(
+                "unexpected process response for {}: {:?}",
+                plugin_path, other
+            ),
         }
 
-        let (out_ch, _out_sr) = neowaves::audio_io::decode_audio_multi(&output).expect("decode output");
-        assert_eq!(out_ch.len(), in_ch.len(), "channel mismatch for {}", plugin_path);
+        let (out_ch, _out_sr) =
+            neowaves::audio_io::decode_audio_multi(&output).expect("decode output");
+        assert_eq!(
+            out_ch.len(),
+            in_ch.len(),
+            "channel mismatch for {}",
+            plugin_path
+        );
         assert_eq!(
             out_ch[0].len(),
             in_ch[0].len(),
             "length mismatch for {}",
             plugin_path
         );
-        assert!(all_finite(&out_ch), "non-finite samples from {}", plugin_path);
+        assert!(
+            all_finite(&out_ch),
+            "non-finite samples from {}",
+            plugin_path
+        );
         let diff_l = mean_abs_diff(&in_ch[0], &out_ch[0]);
         let diff_r = mean_abs_diff(&in_ch[1], &out_ch[1]);
         assert!(

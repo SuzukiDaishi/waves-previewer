@@ -59,6 +59,7 @@ pub struct MediaItem {
     pub pending_gain_db: f32,
     pub status: MediaStatus,
     pub transcript: Option<Transcript>,
+    pub transcript_language: Option<String>,
     pub external: HashMap<String, String>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
     pub virtual_state: Option<VirtualState>,
@@ -167,6 +168,7 @@ pub struct ListColumnConfig {
     pub file: bool,
     pub folder: bool,
     pub transcript: bool,
+    pub transcript_language: bool,
     pub external: bool,
     pub length: bool,
     pub channels: bool,
@@ -189,6 +191,7 @@ impl Default for ListColumnConfig {
             file: true,
             folder: true,
             transcript: false,
+            transcript_language: false,
             external: true,
             length: true,
             channels: true,
@@ -904,6 +907,80 @@ pub struct ExportConfig {
     pub format_override: Option<String>,
     pub conflict: ConflictPolicy,
     pub backup_bak: bool,
+    pub export_srt: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TranscriptAiConfig {
+    pub language: String,
+    pub task: String,
+    pub max_new_tokens: usize,
+    pub overwrite_existing_srt: bool,
+    pub perf_mode: TranscriptPerfMode,
+    pub model_variant: TranscriptModelVariant,
+    pub omit_language_token: bool,
+    pub omit_notimestamps_token: bool,
+    pub vad_enabled: bool,
+    pub vad_model_path: Option<PathBuf>,
+    pub vad_threshold: f32,
+    pub vad_min_speech_ms: usize,
+    pub vad_min_silence_ms: usize,
+    pub vad_speech_pad_ms: usize,
+    pub max_window_ms: usize,
+    pub no_speech_threshold: Option<f32>,
+    pub logprob_threshold: Option<f32>,
+    pub compute_target: TranscriptComputeTarget,
+    pub dml_device_id: i32,
+    pub cpu_intra_threads: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptComputeTarget {
+    Auto,
+    Cpu,
+    Gpu,
+    Npu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptPerfMode {
+    Stable,
+    Balanced,
+    Boost,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptModelVariant {
+    Auto,
+    Fp16,
+    Quantized,
+}
+
+impl Default for TranscriptAiConfig {
+    fn default() -> Self {
+        Self {
+            language: "auto".to_string(),
+            task: "transcribe".to_string(),
+            max_new_tokens: 128,
+            overwrite_existing_srt: false,
+            perf_mode: TranscriptPerfMode::Stable,
+            model_variant: TranscriptModelVariant::Auto,
+            omit_language_token: false,
+            omit_notimestamps_token: false,
+            vad_enabled: true,
+            vad_model_path: None,
+            vad_threshold: 0.5,
+            vad_min_speech_ms: 250,
+            vad_min_silence_ms: 100,
+            vad_speech_pad_ms: 30,
+            max_window_ms: 30_000,
+            no_speech_threshold: None,
+            logprob_threshold: None,
+            compute_target: TranscriptComputeTarget::Auto,
+            dml_device_id: 0,
+            cpu_intra_threads: 0,
+        }
+    }
 }
 
 #[derive(Clone)]

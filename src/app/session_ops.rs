@@ -15,8 +15,8 @@ use super::project::{
     serialize_project, spectro_config_from_project, tool_kind_from_str, view_mode_from_str,
     ProjectApp, ProjectBitDepthOverride, ProjectEdit, ProjectExportPolicy, ProjectExternalSource,
     ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns,
-    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectVirtualItem,
-    ProjectVirtualOp, ProjectVirtualSource,
+    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage,
+    ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -347,6 +347,21 @@ impl super::WavesPreviewer {
             });
         }
         virtual_items.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut transcript_languages: Vec<ProjectTranscriptLanguage> = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.transcript_language
+                    .as_ref()
+                    .map(|lang| (item.path.clone(), lang.trim().to_ascii_lowercase()))
+            })
+            .filter(|(_, lang)| !lang.is_empty())
+            .map(|(path, language)| ProjectTranscriptLanguage {
+                path: rel_path(&path, base_dir),
+                language,
+            })
+            .collect();
+        transcript_languages.sort_by(|a, b| a.path.cmp(&b.path));
         let list = ProjectList {
             root: self.root.as_ref().map(|p| rel_path(p, base_dir)),
             files: list_files.iter().map(|p| rel_path(p, base_dir)).collect(),
@@ -355,6 +370,7 @@ impl super::WavesPreviewer {
             bit_depth_overrides,
             format_overrides,
             virtual_items,
+            transcript_languages,
         };
         let key_column = self
             .external_key_index
@@ -421,6 +437,7 @@ impl super::WavesPreviewer {
                 file: self.list_columns.file,
                 folder: self.list_columns.folder,
                 transcript: self.list_columns.transcript,
+                transcript_language: self.list_columns.transcript_language,
                 external: self.list_columns.external,
                 length: self.list_columns.length,
                 ch: self.list_columns.channels,
@@ -447,6 +464,7 @@ impl super::WavesPreviewer {
                     super::types::ConflictPolicy::Skip => "skip".to_string(),
                 },
                 backup_bak: self.export_cfg.backup_bak,
+                export_srt: self.export_cfg.export_srt,
                 name_template: self.export_cfg.name_template.clone(),
                 dest_folder: self
                     .export_cfg
@@ -634,6 +652,7 @@ impl super::WavesPreviewer {
                 _ => super::types::ConflictPolicy::Rename,
             };
             self.export_cfg.backup_bak = policy.backup_bak;
+            self.export_cfg.export_srt = policy.export_srt;
             if !policy.name_template.trim().is_empty() {
                 self.export_cfg.name_template = policy.name_template.clone();
             }
@@ -647,6 +666,7 @@ impl super::WavesPreviewer {
             file: project.app.list_columns.file,
             folder: project.app.list_columns.folder,
             transcript: project.app.list_columns.transcript,
+            transcript_language: project.app.list_columns.transcript_language,
             external: project.app.list_columns.external,
             length: project.app.list_columns.length,
             channels: project.app.list_columns.ch,
@@ -900,6 +920,10 @@ impl super::WavesPreviewer {
             if let Some(list_item) = self.item_for_path_mut(&path) {
                 list_item.pending_gain_db = item.pending_gain_db;
             }
+        }
+        for item in project.list.transcript_languages.iter() {
+            let path = resolve_path(&item.path, &base_dir);
+            self.set_transcript_language_for_path(&path, Some(item.language.clone()));
         }
         self.sample_rate_override.clear();
         for override_item in project.list.sample_rate_overrides.iter() {

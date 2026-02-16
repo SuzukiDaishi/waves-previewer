@@ -204,7 +204,10 @@ impl WavesPreviewer {
             .unwrap_or(false)
         {
             let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
-            Self::debug_push_latency_sample(&mut self.debug.tab_switch_to_interactive_ms, elapsed_ms);
+            Self::debug_push_latency_sample(
+                &mut self.debug.tab_switch_to_interactive_ms,
+                elapsed_ms,
+            );
             self.debug.tab_switch_started_at = None;
             self.debug.tab_switch_started_path = None;
         }
@@ -365,7 +368,10 @@ impl WavesPreviewer {
             "src_resample_ms: {}",
             summarize(&self.debug.src_resample_ms)
         ));
-        let src_total = self.debug.src_cache_hits.saturating_add(self.debug.src_cache_misses);
+        let src_total = self
+            .debug
+            .src_cache_hits
+            .saturating_add(self.debug.src_cache_misses);
         let src_hit_rate = if src_total > 0 {
             (self.debug.src_cache_hits as f64 / src_total as f64) * 100.0
         } else {
@@ -425,10 +431,14 @@ impl WavesPreviewer {
             lines.push("warning: src_resample_ms has no samples (run SRC path)".to_string());
         }
         if self.debug.plugin_scan_ms.is_empty() {
-            lines.push("warning: plugin_scan_ms has no samples (run plugin scan scenario)".to_string());
+            lines.push(
+                "warning: plugin_scan_ms has no samples (run plugin scan scenario)".to_string(),
+            );
         }
         if self.debug.plugin_probe_ms.is_empty() {
-            lines.push("warning: plugin_probe_ms has no samples (run plugin probe scenario)".to_string());
+            lines.push(
+                "warning: plugin_probe_ms has no samples (run plugin probe scenario)".to_string(),
+            );
         }
         lines.push(format!(
             "autoplay_pending_count: {} stale_preview_cancel_count: {} plugin_stale_drop_count: {} plugin_worker_timeout_count: {} plugin_native_fallback_count: {}",

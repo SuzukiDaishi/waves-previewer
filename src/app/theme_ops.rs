@@ -3,11 +3,68 @@ use std::path::PathBuf;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle, Visuals};
 
 use super::types::{
-    ItemBgMode, SpectrogramConfig, SpectrogramScale, SrcQuality, ThemeMode, WindowFunction,
+    ConflictPolicy, ExportConfig, ItemBgMode, ListColumnConfig, SaveMode, SpectrogramConfig,
+    SpectrogramScale, SrcQuality, ThemeMode, TranscriptComputeTarget, TranscriptModelVariant,
+    TranscriptPerfMode, WindowFunction,
 };
 use super::WavesPreviewer;
 
 impl WavesPreviewer {
+    pub(super) fn reset_transcript_settings_to_default(&mut self) {
+        self.transcript_ai_cfg = super::types::TranscriptAiConfig::default();
+        self.sanitize_transcript_ai_config();
+        self.refresh_transcript_ai_status();
+        self.transcript_ai_last_error = None;
+        self.save_prefs();
+    }
+
+    pub(super) fn reset_settings_window_to_default(&mut self, ctx: &egui::Context) {
+        self.export_cfg = ExportConfig {
+            first_prompt: true,
+            save_mode: SaveMode::NewFile,
+            dest_folder: None,
+            name_template: "{name} (gain{gain:+.1}dB)".into(),
+            format_override: None,
+            conflict: ConflictPolicy::Rename,
+            backup_bak: true,
+            export_srt: false,
+        };
+
+        let prev_skip = self.skip_dotfiles;
+        self.skip_dotfiles = true;
+        self.item_bg_mode = ItemBgMode::Standard;
+        self.src_quality = SrcQuality::Good;
+        self.list_columns = ListColumnConfig::default();
+        self.zero_cross_epsilon = 1.0e-4;
+        self.transcript_ai_cfg = super::types::TranscriptAiConfig::default();
+        self.sanitize_transcript_ai_config();
+        self.refresh_transcript_ai_status();
+        self.transcript_ai_last_error = None;
+        self.reset_plugin_search_paths_to_default();
+        self.ensure_sort_key_visible();
+        self.apply_sort();
+
+        if self.theme_mode != ThemeMode::Dark {
+            self.theme_mode = ThemeMode::Dark;
+            Self::apply_theme_visuals(ctx, self.theme_mode);
+        }
+
+        self.apply_spectro_config(SpectrogramConfig::default());
+
+        if !prev_skip && self.skip_dotfiles {
+            if let Some(root) = self.root.clone() {
+                self.start_scan_folder(root);
+            } else {
+                self.items.retain(|item| !Self::is_dotfile_path(&item.path));
+                self.rebuild_item_indexes();
+                self.apply_filter_from_search();
+                self.apply_sort();
+            }
+        }
+        self.save_prefs();
+        self.debug_log("settings reset to defaults".to_string());
+    }
+
     fn theme_visuals(theme: ThemeMode) -> Visuals {
         let mut visuals = match theme {
             ThemeMode::Dark => Visuals::dark(),
@@ -210,6 +267,112 @@ impl WavesPreviewer {
                     "best" => SrcQuality::Best,
                     _ => SrcQuality::Good,
                 };
+            } else if let Some(rest) = line.strip_prefix("transcript_ai_opt_in=") {
+                self.transcript_ai_opt_in = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("transcript_language=") {
+                let value = rest.trim();
+                if !value.is_empty() {
+                    self.transcript_ai_cfg.language = value.to_string();
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_task=") {
+                let value = rest.trim();
+                if !value.is_empty() {
+                    self.transcript_ai_cfg.task = value.to_string();
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_max_new_tokens=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.transcript_ai_cfg.max_new_tokens = v.clamp(1, 512);
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_perf_mode=") {
+                self.transcript_ai_cfg.perf_mode = match rest.trim().to_ascii_lowercase().as_str() {
+                    "balanced" => TranscriptPerfMode::Balanced,
+                    "boost" => TranscriptPerfMode::Boost,
+                    _ => TranscriptPerfMode::Stable,
+                };
+            } else if let Some(rest) = line.strip_prefix("transcript_model_variant=") {
+                self.transcript_ai_cfg.model_variant =
+                    match rest.trim().to_ascii_lowercase().as_str() {
+                        "fp16" => TranscriptModelVariant::Fp16,
+                        "quantized" => TranscriptModelVariant::Quantized,
+                        _ => TranscriptModelVariant::Auto,
+                    };
+            } else if let Some(rest) = line.strip_prefix("transcript_overwrite_existing_srt=") {
+                self.transcript_ai_cfg.overwrite_existing_srt =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("transcript_omit_language_token=") {
+                self.transcript_ai_cfg.omit_language_token =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("transcript_omit_notimestamps_token=") {
+                self.transcript_ai_cfg.omit_notimestamps_token =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("transcript_vad_enabled=") {
+                self.transcript_ai_cfg.vad_enabled =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("transcript_vad_model_path=") {
+                let raw = rest.trim().trim_matches('"');
+                if raw.is_empty() {
+                    self.transcript_ai_cfg.vad_model_path = None;
+                } else {
+                    self.transcript_ai_cfg.vad_model_path = Some(PathBuf::from(raw));
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_vad_threshold=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.transcript_ai_cfg.vad_threshold = v.clamp(0.01, 0.99);
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_vad_min_speech_ms=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.transcript_ai_cfg.vad_min_speech_ms = v.clamp(10, 10_000);
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_vad_min_silence_ms=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.transcript_ai_cfg.vad_min_silence_ms = v.clamp(10, 10_000);
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_vad_speech_pad_ms=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.transcript_ai_cfg.vad_speech_pad_ms = v.clamp(0, 5_000);
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_max_window_ms=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.transcript_ai_cfg.max_window_ms = v.clamp(1_000, 30_000);
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_no_speech_threshold=") {
+                let t = rest.trim();
+                if t.is_empty() {
+                    self.transcript_ai_cfg.no_speech_threshold = None;
+                } else if let Ok(v) = t.parse::<f32>() {
+                    if v.is_finite() {
+                        self.transcript_ai_cfg.no_speech_threshold = Some(v.clamp(0.0, 1.0));
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_logprob_threshold=") {
+                let t = rest.trim();
+                if t.is_empty() {
+                    self.transcript_ai_cfg.logprob_threshold = None;
+                } else if let Ok(v) = t.parse::<f32>() {
+                    if v.is_finite() {
+                        self.transcript_ai_cfg.logprob_threshold = Some(v.clamp(-10.0, 0.0));
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_compute_target=") {
+                self.transcript_ai_cfg.compute_target =
+                    match rest.trim().to_ascii_lowercase().as_str() {
+                        "cpu" => TranscriptComputeTarget::Cpu,
+                        "gpu" => TranscriptComputeTarget::Gpu,
+                        "npu" => TranscriptComputeTarget::Npu,
+                        _ => TranscriptComputeTarget::Auto,
+                    };
+            } else if let Some(rest) = line.strip_prefix("transcript_dml_device_id=") {
+                if let Ok(v) = rest.trim().parse::<i32>() {
+                    self.transcript_ai_cfg.dml_device_id = v.clamp(0, 16);
+                }
+            } else if let Some(rest) = line.strip_prefix("transcript_cpu_intra_threads=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.transcript_ai_cfg.cpu_intra_threads = v.min(64);
+                }
+            } else if let Some(rest) = line.strip_prefix("export_srt=") {
+                self.export_cfg.export_srt = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("plugin_search_path=") {
                 let raw = rest.trim().trim_matches('"');
                 if !raw.is_empty() {
@@ -260,6 +423,7 @@ impl WavesPreviewer {
             self.plugin_search_paths = plugin_paths;
             Self::normalize_plugin_search_paths(&mut self.plugin_search_paths);
         }
+        self.sanitize_transcript_ai_config();
     }
 
     pub(super) fn save_prefs(&self) {
@@ -298,13 +462,51 @@ impl WavesPreviewer {
             SrcQuality::Good => "good",
             SrcQuality::Best => "best",
         };
+        let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
+        let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
+            "1"
+        } else {
+            "0"
+        };
+        let transcript_perf_mode = match self.transcript_ai_cfg.perf_mode {
+            TranscriptPerfMode::Stable => "stable",
+            TranscriptPerfMode::Balanced => "balanced",
+            TranscriptPerfMode::Boost => "boost",
+        };
+        let transcript_model_variant = match self.transcript_ai_cfg.model_variant {
+            TranscriptModelVariant::Auto => "auto",
+            TranscriptModelVariant::Fp16 => "fp16",
+            TranscriptModelVariant::Quantized => "quantized",
+        };
+        let transcript_omit_language_token = if self.transcript_ai_cfg.omit_language_token {
+            "1"
+        } else {
+            "0"
+        };
+        let transcript_omit_notimestamps_token = if self.transcript_ai_cfg.omit_notimestamps_token {
+            "1"
+        } else {
+            "0"
+        };
+        let transcript_vad_enabled = if self.transcript_ai_cfg.vad_enabled {
+            "1"
+        } else {
+            "0"
+        };
+        let transcript_compute_target = match self.transcript_ai_cfg.compute_target {
+            TranscriptComputeTarget::Auto => "auto",
+            TranscriptComputeTarget::Cpu => "cpu",
+            TranscriptComputeTarget::Gpu => "gpu",
+            TranscriptComputeTarget::Npu => "npu",
+        };
+        let export_srt = if self.export_cfg.export_srt { "1" } else { "0" };
         let zoo_enabled = if self.zoo_enabled { "1" } else { "0" };
         let zoo_walk_enabled = if self.zoo_walk_enabled { "1" } else { "0" };
         let zoo_voice_enabled = if self.zoo_voice_enabled { "1" } else { "0" };
         let zoo_use_bpm = if self.zoo_use_bpm { "1" } else { "0" };
         let zoo_flip_manual = if self.zoo_flip_manual { "1" } else { "0" };
         let mut out = format!(
-                "theme={}\nskip_dotfiles={}\n\
+            "theme={}\nskip_dotfiles={}\n\
 zero_cross_eps={:.6}\n\
 spectro_fft={}\n\
 spectro_window={}\n\
@@ -317,6 +519,27 @@ spectro_max_hz={:.1}\n\
 spectro_note_labels={}\n\
 item_bg_mode={}\n\
 src_quality={}\n\
+transcript_ai_opt_in={}\n\
+transcript_language={}\n\
+transcript_task={}\n\
+transcript_max_new_tokens={}\n\
+transcript_perf_mode={}\n\
+transcript_model_variant={}\n\
+transcript_overwrite_existing_srt={}\n\
+transcript_omit_language_token={}\n\
+transcript_omit_notimestamps_token={}\n\
+transcript_vad_enabled={}\n\
+transcript_vad_threshold={:.3}\n\
+transcript_vad_min_speech_ms={}\n\
+transcript_vad_min_silence_ms={}\n\
+transcript_vad_speech_pad_ms={}\n\
+transcript_max_window_ms={}\n\
+transcript_no_speech_threshold={}\n\
+transcript_logprob_threshold={}\n\
+transcript_compute_target={}\n\
+transcript_dml_device_id={}\n\
+transcript_cpu_intra_threads={}\n\
+export_srt={}\n\
 zoo_enabled={}\n\
 zoo_walk_enabled={}\n\
 zoo_voice_enabled={}\n\
@@ -325,24 +548,51 @@ zoo_scale={:.3}\n\
 zoo_opacity={:.3}\n\
 zoo_speed={:.1}\n\
 zoo_flip_manual={}\n",
-                theme,
-                skip,
-                self.zero_cross_epsilon,
-                self.spectro_cfg.fft_size,
-                window,
-                self.spectro_cfg.overlap,
-                self.spectro_cfg.max_frames,
-                scale,
-                mel_scale,
-                self.spectro_cfg.db_floor,
-                self.spectro_cfg.max_freq_hz,
-                note_labels,
-                item_bg_mode,
-                src_quality,
-                zoo_enabled,
-                zoo_walk_enabled,
-                zoo_voice_enabled,
-                zoo_use_bpm,
+            theme,
+            skip,
+            self.zero_cross_epsilon,
+            self.spectro_cfg.fft_size,
+            window,
+            self.spectro_cfg.overlap,
+            self.spectro_cfg.max_frames,
+            scale,
+            mel_scale,
+            self.spectro_cfg.db_floor,
+            self.spectro_cfg.max_freq_hz,
+            note_labels,
+            item_bg_mode,
+            src_quality,
+            transcript_ai_opt_in,
+            self.transcript_ai_cfg.language,
+            self.transcript_ai_cfg.task,
+            self.transcript_ai_cfg.max_new_tokens,
+            transcript_perf_mode,
+            transcript_model_variant,
+            transcript_overwrite_existing_srt,
+            transcript_omit_language_token,
+            transcript_omit_notimestamps_token,
+            transcript_vad_enabled,
+            self.transcript_ai_cfg.vad_threshold,
+            self.transcript_ai_cfg.vad_min_speech_ms,
+            self.transcript_ai_cfg.vad_min_silence_ms,
+            self.transcript_ai_cfg.vad_speech_pad_ms,
+            self.transcript_ai_cfg.max_window_ms,
+            self.transcript_ai_cfg
+                .no_speech_threshold
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_default(),
+            self.transcript_ai_cfg
+                .logprob_threshold
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_default(),
+            transcript_compute_target,
+            self.transcript_ai_cfg.dml_device_id,
+            self.transcript_ai_cfg.cpu_intra_threads,
+            export_srt,
+            zoo_enabled,
+            zoo_walk_enabled,
+            zoo_voice_enabled,
+            zoo_use_bpm,
             self.zoo_scale,
             self.zoo_opacity,
             self.zoo_speed,
@@ -355,6 +605,11 @@ zoo_flip_manual={}\n",
         }
         if let Some(path) = &self.zoo_voice_path {
             out.push_str("zoo_voice_path=");
+            out.push_str(&path.to_string_lossy().replace('\n', " "));
+            out.push('\n');
+        }
+        if let Some(path) = &self.transcript_ai_cfg.vad_model_path {
+            out.push_str("transcript_vad_model_path=");
             out.push_str(&path.to_string_lossy().replace('\n', " "));
             out.push('\n');
         }

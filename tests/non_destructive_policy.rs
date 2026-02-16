@@ -248,7 +248,9 @@ mod non_destructive_policy {
         harness
             .state_mut()
             .test_set_export_dest_folder(Some(&export_dir));
-        harness.state_mut().test_set_export_name_template("{name}_fmt");
+        harness
+            .state_mut()
+            .test_set_export_name_template("{name}_fmt");
         harness.state_mut().test_trigger_save_selected();
         wait_for_export_finish(&mut harness);
 

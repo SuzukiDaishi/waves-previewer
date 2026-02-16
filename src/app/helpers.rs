@@ -283,5 +283,3 @@ pub fn sanitize_filename_component(name: &str) -> String {
     }
     s
 }
-
-

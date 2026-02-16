@@ -11,7 +11,22 @@ impl crate::app::WavesPreviewer {
             egui::Window::new("Settings")
                 .open(&mut open)
                 .resizable(true)
+                .default_size(egui::vec2(760.0, 640.0))
                 .show(ctx, |ui| {
+                    let max_h = (ctx.content_rect().height() * 0.78).max(360.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(max_h)
+                        .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Reset This Settings Page").clicked() {
+                            self.reset_settings_window_to_default(ctx);
+                        }
+                        if ui.button("Reset Transcription AI Only").clicked() {
+                            self.reset_transcript_settings_to_default();
+                        }
+                    });
+                    ui.separator();
                     ui.label("Default Save Mode:");
                     ui.horizontal(|ui| {
                         let m = self.export_cfg.save_mode;
@@ -137,6 +152,13 @@ impl crate::app::WavesPreviewer {
                         }
                     });
                     ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Transcription settings moved to:");
+                        if ui.button("Tools > AI > Transcription...").clicked() {
+                            self.show_transcription_settings = true;
+                        }
+                    });
+                    ui.separator();
                     ui.label("List Columns:");
                     let mut next_cols = self.list_columns;
                     ui.horizontal_wrapped(|ui| {
@@ -144,6 +166,7 @@ impl crate::app::WavesPreviewer {
                         ui.checkbox(&mut next_cols.file, "File");
                         ui.checkbox(&mut next_cols.folder, "Folder");
                         ui.checkbox(&mut next_cols.transcript, "Transcript");
+                        ui.checkbox(&mut next_cols.transcript_language, "Lang");
                         if self.external_visible_columns.is_empty() {
                             ui.add_enabled(
                                 false,
@@ -170,6 +193,7 @@ impl crate::app::WavesPreviewer {
                         || next_cols.file
                         || next_cols.folder
                         || next_cols.transcript
+                        || next_cols.transcript_language
                         || (next_cols.external && external_available)
                         || next_cols.length
                         || next_cols.channels
@@ -381,6 +405,7 @@ impl crate::app::WavesPreviewer {
                     if next_cfg != self.spectro_cfg {
                         self.apply_spectro_config(next_cfg);
                     }
+                    });
                 });
             self.show_export_settings = open;
         }

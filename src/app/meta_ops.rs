@@ -3,6 +3,59 @@ use std::path::PathBuf;
 use super::{meta, transcript};
 
 impl super::WavesPreviewer {
+    fn needs_full_meta_for_sort(
+        path: &PathBuf,
+        meta: Option<&crate::app::types::FileMeta>,
+    ) -> bool {
+        let Some(m) = meta else {
+            return true;
+        };
+        if m.decode_error.is_some() {
+            return false;
+        }
+        let has_full = m.rms_db.is_some() || m.lufs_i.is_some() || !m.thumb.is_empty();
+        if has_full {
+            return false;
+        }
+        // Header-only rows still need one decode pass for stable numeric sort keys.
+        !path.as_path().as_os_str().is_empty()
+    }
+
+    pub(super) fn prime_sort_metadata_prefetch(&mut self) {
+        let sort_meta = self.sort_key_uses_meta();
+        let sort_transcript = self.sort_key_uses_transcript();
+        if (!sort_meta && !sort_transcript) || self.files.is_empty() {
+            return;
+        }
+        let ids: Vec<_> = self.files.clone();
+        for id in ids {
+            let Some(item) = self.item_for_id(id) else {
+                continue;
+            };
+            let path = item.path.clone();
+            if self.is_virtual_path(&path) {
+                continue;
+            }
+            if sort_meta {
+                let meta = self.meta_for_path(&path);
+                if Self::needs_full_meta_for_sort(&path, meta) {
+                    if meta.is_none() {
+                        self.queue_meta_for_path(&path, false);
+                    } else {
+                        self.queue_full_meta_for_path(&path, false);
+                    }
+                }
+            }
+            if sort_transcript
+                && self.transcript_for_path(&path).is_none()
+                && !self.transcript_inflight.contains(&path)
+            {
+                self.queue_transcript_for_path(&path, false);
+            }
+        }
+        self.list_meta_prefetch_cursor = 0;
+    }
+
     pub(super) fn reset_meta_pool(&mut self) {
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -16,6 +69,7 @@ impl super::WavesPreviewer {
         self.meta_sort_last_applied = None;
         self.list_meta_prefetch_cursor = 0;
         self.transcript_inflight.clear();
+        self.transcript_ai_inflight.clear();
     }
 
     pub(super) fn ensure_meta_pool(&mut self) {

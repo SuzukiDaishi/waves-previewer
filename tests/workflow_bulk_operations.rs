@@ -276,7 +276,8 @@ mod workflow_bulk_operations {
                 let info = neowaves::audio_io::read_audio_info(&path)
                     .unwrap_or_else(|e| panic!("probe failed for {}: {e}", path.display()));
                 assert_eq!(
-                    info.sample_rate, target_sr,
+                    info.sample_rate,
+                    target_sr,
                     "resample output sr mismatch: {}",
                     path.display()
                 );
@@ -303,18 +304,13 @@ mod workflow_bulk_operations {
             wait_for_tab_ready(&mut harness, path);
 
             let before_len = harness.state().test_tab_samples_len();
-            assert!(harness
-                .state_mut()
-                .test_apply_gain(0.10, 0.90, -6.0));
+            assert!(harness.state_mut().test_apply_gain(0.10, 0.90, -6.0));
             assert!(harness.state_mut().test_apply_pitch_shift(3.0));
             wait_for_editor_apply(&mut harness);
             assert!(harness.state_mut().test_apply_time_stretch(1.2));
             wait_for_editor_apply(&mut harness);
             let after_len = harness.state().test_tab_samples_len();
-            assert!(
-                before_len != after_len,
-                "time stretch should change length"
-            );
+            assert!(before_len != after_len, "time stretch should change length");
 
             harness.state_mut().test_switch_to_list();
             assert!(harness.state_mut().test_select_path(path));

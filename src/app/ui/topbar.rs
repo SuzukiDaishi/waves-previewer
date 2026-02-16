@@ -164,6 +164,36 @@ impl crate::app::WavesPreviewer {
                             ui.close();
                         }
                         ui.separator();
+                        ui.menu_button("AI", |ui| {
+                            if self.transcript_ai_has_model() {
+                                ui.label(
+                                    RichText::new("Transcript model: ready")
+                                        .color(Color32::from_rgb(120, 220, 140)),
+                                );
+                            } else {
+                                ui.label(RichText::new("Transcript model: not installed").weak());
+                            }
+                            if ui.button("Transcription...").clicked() {
+                                self.show_transcription_settings = true;
+                                ui.close();
+                            }
+                            if self.transcript_ai_has_model() {
+                                if ui
+                                    .add_enabled(
+                                        self.transcript_ai_can_uninstall(),
+                                        egui::Button::new("Uninstall Transcript Model..."),
+                                    )
+                                    .clicked()
+                                {
+                                    self.uninstall_transcript_model_cache();
+                                    ui.close();
+                                }
+                            } else if ui.button("Download Transcript Model...").clicked() {
+                                self.queue_transcript_model_download();
+                                ui.close();
+                            }
+                        });
+                        ui.separator();
                         self.ui_zoo_menu(ui, ctx);
                         ui.separator();
                         let mcp_on = self.mcp_cmd_rx.is_some();
@@ -213,8 +243,29 @@ impl crate::app::WavesPreviewer {
                     if vol_resp.changed() {
                         self.apply_effective_volume();
                     }
+                    let vol_up = if vol_resp.has_focus() && self.active_tab.is_none() {
+                        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                    } else {
+                        false
+                    };
+                    let vol_down = if vol_resp.has_focus() && self.active_tab.is_none() {
+                        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                    } else {
+                        false
+                    };
+                    if vol_up || vol_down {
+                        self.suppress_list_enter = true;
+                        vol_resp.surrender_focus();
+                        ctx.memory_mut(|m| m.stop_text_input());
+                        self.request_list_focus(ctx);
+                        let delta = if vol_down { 1 } else { -1 };
+                        self.nudge_list_selection(delta, true);
+                    }
                     if vol_resp.has_focus()
-                        && ctx.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape))
+                        && ctx.input(|i| {
+                            i.key_pressed(Key::Enter)
+                                || i.key_pressed(Key::Escape)
+                        })
                     {
                         self.suppress_list_enter = true;
                         vol_resp.surrender_focus();
@@ -230,7 +281,8 @@ impl crate::app::WavesPreviewer {
                             .map(|until| until > now)
                             .unwrap_or(false)
                         || (self.sort_key_uses_meta() && !self.meta_inflight.is_empty())
-                        || (self.sort_key_uses_transcript() && !self.transcript_inflight.is_empty());
+                        || (self.sort_key_uses_transcript()
+                            && !self.transcript_inflight.is_empty());
                     if !sort_loading_visible && self.sort_loading_hold_until.is_some() {
                         self.sort_loading_hold_until = None;
                     }
@@ -295,6 +347,8 @@ impl crate::app::WavesPreviewer {
                         || self.heavy_preview_rx.is_some()
                         || self.heavy_overlay_rx.is_some()
                         || self.editor_apply_state.is_some()
+                        || self.transcript_ai_state.is_some()
+                        || self.transcript_model_download_state.is_some()
                         || self.export_state.is_some()
                         || self.csv_export_state.is_some()
                         || !self.spectro_inflight.is_empty()
@@ -455,6 +509,52 @@ impl crate::app::WavesPreviewer {
                                     state.cancel_requested = true;
                                 }
                             }
+                            if let Some(state) = &self.transcript_ai_state {
+                                ui.add(egui::Spinner::new());
+                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                let canceling = state
+                                    .cancel_requested
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                let remaining = state.total.saturating_sub(state.done);
+                                let label = if state.total > 0 {
+                                    let prefix = if canceling {
+                                        "Transcribing (canceling)"
+                                    } else {
+                                        "Transcribing"
+                                    };
+                                    format!(
+                                        "{prefix}: {}/{} ({:.1}s) candidates:{} skip:{} rem:{}",
+                                        state.done,
+                                        state.total,
+                                        elapsed,
+                                        state.process_total,
+                                        state.skipped_total,
+                                        remaining
+                                    )
+                                } else {
+                                    format!("Transcribing... ({elapsed:.1}s)")
+                                };
+                                ui.label(RichText::new(label).weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_transcript_ai_run();
+                                }
+                            }
+                            if let Some(state) = &self.transcript_model_download_state {
+                                ui.add(egui::Spinner::new());
+                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Downloading transcript model... ({elapsed:.1}s)"
+                                    ))
+                                    .weak(),
+                                );
+                            }
+                            if let Some(err) = &self.transcript_ai_last_error {
+                                ui.label(
+                                    RichText::new(format!("Transcript: {err}"))
+                                        .color(Color32::from_rgb(255, 120, 120)),
+                                );
+                            }
                             if !self.spectro_inflight.is_empty() {
                                 ui.add(egui::Spinner::new());
                                 let mut done = 0usize;
@@ -556,13 +656,33 @@ impl crate::app::WavesPreviewer {
                                 if resp.changed() {
                                     self.audio.set_rate(self.playback_rate);
                                 }
+                                let nav_up = if resp.has_focus() && self.active_tab.is_none() {
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                                } else {
+                                    false
+                                };
+                                let nav_down = if resp.has_focus() && self.active_tab.is_none() {
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                                } else {
+                                    false
+                                };
+                                if nav_up || nav_down {
+                                    self.suppress_list_enter = true;
+                                    resp.surrender_focus();
+                                    ctx.memory_mut(|m| m.stop_text_input());
+                                    self.request_list_focus(ctx);
+                                    let delta = if nav_down { 1 } else { -1 };
+                                    self.nudge_list_selection(delta, true);
+                                }
                                 if resp.has_focus()
                                     && ctx.input(|i| {
-                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                                        i.key_pressed(Key::Enter)
+                                            || i.key_pressed(Key::Escape)
                                     })
                                 {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
+                                    ctx.memory_mut(|m| m.stop_text_input());
                                 }
                             }
                             RateMode::PitchShift => {
@@ -577,13 +697,33 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(1.0);
                                     self.rebuild_current_buffer_with_mode();
                                 }
+                                let nav_up = if resp.has_focus() && self.active_tab.is_none() {
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                                } else {
+                                    false
+                                };
+                                let nav_down = if resp.has_focus() && self.active_tab.is_none() {
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                                } else {
+                                    false
+                                };
+                                if nav_up || nav_down {
+                                    self.suppress_list_enter = true;
+                                    resp.surrender_focus();
+                                    ctx.memory_mut(|m| m.stop_text_input());
+                                    self.request_list_focus(ctx);
+                                    let delta = if nav_down { 1 } else { -1 };
+                                    self.nudge_list_selection(delta, true);
+                                }
                                 if resp.has_focus()
                                     && ctx.input(|i| {
-                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                                        i.key_pressed(Key::Enter)
+                                            || i.key_pressed(Key::Escape)
                                     })
                                 {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
+                                    ctx.memory_mut(|m| m.stop_text_input());
                                 }
                             }
                             RateMode::TimeStretch => {
@@ -598,13 +738,33 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(1.0);
                                     self.rebuild_current_buffer_with_mode();
                                 }
+                                let nav_up = if resp.has_focus() && self.active_tab.is_none() {
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                                } else {
+                                    false
+                                };
+                                let nav_down = if resp.has_focus() && self.active_tab.is_none() {
+                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                                } else {
+                                    false
+                                };
+                                if nav_up || nav_down {
+                                    self.suppress_list_enter = true;
+                                    resp.surrender_focus();
+                                    ctx.memory_mut(|m| m.stop_text_input());
+                                    self.request_list_focus(ctx);
+                                    let delta = if nav_down { 1 } else { -1 };
+                                    self.nudge_list_selection(delta, true);
+                                }
                                 if resp.has_focus()
                                     && ctx.input(|i| {
-                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
+                                        i.key_pressed(Key::Enter)
+                                            || i.key_pressed(Key::Escape)
                                     })
                                 {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
+                                    ctx.memory_mut(|m| m.stop_text_input());
                                 }
                             }
                         }

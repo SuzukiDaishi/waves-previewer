@@ -38,6 +38,14 @@ pub struct ProjectList {
     pub format_overrides: Vec<ProjectFormatOverride>,
     #[serde(default)]
     pub virtual_items: Vec<ProjectVirtualItem>,
+    #[serde(default)]
+    pub transcript_languages: Vec<ProjectTranscriptLanguage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectTranscriptLanguage {
+    pub path: String,
+    pub language: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -159,6 +167,8 @@ pub struct ProjectExportPolicy {
     pub conflict: String,
     #[serde(default = "default_export_backup_bak")]
     pub backup_bak: bool,
+    #[serde(default = "default_export_srt")]
+    pub export_srt: bool,
     #[serde(default = "default_export_name_template")]
     pub name_template: String,
     #[serde(default)]
@@ -209,6 +219,8 @@ pub struct ProjectListColumns {
     pub file: bool,
     pub folder: bool,
     pub transcript: bool,
+    #[serde(default)]
+    pub transcript_language: bool,
     pub external: bool,
     pub length: bool,
     pub ch: bool,
@@ -519,6 +531,10 @@ fn default_export_conflict() -> String {
 
 fn default_export_backup_bak() -> bool {
     true
+}
+
+fn default_export_srt() -> bool {
+    false
 }
 
 fn default_export_name_template() -> String {
@@ -930,6 +946,7 @@ impl super::WavesPreviewer {
         self.original_files.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.transcript_ai_inflight.clear();
         self.sample_rate_override.clear();
         self.bit_depth_override.clear();
         self.format_override.clear();
@@ -1010,6 +1027,7 @@ files = []
             sample_rate_overrides: Vec::new(),
             bit_depth_overrides: Vec::new(),
             format_overrides: Vec::new(),
+            transcript_languages: Vec::new(),
             virtual_items: vec![ProjectVirtualItem {
                 path: "virtual://trim_0001".to_string(),
                 display_name: "trim_0001".to_string(),
@@ -1038,6 +1056,36 @@ files = []
         assert_eq!(v.bits_per_sample, 24);
         assert_eq!(v.source.kind, "file");
         assert_eq!(v.op_chain.len(), 1);
+    }
+
+    #[test]
+    fn project_list_transcript_language_roundtrip() {
+        let list = ProjectList {
+            root: None,
+            files: vec!["a.wav".to_string(), "b.wav".to_string()],
+            items: Vec::new(),
+            sample_rate_overrides: Vec::new(),
+            bit_depth_overrides: Vec::new(),
+            format_overrides: Vec::new(),
+            transcript_languages: vec![
+                ProjectTranscriptLanguage {
+                    path: "a.wav".to_string(),
+                    language: "ja".to_string(),
+                },
+                ProjectTranscriptLanguage {
+                    path: "b.wav".to_string(),
+                    language: "en".to_string(),
+                },
+            ],
+            virtual_items: Vec::new(),
+        };
+        let text = toml::to_string(&list).expect("serialize ProjectList");
+        let restored: ProjectList = toml::from_str(&text).expect("deserialize ProjectList");
+        assert_eq!(restored.transcript_languages.len(), 2);
+        assert_eq!(restored.transcript_languages[0].path, "a.wav");
+        assert_eq!(restored.transcript_languages[0].language, "ja");
+        assert_eq!(restored.transcript_languages[1].path, "b.wav");
+        assert_eq!(restored.transcript_languages[1].language, "en");
     }
 
     #[test]

@@ -4,9 +4,9 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::app::types::{
-    PluginCatalogEntry, PluginGuiCommand, PluginGuiEvent, PluginGuiSessionState, PluginParamUiState,
-    PluginProbeResult, PluginProbeState, PluginProcessResult, PluginProcessState, PluginScanResult,
-    PluginScanState, ToolKind,
+    PluginCatalogEntry, PluginGuiCommand, PluginGuiEvent, PluginGuiSessionState,
+    PluginParamUiState, PluginProbeResult, PluginProbeState, PluginProcessResult,
+    PluginProcessState, PluginScanResult, PluginScanState, ToolKind,
 };
 use crate::plugin::{PluginParamValue, WorkerRequest, WorkerResponse};
 use base64::Engine;
@@ -58,7 +58,9 @@ impl crate::app::WavesPreviewer {
     fn plugin_path_key(path: &Path) -> String {
         #[cfg(windows)]
         {
-            path.to_string_lossy().replace('\\', "/").to_ascii_lowercase()
+            path.to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase()
         }
         #[cfg(not(windows))]
         {
@@ -103,8 +105,18 @@ impl crate::app::WavesPreviewer {
         #[cfg(windows)]
         {
             if let Ok(local) = std::env::var("LOCALAPPDATA") {
-                out.push(PathBuf::from(&local).join("Programs").join("Common").join("VST3"));
-                out.push(PathBuf::from(local).join("Programs").join("Common").join("CLAP"));
+                out.push(
+                    PathBuf::from(&local)
+                        .join("Programs")
+                        .join("Common")
+                        .join("VST3"),
+                );
+                out.push(
+                    PathBuf::from(local)
+                        .join("Programs")
+                        .join("Common")
+                        .join("CLAP"),
+                );
             }
             if let Ok(common) = std::env::var("COMMONPROGRAMFILES") {
                 out.push(PathBuf::from(&common).join("VST3"));
@@ -539,8 +551,14 @@ impl crate::app::WavesPreviewer {
                         backend_note,
                     });
                 }
-                Ok(WorkerResponse::GuiError { session_id, message }) => {
-                    let _ = evt_tx.send(PluginGuiEvent::Error { session_id, message });
+                Ok(WorkerResponse::GuiError {
+                    session_id,
+                    message,
+                }) => {
+                    let _ = evt_tx.send(PluginGuiEvent::Error {
+                        session_id,
+                        message,
+                    });
                     client.close();
                     return;
                 }
@@ -596,8 +614,14 @@ impl crate::app::WavesPreviewer {
                                     backend_note,
                                 });
                             }
-                            Ok(WorkerResponse::GuiError { session_id, message }) => {
-                                let _ = evt_tx.send(PluginGuiEvent::Error { session_id, message });
+                            Ok(WorkerResponse::GuiError {
+                                session_id,
+                                message,
+                            }) => {
+                                let _ = evt_tx.send(PluginGuiEvent::Error {
+                                    session_id,
+                                    message,
+                                });
                             }
                             Ok(WorkerResponse::Error { message }) => {
                                 let _ = evt_tx.send(PluginGuiEvent::Error {
@@ -657,8 +681,14 @@ impl crate::app::WavesPreviewer {
                             running = false;
                         }
                     }
-                    Ok(WorkerResponse::GuiError { session_id, message }) => {
-                        let _ = evt_tx.send(PluginGuiEvent::Error { session_id, message });
+                    Ok(WorkerResponse::GuiError {
+                        session_id,
+                        message,
+                    }) => {
+                        let _ = evt_tx.send(PluginGuiEvent::Error {
+                            session_id,
+                            message,
+                        });
                         running = false;
                     }
                     Ok(WorkerResponse::Error { message }) => {
@@ -900,7 +930,10 @@ impl crate::app::WavesPreviewer {
         self.plugin_process_state = None;
     }
 
-    fn apply_gui_param_delta(tab: &mut crate::app::types::EditorTab, values: &[PluginParamValue]) -> usize {
+    fn apply_gui_param_delta(
+        tab: &mut crate::app::types::EditorTab,
+        values: &[PluginParamValue],
+    ) -> usize {
         let mut applied = 0usize;
         for value in values.iter().take(64) {
             if let Some(param) = tab
@@ -1030,7 +1063,10 @@ impl crate::app::WavesPreviewer {
                     }
                     keep_state = false;
                 }
-                PluginGuiEvent::Error { session_id, message } => {
+                PluginGuiEvent::Error {
+                    session_id,
+                    message,
+                } => {
                     if session_id != gui_state.session_id {
                         self.debug.plugin_stale_drop_count =
                             self.debug.plugin_stale_drop_count.saturating_add(1);
@@ -1117,10 +1153,8 @@ impl crate::app::WavesPreviewer {
                                 if result.backend == crate::plugin::PluginHostBackend::Generic
                                     && Self::is_native_plugin_key(&result.plugin_key)
                                 {
-                                    self.debug.plugin_native_fallback_count = self
-                                        .debug
-                                        .plugin_native_fallback_count
-                                        .saturating_add(1);
+                                    self.debug.plugin_native_fallback_count =
+                                        self.debug.plugin_native_fallback_count.saturating_add(1);
                                 }
                                 tab.plugin_fx_draft.plugin_key = Some(result.plugin_key);
                                 tab.plugin_fx_draft.plugin_name = result.plugin_name;
@@ -1214,10 +1248,8 @@ impl crate::app::WavesPreviewer {
                         if native_requested
                             && result.backend == crate::plugin::PluginHostBackend::Generic
                         {
-                            self.debug.plugin_native_fallback_count = self
-                                .debug
-                                .plugin_native_fallback_count
-                                .saturating_add(1);
+                            self.debug.plugin_native_fallback_count =
+                                self.debug.plugin_native_fallback_count.saturating_add(1);
                         }
                         if let Some(tab) = self.tabs.get_mut(result.tab_idx) {
                             if let Some(undo) = state.undo.take() {
@@ -1233,19 +1265,14 @@ impl crate::app::WavesPreviewer {
                             tab.plugin_fx_draft.backend = Some(result.backend);
                             tab.plugin_fx_draft.last_error = None;
                             let processed_channels = tab.ch_samples.len();
-                            let frames = tab
-                                .ch_samples
-                                .get(0)
-                                .map(|c| c.len())
-                                .unwrap_or(0);
+                            let frames = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
                             let mut lines = vec![format!(
                                 "Apply: {:?}, {}ch {} smp, {:.1} ms",
-                                result.backend,
-                                processed_channels,
-                                frames,
-                                elapsed_ms
+                                result.backend, processed_channels, frames, elapsed_ms
                             )];
-                            lines.push("Apply audio source: processed channels (committed)".to_string());
+                            lines.push(
+                                "Apply audio source: processed channels (committed)".to_string(),
+                            );
                             lines.push(format!(
                                 "Channels: processed={} / editor_before={}",
                                 processed_channels, editor_channels_before
@@ -1303,15 +1330,12 @@ impl crate::app::WavesPreviewer {
                         if native_requested
                             && result.backend == crate::plugin::PluginHostBackend::Generic
                         {
-                            self.debug.plugin_native_fallback_count = self
-                                .debug
-                                .plugin_native_fallback_count
-                                .saturating_add(1);
+                            self.debug.plugin_native_fallback_count =
+                                self.debug.plugin_native_fallback_count.saturating_add(1);
                         }
                         let preview_channels = result.channels;
                         let preview_ch_count = preview_channels.len();
-                        let timeline_len =
-                            preview_channels.get(0).map(|c| c.len()).unwrap_or(0);
+                        let timeline_len = preview_channels.get(0).map(|c| c.len()).unwrap_or(0);
                         let overlay = Self::preview_overlay_from_channels(
                             preview_channels.clone(),
                             ToolKind::PluginFx,
@@ -1331,10 +1355,7 @@ impl crate::app::WavesPreviewer {
                                 .unwrap_or(0);
                             let mut lines = vec![format!(
                                 "Preview: {:?}, {}ch {} smp, {:.1} ms",
-                                result.backend,
-                                preview_ch_count,
-                                frames,
-                                elapsed_ms
+                                result.backend, preview_ch_count, frames, elapsed_ms
                             )];
                             lines.push("Preview audio source: processed channels".to_string());
                             lines.push(format!(
