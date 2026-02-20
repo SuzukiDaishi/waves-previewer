@@ -311,7 +311,103 @@ pub enum ToolKind {
     Normalize,
     Loudness,
     Reverse,
+    MusicAnalyze,
     PluginFx,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StemGainsDb {
+    pub bass: f32,
+    pub drums: f32,
+    pub other: f32,
+    pub vocals: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MusicStemSet {
+    pub sample_rate: u32,
+    pub bass: Vec<Vec<f32>>,
+    pub drums: Vec<Vec<f32>>,
+    pub other: Vec<Vec<f32>>,
+    pub vocals: Vec<Vec<f32>>,
+}
+
+impl MusicStemSet {
+    pub fn len_samples(&self) -> usize {
+        self.bass
+            .first()
+            .or_else(|| self.drums.first())
+            .or_else(|| self.other.first())
+            .or_else(|| self.vocals.first())
+            .map(|c| c.len())
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MusicAnalysisResult {
+    pub beats: Vec<usize>,
+    pub downbeats: Vec<usize>,
+    pub sections: Vec<(usize, String)>,
+    pub estimated_bpm: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MusicAnalysisSourceKind {
+    #[default]
+    StemsDir,
+    AutoDemucs,
+}
+
+#[derive(Clone, Debug)]
+pub struct MusicAnalysisDraft {
+    pub result: Option<MusicAnalysisResult>,
+    pub show_beat: bool,
+    pub show_downbeat: bool,
+    pub show_section: bool,
+    pub preview_gains_db: StemGainsDb,
+    pub preview_selection_only: bool,
+    pub analysis_inflight: bool,
+    pub stems_dir_override: Option<PathBuf>,
+    pub last_error: Option<String>,
+    pub preview_active: bool,
+    pub stems_audio: Option<Arc<MusicStemSet>>,
+    pub preview_inflight: bool,
+    pub preview_generation: u64,
+    pub preview_error: Option<String>,
+    pub analysis_source_len: usize,
+    pub analysis_source_kind: MusicAnalysisSourceKind,
+    pub provisional_markers: Vec<MarkerEntry>,
+    pub preview_peak_abs: f32,
+    pub preview_clip_applied: bool,
+    pub analysis_process_message: String,
+}
+
+impl Default for MusicAnalysisDraft {
+    fn default() -> Self {
+        Self {
+            result: None,
+            show_beat: true,
+            show_downbeat: true,
+            show_section: true,
+            preview_gains_db: StemGainsDb::default(),
+            preview_selection_only: false,
+            analysis_inflight: false,
+            stems_dir_override: None,
+            last_error: None,
+            preview_active: false,
+            stems_audio: None,
+            preview_inflight: false,
+            preview_generation: 0,
+            preview_error: None,
+            analysis_source_len: 0,
+            analysis_source_kind: MusicAnalysisSourceKind::StemsDir,
+            provisional_markers: Vec::new(),
+            preview_peak_abs: 0.0,
+            preview_clip_applied: false,
+            analysis_process_message: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -590,6 +686,7 @@ pub struct EditorTab {
     pub bpm_enabled: bool,                   // grid toggle in editor
     pub bpm_value: f32,                      // current BPM for grid
     pub bpm_user_set: bool,                  // user-overridden BPM
+    pub bpm_offset_sec: f32,                 // grid offset in seconds
     pub seek_hold: Option<SeekHoldState>,    // key repeat state for seek
     pub snap_zero_cross: bool,               // enable zero-cross snapping
     pub drag_select_anchor: Option<usize>,   // transient during drag
@@ -603,6 +700,7 @@ pub struct EditorTab {
     pub preview_offset_samples: Option<usize>,
     // Per-channel non-destructive preview overlay (green waveform)
     pub preview_overlay: Option<PreviewOverlay>,
+    pub music_analysis_draft: MusicAnalysisDraft,
     pub plugin_fx_draft: PluginFxDraft,
     pub pending_loop_unwrap: Option<u32>,
     pub undo_stack: Vec<EditorUndoState>,
@@ -775,6 +873,7 @@ pub struct CachedEdit {
     pub bpm_enabled: bool,
     pub bpm_value: f32,
     pub bpm_user_set: bool,
+    pub bpm_offset_sec: f32,
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,

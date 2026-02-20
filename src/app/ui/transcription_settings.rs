@@ -1,6 +1,4 @@
-use crate::app::types::{
-    TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
-};
+use crate::app::types::{TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode};
 use egui::RichText;
 
 impl crate::app::WavesPreviewer {
@@ -345,7 +343,9 @@ impl crate::app::WavesPreviewer {
                                 .changed()
                             {
                                 if use_no_speech {
-                                    self.transcript_ai_cfg.no_speech_threshold.get_or_insert(0.6);
+                                    self.transcript_ai_cfg
+                                        .no_speech_threshold
+                                        .get_or_insert(0.6);
                                 } else {
                                     self.transcript_ai_cfg.no_speech_threshold = None;
                                 }

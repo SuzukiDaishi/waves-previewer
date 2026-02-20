@@ -579,6 +579,7 @@ impl super::WavesPreviewer {
                 bpm_enabled: cached.bpm_enabled,
                 bpm_value: cached.bpm_value,
                 bpm_user_set: cached.bpm_user_set,
+                bpm_offset_sec: cached.bpm_offset_sec,
                 plugin_fx_draft: project_plugin_fx_draft_from_draft(&cached.plugin_fx_draft),
             });
         }
@@ -1055,6 +1056,7 @@ impl super::WavesPreviewer {
                     bpm_enabled: edit.bpm_enabled,
                     bpm_value: edit.bpm_value,
                     bpm_user_set: edit.bpm_user_set,
+                    bpm_offset_sec: edit.bpm_offset_sec,
                 },
             );
         }
@@ -1115,6 +1117,7 @@ impl super::WavesPreviewer {
                         bpm_enabled: tab.bpm_enabled,
                         bpm_value: tab.bpm_value,
                         bpm_user_set: tab.bpm_user_set,
+                        bpm_offset_sec: tab.bpm_offset_sec,
                     },
                 );
             }
@@ -1198,6 +1201,7 @@ impl super::WavesPreviewer {
                     t.bpm_enabled = tab.bpm_enabled;
                     t.bpm_value = tab.bpm_value;
                     t.bpm_user_set = tab.bpm_user_set;
+                    t.bpm_offset_sec = tab.bpm_offset_sec;
                     t.view_offset = tab.view_offset;
                     t.samples_per_px = tab.samples_per_px;
                     t.dirty = tab.dirty;

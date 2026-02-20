@@ -388,9 +388,8 @@ impl WhisperOnnxTranscriber {
         let hidden_shape = hs_dims.clone();
         let hidden_data = hs_data.to_vec();
 
-        let v_ids =
-            Value::from_array((vec![1usize, prompt_ids.len()], prompt_ids.clone()))
-                .map_err(|e| format!("prompt ids value error: {e}"))?;
+        let v_ids = Value::from_array((vec![1usize, prompt_ids.len()], prompt_ids.clone()))
+            .map_err(|e| format!("prompt ids value error: {e}"))?;
         let v_hidden = Value::from_array((hidden_shape.clone(), hidden_data.clone()))
             .map_err(|e| format!("hidden value error: {e}"))?;
         let dec_out = self
@@ -414,8 +413,11 @@ impl WhisperOnnxTranscriber {
         }
 
         let mut logits = last_logits(&dec_out["logits"])?;
-        let detected_language =
-            Self::detect_language_from_logits(forced_language.as_ref(), &language_token_ids, &logits);
+        let detected_language = Self::detect_language_from_logits(
+            forced_language.as_ref(),
+            &language_token_ids,
+            &logits,
+        );
         apply_suppression(&mut logits, &self.suppress_ids, &self.begin_ids, 0);
         let first_lp = log_softmax(&logits);
         let no_speech_prob = self

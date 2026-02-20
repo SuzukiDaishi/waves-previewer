@@ -138,6 +138,8 @@ pub struct ProjectEdit {
     #[serde(default)]
     pub bpm_user_set: bool,
     #[serde(default)]
+    pub bpm_offset_sec: f32,
+    #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
 }
 
@@ -267,6 +269,8 @@ pub struct ProjectTab {
     pub bpm_value: f32,
     #[serde(default)]
     pub bpm_user_set: bool,
+    #[serde(default)]
+    pub bpm_offset_sec: f32,
     #[serde(default)]
     pub preview_tool: Option<String>,
     #[serde(default)]
@@ -635,6 +639,7 @@ pub fn project_tab_from_tab(
         bpm_enabled: tab.bpm_enabled,
         bpm_value: tab.bpm_value,
         bpm_user_set: tab.bpm_user_set,
+        bpm_offset_sec: tab.bpm_offset_sec,
         preview_tool,
         preview_audio: preview_audio.map(|p| rel_path(&p, base)),
         loop_mode: format!("{:?}", tab.loop_mode),

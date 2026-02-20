@@ -192,6 +192,26 @@ impl crate::app::WavesPreviewer {
                                 self.queue_transcript_model_download();
                                 ui.close();
                             }
+                            ui.separator();
+                            if self.music_ai_has_model() {
+                                ui.label(
+                                    RichText::new("Music Analyze model: ready")
+                                        .color(Color32::from_rgb(120, 220, 140)),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        self.music_ai_can_uninstall(),
+                                        egui::Button::new("Uninstall Music Analyze Model..."),
+                                    )
+                                    .clicked()
+                                {
+                                    self.uninstall_music_model_cache();
+                                    ui.close();
+                                }
+                            } else if ui.button("Download Music Analyze Model...").clicked() {
+                                self.queue_music_model_download();
+                                ui.close();
+                            }
                         });
                         ui.separator();
                         self.ui_zoo_menu(ui, ctx);
@@ -262,10 +282,7 @@ impl crate::app::WavesPreviewer {
                         self.nudge_list_selection(delta, true);
                     }
                     if vol_resp.has_focus()
-                        && ctx.input(|i| {
-                            i.key_pressed(Key::Enter)
-                                || i.key_pressed(Key::Escape)
-                        })
+                        && ctx.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape))
                     {
                         self.suppress_list_enter = true;
                         vol_resp.surrender_focus();
@@ -346,9 +363,12 @@ impl crate::app::WavesPreviewer {
                         || self.editor_decode_state.is_some()
                         || self.heavy_preview_rx.is_some()
                         || self.heavy_overlay_rx.is_some()
+                        || self.music_preview_state.is_some()
                         || self.editor_apply_state.is_some()
                         || self.transcript_ai_state.is_some()
                         || self.transcript_model_download_state.is_some()
+                        || self.music_ai_state.is_some()
+                        || self.music_model_download_state.is_some()
                         || self.export_state.is_some()
                         || self.csv_export_state.is_some()
                         || !self.spectro_inflight.is_empty()
@@ -439,6 +459,12 @@ impl crate::app::WavesPreviewer {
                                 ui.label(RichText::new("Previewing...").weak());
                                 if ui.button("Cancel").clicked() {
                                     self.cancel_heavy_preview();
+                                }
+                            } else if self.music_preview_state.is_some() {
+                                ui.add(egui::Spinner::new());
+                                ui.label(RichText::new("Previewing Music Analyze...").weak());
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_music_preview_run();
                                 }
                             }
                             if let Some(apply) = &self.editor_apply_state {
@@ -555,6 +581,44 @@ impl crate::app::WavesPreviewer {
                                         .color(Color32::from_rgb(255, 120, 120)),
                                 );
                             }
+                            if let Some(state) = &self.music_ai_state {
+                                ui.add(egui::Spinner::new());
+                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                let canceling = state
+                                    .cancel_requested
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                let prefix = if canceling {
+                                    "Music Analyze (canceling)"
+                                } else {
+                                    "Music Analyze"
+                                };
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{prefix}: {}/{} ({elapsed:.1}s)",
+                                        state.done, state.total
+                                    ))
+                                    .weak(),
+                                );
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_music_analysis_run();
+                                }
+                            }
+                            if let Some(state) = &self.music_model_download_state {
+                                ui.add(egui::Spinner::new());
+                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Downloading music analyze model... ({elapsed:.1}s)"
+                                    ))
+                                    .weak(),
+                                );
+                            }
+                            if let Some(err) = &self.music_ai_last_error {
+                                ui.label(
+                                    RichText::new(format!("Music Analyze: {err}"))
+                                        .color(Color32::from_rgb(255, 120, 120)),
+                                );
+                            }
                             if !self.spectro_inflight.is_empty() {
                                 ui.add(egui::Spinner::new());
                                 let mut done = 0usize;
@@ -657,12 +721,16 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(self.playback_rate);
                                 }
                                 let nav_up = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                                    ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
+                                    })
                                 } else {
                                     false
                                 };
                                 let nav_down = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                                    ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                                    })
                                 } else {
                                     false
                                 };
@@ -676,8 +744,7 @@ impl crate::app::WavesPreviewer {
                                 }
                                 if resp.has_focus()
                                     && ctx.input(|i| {
-                                        i.key_pressed(Key::Enter)
-                                            || i.key_pressed(Key::Escape)
+                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
                                     })
                                 {
                                     self.suppress_list_enter = true;
@@ -698,12 +765,16 @@ impl crate::app::WavesPreviewer {
                                     self.rebuild_current_buffer_with_mode();
                                 }
                                 let nav_up = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                                    ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
+                                    })
                                 } else {
                                     false
                                 };
                                 let nav_down = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                                    ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                                    })
                                 } else {
                                     false
                                 };
@@ -717,8 +788,7 @@ impl crate::app::WavesPreviewer {
                                 }
                                 if resp.has_focus()
                                     && ctx.input(|i| {
-                                        i.key_pressed(Key::Enter)
-                                            || i.key_pressed(Key::Escape)
+                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
                                     })
                                 {
                                     self.suppress_list_enter = true;
@@ -739,12 +809,16 @@ impl crate::app::WavesPreviewer {
                                     self.rebuild_current_buffer_with_mode();
                                 }
                                 let nav_up = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
+                                    ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
+                                    })
                                 } else {
                                     false
                                 };
                                 let nav_down = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
+                                    ctx.input_mut(|i| {
+                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                                    })
                                 } else {
                                     false
                                 };
@@ -758,8 +832,7 @@ impl crate::app::WavesPreviewer {
                                 }
                                 if resp.has_focus()
                                     && ctx.input(|i| {
-                                        i.key_pressed(Key::Enter)
-                                            || i.key_pressed(Key::Escape)
+                                        i.key_pressed(Key::Enter) || i.key_pressed(Key::Escape)
                                     })
                                 {
                                     self.suppress_list_enter = true;

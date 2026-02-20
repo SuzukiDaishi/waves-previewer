@@ -39,6 +39,8 @@ mod loudnorm_ops;
 mod mcp_ops;
 mod meta;
 mod meta_ops;
+mod music_ai_ops;
+mod music_onnx;
 mod plugin_ops;
 mod preview;
 mod preview_ops;
@@ -54,6 +56,7 @@ mod spectrogram_jobs;
 mod startup;
 mod temp_audio_ops;
 mod theme_ops;
+mod threading;
 mod tool_ops;
 mod tooling;
 mod transcript;
@@ -69,7 +72,7 @@ use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, StartupConfig,
-    ViewMode,
+    ToolKind, ViewMode,
 };
 use self::{helpers::*, types::*};
 
@@ -158,6 +161,60 @@ struct TranscriptModelDownloadState {
     rx: std::sync::mpsc::Receiver<TranscriptModelDownloadResult>,
 }
 
+struct MusicAnalyzeItemResult {
+    path: PathBuf,
+    result: Option<MusicAnalysisResult>,
+    source_len_samples: usize,
+    source_kind: MusicAnalysisSourceKind,
+    stems: Option<MusicStemSet>,
+    error: Option<String>,
+}
+
+enum MusicAnalyzeRunResult {
+    Started(PathBuf),
+    Progress { path: PathBuf, message: String },
+    Item(MusicAnalyzeItemResult),
+    Finished,
+}
+
+struct MusicAnalyzeRunState {
+    started_at: std::time::Instant,
+    total: usize,
+    done: usize,
+    pending: HashSet<PathBuf>,
+    cancel_requested: Arc<AtomicBool>,
+    current_step: String,
+    rx: std::sync::mpsc::Receiver<MusicAnalyzeRunResult>,
+}
+
+struct MusicPreviewResult {
+    tab_path: PathBuf,
+    generation: u64,
+    overlay: Option<Vec<Vec<f32>>>,
+    mono: Option<Vec<f32>>,
+    peak_abs: f32,
+    clip_applied: bool,
+    error: Option<String>,
+}
+
+struct MusicPreviewRunState {
+    started_at: std::time::Instant,
+    tab_path: PathBuf,
+    generation: u64,
+    cancel_requested: Arc<AtomicBool>,
+    rx: std::sync::mpsc::Receiver<MusicPreviewResult>,
+}
+
+struct MusicModelDownloadResult {
+    model_dir: Option<PathBuf>,
+    error: Option<String>,
+}
+
+struct MusicModelDownloadState {
+    started_at: std::time::Instant,
+    rx: std::sync::mpsc::Receiver<MusicModelDownloadResult>,
+}
+
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
@@ -193,6 +250,15 @@ pub struct WavesPreviewer {
     transcript_ai_cfg: TranscriptAiConfig,
     transcript_supported_languages: Vec<String>,
     transcript_supported_tasks: Vec<String>,
+    music_ai_model_dir: Option<PathBuf>,
+    music_ai_available: bool,
+    music_ai_state: Option<MusicAnalyzeRunState>,
+    music_model_download_state: Option<MusicModelDownloadState>,
+    music_ai_last_error: Option<String>,
+    music_ai_inflight: HashSet<PathBuf>,
+    music_preview_state: Option<MusicPreviewRunState>,
+    music_preview_generation_counter: u64,
+    music_preview_expected_generation: u64,
     pub external_sources: Vec<ExternalSource>,
     pub external_active_source: Option<usize>,
     pub external_source: Option<PathBuf>,
@@ -438,6 +504,9 @@ impl WavesPreviewer {
 
     fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
         self.close_plugin_gui_for_tab(idx);
+        if let Some(path) = self.tabs.get(idx).map(|t| t.path.clone()) {
+            self.cancel_music_preview_if_path(path.as_path());
+        }
         self.clear_preview_if_any(idx);
         self.cache_dirty_tab_at(idx);
         self.audio.stop();
@@ -449,6 +518,11 @@ impl WavesPreviewer {
                 self.tabs.len() - 1
             };
             self.active_tab = Some(new_active);
+            if let Some(tab) = self.tabs.get(new_active) {
+                let path = tab.path.clone();
+                self.debug_mark_tab_switch_start(&path);
+                self.queue_tab_activation(path);
+            }
         } else {
             self.active_tab = None;
             self.request_list_focus(ctx);
@@ -1823,6 +1897,15 @@ impl WavesPreviewer {
             transcript_ai_cfg: TranscriptAiConfig::default(),
             transcript_supported_languages: Vec::new(),
             transcript_supported_tasks: Vec::new(),
+            music_ai_model_dir: None,
+            music_ai_available: false,
+            music_ai_state: None,
+            music_model_download_state: None,
+            music_ai_last_error: None,
+            music_ai_inflight: HashSet::new(),
+            music_preview_state: None,
+            music_preview_generation_counter: 0,
+            music_preview_expected_generation: 0,
             external_sources: Vec::new(),
             external_active_source: None,
             external_source: None,
@@ -2044,6 +2127,7 @@ impl WavesPreviewer {
         };
         app.load_prefs();
         app.refresh_transcript_ai_status();
+        app.refresh_music_ai_status();
         app.reload_zoo_gif_frames();
         app.load_tools_config();
         app.apply_startup_paths();
@@ -2309,6 +2393,10 @@ impl eframe::App for WavesPreviewer {
         self.drain_plugin_jobs(ctx);
         self.drain_transcript_model_download_results(ctx);
         self.drain_transcript_ai_results(ctx);
+        self.drain_music_model_download_results(ctx);
+        self.drain_music_ai_results(ctx);
+        self.drain_music_preview_results(ctx);
+        self.enforce_music_stem_cache_policy();
         // Drain metadata updates
         self.drain_meta_updates(ctx);
         self.drain_external_load_results(ctx);
@@ -3003,6 +3091,9 @@ impl eframe::App for WavesPreviewer {
                                     }
                                     _ => {
                                         self.audio.set_rate(1.0);
+                                        // Prime with selected tab source before heavy processing result arrives.
+                                        self.audio.set_samples_channels(channels.clone());
+                                        self.audio.stop();
                                         self.spawn_heavy_processing_from_channels(
                                             p.clone(),
                                             channels,
@@ -3066,6 +3157,8 @@ impl eframe::App for WavesPreviewer {
             || self.editor_decode_state.is_some()
             || self.heavy_preview_rx.is_some()
             || self.heavy_overlay_rx.is_some()
+            || self.music_ai_state.is_some()
+            || self.music_preview_state.is_some()
             || self.editor_apply_state.is_some()
             || self.plugin_process_state.is_some()
             || self.export_state.is_some()

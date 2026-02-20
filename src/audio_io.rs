@@ -936,7 +936,9 @@ pub fn decode_audio_mono_prefix(path: &Path, max_secs: f32) -> Result<(Vec<f32>,
 
 pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
     if is_m4a_path(path) {
-        let (mut chans, sr, _) = decode_m4a_fdk(path, None)?;
+        let (chans, sr, _) = decode_m4a_fdk(path, None)?;
+        #[cfg(debug_assertions)]
+        let mut chans = chans;
         #[cfg(debug_assertions)]
         sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
         io_trace(
@@ -1019,7 +1021,9 @@ pub fn decode_audio_multi(path: &Path) -> Result<(Vec<Vec<f32>>, u32)> {
         Ok((chans, sample_rate))
     })();
     if res.is_err() && is_m4a_path(path) {
-        if let Ok((mut chans, sr, _)) = decode_m4a_fdk(path, None) {
+        if let Ok((chans, sr, _)) = decode_m4a_fdk(path, None) {
+            #[cfg(debug_assertions)]
+            let mut chans = chans;
             #[cfg(debug_assertions)]
             sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
             io_trace(
@@ -1489,7 +1493,9 @@ pub fn decode_audio_mono_with_errors(path: &Path) -> Result<(Vec<f32>, u32, u32)
 
 pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32, u32)> {
     if is_m4a_path(path) {
-        let (mut chans, sr, _) = decode_m4a_fdk(path, None)?;
+        let (chans, sr, _) = decode_m4a_fdk(path, None)?;
+        #[cfg(debug_assertions)]
+        let mut chans = chans;
         #[cfg(debug_assertions)]
         sanitize_non_finite_multi(path, "decode_multi_m4a", &mut chans);
         io_trace(

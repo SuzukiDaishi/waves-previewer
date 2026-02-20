@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::app::music_onnx;
 use crate::app::{helpers::*, types::*, LIVE_PREVIEW_SAMPLE_LIMIT};
 use crate::wave::build_minmax;
 use egui::*;
@@ -298,6 +299,20 @@ impl crate::app::WavesPreviewer {
                 tab.bpm_value = bpm_value.max(0.0);
                 tab.bpm_user_set = true;
             }
+            ui.label("Offset:");
+            let mut bpm_offset_sec = tab.bpm_offset_sec;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut bpm_offset_sec)
+                        .range(-30.0..=30.0)
+                        .speed(0.01)
+                        .fixed_decimals(2)
+                        .suffix(" s"),
+                )
+                .changed()
+            {
+                tab.bpm_offset_sec = bpm_offset_sec.clamp(-30.0, 30.0);
+            }
             ui.separator();
             // Time HUD: play position (editable) / total length
             let sr = sr_ctx.max(1.0); // restore local sample-rate alias after removing top-level Loop block
@@ -582,10 +597,29 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .map(|s| s.tab_idx == tab_idx && s.is_apply)
             .unwrap_or(false);
-        let overlay_busy = self.heavy_overlay_rx.is_some();
+        let overlay_busy = self.heavy_overlay_rx.is_some() || self.music_preview_state.is_some();
         let apply_busy = self.editor_apply_state.is_some() || plugin_apply_busy;
         let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
         let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32)> = None;
+        let music_model_ready = self.music_ai_has_model();
+        let music_model_downloading = self.music_model_download_state.is_some();
+        let music_model_dir_text = self
+            .music_ai_model_dir
+            .as_ref()
+            .map(|p| p.display().to_string());
+        let music_can_uninstall = self.music_ai_can_uninstall();
+        let music_analyze_running = self.music_ai_state.is_some();
+        let music_run_status = self.music_analysis_status_text();
+        let music_run_process = self.music_analysis_process_text();
+        let mut pending_music_model_download = false;
+        let mut pending_music_model_uninstall = false;
+        let mut pending_music_analyze_start = false;
+        let mut pending_music_analyze_cancel = false;
+        let mut pending_music_preview_cancel = false;
+        let mut pending_music_rebuild_markers = false;
+        let mut pending_music_preview_refresh = false;
+        let mut pending_music_apply_markers = false;
+        let mut pending_music_apply_preview = false;
         let mut request_undo = false;
         let mut request_redo = false;
         let gain_db = self
@@ -617,13 +651,18 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .filter(|p| p.path == tab_path)
             .map(|p| (p.msg.clone(), p.started_at));
-        let preview_msg = if self.heavy_preview_rx.is_some() || self.heavy_overlay_rx.is_some() {
+        let preview_msg = if self.heavy_preview_rx.is_some()
+            || self.heavy_overlay_rx.is_some()
+            || self.music_preview_state.is_some()
+        {
             let msg = if let Some(t) = &self.heavy_preview_tool {
                 match t {
                     ToolKind::PitchShift => "Previewing PitchShift...".to_string(),
                     ToolKind::TimeStretch => "Previewing TimeStretch...".to_string(),
                     _ => "Previewing...".to_string(),
                 }
+            } else if self.music_preview_state.is_some() {
+                "Previewing Music Analyze...".to_string()
             } else {
                 "Previewing...".to_string()
             };
@@ -753,6 +792,7 @@ impl crate::app::WavesPreviewer {
                     if tab.bpm_enabled && tab.bpm_value >= 20.0 {
                         let bpm = tab.bpm_value.max(1.0);
                         let beat_sec = 60.0 / bpm;
+                        let offset_sec = tab.bpm_offset_sec;
                         let px_per_beat = px_per_sec * beat_sec;
                         let steps: [f32; 10] = [1.0/64.0, 1.0/32.0, 1.0/16.0, 1.0/8.0, 1.0/4.0, 0.5, 1.0, 2.0, 4.0, 8.0];
                         let mut step_beats = steps[steps.len() - 1];
@@ -762,8 +802,8 @@ impl crate::app::WavesPreviewer {
                                 break;
                             }
                         }
-                        let b0 = t0 / beat_sec;
-                        let b1 = t1 / beat_sec;
+                        let b0 = (t0 - offset_sec) / beat_sec;
+                        let b1 = (t1 - offset_sec) / beat_sec;
                         let start_beat = (b0 / step_beats).floor() * step_beats;
                         let mut beat = start_beat;
                         let label_every = if step_beats < 0.25 {
@@ -774,10 +814,14 @@ impl crate::app::WavesPreviewer {
                             step_beats
                         };
                         while beat <= b1 + step_beats * 0.5 {
-                            let t = beat * beat_sec;
+                            let t = offset_sec + beat * beat_sec;
+                            if t < t0 || t > t1 {
+                                beat += step_beats;
+                                continue;
+                            }
                             let s_idx = (t * sr).round() as isize;
-                            let rel = (s_idx.max(start as isize) - start as isize) as f32;
-                            let x = wave_left + (rel / spp).clamp(0.0, wave_w);
+                            let rel = (s_idx - start as isize).max(0) as f32;
+                            let x = wave_left + (rel / spp).min(wave_w);
                             painter.line_segment(
                                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
                                 egui::Stroke::new(1.0, grid_col),
@@ -1853,16 +1897,28 @@ impl crate::app::WavesPreviewer {
                     let start = tab.view_offset.min(tab.samples_len);
                     let end = (start + vis).min(tab.samples_len);
                     let pending = tab.markers != tab.markers_committed;
-                    let col = if pending {
-                        Color32::from_rgb(120, 220, 120)
+                    let mut provisional_set = std::collections::HashSet::<(usize, String)>::new();
+                    for m in tab.music_analysis_draft.provisional_markers.iter() {
+                        provisional_set.insert((m.sample, m.label.clone()));
+                    }
+                    let base_col = if pending {
+                        Color32::from_rgb(235, 210, 130)
                     } else {
                         Color32::from_rgb(255, 200, 80)
                     };
+                    let provisional_col = Color32::from_rgb(120, 220, 120);
                     for m in tab.markers.iter() {
                         if m.sample < start || m.sample > end {
                             continue;
                         }
                         let x = to_x(m.sample);
+                        let is_provisional =
+                            provisional_set.contains(&(m.sample, m.label.clone()));
+                        let col = if is_provisional {
+                            provisional_col
+                        } else {
+                            base_col
+                        };
                         painter.line_segment(
                             [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
                             egui::Stroke::new(1.0, col),
@@ -2264,6 +2320,10 @@ impl crate::app::WavesPreviewer {
                     ui.set_width(inspector_w);
                     ui.heading("Inspector");
                     ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt(("editor_inspector_scroll", tab_idx))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                     if let Some((msg, progress)) = decode_status.as_ref() {
                         ui.horizontal_wrapped(|ui| {
                             ui.add(egui::Spinner::new());
@@ -2399,6 +2459,11 @@ impl crate::app::WavesPreviewer {
                                     ui.selectable_value(&mut tool, ToolKind::Normalize, "Normalize");
                                     ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
                                     ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
+                                    ui.selectable_value(
+                                        &mut tool,
+                                        ToolKind::MusicAnalyze,
+                                        "Music Analyze",
+                                    );
                                     ui.selectable_value(&mut tool, ToolKind::PluginFx, "Plugin FX");
                                 });
                             if tool != tab.active_tool {
@@ -2424,6 +2489,15 @@ impl crate::app::WavesPreviewer {
                                 if matches!(tab.active_tool, ToolKind::Trim) {
                                     // Trim-specific range display should not persist after leaving Trim.
                                     tab.trim_range = None;
+                                }
+                                if matches!(tab.active_tool, ToolKind::MusicAnalyze) {
+                                    tab.music_analysis_draft.provisional_markers.clear();
+                                    tab.markers = tab.markers_committed.clone();
+                                    tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                                    tab.music_analysis_draft.stems_audio = None;
+                                    tab.music_analysis_draft.preview_inflight = false;
+                                    tab.music_analysis_draft.preview_active = false;
+                                    pending_music_preview_cancel = true;
                                 }
                                 // Leaving a tool: discard any preview overlay/audio
                                 if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
@@ -3285,6 +3359,373 @@ impl crate::app::WavesPreviewer {
                                         };
                                     }
                                 }
+                                ToolKind::MusicAnalyze => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        if music_model_ready {
+                                            ui.label(
+                                                RichText::new("Model: ready")
+                                                    .color(egui::Color32::from_rgb(120, 220, 140)),
+                                            );
+                                        } else if music_model_downloading {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.add(egui::Spinner::new());
+                                                ui.label(RichText::new("Model: downloading...").weak());
+                                            });
+                                        } else {
+                                            ui.label(RichText::new("Model: not installed").weak());
+                                        }
+                                        if let Some(model_dir) = music_model_dir_text.as_ref() {
+                                            ui.label(
+                                                RichText::new(format!("Model dir: {model_dir}"))
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            if !music_model_ready {
+                                                if ui
+                                                    .add_enabled(
+                                                        !music_model_downloading,
+                                                        egui::Button::new("Download Model..."),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    pending_music_model_download = true;
+                                                }
+                                            } else if ui
+                                                .add_enabled(
+                                                    music_can_uninstall,
+                                                    egui::Button::new("Uninstall Model..."),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_music_model_uninstall = true;
+                                            }
+                                        });
+                                        if let Some(err) = tab.music_analysis_draft.last_error.as_ref() {
+                                            ui.label(
+                                                RichText::new(err)
+                                                    .color(egui::Color32::LIGHT_RED),
+                                            );
+                                        } else if let Some(err) = self.music_ai_last_error.as_ref() {
+                                            ui.label(
+                                                RichText::new(err)
+                                                    .color(egui::Color32::LIGHT_RED),
+                                            );
+                                        }
+                                        ui.separator();
+
+                                        let stems = music_onnx::resolve_stem_paths(
+                                            tab.path.as_path(),
+                                            tab.music_analysis_draft.stems_dir_override.as_deref(),
+                                        );
+                                        let demucs_ready = self
+                                            .music_ai_model_dir
+                                            .as_deref()
+                                            .and_then(music_onnx::resolve_demucs_model_path)
+                                            .is_some();
+                                        if stems.is_ready() {
+                                            ui.label(
+                                                RichText::new("Input: stems ready")
+                                                    .color(egui::Color32::from_rgb(120, 220, 140)),
+                                            );
+                                        } else if demucs_ready {
+                                            ui.label(
+                                                RichText::new("Input: source audio (auto Demucs)")
+                                                .color(egui::Color32::from_rgb(120, 200, 220)),
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new("Input: stems not found")
+                                                .color(egui::Color32::from_rgb(220, 170, 120)),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Missing: {}",
+                                                    stems.missing.join(", ")
+                                                ))
+                                                .small()
+                                                .weak(),
+                                            );
+                                        }
+                                        let can_analyze = music_model_ready
+                                            && (stems.is_ready() || demucs_ready)
+                                            && !tab.music_analysis_draft.analysis_inflight
+                                            && !music_analyze_running;
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(can_analyze, egui::Button::new("Analyze"))
+                                                .clicked()
+                                            {
+                                                pending_music_analyze_start = true;
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    tab.music_analysis_draft.analysis_inflight
+                                                        || music_analyze_running,
+                                                    egui::Button::new("Cancel"),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_music_analyze_cancel = true;
+                                            }
+                                            if let Some(status) = music_run_status.as_ref() {
+                                                ui.label(RichText::new(status).weak());
+                                            }
+                                        });
+                                        if let Some(process) = music_run_process.as_ref() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                if music_analyze_running {
+                                                    ui.add(egui::Spinner::new());
+                                                }
+                                                ui.label(
+                                                    RichText::new(format!("Process: {process}"))
+                                                        .small()
+                                                        .weak(),
+                                                );
+                                            });
+                                        } else if !tab.music_analysis_draft.analysis_process_message.is_empty() {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Process: {}",
+                                                    tab.music_analysis_draft.analysis_process_message
+                                                ))
+                                                .small()
+                                                .weak(),
+                                            );
+                                        }
+
+                                        if tab.music_analysis_draft.result.is_some() {
+                                            let (beat_count, downbeat_count, section_count, estimated_bpm) = tab
+                                                .music_analysis_draft
+                                                .result
+                                                .as_ref()
+                                                .map(|r| {
+                                                    (
+                                                        r.beats.len(),
+                                                        r.downbeats.len(),
+                                                        r.sections.len(),
+                                                        r.estimated_bpm,
+                                                    )
+                                                })
+                                                .unwrap_or((0, 0, 0, None));
+                                            let source_text = match tab.music_analysis_draft.analysis_source_kind {
+                                                MusicAnalysisSourceKind::StemsDir => "stems",
+                                                MusicAnalysisSourceKind::AutoDemucs => "auto-demucs",
+                                            };
+                                            ui.separator();
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Result: beats={beat_count}, downbeats={downbeat_count}, sections={section_count}{}",
+                                                    estimated_bpm
+                                                        .map(|v| format!(", bpm={v:.2}"))
+                                                        .unwrap_or_default()
+                                                ))
+                                                .small()
+                                                .weak(),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!("Source: {source_text}"))
+                                                    .small()
+                                                    .weak(),
+                                            );
+                                            ui.label(RichText::new("Markers").strong());
+                                            if ui
+                                                .checkbox(&mut tab.music_analysis_draft.show_beat, "Beat")
+                                                .changed()
+                                            {
+                                                pending_music_rebuild_markers = true;
+                                            }
+                                            if ui
+                                                .checkbox(
+                                                    &mut tab.music_analysis_draft.show_downbeat,
+                                                    "DownBeat",
+                                                )
+                                                .changed()
+                                            {
+                                                pending_music_rebuild_markers = true;
+                                            }
+                                            if ui
+                                                .checkbox(
+                                                    &mut tab.music_analysis_draft.show_section,
+                                                    "Section",
+                                                )
+                                                .changed()
+                                            {
+                                                pending_music_rebuild_markers = true;
+                                            }
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Provisional markers: {}",
+                                                    tab.music_analysis_draft.provisional_markers.len()
+                                                ))
+                                                .small()
+                                                .weak(),
+                                            );
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui
+                                                    .add_enabled(
+                                                        !apply_busy
+                                                            && tab.music_analysis_draft.result.is_some(),
+                                                        egui::Button::new("Apply Markers"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    if pending_edit_undo.is_none() {
+                                                        pending_edit_undo =
+                                                            Some(Self::capture_undo_state(tab));
+                                                    }
+                                                    pending_music_apply_markers = true;
+                                                }
+                                            });
+
+                                            ui.separator();
+                                            ui.label(RichText::new("Stem Preview (dB)").strong());
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Peak: {:.4}{}",
+                                                    tab.music_analysis_draft.preview_peak_abs,
+                                                    if tab.music_analysis_draft.preview_clip_applied {
+                                                        " (clip applied)"
+                                                    } else {
+                                                        ""
+                                                    }
+                                                ))
+                                                .small()
+                                                .weak(),
+                                            );
+                                            if tab.music_analysis_draft.preview_inflight {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.add(egui::Spinner::new());
+                                                    ui.label(
+                                                        RichText::new("Preview: updating...")
+                                                            .small()
+                                                            .weak(),
+                                                    );
+                                                });
+                                            }
+                                            if let Some(err) =
+                                                tab.music_analysis_draft.preview_error.as_ref()
+                                            {
+                                                ui.label(
+                                                    RichText::new(err)
+                                                        .small()
+                                                        .color(egui::Color32::LIGHT_RED),
+                                                );
+                                            }
+                                            let mut slider_changed = false;
+                                            slider_changed |= ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut tab.music_analysis_draft.preview_gains_db.bass,
+                                                        -80.0..=6.0,
+                                                    )
+                                                    .text("bass"),
+                                                )
+                                                .changed();
+                                            slider_changed |= ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut tab.music_analysis_draft.preview_gains_db.drums,
+                                                        -80.0..=6.0,
+                                                    )
+                                                    .text("drums"),
+                                                )
+                                                .changed();
+                                            slider_changed |= ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut tab.music_analysis_draft.preview_gains_db.other,
+                                                        -80.0..=6.0,
+                                                    )
+                                                    .text("other"),
+                                                )
+                                                .changed();
+                                            slider_changed |= ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut tab.music_analysis_draft.preview_gains_db.vocals,
+                                                        -80.0..=6.0,
+                                                    )
+                                                    .text("vocals"),
+                                                )
+                                                .changed();
+                                            tab.music_analysis_draft.preview_gains_db.bass = tab
+                                                .music_analysis_draft
+                                                .preview_gains_db
+                                                .bass
+                                                .clamp(-80.0, 6.0);
+                                            tab.music_analysis_draft.preview_gains_db.drums = tab
+                                                .music_analysis_draft
+                                                .preview_gains_db
+                                                .drums
+                                                .clamp(-80.0, 6.0);
+                                            tab.music_analysis_draft.preview_gains_db.other = tab
+                                                .music_analysis_draft
+                                                .preview_gains_db
+                                                .other
+                                                .clamp(-80.0, 6.0);
+                                            tab.music_analysis_draft.preview_gains_db.vocals = tab
+                                                .music_analysis_draft
+                                                .preview_gains_db
+                                                .vocals
+                                                .clamp(-80.0, 6.0);
+                                            if slider_changed {
+                                                tab.music_analysis_draft.preview_active = false;
+                                                pending_music_preview_refresh = true;
+                                                stop_playback = true;
+                                            }
+                                            if ui
+                                                .checkbox(
+                                                    &mut tab.music_analysis_draft.preview_selection_only,
+                                                    "Selection only",
+                                                )
+                                                .changed()
+                                            {
+                                                tab.music_analysis_draft.preview_active = false;
+                                                pending_music_preview_refresh = true;
+                                                stop_playback = true;
+                                            }
+                                            ui.horizontal_wrapped(|ui| {
+                                                if ui
+                                                    .add_enabled(
+                                                        !apply_busy
+                                                            && !tab.music_analysis_draft.preview_inflight
+                                                            && tab.music_analysis_draft.preview_active,
+                                                        egui::Button::new("Apply"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    pending_music_apply_preview = true;
+                                                }
+                                            });
+                                            ui.label(
+                                                RichText::new("Preview updates live (async).")
+                                                .small()
+                                                .weak(),
+                                            );
+                                        } else {
+                                            if music_analyze_running {
+                                                ui.label(
+                                                    RichText::new(
+                                                        "Analyze is running. Apply becomes available after completion.",
+                                                    )
+                                                    .weak(),
+                                                );
+                                            } else {
+                                                ui.label(
+                                                    RichText::new(
+                                                        "Run Analyze to enable marker toggles and stem preview sliders.",
+                                                    )
+                                                    .weak(),
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
                                 ToolKind::PluginFx => {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut();
@@ -3631,6 +4072,7 @@ impl crate::app::WavesPreviewer {
                             ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
                         }
                     }
+                });
                 }); // end inspector
                 if need_restore_preview {
                     pending_preview = None;
@@ -3713,6 +4155,33 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_plugin_apply {
                     self.spawn_plugin_apply_for_tab(tab_idx);
+                }
+                if pending_music_model_download {
+                    self.queue_music_model_download();
+                }
+                if pending_music_model_uninstall {
+                    self.uninstall_music_model_cache();
+                }
+                if pending_music_analyze_start {
+                    self.start_music_analysis_for_tab(tab_idx);
+                }
+                if pending_music_analyze_cancel {
+                    self.cancel_music_analysis_run();
+                }
+                if pending_music_preview_cancel {
+                    self.cancel_music_preview_run();
+                }
+                if pending_music_rebuild_markers {
+                    self.rebuild_music_provisional_markers_for_tab(tab_idx);
+                }
+                if pending_music_preview_refresh {
+                    self.apply_music_preview_mix_for_tab(tab_idx);
+                }
+                if pending_music_apply_markers {
+                    self.apply_music_analysis_markers_to_tab(tab_idx);
+                }
+                if pending_music_apply_preview {
+                    self.apply_music_preview_to_tab(tab_idx);
                 }
                 if stop_playback { self.audio.stop(); }
                 if need_restore_preview { self.clear_preview_if_any(tab_idx); }

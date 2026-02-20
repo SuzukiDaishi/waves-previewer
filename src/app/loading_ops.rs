@@ -18,31 +18,46 @@ impl super::WavesPreviewer {
                 waveform,
                 mut channels,
             } = res;
-            // Apply processed buffer + waveform and refresh playback state.
-            if channels.is_empty() {
-                self.audio.set_samples_mono(samples);
+            let active_tab_path = self
+                .active_tab
+                .and_then(|idx| self.tabs.get(idx))
+                .map(|tab| tab.path.clone());
+            let should_apply_audio = if let Some(active_path) = active_tab_path.as_ref() {
+                active_path == &path
             } else {
-                self.apply_sample_rate_preview_for_path(
-                    &path,
-                    &mut channels,
-                    self.audio.shared.out_sample_rate,
-                );
-                self.audio.set_samples_channels(channels);
+                self.selected_path_buf().as_ref() == Some(&path)
+                    || self.playing_path.as_ref() == Some(&path)
+            };
+            // Apply processed buffer only when the result still matches the current target.
+            if should_apply_audio {
+                if channels.is_empty() {
+                    self.audio.set_samples_mono(samples);
+                } else {
+                    self.apply_sample_rate_preview_for_path(
+                        &path,
+                        &mut channels,
+                        self.audio.shared.out_sample_rate,
+                    );
+                    self.audio.set_samples_channels(channels);
+                }
+                self.audio.stop();
             }
-            self.audio.stop();
             if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
                 if let Some(tab) = self.tabs.get_mut(idx) {
                     tab.waveform_minmax = waveform;
                 }
             }
-            // update current playing path (for effective volume using pending gains)
-            self.playing_path = Some(path.clone());
-            // full-buffer loop region if needed
-            if let Some(buf) = self.audio.shared.samples.load().as_ref() {
-                self.audio.set_loop_region(0, buf.len());
+            if should_apply_audio {
+                // update current playing path (for effective volume using pending gains)
+                self.playing_path = Some(path.clone());
+                // full-buffer loop region if needed
+                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
+                    self.audio.set_loop_region(0, buf.len());
+                }
             }
             self.processing = None;
-            let should_resume_list_play = self.active_tab.is_none()
+            let should_resume_list_play = should_apply_audio
+                && self.active_tab.is_none()
                 && self.selected_path_buf().as_ref() == Some(&path)
                 && (autoplay_when_ready || self.list_play_pending);
             if should_resume_list_play {

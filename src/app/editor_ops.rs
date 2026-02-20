@@ -153,7 +153,7 @@ impl crate::app::WavesPreviewer {
         Self::update_loop_markers_dirty(tab);
     }
 
-    fn on_audio_length_changed(&mut self, tab_idx: usize) {
+    pub(super) fn on_audio_length_changed(&mut self, tab_idx: usize) {
         let len = if let Some(tab) = self.tabs.get_mut(tab_idx) {
             Self::editor_clamp_ranges(tab);
             tab.samples_len

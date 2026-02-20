@@ -14,13 +14,13 @@ const TRANSCRIPT_MODEL_REVISION: &str = "main";
 const VAD_MODEL_ID: &str = "deepghs/silero-vad-onnx";
 const VAD_MODEL_REVISION: &str = "main";
 const WHISPER_ALLOWED_LANGUAGES: &[&str] = &[
-    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy",
-    "da", "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw",
-    "he", "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn",
-    "ko", "la", "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt",
-    "my", "ne", "nl", "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si",
-    "sk", "sl", "sn", "so", "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl",
-    "tr", "tt", "uk", "ur", "uz", "vi", "yi", "yo", "yue", "zh",
+    "af", "am", "ar", "as", "az", "ba", "be", "bg", "bn", "bo", "br", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "es", "et", "eu", "fa", "fi", "fo", "fr", "gl", "gu", "ha", "haw", "he",
+    "hi", "hr", "ht", "hu", "hy", "id", "is", "it", "ja", "jw", "ka", "kk", "km", "kn", "ko", "la",
+    "lb", "ln", "lo", "lt", "lv", "mg", "mi", "mk", "ml", "mn", "mr", "ms", "mt", "my", "ne", "nl",
+    "nn", "no", "oc", "pa", "pl", "ps", "pt", "ro", "ru", "sa", "sd", "si", "sk", "sl", "sn", "so",
+    "sq", "sr", "su", "sv", "sw", "ta", "te", "tg", "th", "tk", "tl", "tr", "tt", "uk", "ur", "uz",
+    "vi", "yi", "yo", "yue", "zh",
 ];
 
 fn canonical_transcript_languages() -> Vec<String> {
@@ -229,7 +229,8 @@ fn transcript_catalog_from_generation_config(
     let mut tasks = BTreeSet::<String>::new();
     if let Some(obj) = json.get("lang_to_id").and_then(|v| v.as_object()) {
         for key in obj.keys() {
-            if let Some(code) = normalize_special_token_code(key).filter(|v| is_language_code_token(v))
+            if let Some(code) =
+                normalize_special_token_code(key).filter(|v| is_language_code_token(v))
             {
                 langs.insert(code);
             }
@@ -255,10 +256,16 @@ fn transcript_catalog_from_generation_config(
 fn transcript_catalog_from_tokenizer(model_dir: &Path) -> (Vec<String>, Vec<String>) {
     let path = model_dir.join("tokenizer.json");
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (Vec::new(), vec!["transcribe".to_string(), "translate".to_string()]);
+        return (
+            Vec::new(),
+            vec!["transcribe".to_string(), "translate".to_string()],
+        );
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return (Vec::new(), vec!["transcribe".to_string(), "translate".to_string()]);
+        return (
+            Vec::new(),
+            vec!["transcribe".to_string(), "translate".to_string()],
+        );
     };
     let mut langs = BTreeSet::<String>::new();
     let mut tasks = BTreeSet::<String>::new();
@@ -665,7 +672,8 @@ impl super::WavesPreviewer {
             let (_langs, tasks) = transcript_catalog_from_model_dir(dir);
             self.transcript_supported_tasks = tasks;
         } else {
-            self.transcript_supported_tasks = vec!["transcribe".to_string(), "translate".to_string()];
+            self.transcript_supported_tasks =
+                vec!["transcribe".to_string(), "translate".to_string()];
         }
         self.sanitize_transcript_ai_config();
         self.transcript_ai_available = self
@@ -1113,7 +1121,7 @@ impl super::WavesPreviewer {
             }
             ctx.request_repaint();
         } else {
-            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 
@@ -1207,7 +1215,7 @@ impl super::WavesPreviewer {
             ctx.request_repaint();
             return;
         }
-        ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        ctx.request_repaint_after(std::time::Duration::from_millis(33));
     }
 }
 
@@ -1215,8 +1223,8 @@ impl super::WavesPreviewer {
 mod tests {
     use super::{
         canonical_transcript_languages, has_required_model_files_for_variant,
-        sanitize_transcript_language_task,
-        transcript_catalog_from_generation_config, transcript_catalog_from_tokenizer,
+        sanitize_transcript_language_task, transcript_catalog_from_generation_config,
+        transcript_catalog_from_tokenizer,
     };
     use crate::app::types::TranscriptModelVariant;
 

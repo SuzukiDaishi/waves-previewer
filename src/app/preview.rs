@@ -275,6 +275,7 @@ impl WavesPreviewer {
         self.heavy_preview_tool = None;
         self.heavy_overlay_rx = None;
         self.overlay_expected_tool = None;
+        self.cancel_music_preview_run();
     }
 
     pub(super) fn spawn_heavy_preview_owned(&mut self, mono: Vec<f32>, tool: ToolKind, param: f32) {

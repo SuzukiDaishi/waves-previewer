@@ -212,11 +212,15 @@ mod ui_focus_input_regressions {
         assert!(harness.state().test_show_transcription_settings());
 
         // Ctrl+F should still move focus to the search box after closing dialogs.
-        harness.state_mut().test_set_show_transcription_settings(false);
+        harness
+            .state_mut()
+            .test_set_show_transcription_settings(false);
         harness.run_steps(1);
         harness.key_press_modifiers(Modifiers::COMMAND, Key::F);
         harness.run_steps(1);
-        assert!(harness.ctx.memory(|m| m.has_focus(egui::Id::new("search_box"))));
+        assert!(harness
+            .ctx
+            .memory(|m| m.has_focus(egui::Id::new("search_box"))));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

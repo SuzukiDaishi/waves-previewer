@@ -1,26 +1,158 @@
 #[cfg(feature = "kittest")]
 mod kittest_suite {
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use egui::{Key, Modifiers};
     use egui_kittest::{kittest::Queryable, Harness};
+    use neowaves::app::ToolKind;
     use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
     use walkdir::WalkDir;
 
-    const DEFAULT_WAV_DIR: &str =
-        "C:\\Users\\zukky\\Desktop\\TTS_Train_Pipeline\\voice_pipeline\\synth_out_raw\\wavs";
+    const DEFAULT_WAV_DIR: &str = "test_samples";
     const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
     const TAB_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
-    fn wav_dir() -> PathBuf {
+    fn source_wav_dir() -> PathBuf {
         let from_env = std::env::var("WAVES_PREVIEWER_TEST_WAV_DIR").ok();
-        let dir = from_env.unwrap_or_else(|| DEFAULT_WAV_DIR.to_string());
-        let path = PathBuf::from(dir);
+        let path = from_env
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_WAV_DIR));
         assert!(path.is_dir(), "test wav dir not found: {}", path.display());
         path
+    }
+
+    fn wav_dir() -> PathBuf {
+        static FIXTURE_DIR: OnceLock<PathBuf> = OnceLock::new();
+        FIXTURE_DIR
+            .get_or_init(|| {
+                let src = source_wav_dir();
+                let dst = make_temp_dir("kittest_media");
+                for entry in WalkDir::new(&src).follow_links(false) {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(_) => continue,
+                    };
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let Ok(rel) = entry.path().strip_prefix(&src) else {
+                        continue;
+                    };
+                    let out = dst.join(rel);
+                    if let Some(parent) = out.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::copy(entry.path(), out);
+                }
+                maybe_generate_extra_formats(&dst);
+                dst
+            })
+            .clone()
+    }
+
+    fn has_file_ext(dir: &Path, ext: &str) -> bool {
+        for entry in WalkDir::new(dir).follow_links(false) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let matches = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case(ext))
+                .unwrap_or(false);
+            if matches {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn first_wav_file(dir: &Path) -> Option<PathBuf> {
+        for entry in WalkDir::new(dir).follow_links(false) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let is_wav = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false);
+            if is_wav {
+                return Some(entry.into_path());
+            }
+        }
+        None
+    }
+
+    fn try_ffmpeg_convert(src: &Path, dst: &Path) -> bool {
+        Command::new("ffmpeg")
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-i")
+            .arg(src)
+            .arg(dst)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn try_sox_convert(src: &Path, dst: &Path) -> bool {
+        Command::new("sox")
+            .arg(src)
+            .arg(dst)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn try_internal_convert(src: &Path, dst: &Path) -> bool {
+        match neowaves::audio_io::decode_audio_multi(src) {
+            Ok((chans, sr)) => neowaves::wave::export_channels_audio(&chans, sr, dst).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    fn maybe_generate_extra_formats(dir: &Path) {
+        let Some(seed) = first_wav_file(dir) else {
+            return;
+        };
+        for ext in ["mp3", "m4a", "ogg"] {
+            if has_file_ext(dir, ext) {
+                continue;
+            }
+            let out = dir.join(format!("generated_fixture.{ext}"));
+            let ok = try_ffmpeg_convert(&seed, &out)
+                || ((ext == "mp3" || ext == "ogg") && try_sox_convert(&seed, &out))
+                || try_internal_convert(&seed, &out);
+            if !ok {
+                eprintln!(
+                    "warning: could not generate {} fixture from {}",
+                    ext,
+                    seed.display()
+                );
+            }
+        }
     }
 
     fn harness_with_wavs(open_first: bool) -> Harness<'static, WavesPreviewer> {
@@ -265,6 +397,29 @@ mod kittest_suite {
         top_menu_button(&harness, "Export");
         top_menu_button(&harness, "Tools");
         top_menu_button(&harness, "List");
+    }
+
+    #[test]
+    fn inspector_panel_visible_when_editor_open() {
+        let mut harness = harness_with_wavs(true);
+        wait_for_scan(&mut harness);
+        wait_for_tab(&mut harness);
+        let inspector_nodes: Vec<_> = harness.query_all_by_label("Inspector").collect();
+        assert!(!inspector_nodes.is_empty(), "Inspector heading not found");
+    }
+
+    #[test]
+    fn inspector_tool_combo_reachable() {
+        let mut harness = harness_with_wavs(true);
+        wait_for_scan(&mut harness);
+        wait_for_tab(&mut harness);
+
+        let tool_nodes: Vec<_> = harness.query_all_by_label("Tool").collect();
+        assert!(!tool_nodes.is_empty(), "Inspector tool row not found");
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
+        harness.run_steps(1);
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Reverse));
     }
 
     #[test]

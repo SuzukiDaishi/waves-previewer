@@ -5,6 +5,7 @@ mod session_virtual_restore {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use egui_kittest::Harness;
+    use neowaves::app::ToolKind;
     use neowaves::kittest::harness_with_startup;
     use neowaves::{StartupConfig, WavesPreviewer};
 
@@ -98,6 +99,14 @@ mod session_virtual_restore {
 
         assert!(harness.state_mut().test_open_first_tab());
         wait_for_tab(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
+        assert!(harness.state_mut().test_set_bpm_offset_sec(0.375));
+        if let Some(tab_idx) = harness.state().active_tab {
+            let tab = &mut harness.state_mut().tabs[tab_idx];
+            tab.bpm_enabled = true;
+            tab.bpm_user_set = true;
+            tab.bpm_value = 128.5;
+        }
         assert!(harness.state_mut().test_add_trim_virtual_frac(0.15, 0.55));
         harness.run_steps(3);
 
@@ -128,6 +137,14 @@ mod session_virtual_restore {
         assert!(harness
             .state_mut()
             .test_set_selected_sample_rate_override(0));
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_bpm_offset_sec(-1.25));
+        if let Some(tab_idx) = harness.state().active_tab {
+            let tab = &mut harness.state_mut().tabs[tab_idx];
+            tab.bpm_enabled = false;
+            tab.bpm_user_set = false;
+            tab.bpm_value = 0.0;
+        }
         harness
             .state_mut()
             .test_set_export_save_mode_overwrite(false);
@@ -163,6 +180,20 @@ mod session_virtual_restore {
             harness.state().test_selected_path().map(|p| p.as_path()),
             Some(wav_path.as_path())
         );
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Reverse));
+        let restored_offset = harness
+            .state()
+            .test_bpm_offset_sec()
+            .expect("restored bpm offset");
+        assert!((restored_offset - 0.375).abs() < 0.0001);
+        if let Some(tab_idx) = harness.state().active_tab {
+            let tab = &harness.state().tabs[tab_idx];
+            assert!(tab.bpm_enabled);
+            assert!(tab.bpm_user_set);
+            assert!((tab.bpm_value - 128.5).abs() < 0.0001);
+        } else {
+            panic!("active tab missing after session load");
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

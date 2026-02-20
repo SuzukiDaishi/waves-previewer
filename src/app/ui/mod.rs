@@ -5,6 +5,6 @@ pub(super) mod external;
 pub(super) mod list;
 pub(super) mod tools;
 pub(super) mod topbar;
-pub(super) mod transcription_settings;
 pub(super) mod transcript;
+pub(super) mod transcription_settings;
 pub(super) mod zoo;

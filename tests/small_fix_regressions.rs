@@ -330,4 +330,85 @@ mod small_fix_regressions {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn tab_switch_during_heavy_processing_keeps_target_audio() {
+        let dir = make_temp_dir("tab_switch_heavy");
+        let long = dir.join("a_long.wav");
+        let short = dir.join("b_short.wav");
+        write_wav_32_float(&long, 48_000, 8.0);
+        write_wav_32_float(&short, 48_000, 0.7);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&long));
+        wait_for_tab_ready(&mut harness);
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(long.as_path())
+        );
+
+        assert!(harness.state_mut().test_open_tab_for_path(&short));
+        wait_for_tab_ready(&mut harness);
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(short.as_path())
+        );
+
+        harness.state_mut().test_set_mode_time_stretch();
+        harness.state_mut().test_set_playback_rate(0.5);
+
+        // Start heavy processing on long tab, then immediately switch back to short tab.
+        assert!(harness.state_mut().test_open_tab_for_path(&long));
+        harness.run_steps(1);
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(harness.state_mut().test_open_tab_for_path(&short));
+
+        let mut ready = false;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(12) {
+            harness.run_steps(1);
+            let active = harness.state().test_active_tab_path();
+            let playing = harness.state().test_playing_path().cloned();
+            let len = harness.state().test_audio_buffer_len();
+            if active.as_deref() == Some(short.as_path())
+                && playing.as_deref() == Some(short.as_path())
+                && len > 0
+                && len < 200_000
+            {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(
+            ready,
+            "target tab did not stabilize after heavy-processing switch (active={:?} playing={:?} len={})",
+            harness.state().test_active_tab_path(),
+            harness.state().test_playing_path(),
+            harness.state().test_audio_buffer_len()
+        );
+
+        // Keep running to ensure no late stale result rewinds playback to the long tab.
+        let soak_start = Instant::now();
+        while soak_start.elapsed() < Duration::from_secs(2) {
+            harness.run_steps(1);
+            assert_eq!(
+                harness.state().test_active_tab_path().as_deref(),
+                Some(short.as_path())
+            );
+            assert_eq!(
+                harness.state().test_playing_path().map(|p| p.as_path()),
+                Some(short.as_path())
+            );
+            assert!(
+                harness.state().test_audio_buffer_len() < 200_000,
+                "audio buffer length looks like long-tab content after switch"
+            );
+            std::thread::sleep(Duration::from_millis(15));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

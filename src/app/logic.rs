@@ -203,6 +203,7 @@ impl super::WavesPreviewer {
                     bpm_enabled: tab.bpm_enabled,
                     bpm_value: tab.bpm_value,
                     bpm_user_set: tab.bpm_user_set,
+                    bpm_offset_sec: tab.bpm_offset_sec,
                     snap_zero_cross: tab.snap_zero_cross,
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
@@ -253,6 +254,9 @@ impl super::WavesPreviewer {
                             self.audio.set_rate(1.0);
                         } else {
                             self.audio.set_rate(1.0);
+                            // Prime with target tab audio so tab switch never keeps old-tab content.
+                            self.audio.set_samples_channels(channels.clone());
+                            self.audio.stop();
                             self.spawn_heavy_processing_from_channels(path.to_path_buf(), channels);
                         }
                     }
@@ -290,6 +294,9 @@ impl super::WavesPreviewer {
                     self.audio.set_rate(1.0);
                 } else {
                     self.audio.set_rate(1.0);
+                    // Prime with target tab audio so tab switch never keeps old-tab content.
+                    self.audio.set_samples_channels(channels.clone());
+                    self.audio.stop();
                     self.spawn_heavy_processing_from_channels(tab_path.clone(), channels);
                 }
             }
@@ -1663,6 +1670,8 @@ impl super::WavesPreviewer {
             self.audio.stop();
             if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
                 self.active_tab = Some(idx);
+                self.debug_mark_tab_switch_start(path);
+                self.queue_tab_activation(path.to_path_buf());
                 return;
             }
             if self.tabs.len() >= crate::app::MAX_EDITOR_TABS {
@@ -1716,6 +1725,7 @@ impl super::WavesPreviewer {
                     bpm_enabled: cached.bpm_enabled,
                     bpm_value: cached.bpm_value,
                     bpm_user_set: cached.bpm_user_set,
+                    bpm_offset_sec: cached.bpm_offset_sec,
                     seek_hold: None,
                     snap_zero_cross: cached.snap_zero_cross,
                     drag_select_anchor: None,
@@ -1727,6 +1737,7 @@ impl super::WavesPreviewer {
                     active_tool_last: None,
                     preview_offset_samples: None,
                     preview_overlay: None,
+                    music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
                     plugin_fx_draft: cached.plugin_fx_draft,
                     pending_loop_unwrap: None,
                     undo_stack: Vec::new(),
@@ -1796,6 +1807,7 @@ impl super::WavesPreviewer {
                 bpm_enabled: false,
                 bpm_value: default_bpm,
                 bpm_user_set: false,
+                bpm_offset_sec: 0.0,
                 seek_hold: None,
                 snap_zero_cross: true,
                 drag_select_anchor: None,
@@ -1816,6 +1828,7 @@ impl super::WavesPreviewer {
                 active_tool_last: None,
                 preview_offset_samples: None,
                 preview_overlay: None,
+                music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
                 plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
                 pending_loop_unwrap: None,
                 undo_stack: Vec::new(),
@@ -1832,6 +1845,9 @@ impl super::WavesPreviewer {
                 }
                 _ => {
                     self.audio.set_rate(1.0);
+                    // Prime with source audio to avoid replaying previous tab content.
+                    self.audio.set_samples_channels(chs.clone());
+                    self.audio.stop();
                     self.spawn_heavy_processing_from_channels(path.to_path_buf(), chs);
                 }
             }
@@ -1848,6 +1864,8 @@ impl super::WavesPreviewer {
 
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
             self.active_tab = Some(idx);
+            self.debug_mark_tab_switch_start(path);
+            self.queue_tab_activation(path.to_path_buf());
             return;
         }
         if self.tabs.len() >= crate::app::MAX_EDITOR_TABS {
@@ -1902,6 +1920,7 @@ impl super::WavesPreviewer {
                 bpm_enabled: cached.bpm_enabled,
                 bpm_value: cached.bpm_value,
                 bpm_user_set: cached.bpm_user_set,
+                bpm_offset_sec: cached.bpm_offset_sec,
                 seek_hold: None,
                 snap_zero_cross: cached.snap_zero_cross,
                 drag_select_anchor: None,
@@ -1913,6 +1932,7 @@ impl super::WavesPreviewer {
                 active_tool_last: None,
                 preview_offset_samples: None,
                 preview_overlay: None,
+                music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
                 plugin_fx_draft: cached.plugin_fx_draft,
                 pending_loop_unwrap: None,
                 undo_stack: Vec::new(),
@@ -1974,6 +1994,7 @@ impl super::WavesPreviewer {
             bpm_enabled: false,
             bpm_value: default_bpm,
             bpm_user_set: false,
+            bpm_offset_sec: 0.0,
             seek_hold: None,
             snap_zero_cross: true,
             drag_select_anchor: None,
@@ -1994,6 +2015,7 @@ impl super::WavesPreviewer {
             active_tool_last: None,
             preview_offset_samples: None,
             preview_overlay: None,
+            music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
             plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
             pending_loop_unwrap: None,
             undo_stack: Vec::new(),

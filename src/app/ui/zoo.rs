@@ -131,7 +131,7 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let now = Instant::now();
-        let dt = (now - self.zoo_last_tick).as_secs_f32().clamp(0.0, 0.1);
+        let dt = (now - self.zoo_last_tick).as_secs_f32().clamp(0.0, 0.35);
         self.zoo_last_tick = now;
 
         let mut bpm_mul = 1.0f32;

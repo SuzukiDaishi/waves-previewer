@@ -1,0 +1,3 @@
+[submodule "vendor/signalsmith-stretch"]
+	path = vendor/signalsmith-stretch
+	url = https://github.com/colinmarc/signalsmith-stretch-rs.git

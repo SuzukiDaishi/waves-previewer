@@ -286,6 +286,28 @@ impl super::WavesPreviewer {
         }
     }
 
+    pub fn test_active_tool(&self) -> Option<ToolKind> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.active_tool)
+    }
+
+    pub fn test_set_bpm_offset_sec(&mut self, offset_sec: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.bpm_offset_sec = offset_sec;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn test_bpm_offset_sec(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.bpm_offset_sec)
+    }
+
     pub fn test_set_selection_frac(&mut self, start: f32, end: f32) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -625,6 +647,15 @@ impl super::WavesPreviewer {
         self.audio.set_loop_enabled(false);
     }
 
+    pub fn test_close_active_tab(&mut self) -> bool {
+        let Some(active_idx) = self.active_tab else {
+            return false;
+        };
+        let ctx = egui::Context::default();
+        self.close_tab_at(active_idx, &ctx);
+        true
+    }
+
     pub fn test_audio_buffer_len(&self) -> usize {
         self.audio
             .shared
@@ -758,7 +789,8 @@ impl super::WavesPreviewer {
 
     pub fn test_selected_item_transcript_language(&self) -> Option<String> {
         let path = self.test_selected_path()?;
-        self.transcript_language_for_path(path).map(|v| v.to_string())
+        self.transcript_language_for_path(path)
+            .map(|v| v.to_string())
     }
 
     pub fn test_set_export_dest_folder(&mut self, dest: Option<&Path>) {
