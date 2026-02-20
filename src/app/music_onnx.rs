@@ -2651,16 +2651,54 @@ fn hf_cache_root() -> PathBuf {
     if let Some(path) = std::env::var_os("HF_HUB_CACHE") {
         return PathBuf::from(path);
     }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !candidates.iter().any(|p| p == &path) {
+            candidates.push(path);
+        }
+    };
+
     if let Some(path) = std::env::var_os("HF_HOME") {
-        return PathBuf::from(path).join("hub");
+        push_unique(PathBuf::from(path).join("hub"));
+    }
+    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+        push_unique(PathBuf::from(path).join("huggingface").join("hub"));
     }
     if let Some(home) = std::env::var_os("USERPROFILE") {
-        return PathBuf::from(home)
-            .join(".cache")
-            .join("huggingface")
-            .join("hub");
+        push_unique(
+            PathBuf::from(home)
+                .join(".cache")
+                .join("huggingface")
+                .join("hub"),
+        );
     }
-    PathBuf::from(".")
+    if let Some(home) = std::env::var_os("HOME") {
+        push_unique(
+            PathBuf::from(home)
+                .join(".cache")
+                .join("huggingface")
+                .join("hub"),
+        );
+    }
+    if let (Some(drive), Some(path)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+    {
+        let mut home = std::ffi::OsString::from(drive);
+        home.push(path);
+        push_unique(
+            PathBuf::from(home)
+                .join(".cache")
+                .join("huggingface")
+                .join("hub"),
+        );
+    }
+
+    if let Some(existing) = candidates.iter().find(|p| p.is_dir()) {
+        return existing.clone();
+    }
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(test)]

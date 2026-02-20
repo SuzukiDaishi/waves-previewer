@@ -217,6 +217,43 @@ function Build-Args {
     return $localArgs
 }
 
+function Invoke-IsccCommand {
+    param(
+        [string]$ExePath,
+        [string[]]$ExeArgs
+    )
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    try {
+        $proc = Start-Process `
+            -FilePath $ExePath `
+            -ArgumentList $ExeArgs `
+            -Wait `
+            -PassThru `
+            -NoNewWindow `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+
+        $out = @()
+        if (Test-Path $stdoutPath) {
+            $out += Get-Content -Path $stdoutPath -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $stderrPath) {
+            $out += Get-Content -Path $stderrPath -ErrorAction SilentlyContinue
+        }
+        $exitCode = if ($null -ne $proc) { [int]$proc.ExitCode } else { 1 }
+        $text = ($out -join "`n")
+        [pscustomobject]@{
+            Output = $out
+            ExitCode = $exitCode
+            Text = $text
+        }
+    } finally {
+        Remove-Item -Path $stdoutPath -ErrorAction SilentlyContinue
+        Remove-Item -Path $stderrPath -ErrorAction SilentlyContinue
+    }
+}
+
 if (-not $BuildId) {
     $BuildId = New-BuildId
 }
@@ -247,24 +284,47 @@ Write-Host "BuildId: $BuildId"
 Write-Host "OutputDir: $OutputDir"
 
 $attempts = 0
-$maxAttempts = 3
+$maxAttempts = 5
+$usedTempOutputFallback = $false
 while ($true) {
     $attempts++
-    $output = & $iscc @args 2>&1
-    $code = $LASTEXITCODE
+    $run = Invoke-IsccCommand -ExePath $iscc -ExeArgs $args
+    $output = $run.Output
+    $code = $run.ExitCode
+    $text = $run.Text
+    $resourceUpdateError = ($text -match "Resource update error") -or ($text -match "EndUpdateResource failed")
     if ($code -eq 0) {
         if ($output) { $output | Write-Host }
         break
     }
-    if ($code -ne 2 -or $attempts -ge $maxAttempts) {
-        if ($output) { $output | Write-Host }
+    if ($output) { $output | Write-Host }
+    if (-not $resourceUpdateError -or $attempts -ge $maxAttempts) {
+        if ($resourceUpdateError) {
+            throw "ISCC failed after $attempts attempts due to resource update error (110). Try excluding installer output/temp folders from antivirus software."
+        }
         throw "ISCC failed with exit code $code"
     }
-    Write-Host "ISCC resource update failed (110). Retrying with new BuildId..."
-    Start-Sleep -Milliseconds 800
+    if (-not $usedTempOutputFallback -and $attempts -ge 2) {
+        $usedTempOutputFallback = $true
+        $OutputDir = Join-Path $env:TEMP ("neowaves_installer_" + $BuildId)
+        Write-Host "ISCC resource update failed (110). Switching OutputDir to temp path: $OutputDir"
+    } else {
+        Write-Host "ISCC resource update failed (110). Retrying with new BuildId..."
+    }
+    $delayMs = [Math]::Min(5000, 500 * [Math]::Pow(2, $attempts - 1))
+    Start-Sleep -Milliseconds ([int]$delayMs)
     $BuildId = New-BuildId
-    $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
+    if (-not $usedTempOutputFallback) {
+        $OutputDir = Join-Path $root ("out\\installer_" + $BuildId)
+    } else {
+        $OutputDir = Join-Path $env:TEMP ("neowaves_installer_" + $BuildId)
+    }
     $args = Build-Args -OutDir $OutputDir -Ver $version -Id $BuildId
+    Write-Host "Retrying ISCC ($($attempts + 1)/$maxAttempts)..."
+}
+
+if ($usedTempOutputFallback) {
+    Write-Host "Installer output fallback used. Final OutputDir: $OutputDir"
 }
 
 Write-Host "Done."

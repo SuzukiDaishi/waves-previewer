@@ -60,7 +60,9 @@ Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Ad
 Name: "assoc"; Description: "Associate .wav/.mp3/.m4a/.nwsess with {#MyAppShort}"; GroupDescription: "File associations:"; Flags: unchecked
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Run {#MyAppShort}"; Flags: nowait postinstall skipifsilent
+; Run as the original interactive user so per-user HF cache (%USERPROFILE%\.cache\huggingface\hub)
+; is resolved correctly after elevated install.
+Filename: "{app}\{#MyAppExeName}"; Description: "Run {#MyAppShort}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Registry]
 Root: HKCR; Subkey: ".wav"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssoc}"; Flags: uninsdeletevalue; Tasks: assoc

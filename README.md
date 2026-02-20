@@ -81,12 +81,15 @@ cargo run
 
 ### Installer (Windows)
 ```powershell
-cargo build --release
-"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe" installer\\NeoWaves.iss
+.\commands\build_installer.ps1
 ```
 
 出力:
-- `dist\\NeoWaves-Setup-<version>.exe`
+- `installer\\out\\installer_<buildid>\\NeoWaves-Setup-<version>-<buildid>.exe`
+
+補足:
+- `build_installer.ps1` は `ISCC` の `Resource update error ... EndUpdateResource failed (110)` を検知した場合、再試行します。
+- 再試行中に失敗が続く場合は出力先を `%TEMP%` 配下へ切り替えて継続します（最終 `OutputDir` はログに表示）。
 
 ---
 
