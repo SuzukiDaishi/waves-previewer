@@ -66,6 +66,17 @@ impl super::WavesPreviewer {
         Vec::new()
     }
 
+    #[cfg(windows)]
+    fn get_clipboard_text(&self) -> Option<String> {
+        use clipboard_win::formats::Unicode;
+        clipboard_win::get_clipboard(Unicode).ok()
+    }
+
+    #[cfg(not(windows))]
+    fn get_clipboard_text(&self) -> Option<String> {
+        None
+    }
+
     pub(super) fn copy_selected_to_clipboard(&mut self) {
         const CLIPBOARD_MARKER: &str = "neowaves://clipboard";
         let ids = self.selected_item_ids();
@@ -310,8 +321,78 @@ impl super::WavesPreviewer {
         }
     }
 
+    fn handle_effect_graph_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
+        if !self.is_effect_graph_workspace_active() {
+            return;
+        }
+        let allow = !ctx.wants_keyboard_input();
+        let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let down_c = ctx.input(|i| i.key_down(egui::Key::C));
+        let down_v = ctx.input(|i| i.key_down(egui::Key::V));
+        let mut consumed_copy_event = false;
+        let mut consumed_paste_event = false;
+        let mut paste_text: Option<String> = None;
+        if allow {
+            ctx.input_mut(|i| {
+                let mut idx = 0usize;
+                while idx < i.events.len() {
+                    match &i.events[idx] {
+                        egui::Event::Copy => {
+                            consumed_copy_event = true;
+                            i.events.remove(idx);
+                            continue;
+                        }
+                        egui::Event::Paste(text)
+                            if self.effect_graph_clipboard_text_is_supported(text) =>
+                        {
+                            consumed_paste_event = true;
+                            paste_text = Some(text.clone());
+                            i.events.remove(idx);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    idx += 1;
+                }
+            });
+        }
+        let edge_c = allow && ctrl && down_c && !self.clipboard_c_was_down;
+        let edge_v = allow && ctrl && down_v && !self.clipboard_v_was_down;
+        let consumed_copy =
+            allow && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
+        let consumed_paste =
+            allow && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+        self.clipboard_c_was_down = down_c;
+        self.clipboard_v_was_down = down_v;
+
+        if (consumed_copy_event || consumed_copy || edge_c)
+            && self.effect_graph_can_copy_selection()
+        {
+            let _ = self.effect_graph_copy_selection_to_clipboard(ctx);
+        }
+        if consumed_paste_event || consumed_paste || edge_v {
+            let clipboard_text = paste_text
+                .or_else(|| self.get_clipboard_text())
+                .filter(|text| self.effect_graph_clipboard_text_is_supported(text));
+            if let Some(text) = clipboard_text {
+                if let Err(err) = self.effect_graph_paste_from_clipboard_text(&text) {
+                    self.push_effect_graph_console(
+                        super::types::EffectGraphSeverity::Error,
+                        "clipboard",
+                        format!("paste failed: {err}"),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
     pub(super) fn handle_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
-        if self.active_tab.is_some() {
+        if self.is_effect_graph_workspace_active() {
+            self.handle_effect_graph_clipboard_hotkeys(ctx);
+            return;
+        }
+        if !self.is_list_workspace_active() {
             return;
         }
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));

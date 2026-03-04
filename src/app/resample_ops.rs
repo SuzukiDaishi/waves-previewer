@@ -103,7 +103,7 @@ impl super::WavesPreviewer {
                 }
             }
         }
-        if self.active_tab.is_none() {
+        if self.is_list_workspace_active() {
             if let Some(row_idx) = self.selected {
                 if let Some(item) = self.item_for_row(row_idx) {
                     if targets.iter().any(|p| p == &item.path) {

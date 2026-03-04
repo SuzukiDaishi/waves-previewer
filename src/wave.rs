@@ -737,6 +737,33 @@ pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: 
     out
 }
 
+// Heavy offline: speed change that changes both pitch and duration while keeping the nominal
+// sample-rate metadata unchanged.
+pub fn process_speed_offline(mono: &[f32], rate: f32) -> Vec<f32> {
+    let rate = rate.clamp(0.25, 4.0);
+    if mono.is_empty() {
+        return Vec::new();
+    }
+    if (rate - 1.0).abs() <= f32::EPSILON {
+        return mono.to_vec();
+    }
+    let out_len = ((mono.len() as f64) / (rate as f64)).ceil().max(1.0) as usize;
+    let mut out = Vec::with_capacity(out_len);
+    let last = mono.len().saturating_sub(1);
+    for i in 0..out_len {
+        let src_pos = (i as f32) * rate;
+        let i0 = src_pos.floor() as usize;
+        if i0 >= last {
+            out.push(*mono.last().unwrap_or(&0.0));
+            continue;
+        }
+        let i1 = (i0 + 1).min(last);
+        let t = (src_pos - i0 as f32).clamp(0.0, 1.0);
+        out.push(mono[i0] * (1.0 - t) + mono[i1] * t);
+    }
+    out
+}
+
 fn stretch_seek_preroll(stretch: &mut Stretch, input: &[f32], playback_rate: f32) {
     let in_lat = stretch.input_latency();
     if in_lat == 0 {

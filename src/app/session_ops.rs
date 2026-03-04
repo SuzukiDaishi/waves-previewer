@@ -13,10 +13,11 @@ use super::project::{
     project_spectrogram_from_cfg, project_tab_from_tab, project_tool_state_to_tool_state, rel_path,
     resolve_path, save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio,
     serialize_project, spectro_config_from_project, tool_kind_from_str, view_mode_from_str,
-    ProjectApp, ProjectBitDepthOverride, ProjectEdit, ProjectExportPolicy, ProjectExternalSource,
-    ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns,
-    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage,
-    ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
+    ProjectApp, ProjectAppliedEffectGraph, ProjectBitDepthOverride, ProjectEdit,
+    ProjectEffectGraphUi, ProjectExportPolicy, ProjectExternalSource, ProjectExternalState,
+    ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns, ProjectListItem,
+    ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage, ProjectVirtualItem,
+    ProjectVirtualOp, ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -473,6 +474,10 @@ impl super::WavesPreviewer {
                     .map(|path| rel_path(path, base_dir)),
             }),
             external_state: Some(external_state),
+            effect_graph_ui: Some(ProjectEffectGraphUi {
+                tab_open: self.effect_graph.workspace_open,
+                active_template_id: self.effect_graph.active_template_id.clone(),
+            }),
         };
         let spectrogram = project_spectrogram_from_cfg(&self.spectro_cfg);
 
@@ -482,12 +487,10 @@ impl super::WavesPreviewer {
             let mut preview_audio = None;
             let mut preview_tool = None;
             if tab.dirty && !tab.ch_samples.is_empty() {
-                match save_sidecar_audio(
-                    &path,
-                    idx,
-                    &tab.ch_samples,
-                    self.audio.shared.out_sample_rate,
-                ) {
+                let sidecar_sr = self
+                    .effective_sample_rate_for_path(&tab.path)
+                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                match save_sidecar_audio(&path, idx, &tab.ch_samples, sidecar_sr) {
                     Ok(p) => {
                         edited_audio = Some(p);
                     }
@@ -526,17 +529,16 @@ impl super::WavesPreviewer {
             if cached.ch_samples.is_empty() {
                 continue;
             }
-            let edited_audio = match save_sidecar_cached_audio(
-                &path,
-                idx,
-                &cached.ch_samples,
-                self.audio.shared.out_sample_rate,
-            ) {
-                Ok(p) => p,
-                Err(err) => {
-                    return Err(format!("Failed to save cached audio: {err}"));
-                }
-            };
+            let sidecar_sr = self
+                .effective_sample_rate_for_path(item_path)
+                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            let edited_audio =
+                match save_sidecar_cached_audio(&path, idx, &cached.ch_samples, sidecar_sr) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        return Err(format!("Failed to save cached audio: {err}"));
+                    }
+                };
             cached_edits.push(ProjectEdit {
                 path: rel_path(item_path, base_dir),
                 edited_audio: rel_path(&edited_audio, base_dir),
@@ -581,6 +583,13 @@ impl super::WavesPreviewer {
                 bpm_user_set: cached.bpm_user_set,
                 bpm_offset_sec: cached.bpm_offset_sec,
                 plugin_fx_draft: project_plugin_fx_draft_from_draft(&cached.plugin_fx_draft),
+                applied_effect_graph: cached.applied_effect_graph.as_ref().map(|stamp| {
+                    ProjectAppliedEffectGraph {
+                        template_id: stamp.template_id.clone(),
+                        template_name: stamp.template_name.clone(),
+                        template_updated_at_unix_ms: stamp.template_updated_at_unix_ms,
+                    }
+                }),
             });
         }
 
@@ -705,6 +714,10 @@ impl super::WavesPreviewer {
         match project.app.theme.as_str() {
             "light" => self.theme_mode = super::types::ThemeMode::Light,
             _ => self.theme_mode = super::types::ThemeMode::Dark,
+        }
+        if let Some(effect_graph_ui) = project.app.effect_graph_ui.as_ref() {
+            self.effect_graph.workspace_open = effect_graph_ui.tab_open;
+            self.effect_graph.active_template_id = effect_graph_ui.active_template_id.clone();
         }
         self.apply_spectro_config(spectro_config_from_project(&project.spectrogram));
 
@@ -1007,24 +1020,25 @@ impl super::WavesPreviewer {
         for edit in project.cached_edits.iter() {
             let path = resolve_path(&edit.path, &base_dir);
             let edited = load_sidecar_audio(&project_path, &edit.edited_audio).ok();
-            let Some((mut chans, sr, _)) = edited else {
+            let Some((chans, sr, _)) = edited else {
                 continue;
             };
-            if sr != out_sr {
-                for ch in chans.iter_mut() {
-                    *ch = self.resample_mono_with_quality(ch, sr, out_sr);
-                }
-            }
+            let sr = sr.max(1);
             let samples_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
             let mut waveform = Vec::new();
             let mono = super::WavesPreviewer::mixdown_channels(&chans, samples_len);
             crate::wave::build_minmax(&mut waveform, &mono, 2048);
+            let bits = self.effective_bits_for_path(&path).unwrap_or(32);
+            let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
+                &chans, sr, bits,
+            ));
             self.edited_cache.insert(
                 path,
                 super::types::CachedEdit {
                     ch_samples: chans,
                     samples_len,
                     waveform_minmax: waveform,
+                    display_meta,
                     dirty: edit.dirty,
                     loop_region: edit.loop_region.map(|v| (v[0], v[1])),
                     loop_region_committed: edit.loop_region.map(|v| (v[0], v[1])),
@@ -1057,6 +1071,13 @@ impl super::WavesPreviewer {
                     bpm_value: edit.bpm_value,
                     bpm_user_set: edit.bpm_user_set,
                     bpm_offset_sec: edit.bpm_offset_sec,
+                    applied_effect_graph: edit.applied_effect_graph.as_ref().map(|stamp| {
+                        super::types::AppliedEffectGraphStamp {
+                            template_id: stamp.template_id.clone(),
+                            template_name: stamp.template_name.clone(),
+                            template_updated_at_unix_ms: stamp.template_updated_at_unix_ms,
+                        }
+                    }),
                 },
             );
         }
@@ -1068,24 +1089,25 @@ impl super::WavesPreviewer {
             } else {
                 None
             };
-            if let Some((mut chans, sr, _)) = edited {
-                if sr != out_sr {
-                    for ch in chans.iter_mut() {
-                        *ch = self.resample_mono_with_quality(ch, sr, out_sr);
-                    }
-                }
+            if let Some((chans, sr, _)) = edited {
+                let sr = sr.max(1);
                 let mut waveform = Vec::new();
                 let mono = super::WavesPreviewer::mixdown_channels(
                     &chans,
                     chans.get(0).map(|c| c.len()).unwrap_or(0),
                 );
                 crate::wave::build_minmax(&mut waveform, &mono, 2048);
+                let bits = self.effective_bits_for_path(&tab_path).unwrap_or(32);
+                let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
+                    &chans, sr, bits,
+                ));
                 self.edited_cache.insert(
                     tab_path.clone(),
                     super::types::CachedEdit {
                         ch_samples: chans,
                         samples_len: mono.len(),
                         waveform_minmax: waveform,
+                        display_meta,
                         dirty: tab.dirty,
                         loop_region: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_region_committed: tab.loop_region.map(|v| (v[0], v[1])),
@@ -1118,6 +1140,7 @@ impl super::WavesPreviewer {
                         bpm_value: tab.bpm_value,
                         bpm_user_set: tab.bpm_user_set,
                         bpm_offset_sec: tab.bpm_offset_sec,
+                        applied_effect_graph: None,
                     },
                 );
             }
@@ -1240,6 +1263,26 @@ impl super::WavesPreviewer {
                 self.selected_multi.insert(row);
                 self.select_anchor = Some(row);
             }
+        }
+        self.load_effect_graph_library();
+        if let Some(template_id) = self.effect_graph.active_template_id.clone() {
+            if self.effect_graph_entry_by_id(&template_id).is_some() {
+                let _ = self.load_effect_graph_template_into_draft(&template_id);
+            } else if self.effect_graph.workspace_open {
+                self.push_effect_graph_console(
+                    super::types::EffectGraphSeverity::Warning,
+                    "session",
+                    format!("missing effect graph template: {template_id}"),
+                    None,
+                );
+            }
+        }
+        if self.effect_graph.workspace_open {
+            self.open_effect_graph_workspace();
+        } else if self.active_tab.is_some() {
+            self.workspace_view = super::types::WorkspaceView::Editor;
+        } else {
+            self.workspace_view = super::types::WorkspaceView::List;
         }
         Ok(())
     }

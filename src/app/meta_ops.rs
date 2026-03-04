@@ -212,7 +212,7 @@ impl super::WavesPreviewer {
         let need_prefetch = self.item_bg_mode != crate::app::types::ItemBgMode::Standard
             || sort_meta_prefetch
             || sort_transcript_prefetch;
-        if self.active_tab.is_some() || self.files.is_empty() || !need_prefetch {
+        if !self.is_list_workspace_active() || self.files.is_empty() || !need_prefetch {
             self.list_meta_prefetch_cursor = 0;
             return;
         }

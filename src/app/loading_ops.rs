@@ -57,7 +57,7 @@ impl super::WavesPreviewer {
             }
             self.processing = None;
             let should_resume_list_play = should_apply_audio
-                && self.active_tab.is_none()
+                && self.is_list_workspace_active()
                 && self.selected_path_buf().as_ref() == Some(&path)
                 && (autoplay_when_ready || self.list_play_pending);
             if should_resume_list_play {

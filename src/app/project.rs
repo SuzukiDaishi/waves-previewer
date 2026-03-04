@@ -141,6 +141,8 @@ pub struct ProjectEdit {
     pub bpm_offset_sec: f32,
     #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
+    #[serde(default)]
+    pub applied_effect_graph: Option<ProjectAppliedEffectGraph>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -159,6 +161,26 @@ pub struct ProjectApp {
     pub export_policy: Option<ProjectExportPolicy>,
     #[serde(default)]
     pub external_state: Option<ProjectExternalState>,
+    #[serde(default)]
+    pub effect_graph_ui: Option<ProjectEffectGraphUi>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectEffectGraphUi {
+    #[serde(default)]
+    pub tab_open: bool,
+    #[serde(default)]
+    pub active_template_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectAppliedEffectGraph {
+    #[serde(default)]
+    pub template_id: String,
+    #[serde(default)]
+    pub template_name: String,
+    #[serde(default)]
+    pub template_updated_at_unix_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -925,7 +947,9 @@ impl super::WavesPreviewer {
         self.audio.stop();
         self.tabs.clear();
         self.active_tab = None;
+        self.workspace_view = super::types::WorkspaceView::List;
         self.edited_cache.clear();
+        self.effect_graph = super::types::EffectGraphState::default();
         self.pending_activate_path = None;
         self.leave_intent = None;
         self.show_leave_prompt = false;

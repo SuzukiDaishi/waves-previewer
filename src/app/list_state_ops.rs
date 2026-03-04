@@ -57,8 +57,15 @@ impl WavesPreviewer {
             .unwrap_or(false)
     }
 
+    pub(super) fn effective_display_meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
+        self.edited_cache
+            .get(path)
+            .and_then(|cached| cached.display_meta.as_ref())
+            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_ref()))
+    }
+
     pub(super) fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
-        self.item_for_path(path).and_then(|item| item.meta.as_ref())
+        self.effective_display_meta_for_path(path)
     }
 
     pub(super) fn effective_sample_rate_for_path(&self, path: &Path) -> Option<u32> {

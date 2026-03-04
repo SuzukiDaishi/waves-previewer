@@ -133,6 +133,10 @@ impl super::WavesPreviewer {
             };
             let p = item.path.clone();
             let db = item.pending_gain_db;
+            let effective_sr = self
+                .effective_sample_rate_for_path(&p)
+                .unwrap_or(out_sr)
+                .max(1);
             let path_format_override = self
                 .format_override
                 .get(&p)
@@ -256,9 +260,9 @@ impl super::WavesPreviewer {
                                 && tab.ch_samples[0].len() > 0;
                             if tab_ready {
                                 ch_samples = Some(tab.ch_samples.clone());
-                                let target_sr = sr_override.unwrap_or(out_sr);
-                                let scaled =
-                                    (tab.samples_len as f64) * (target_sr as f64 / out_sr as f64);
+                                let target_sr = sr_override.unwrap_or(effective_sr);
+                                let scaled = (tab.samples_len as f64)
+                                    * (target_sr as f64 / effective_sr as f64);
                                 max_file_samples = Some(scaled.round().max(0.0) as u64);
                             } else {
                                 max_file_samples = self
@@ -306,9 +310,9 @@ impl super::WavesPreviewer {
                                 && cached.ch_samples[0].len() > 0;
                             if cache_ready {
                                 ch_samples = Some(cached.ch_samples.clone());
-                                let target_sr = sr_override.unwrap_or(out_sr);
+                                let target_sr = sr_override.unwrap_or(effective_sr);
                                 let scaled = (cached.samples_len as f64)
-                                    * (target_sr as f64 / out_sr as f64);
+                                    * (target_sr as f64 / effective_sr as f64);
                                 max_file_samples = Some(scaled.round().max(0.0) as u64);
                             } else {
                                 max_file_samples = self
@@ -348,7 +352,7 @@ impl super::WavesPreviewer {
                     let audio = ch_samples
                         .map(crate::audio::AudioBuffer::from_channels)
                         .map(std::sync::Arc::new);
-                    let target_sr = sr_override.unwrap_or(out_sr).max(1);
+                    let target_sr = sr_override.unwrap_or(effective_sr).max(1);
                     let file_sr = if write_audio {
                         target_sr
                     } else {

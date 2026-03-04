@@ -295,7 +295,7 @@ impl super::WavesPreviewer {
             // Prioritize interactive decode over speculative prefetch.
             return;
         }
-        if self.active_tab.is_some() || self.scan_in_progress || self.files.is_empty() {
+        if !self.is_list_workspace_active() || self.scan_in_progress || self.files.is_empty() {
             return;
         }
         if self.list_preview_prefetch_inflight.len()
@@ -412,7 +412,7 @@ impl super::WavesPreviewer {
                             },
                         );
                         self.debug_mark_list_preview_ready(&res.path);
-                        if self.active_tab.is_none()
+                        if self.is_list_workspace_active()
                             && self.playing_path.as_ref() == Some(&res.path)
                         {
                             self.audio.replace_samples_keep_pos(audio);
@@ -474,7 +474,7 @@ impl super::WavesPreviewer {
                     .map(|p| p.as_path() == path.as_path())
                     .unwrap_or(false);
                 self.list_preview_pending_path = None;
-                if self.active_tab.is_none()
+                if self.is_list_workspace_active()
                     && selected_matches
                     && !self.is_virtual_path(&path)
                     && path.is_file()

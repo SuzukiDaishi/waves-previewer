@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use super::types::{
-    ChannelView, EditorDecodeResult, EditorDecodeState, EditorTab, ProcessingResult,
-    ProcessingState, RateMode, ScanMessage, SortDir, SortKey,
+    ChannelView, EditorDecodeResult, EditorDecodeStage, EditorDecodeState, EditorDecodeUiStatus,
+    EditorTab, ProcessingResult, ProcessingState, RateMode, ScanMessage, SortDir, SortKey,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 0.35;
@@ -16,6 +16,8 @@ const LIST_PLAY_PREFIX_SECS_BASE: f32 = 0.6;
 const LIST_PLAY_PREFIX_SECS_COMPRESSED_BASE: f32 = 1.2;
 const LIST_PLAY_PREFIX_SECS_MIN: f32 = 0.25;
 const EDITOR_PREVIEW_PREFIX_SECS: f32 = 8.0;
+const EDITOR_PREVIEW_PREFIX_SECS_COMPRESSED: f32 = 0.8;
+const EDITOR_PROGRESSIVE_EMIT_SECS_COMPRESSED: f32 = 0.0;
 
 impl super::WavesPreviewer {
     fn option_num_order(a: Option<f32>, b: Option<f32>, dir: SortDir) -> std::cmp::Ordering {
@@ -102,6 +104,82 @@ impl super::WavesPreviewer {
         base
     }
 
+    fn is_progressive_editor_decode_path(path: &Path) -> bool {
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("mp3") || s.eq_ignore_ascii_case("ogg"))
+            .unwrap_or(false)
+    }
+
+    fn process_editor_decode_channels(
+        mut chans: Vec<Vec<f32>>,
+        in_sr: u32,
+        out_sr: u32,
+        target_sr: Option<u32>,
+        bit_depth: Option<crate::wave::WavBitDepth>,
+        resample_quality: crate::wave::ResampleQuality,
+    ) -> Vec<Vec<f32>> {
+        if let Some(target) = target_sr {
+            let target = target.max(1);
+            if in_sr != target {
+                for c in chans.iter_mut() {
+                    *c = crate::wave::resample_quality(c, in_sr, target, resample_quality);
+                }
+            }
+            if target != out_sr {
+                for c in chans.iter_mut() {
+                    *c = crate::wave::resample_quality(c, target, out_sr, resample_quality);
+                }
+            }
+        } else if in_sr != out_sr {
+            for c in chans.iter_mut() {
+                *c = crate::wave::resample_quality(c, in_sr, out_sr, resample_quality);
+            }
+        }
+        if let Some(depth) = bit_depth {
+            crate::wave::quantize_channels_in_place(&mut chans, depth);
+        }
+        chans
+    }
+
+    fn estimate_editor_total_frames(&self, path: &Path, out_sr: u32) -> Option<usize> {
+        let secs = self
+            .meta_for_path(path)
+            .and_then(|meta| meta.duration_secs)
+            .filter(|v| v.is_finite() && *v > 0.0)?;
+        Some(((secs * out_sr.max(1) as f32).round() as usize).max(1))
+    }
+
+    pub(crate) fn editor_decode_ui_status(
+        &self,
+        path_filter: Option<&Path>,
+    ) -> Option<EditorDecodeUiStatus> {
+        let state = self.editor_decode_state.as_ref()?;
+        if let Some(path) = path_filter {
+            if state.path != path {
+                return None;
+            }
+        }
+        let message = if state.partial_ready {
+            "Loading full audio"
+        } else {
+            "Decoding preview"
+        };
+        let progress = if let Some(total) = state.estimated_total_frames.filter(|v| *v > 0) {
+            let ratio = (state.decoded_frames as f32 / total as f32).clamp(0.0, 1.0);
+            ratio.min(0.97)
+        } else if state.partial_ready || matches!(state.stage, EditorDecodeStage::StreamingFull) {
+            0.80
+        } else {
+            0.15
+        };
+        Some(EditorDecodeUiStatus {
+            message: message.to_string(),
+            progress,
+            show_percentage: true,
+        })
+    }
+
     fn mixdown_channels_mono(chs: &[Vec<f32>], len: usize) -> Vec<f32> {
         if len == 0 {
             return Vec::new();
@@ -181,6 +259,11 @@ impl super::WavesPreviewer {
                     ch_samples: tab.ch_samples.clone(),
                     samples_len: tab.samples_len,
                     waveform_minmax: waveform,
+                    display_meta: Some(Self::build_meta_from_audio(
+                        &tab.ch_samples,
+                        self.audio.shared.out_sample_rate.max(1),
+                        self.effective_bits_for_path(&tab.path).unwrap_or(32),
+                    )),
                     dirty: tab.dirty,
                     loop_region: tab.loop_region,
                     loop_region_committed: tab.loop_region_committed,
@@ -209,6 +292,7 @@ impl super::WavesPreviewer {
                     active_tool: tab.active_tool,
                     plugin_fx_draft: tab.plugin_fx_draft.clone(),
                     show_waveform_overlay: tab.show_waveform_overlay,
+                    applied_effect_graph: None,
                 },
             )
         };
@@ -692,7 +776,7 @@ impl super::WavesPreviewer {
                     self.reset_tab_from_disk(idx, update_audio);
                 }
             }
-            if self.active_tab.is_none() && self.playing_path.as_ref() == Some(p) {
+            if self.is_list_workspace_active() && self.playing_path.as_ref() == Some(p) {
                 reload_playing = true;
             }
         }
@@ -1048,7 +1132,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn force_load_selected_list_preview_for_play(&mut self) -> bool {
-        if self.active_tab.is_some() {
+        if !self.is_list_workspace_active() {
             return false;
         }
         let selected_row = self.selected;
@@ -1187,11 +1271,79 @@ impl super::WavesPreviewer {
             .copied()
             .filter(|v| *v > 0);
         let bit_depth = self.bit_depth_override.get(&path).copied();
+        let estimated_total_frames = self.estimate_editor_total_frames(&path, out_sr);
+        let use_progressive = Self::is_progressive_editor_decode_path(&path);
+        self.debug_log(format!(
+            "editor decode spawn: {} strategy={} out_sr={} target_sr={:?} bits={:?} est_frames={:?}",
+            path.display(),
+            if use_progressive { "progressive" } else { "prefix+full" },
+            out_sr,
+            target_sr,
+            bit_depth,
+            estimated_total_frames
+        ));
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_thread = cancel.clone();
         let path_for_thread = path.clone();
         let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
         std::thread::spawn(move || {
+            if use_progressive {
+                let mut partial_emitted = false;
+                let progressive = crate::audio_io::decode_audio_multi_progressive(
+                    &path_for_thread,
+                    EDITOR_PREVIEW_PREFIX_SECS_COMPRESSED,
+                    EDITOR_PROGRESSIVE_EMIT_SECS_COMPRESSED,
+                    || cancel_thread.load(Ordering::Relaxed),
+                    |chans, in_sr, is_final| {
+                        if cancel_thread.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                        let stage = if partial_emitted {
+                            EditorDecodeStage::StreamingFull
+                        } else {
+                            EditorDecodeStage::Preview
+                        };
+                        let chans = Self::process_editor_decode_channels(
+                            chans,
+                            in_sr,
+                            out_sr,
+                            target_sr,
+                            bit_depth,
+                            resample_quality,
+                        );
+                        let decoded_frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+                        let sent = tx
+                            .send(EditorDecodeResult {
+                                path: path_for_thread.clone(),
+                                channels: chans,
+                                is_final,
+                                job_id,
+                                error: None,
+                                stage,
+                                decoded_frames,
+                            })
+                            .is_ok();
+                        if !is_final {
+                            partial_emitted = true;
+                        }
+                        sent
+                    },
+                );
+                if let Err(err) = progressive {
+                    if !cancel_thread.load(Ordering::Relaxed) {
+                        let _ = tx.send(EditorDecodeResult {
+                            path: path_for_thread,
+                            channels: Vec::new(),
+                            is_final: true,
+                            job_id,
+                            error: Some(err.to_string()),
+                            stage: EditorDecodeStage::StreamingFull,
+                            decoded_frames: 0,
+                        });
+                    }
+                }
+                return;
+            }
             let prefix = crate::audio_io::decode_audio_multi_prefix(
                 &path_for_thread,
                 EDITOR_PREVIEW_PREFIX_SECS,
@@ -1205,6 +1357,8 @@ impl super::WavesPreviewer {
                         is_final: true,
                         job_id,
                         error: Some(err.to_string()),
+                        stage: EditorDecodeStage::Preview,
+                        decoded_frames: 0,
                     });
                     return;
                 }
@@ -1212,32 +1366,23 @@ impl super::WavesPreviewer {
             if cancel_thread.load(Ordering::Relaxed) {
                 return;
             }
-            if let Some(target) = target_sr {
-                let target = target.max(1);
-                if in_sr != target {
-                    for c in chans.iter_mut() {
-                        *c = crate::wave::resample_quality(c, in_sr, target, resample_quality);
-                    }
-                }
-                if target != out_sr {
-                    for c in chans.iter_mut() {
-                        *c = crate::wave::resample_quality(c, target, out_sr, resample_quality);
-                    }
-                }
-            } else if in_sr != out_sr {
-                for c in chans.iter_mut() {
-                    *c = crate::wave::resample_quality(c, in_sr, out_sr, resample_quality);
-                }
-            }
-            if let Some(depth) = bit_depth {
-                crate::wave::quantize_channels_in_place(&mut chans, depth);
-            }
+            chans = Self::process_editor_decode_channels(
+                chans,
+                in_sr,
+                out_sr,
+                target_sr,
+                bit_depth,
+                resample_quality,
+            );
+            let decoded_frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
             let _ = tx.send(EditorDecodeResult {
                 path: path_for_thread.clone(),
                 channels: chans,
                 is_final: !truncated,
                 job_id,
                 error: None,
+                stage: EditorDecodeStage::Preview,
+                decoded_frames,
             });
             if !truncated || cancel_thread.load(Ordering::Relaxed) {
                 return;
@@ -1252,6 +1397,8 @@ impl super::WavesPreviewer {
                         is_final: true,
                         job_id,
                         error: Some(err.to_string()),
+                        stage: EditorDecodeStage::StreamingFull,
+                        decoded_frames: 0,
                     });
                     return;
                 }
@@ -1259,35 +1406,26 @@ impl super::WavesPreviewer {
             if cancel_thread.load(Ordering::Relaxed) {
                 return;
             }
-            if let Some(target) = target_sr {
-                let target = target.max(1);
-                if in_sr != target {
-                    for c in chans.iter_mut() {
-                        *c = crate::wave::resample_quality(c, in_sr, target, resample_quality);
-                    }
-                }
-                if target != out_sr {
-                    for c in chans.iter_mut() {
-                        *c = crate::wave::resample_quality(c, target, out_sr, resample_quality);
-                    }
-                }
-            } else if in_sr != out_sr {
-                for c in chans.iter_mut() {
-                    *c = crate::wave::resample_quality(c, in_sr, out_sr, resample_quality);
-                }
-            }
-            if let Some(depth) = bit_depth {
-                crate::wave::quantize_channels_in_place(&mut chans, depth);
-            }
+            chans = Self::process_editor_decode_channels(
+                chans,
+                in_sr,
+                out_sr,
+                target_sr,
+                bit_depth,
+                resample_quality,
+            );
             if cancel_thread.load(Ordering::Relaxed) {
                 return;
             }
+            let decoded_frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
             let _ = tx.send(EditorDecodeResult {
                 path: path_for_thread,
                 channels: chans,
                 is_final: true,
                 job_id,
                 error: None,
+                stage: EditorDecodeStage::StreamingFull,
+                decoded_frames,
             });
         });
         self.editor_decode_state = Some(EditorDecodeState {
@@ -1297,6 +1435,9 @@ impl super::WavesPreviewer {
             cancel,
             job_id,
             partial_ready: false,
+            stage: EditorDecodeStage::Preview,
+            decoded_frames: 0,
+            estimated_total_frames,
         });
     }
 
@@ -1308,6 +1449,8 @@ impl super::WavesPreviewer {
         let mut decode_done = false;
         let mut marker_updates: Vec<(usize, PathBuf)> = Vec::new();
         let mut spectro_reset_paths: Vec<PathBuf> = Vec::new();
+        let mut decode_partial_events: Vec<(PathBuf, usize, EditorDecodeStage)> = Vec::new();
+        let mut decode_final_events: Vec<(PathBuf, usize)> = Vec::new();
         if let Some(state) = &mut self.editor_decode_state {
             while let Ok(res) = state.rx.try_recv() {
                 if res.job_id != state.job_id {
@@ -1323,6 +1466,8 @@ impl super::WavesPreviewer {
                     decode_done = true;
                     continue;
                 }
+                state.stage = res.stage;
+                state.decoded_frames = res.decoded_frames;
                 if let Some(idx) = self.tabs.iter().position(|t| t.path == res.path) {
                     if let Some(tab) = self.tabs.get_mut(idx) {
                         let had_preview =
@@ -1334,6 +1479,13 @@ impl super::WavesPreviewer {
                         let old_spp = tab.samples_per_px;
                         tab.ch_samples = res.channels;
                         tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                        if tab.samples_len > 0 {
+                            let mono =
+                                Self::mixdown_channels_mono(&tab.ch_samples, tab.samples_len);
+                            crate::wave::build_minmax(&mut tab.waveform_minmax, &mono, 2048);
+                        } else {
+                            tab.waveform_minmax.clear();
+                        }
                         if tab.samples_len != old_len {
                             spectro_reset_paths.push(tab.path.clone());
                         }
@@ -1365,11 +1517,19 @@ impl super::WavesPreviewer {
                     }
                 }
                 if res.is_final {
+                    decode_final_events.push((res.path.clone(), res.decoded_frames));
                     decode_done = true;
                 } else {
+                    decode_partial_events.push((res.path.clone(), res.decoded_frames, res.stage));
                     state.partial_ready = true;
                 }
             }
+        }
+        for (path, decoded_frames, stage) in decode_partial_events {
+            self.debug_mark_editor_open_partial(&path, decoded_frames, stage);
+        }
+        for (path, decoded_frames) in decode_final_events {
+            self.debug_mark_editor_open_final(&path, decoded_frames);
         }
         for path in spectro_reset_paths {
             self.cancel_spectrogram_for_path(&path);
@@ -1422,7 +1582,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn nudge_list_selection(&mut self, delta: isize, auto_scroll: bool) -> bool {
-        if self.active_tab.is_some() || self.files.is_empty() {
+        if !self.is_list_workspace_active() || self.files.is_empty() {
             return false;
         }
         let len = self.files.len();
@@ -1669,6 +1829,7 @@ impl super::WavesPreviewer {
         if self.is_virtual_path(path) {
             self.audio.stop();
             if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
+                self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(idx);
                 self.debug_mark_tab_switch_start(path);
                 self.queue_tab_activation(path.to_path_buf());
@@ -1745,6 +1906,7 @@ impl super::WavesPreviewer {
                     redo_stack: Vec::new(),
                     redo_bytes: 0,
                 });
+                self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.playing_path = Some(path.to_path_buf());
                 self.apply_dirty_tab_audio_with_mode(path);
@@ -1836,6 +1998,7 @@ impl super::WavesPreviewer {
                 redo_stack: Vec::new(),
                 redo_bytes: 0,
             });
+            self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
             match self.mode {
@@ -1863,6 +2026,7 @@ impl super::WavesPreviewer {
         self.audio.stop();
 
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
+            self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(idx);
             self.debug_mark_tab_switch_start(path);
             self.queue_tab_activation(path.to_path_buf());
@@ -1940,6 +2104,7 @@ impl super::WavesPreviewer {
                 redo_stack: Vec::new(),
                 redo_bytes: 0,
             });
+            self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
             self.apply_dirty_tab_audio_with_mode(path);
@@ -2023,6 +2188,7 @@ impl super::WavesPreviewer {
             redo_stack: Vec::new(),
             redo_bytes: 0,
         });
+        self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);
         self.playing_path = Some(path.to_path_buf());
         match self.mode {
@@ -2033,6 +2199,7 @@ impl super::WavesPreviewer {
         self.audio.stop();
         self.apply_effective_volume();
         if !decode_failed {
+            self.debug_mark_editor_open_start(path);
             self.spawn_editor_decode(path.to_path_buf());
         }
     }

@@ -32,6 +32,29 @@ impl crate::app::WavesPreviewer {
             self.trigger_save_selected();
             ui.close();
         }
+        let effect_targets = selected.clone();
+        ui.menu_button("Effect", |ui| {
+            let entries = self.effect_graph.library.entries.clone();
+            if entries.is_empty() {
+                ui.label("No templates");
+            }
+            for entry in entries {
+                let resp = ui.add_enabled(entry.valid, egui::Button::new(entry.name.clone()));
+                if resp.clicked() {
+                    if let Err(err) = self
+                        .apply_effect_graph_template_to_paths(&entry.template_id, &effect_targets)
+                    {
+                        self.push_effect_graph_console(
+                            crate::app::types::EffectGraphSeverity::Error,
+                            "apply",
+                            err,
+                            None,
+                        );
+                    }
+                    ui.close();
+                }
+            }
+        });
         let transcript_targets: Vec<_> = selected
             .iter()
             .filter(|path| {
@@ -253,7 +276,7 @@ impl crate::app::WavesPreviewer {
         let _ = focus_resp;
         let mut list_has_focus = list_focus_now || self.list_has_focus;
         if !list_has_focus
-            && self.active_tab.is_none()
+            && self.is_list_workspace_active()
             && self.selected.is_some()
             && !self.search_has_focus
             && allow_focus_reclaim
@@ -266,11 +289,11 @@ impl crate::app::WavesPreviewer {
         // Keyboard navigation & per-file gain adjust in list view
         // Do not gate on non-list text focus here: Up/Down must always recover list navigation
         // in list mode (e.g. after DragValue text-entry focus in topbar/list cells).
-        let allow_list_keys = self.active_tab.is_none()
+        let allow_list_keys = self.is_list_workspace_active()
             && !self.files.is_empty()
             && !search_focused
             && !rename_modal_open;
-        if self.debug.cfg.enabled && self.active_tab.is_none() && !self.files.is_empty() {
+        if self.debug.cfg.enabled && self.is_list_workspace_active() && !self.files.is_empty() {
             let nav_key_pressed = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
                     || i.key_pressed(egui::Key::ArrowUp)
@@ -398,7 +421,7 @@ impl crate::app::WavesPreviewer {
         } else {
             false
         };
-        if self.active_tab.is_none() && !self.files.is_empty() && allow_list_keys {
+        if self.is_list_workspace_active() && !self.files.is_empty() && allow_list_keys {
             if pressed_ctrl_a
                 || pressed_home
                 || pressed_end

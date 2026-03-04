@@ -5,7 +5,252 @@ use crate::app::{helpers::*, types::*, LIVE_PREVIEW_SAMPLE_LIMIT};
 use crate::wave::build_minmax;
 use egui::*;
 
+struct LoopSeamPreview {
+    raw_left: Vec<f32>,
+    raw_right: Vec<f32>,
+    blended_left: Option<Vec<f32>>,
+    blended_right: Option<Vec<f32>>,
+    sample_rate: u32,
+    effective_xfade_samples: usize,
+}
+
 impl crate::app::WavesPreviewer {
+    fn build_minmax_from_peaks(out: &mut Vec<(f32, f32)>, peaks: &[(f32, f32)], bins: usize) {
+        out.clear();
+        if peaks.is_empty() || bins == 0 {
+            return;
+        }
+        let len = peaks.len();
+        let step = (len as f32 / bins as f32).max(1.0);
+        let mut pos = 0.0f32;
+        for _ in 0..bins {
+            let start = pos as usize;
+            let end = ((pos + step) as usize).min(len);
+            if start >= end {
+                out.push((0.0, 0.0));
+            } else {
+                let mut mn = f32::INFINITY;
+                let mut mx = f32::NEG_INFINITY;
+                for &(a, b) in &peaks[start..end] {
+                    mn = mn.min(a);
+                    mx = mx.max(b);
+                }
+                out.push(if mn.is_finite() && mx.is_finite() {
+                    (mn, mx)
+                } else {
+                    (0.0, 0.0)
+                });
+            }
+            pos += step;
+            if (pos as usize) >= len {
+                break;
+            }
+        }
+    }
+
+    fn build_minmax_from_peak_range(
+        out: &mut Vec<(f32, f32)>,
+        peaks: &[(f32, f32)],
+        bins: usize,
+        total_samples: usize,
+        start_sample: usize,
+        end_sample: usize,
+    ) {
+        out.clear();
+        if peaks.is_empty() || bins == 0 || total_samples == 0 || end_sample <= start_sample {
+            return;
+        }
+        let total = total_samples as f32;
+        let len = peaks.len();
+        let start_peak = (((start_sample as f32) / total) * len as f32).floor() as usize;
+        let mut end_peak = (((end_sample as f32) / total) * len as f32).ceil() as usize;
+        let start_peak = start_peak.min(len.saturating_sub(1));
+        end_peak = end_peak.clamp(start_peak.saturating_add(1), len);
+        Self::build_minmax_from_peaks(out, &peaks[start_peak..end_peak], bins);
+    }
+
+    fn build_loop_seam_preview(tab: &EditorTab, sample_rate: u32) -> Option<LoopSeamPreview> {
+        if tab.active_tool != ToolKind::LoopEdit {
+            return None;
+        }
+        let (a0, b0) = tab.loop_region?;
+        let (start, end) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+        if end <= start || tab.ch_samples.is_empty() {
+            return None;
+        }
+        let available_len = tab.ch_samples.iter().map(|ch| ch.len()).min().unwrap_or(0);
+        if available_len == 0 || start >= available_len {
+            return None;
+        }
+        let mut mono = vec![0.0f32; available_len];
+        let inv_channels = 1.0 / tab.ch_samples.len().max(1) as f32;
+        for ch in &tab.ch_samples {
+            for (dst, &sample) in mono.iter_mut().zip(ch.iter().take(available_len)) {
+                *dst += sample * inv_channels;
+            }
+        }
+        let sr = sample_rate.max(1);
+        let effective_xfade_samples =
+            Self::effective_loop_xfade_samples(start, end, available_len, tab.loop_xfade_samples);
+        let base_side_samples = ((sr as f32) * 0.12).round() as usize;
+        let side_samples = base_side_samples
+            .max(effective_xfade_samples.saturating_mul(2))
+            .clamp(256, 16_384);
+        let clamped_end = end.min(available_len);
+        let left_start = clamped_end.saturating_sub(side_samples);
+        let right_end = start.saturating_add(side_samples).min(available_len);
+        let raw_left = mono[left_start..clamped_end].to_vec();
+        let raw_right = mono[start..right_end].to_vec();
+        if raw_left.is_empty() && raw_right.is_empty() {
+            return None;
+        }
+        let xfade = effective_xfade_samples
+            .min(raw_left.len())
+            .min(raw_right.len());
+        let (blended_left, blended_right) = if xfade > 0 {
+            let mut left = raw_left.clone();
+            let mut right = raw_right.clone();
+            let denom = (xfade.saturating_sub(1)).max(1) as f32;
+            let left_base = left.len().saturating_sub(xfade);
+            for i in 0..xfade {
+                let t = (i as f32) / denom;
+                let (w_out, w_in) = match tab.loop_xfade_shape {
+                    LoopXfadeShape::EqualPower => {
+                        let ang = core::f32::consts::FRAC_PI_2 * t;
+                        (ang.cos(), ang.sin())
+                    }
+                    LoopXfadeShape::Linear => (1.0 - t, t),
+                };
+                let mixed = left[left_base + i] * w_out + right[i] * w_in;
+                left[left_base + i] = mixed;
+                right[i] = mixed;
+            }
+            (Some(left), Some(right))
+        } else {
+            (None, None)
+        };
+        Some(LoopSeamPreview {
+            raw_left,
+            raw_right,
+            blended_left,
+            blended_right,
+            sample_rate: sr,
+            effective_xfade_samples,
+        })
+    }
+
+    fn draw_loop_seam_preview(ui: &mut egui::Ui, preview: &LoopSeamPreview) {
+        let desired = egui::vec2(ui.available_width().max(120.0), 84.0);
+        let (resp, painter) = ui.allocate_painter(desired, Sense::hover());
+        let rect = resp.rect;
+        painter.rect_filled(rect, 6.0, Color32::from_rgb(15, 18, 24));
+        painter.rect_stroke(
+            rect,
+            6.0,
+            Stroke::new(1.0, Color32::from_rgb(52, 62, 78)),
+            egui::StrokeKind::Outside,
+        );
+        let wave_rect = rect.shrink2(egui::vec2(10.0, 8.0));
+        let wave_rect = egui::Rect::from_min_max(
+            wave_rect.min,
+            egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
+        );
+        let footer_y = rect.bottom() - 10.0;
+        let center_y = wave_rect.center().y;
+        let amp = wave_rect.height() * 0.42;
+        let seam_x = wave_rect.center().x;
+        let half_gap = 6.0;
+        let left_rect = egui::Rect::from_min_max(
+            wave_rect.min,
+            egui::pos2(seam_x - half_gap, wave_rect.max.y),
+        );
+        let right_rect = egui::Rect::from_min_max(
+            egui::pos2(seam_x + half_gap, wave_rect.min.y),
+            wave_rect.max,
+        );
+        painter.line_segment(
+            [
+                egui::pos2(wave_rect.left(), center_y),
+                egui::pos2(wave_rect.right(), center_y),
+            ],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 36)),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(seam_x, wave_rect.top()),
+                egui::pos2(seam_x, wave_rect.bottom()),
+            ],
+            Stroke::new(1.5, Color32::from_rgb(255, 196, 72)),
+        );
+        let draw_half = |painter: &egui::Painter,
+                         samples: &[f32],
+                         target_rect: egui::Rect,
+                         stroke: Stroke,
+                         stem_col: Color32| {
+            let bins = target_rect.width().round().max(8.0) as usize;
+            let mut tmp = Vec::new();
+            build_minmax(&mut tmp, samples, bins);
+            if tmp.is_empty() {
+                return;
+            }
+            let denom = (tmp.len().saturating_sub(1)).max(1) as f32;
+            let mut points = Vec::with_capacity(tmp.len());
+            for (i, (mn, mx)) in tmp.iter().enumerate() {
+                let x = egui::lerp(target_rect.x_range(), i as f32 / denom);
+                let y_min = center_y - mn.clamp(-1.0, 1.0) * amp;
+                let y_max = center_y - mx.clamp(-1.0, 1.0) * amp;
+                painter.line_segment(
+                    [egui::pos2(x, y_min), egui::pos2(x, y_max)],
+                    Stroke::new(1.0, stem_col),
+                );
+                points.push(egui::pos2(
+                    x,
+                    center_y - ((mn + mx) * 0.5).clamp(-1.0, 1.0) * amp,
+                ));
+            }
+            if points.len() >= 2 {
+                painter.add(egui::Shape::line(points, stroke));
+            }
+        };
+        let raw_stem = Color32::from_rgba_unmultiplied(112, 160, 255, 48);
+        let raw_line = Stroke::new(1.2, Color32::from_rgb(120, 176, 255));
+        draw_half(&painter, &preview.raw_left, left_rect, raw_line, raw_stem);
+        draw_half(&painter, &preview.raw_right, right_rect, raw_line, raw_stem);
+        if let (Some(left), Some(right)) = (&preview.blended_left, &preview.blended_right) {
+            let blend_stem = Color32::from_rgba_unmultiplied(88, 255, 224, 32);
+            let blend_line = Stroke::new(1.8, Color32::from_rgb(92, 255, 224));
+            draw_half(&painter, left, left_rect, blend_line, blend_stem);
+            draw_half(&painter, right, right_rect, blend_line, blend_stem);
+        }
+        let label_font = TextStyle::Small.resolve(ui.style());
+        painter.text(
+            left_rect.left_top(),
+            egui::Align2::LEFT_TOP,
+            "End",
+            label_font.clone(),
+            Color32::from_rgb(185, 190, 204),
+        );
+        painter.text(
+            right_rect.right_top(),
+            egui::Align2::RIGHT_TOP,
+            "Start",
+            label_font.clone(),
+            Color32::from_rgb(185, 190, 204),
+        );
+        let window_ms = (preview.raw_left.len().max(preview.raw_right.len()) as f32
+            / preview.sample_rate as f32)
+            * 1000.0;
+        let xfade_ms =
+            (preview.effective_xfade_samples as f32 / preview.sample_rate as f32) * 1000.0;
+        painter.text(
+            egui::pos2(rect.center().x, footer_y),
+            egui::Align2::CENTER_CENTER,
+            format!("window {window_ms:.1} ms / xfade {xfade_ms:.1} ms"),
+            label_font,
+            Color32::from_rgb(150, 162, 184),
+        );
+    }
+
     fn find_zero_cross_display(&self, tab_idx: usize, cur: usize, dir: i32) -> usize {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return cur;
@@ -634,18 +879,7 @@ impl crate::app::WavesPreviewer {
         } else {
             None
         };
-        let decode_status = self.editor_decode_state.as_ref().and_then(|state| {
-            if state.path == tab_path {
-                let (msg, progress) = if state.partial_ready {
-                    ("Loading full audio".to_string(), 0.65f32)
-                } else {
-                    ("Decoding preview".to_string(), 0.25f32)
-                };
-                Some((msg, progress))
-            } else {
-                None
-            }
-        });
+        let decode_status = self.editor_decode_ui_status(Some(tab_path.as_path()));
         let processing_msg = self
             .processing
             .as_ref()
@@ -682,6 +916,9 @@ impl crate::app::WavesPreviewer {
         let mut cancel_processing = false;
         let mut cancel_preview = false;
         let mut cancel_spectro = false;
+        let mut perf_mixdown_ms: Option<f32> = None;
+        let mut perf_wave_render_ms: Option<f32> = None;
+        let mut waveform_render_started: Option<std::time::Instant> = None;
         // Split canvas and inspector; keep inspector visible on narrow widths.
         let min_canvas_w = 160.0f32;
         let min_inspector_w = 220.0f32;
@@ -1026,6 +1263,10 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            if let Some(started) = waveform_render_started {
+                perf_wave_render_ms = Some(started.elapsed().as_secs_f32() * 1000.0);
+            }
+
             // Handle interactions (seek, zoom, pan, selection)
             if tab.view_mode == ViewMode::Waveform && tab.samples_len > 0 && !ctx.wants_keyboard_input() {
                 let zoom_in = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
@@ -1312,8 +1553,15 @@ impl crate::app::WavesPreviewer {
             let start = tab.view_offset.min(tab.samples_len);
             let end = (start + vis).min(tab.samples_len);
             let visible_len = end.saturating_sub(start);
+            let use_cached_mixdown_view =
+                use_mixdown && spp >= 1.0 && !tab.waveform_minmax.is_empty();
 
-            let mixdown_visible = if use_mixdown && visible_len > 0 && !tab.ch_samples.is_empty() {
+            let mixdown_started = std::time::Instant::now();
+            let mixdown_visible = if use_mixdown
+                && !use_cached_mixdown_view
+                && visible_len > 0
+                && !tab.ch_samples.is_empty()
+            {
                 let mut out = vec![0.0f32; visible_len];
                 let chn = tab.ch_samples.len() as f32;
                 if chn > 0.0 {
@@ -1332,10 +1580,14 @@ impl crate::app::WavesPreviewer {
             } else {
                 Vec::new()
             };
+            if use_mixdown && !use_cached_mixdown_view && visible_len > 0 {
+                perf_mixdown_ms = Some(mixdown_started.elapsed().as_secs_f32() * 1000.0);
+            }
 
             let show_waveform = tab.view_mode == ViewMode::Waveform || tab.show_waveform_overlay;
 
             // Draw per-channel lanes with dB grid and playhead
+            waveform_render_started = Some(std::time::Instant::now());
             if show_waveform {
             for lane_idx in 0..lane_count {
                 let channel_index = if use_mixdown {
@@ -1368,7 +1620,16 @@ impl crate::app::WavesPreviewer {
                         let bins = wave_w as usize; // one bin per pixel
                         if bins > 0 {
                             let mut tmp = Vec::new();
-                            if use_mixdown {
+                            if use_cached_mixdown_view {
+                                Self::build_minmax_from_peak_range(
+                                    &mut tmp,
+                                    &tab.waveform_minmax,
+                                    bins,
+                                    tab.samples_len,
+                                    start,
+                                    end,
+                                );
+                            } else if use_mixdown {
                                 build_minmax(&mut tmp, &mixdown_visible, bins);
                             } else if let Some(ch) = channel_index.and_then(|idx| tab.ch_samples.get(idx)) {
                                 build_minmax(&mut tmp, &ch[start..end], bins);
@@ -2272,7 +2533,7 @@ impl crate::app::WavesPreviewer {
             if tab.loading {
                 let (msg, progress) = decode_status
                     .as_ref()
-                    .map(|(m, p)| (m.as_str(), *p))
+                    .map(|status| (status.message.as_str(), status.progress))
                     .unwrap_or(("Loading audio", 0.0));
                 let overlay_rect = egui::Rect::from_min_size(
                     egui::pos2(wave_left, rect.top()),
@@ -2324,15 +2585,16 @@ impl crate::app::WavesPreviewer {
                         .id_salt(("editor_inspector_scroll", tab_idx))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                    if let Some((msg, progress)) = decode_status.as_ref() {
+                    if let Some(status) = decode_status.as_ref() {
                         ui.horizontal_wrapped(|ui| {
                             ui.add(egui::Spinner::new());
-                            ui.label(RichText::new(msg.as_str()).strong());
-                            ui.add(
-                                egui::ProgressBar::new(*progress)
-                                    .desired_width(120.0)
-                                    .show_percentage(),
-                            );
+                            ui.label(RichText::new(status.message.as_str()).strong());
+                            let mut bar =
+                                egui::ProgressBar::new(status.progress).desired_width(120.0);
+                            if status.show_percentage {
+                                bar = bar.show_percentage();
+                            }
+                            ui.add(bar);
                             if ui.button("Cancel").clicked() {
                                 cancel_decode = true;
                             }
@@ -2666,6 +2928,18 @@ impl crate::app::WavesPreviewer {
 
 
                                         });
+
+                                        if let Some(seam_preview) = Self::build_loop_seam_preview(
+                                            tab,
+                                            self.audio.shared.out_sample_rate,
+                                        ) {
+                                            ui.separator();
+                                            ui.label("Loop seam");
+                                            Self::draw_loop_seam_preview(ui, &seam_preview);
+                                        } else {
+                                            ui.separator();
+                                            ui.label(RichText::new("Loop seam: -").weak());
+                                        }
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):
                                         // Build a mono preview applying the current loop crossfade to the mixdown.
@@ -4204,6 +4478,18 @@ impl crate::app::WavesPreviewer {
         self.plugin_search_path_input = plugin_search_path_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
+        }
+        if let Some(ms) = perf_mixdown_ms {
+            self.debug_push_editor_mixdown_build_sample(ms);
+        }
+        if let Some(ms) = perf_wave_render_ms {
+            self.debug_push_editor_wave_render_sample(ms);
+        }
+
+        let painted_path = self.tabs[tab_idx].path.clone();
+        let painted_samples_len = self.tabs[tab_idx].samples_len;
+        if painted_samples_len > 0 {
+            self.debug_mark_editor_open_first_paint(&painted_path, painted_samples_len);
         }
 
         if cancel_apply {

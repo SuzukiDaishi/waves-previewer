@@ -1,7 +1,10 @@
 use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -119,6 +122,7 @@ pub enum SortDir {
 pub enum UndoScope {
     Editor,
     List,
+    EffectGraph,
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +235,14 @@ pub enum RateMode {
     TimeStretch,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WorkspaceView {
+    #[default]
+    List,
+    Editor,
+    EffectGraph,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThemeMode {
     Dark,
@@ -262,6 +274,14 @@ pub enum ViewMode {
 pub enum SpectrogramScale {
     Linear,
     Log,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectGraphSpectrumMode {
+    Linear,
+    Log,
+    Mel,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -728,7 +748,7 @@ pub struct FileMeta {
     pub decode_error: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SpectrogramData {
     pub frames: usize,
     pub bins: usize,
@@ -798,12 +818,20 @@ pub struct EditorApplyResult {
     pub lufs_override: Option<f32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorDecodeStage {
+    Preview,
+    StreamingFull,
+}
+
 pub struct EditorDecodeResult {
     pub path: PathBuf,
     pub channels: Vec<Vec<f32>>,
     pub is_final: bool,
     pub job_id: u64,
     pub error: Option<String>,
+    pub stage: EditorDecodeStage,
+    pub decoded_frames: usize,
 }
 
 pub struct EditorDecodeState {
@@ -813,6 +841,15 @@ pub struct EditorDecodeState {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub job_id: u64,
     pub partial_ready: bool,
+    pub stage: EditorDecodeStage,
+    pub decoded_frames: usize,
+    pub estimated_total_frames: Option<usize>,
+}
+
+pub struct EditorDecodeUiStatus {
+    pub message: String,
+    pub progress: f32,
+    pub show_percentage: bool,
 }
 
 #[derive(Clone)]
@@ -851,6 +888,7 @@ pub struct CachedEdit {
     pub ch_samples: Vec<Vec<f32>>,
     pub samples_len: usize,
     pub waveform_minmax: Vec<(f32, f32)>,
+    pub display_meta: Option<FileMeta>,
     pub dirty: bool,
     pub loop_region: Option<(usize, usize)>,
     pub loop_region_committed: Option<(usize, usize)>,
@@ -879,6 +917,601 @@ pub struct CachedEdit {
     pub active_tool: ToolKind,
     pub plugin_fx_draft: PluginFxDraft,
     pub show_waveform_overlay: bool,
+    pub applied_effect_graph: Option<AppliedEffectGraphStamp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedEffectGraphStamp {
+    pub template_id: String,
+    pub template_name: String,
+    pub template_updated_at_unix_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectGraphSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectGraphNodeKind {
+    Input,
+    Output,
+    Gain,
+    MonoMix,
+    PitchShift,
+    TimeStretch,
+    Speed,
+    Duplicate,
+    SplitChannels,
+    CombineChannels,
+    DebugWaveform,
+    DebugSpectrum,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectGraphNodeData {
+    Input,
+    Output,
+    Gain {
+        gain_db: f32,
+    },
+    MonoMix {
+        ignored_channels: Vec<bool>,
+    },
+    PitchShift {
+        semitones: f32,
+    },
+    TimeStretch {
+        rate: f32,
+    },
+    Speed {
+        rate: f32,
+    },
+    Duplicate,
+    SplitChannels,
+    CombineChannels,
+    DebugWaveform {
+        zoom: f32,
+    },
+    DebugSpectrum {
+        mode: EffectGraphSpectrumMode,
+        zoom: f32,
+    },
+}
+
+impl EffectGraphNodeData {
+    pub fn kind(&self) -> EffectGraphNodeKind {
+        match self {
+            Self::Input => EffectGraphNodeKind::Input,
+            Self::Output => EffectGraphNodeKind::Output,
+            Self::Gain { .. } => EffectGraphNodeKind::Gain,
+            Self::MonoMix { .. } => EffectGraphNodeKind::MonoMix,
+            Self::PitchShift { .. } => EffectGraphNodeKind::PitchShift,
+            Self::TimeStretch { .. } => EffectGraphNodeKind::TimeStretch,
+            Self::Speed { .. } => EffectGraphNodeKind::Speed,
+            Self::Duplicate => EffectGraphNodeKind::Duplicate,
+            Self::SplitChannels => EffectGraphNodeKind::SplitChannels,
+            Self::CombineChannels => EffectGraphNodeKind::CombineChannels,
+            Self::DebugWaveform { .. } => EffectGraphNodeKind::DebugWaveform,
+            Self::DebugSpectrum { .. } => EffectGraphNodeKind::DebugSpectrum,
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self.kind() {
+            EffectGraphNodeKind::Input => "Input",
+            EffectGraphNodeKind::Output => "Output",
+            EffectGraphNodeKind::Gain => "Gain",
+            EffectGraphNodeKind::MonoMix => "Mono Mix",
+            EffectGraphNodeKind::PitchShift => "PitchShift",
+            EffectGraphNodeKind::TimeStretch => "TimeStretch",
+            EffectGraphNodeKind::Speed => "Speed",
+            EffectGraphNodeKind::Duplicate => "Duplicate",
+            EffectGraphNodeKind::SplitChannels => "Split Channels",
+            EffectGraphNodeKind::CombineChannels => "Combine Channels",
+            EffectGraphNodeKind::DebugWaveform => "Waveform",
+            EffectGraphNodeKind::DebugSpectrum => "Spectrum",
+        }
+    }
+
+    pub fn default_for_kind(kind: EffectGraphNodeKind) -> Self {
+        match kind {
+            EffectGraphNodeKind::Input => Self::Input,
+            EffectGraphNodeKind::Output => Self::Output,
+            EffectGraphNodeKind::Gain => Self::Gain { gain_db: 0.0 },
+            EffectGraphNodeKind::MonoMix => Self::MonoMix {
+                ignored_channels: vec![false; 8],
+            },
+            EffectGraphNodeKind::PitchShift => Self::PitchShift { semitones: 0.0 },
+            EffectGraphNodeKind::TimeStretch => Self::TimeStretch { rate: 1.0 },
+            EffectGraphNodeKind::Speed => Self::Speed { rate: 1.0 },
+            EffectGraphNodeKind::Duplicate => Self::Duplicate,
+            EffectGraphNodeKind::SplitChannels => Self::SplitChannels,
+            EffectGraphNodeKind::CombineChannels => Self::CombineChannels,
+            EffectGraphNodeKind::DebugWaveform => Self::DebugWaveform { zoom: 1.0 },
+            EffectGraphNodeKind::DebugSpectrum => Self::DebugSpectrum {
+                mode: EffectGraphSpectrumMode::Log,
+                zoom: 1.0,
+            },
+        }
+    }
+
+    pub fn input_ports(&self) -> &'static [&'static str] {
+        match self {
+            Self::Input => &[],
+            Self::Output => &["in"],
+            Self::Gain { .. }
+            | Self::MonoMix { .. }
+            | Self::PitchShift { .. }
+            | Self::TimeStretch { .. }
+            | Self::Speed { .. }
+            | Self::Duplicate
+            | Self::DebugWaveform { .. }
+            | Self::DebugSpectrum { .. }
+            | Self::SplitChannels => &["in"],
+            Self::CombineChannels => &["in1", "in2", "in3", "in4", "in5", "in6", "in7", "in8"],
+        }
+    }
+
+    pub fn output_ports(&self) -> &'static [&'static str] {
+        match self {
+            Self::Output => &[],
+            Self::Input
+            | Self::Gain { .. }
+            | Self::MonoMix { .. }
+            | Self::PitchShift { .. }
+            | Self::TimeStretch { .. }
+            | Self::Speed { .. }
+            | Self::DebugWaveform { .. }
+            | Self::DebugSpectrum { .. }
+            | Self::CombineChannels => &["out"],
+            Self::Duplicate => &["out1", "out2"],
+            Self::SplitChannels => &["ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8"],
+        }
+    }
+
+    pub fn has_input_port(&self, port_id: &str) -> bool {
+        self.input_ports().iter().any(|port| *port == port_id)
+    }
+
+    pub fn has_output_port(&self, port_id: &str) -> bool {
+        self.output_ports().iter().any(|port| *port == port_id)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectGraphNode {
+    pub id: String,
+    pub ui_pos: [f32; 2],
+    pub ui_size: [f32; 2],
+    #[serde(flatten)]
+    pub data: EffectGraphNodeData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectGraphEdge {
+    pub id: String,
+    pub from_node_id: String,
+    #[serde(default = "default_effect_graph_out_port")]
+    pub from_port_id: String,
+    pub to_node_id: String,
+    #[serde(default = "default_effect_graph_in_port")]
+    pub to_port_id: String,
+}
+
+fn default_effect_graph_out_port() -> String {
+    "out".to_string()
+}
+
+fn default_effect_graph_in_port() -> String {
+    "in".to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectGraphCanvasPersistedState {
+    pub zoom: f32,
+    pub pan: [f32; 2],
+}
+
+impl Default for EffectGraphCanvasPersistedState {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: [48.0, 48.0],
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectGraphDocument {
+    pub schema_version: u32,
+    pub name: String,
+    pub nodes: Vec<EffectGraphNode>,
+    pub edges: Vec<EffectGraphEdge>,
+    #[serde(default)]
+    pub canvas: EffectGraphCanvasPersistedState,
+}
+
+impl Default for EffectGraphDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: 2,
+            name: "New Effect Graph".to_string(),
+            nodes: vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [60.0, 120.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [360.0, 120.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            edges: vec![EffectGraphEdge {
+                id: "edge_input_output".to_string(),
+                from_node_id: "input".to_string(),
+                from_port_id: "out".to_string(),
+                to_node_id: "output".to_string(),
+                to_port_id: "in".to_string(),
+            }],
+            canvas: EffectGraphCanvasPersistedState::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectGraphTemplateFile {
+    pub schema_version: u32,
+    pub template_id: String,
+    pub name: String,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub graph: EffectGraphDocument,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectGraphValidationIssue {
+    pub severity: EffectGraphSeverity,
+    pub code: String,
+    pub message: String,
+    pub node_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectGraphLibraryEntry {
+    pub template_id: String,
+    pub name: String,
+    pub path: PathBuf,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub valid: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EffectGraphLibraryState {
+    pub entries: Vec<EffectGraphLibraryEntry>,
+    pub new_template_name: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EffectGraphCanvasState {
+    pub zoom: f32,
+    pub pan: [f32; 2],
+    pub selected_nodes: HashSet<String>,
+    pub selected_edge_id: Option<String>,
+    pub connecting_from_port: Option<EffectGraphPortKey>,
+    pub drag_palette_kind: Option<EffectGraphNodeKind>,
+    pub last_canvas_pointer_world: Option<[f32; 2]>,
+    pub focus_node_id: Option<String>,
+    pub background_panning: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EffectGraphDebugViewState {
+    pub scroll_x: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectGraphUndoState {
+    pub active_template_id: Option<String>,
+    pub draft: EffectGraphDocument,
+    pub draft_dirty: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphNodeRunPhase {
+    Idle,
+    Running,
+    Success,
+    Failed,
+}
+
+impl Default for EffectGraphNodeRunPhase {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EffectGraphNodeRunStatus {
+    pub phase: EffectGraphNodeRunPhase,
+    pub elapsed_ms: Option<f32>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum EffectGraphDebugPreview {
+    Waveform { mono: Vec<f32>, sample_rate: u32 },
+    Spectrum { spectrogram: SpectrogramData },
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectGraphConsoleLine {
+    pub timestamp_unix_ms: u64,
+    pub severity: EffectGraphSeverity,
+    pub scope: String,
+    pub message: String,
+    pub node_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectGraphConsoleState {
+    pub lines: VecDeque<EffectGraphConsoleLine>,
+    pub max_lines: usize,
+}
+
+impl Default for EffectGraphConsoleState {
+    fn default() -> Self {
+        Self {
+            lines: VecDeque::new(),
+            max_lines: 500,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphRunMode {
+    TestPreview,
+    ApplyToListSelection,
+}
+
+#[derive(Clone, Debug)]
+pub enum EffectGraphWorkerEvent {
+    RunStarted {
+        mode: EffectGraphRunMode,
+        total: usize,
+    },
+    PathStarted {
+        path: PathBuf,
+        index: usize,
+        total: usize,
+    },
+    NodeStarted {
+        node_id: String,
+    },
+    NodeFinished {
+        node_id: String,
+        elapsed_ms: f32,
+    },
+    NodeLog {
+        node_id: String,
+        severity: EffectGraphSeverity,
+        message: String,
+    },
+    NodeDebugPreview {
+        node_id: String,
+        preview: EffectGraphDebugPreview,
+    },
+    PathFinished {
+        path: PathBuf,
+        output_bus: EffectGraphAudioBus,
+        monitor_audio: Vec<Vec<f32>>,
+        total_elapsed_ms: f32,
+    },
+    Failed {
+        path: Option<PathBuf>,
+        node_id: Option<String>,
+        message: String,
+    },
+    Finished,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphPlaybackTarget {
+    Input,
+    Output,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EffectGraphTesterState {
+    pub target_path_input: String,
+    pub target_path: Option<PathBuf>,
+    pub last_input_audio: Option<Arc<AudioBuffer>>,
+    pub last_input_bus: Option<EffectGraphAudioBus>,
+    pub last_output_audio: Option<Arc<AudioBuffer>>,
+    pub last_output_bus: Option<EffectGraphAudioBus>,
+    pub last_run_ms: Option<f32>,
+    pub last_output_summary: String,
+    pub last_error: Option<String>,
+    pub playback_target: Option<EffectGraphPlaybackTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EffectGraphPortKey {
+    pub node_id: String,
+    pub port_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectGraphChannelLayout {
+    pub declared_width: usize,
+    pub entries: Vec<EffectGraphChannelLayoutEntry>,
+}
+
+impl Default for EffectGraphChannelLayout {
+    fn default() -> Self {
+        Self {
+            declared_width: 0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EffectGraphChannelLayoutEntry {
+    Dense,
+    Slotted {
+        slot_index: usize,
+    },
+    Vacant {
+        requested_slot: usize,
+    },
+    AutoPlaced {
+        origin_slot: Option<usize>,
+        branch_group_id: String,
+        branch_channel_index: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphCombineMode {
+    Concat,
+    Restore,
+    Adaptive,
+    Mixed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EffectGraphChannelFlowHint {
+    PlainDense,
+    Slotted {
+        declared_width_hint: Option<usize>,
+        slot_indices: Vec<usize>,
+    },
+    AutoPlaced {
+        declared_width_hint: Option<usize>,
+        origin_slots: Vec<Option<usize>>,
+        branch_group_count: usize,
+        predicted_channels_hint: usize,
+    },
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectGraphAudioBus {
+    pub channels: Vec<Vec<f32>>,
+    pub sample_rate: u32,
+    pub channel_layout: EffectGraphChannelLayout,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectGraphPredictedFormat {
+    pub channel_count: usize,
+    pub sample_rate: u32,
+    pub combine_mode: Option<EffectGraphCombineMode>,
+    pub summary: String,
+}
+
+#[derive(Debug)]
+pub struct EffectGraphRunnerState {
+    pub mode: Option<EffectGraphRunMode>,
+    pub started_at: Option<Instant>,
+    pub total: usize,
+    pub done: usize,
+    pub current_path: Option<PathBuf>,
+    pub template_stamp: Option<AppliedEffectGraphStamp>,
+    pub rx: Option<Receiver<EffectGraphWorkerEvent>>,
+    pub cancel_requested: Option<Arc<AtomicBool>>,
+    pub node_status: HashMap<String, EffectGraphNodeRunStatus>,
+}
+
+impl Default for EffectGraphRunnerState {
+    fn default() -> Self {
+        Self {
+            mode: None,
+            started_at: None,
+            total: 0,
+            done: 0,
+            current_path: None,
+            template_stamp: None,
+            rx: None,
+            cancel_requested: None,
+            node_status: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum EffectGraphPendingAction {
+    CloseWorkspace,
+    SwitchTemplate(String),
+    DeleteTemplate(String),
+}
+
+#[derive(Debug)]
+pub struct EffectGraphState {
+    pub workspace_open: bool,
+    pub active_template_id: Option<String>,
+    pub draft: EffectGraphDocument,
+    pub draft_dirty: bool,
+    pub library: EffectGraphLibraryState,
+    pub canvas: EffectGraphCanvasState,
+    pub tester: EffectGraphTesterState,
+    pub runner: EffectGraphRunnerState,
+    pub debug_previews: HashMap<String, Arc<EffectGraphDebugPreview>>,
+    pub debug_view_state: HashMap<String, EffectGraphDebugViewState>,
+    pub undo_stack: Vec<EffectGraphUndoState>,
+    pub redo_stack: Vec<EffectGraphUndoState>,
+    pub console: EffectGraphConsoleState,
+    pub validation: Vec<EffectGraphValidationIssue>,
+    pub left_panel_width: f32,
+    pub right_panel_width: f32,
+    pub bottom_panel_height: f32,
+    pub last_editor_tab: Option<usize>,
+    pub clipboard_paste_serial: u64,
+    pub pending_action: Option<EffectGraphPendingAction>,
+    pub show_unsaved_prompt: bool,
+}
+
+impl Default for EffectGraphState {
+    fn default() -> Self {
+        let draft = EffectGraphDocument::default();
+        Self {
+            workspace_open: false,
+            active_template_id: None,
+            canvas: EffectGraphCanvasState {
+                zoom: draft.canvas.zoom,
+                pan: draft.canvas.pan,
+                ..Default::default()
+            },
+            draft,
+            draft_dirty: false,
+            library: EffectGraphLibraryState::default(),
+            tester: EffectGraphTesterState::default(),
+            runner: EffectGraphRunnerState::default(),
+            debug_previews: HashMap::new(),
+            debug_view_state: HashMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            console: EffectGraphConsoleState::default(),
+            validation: Vec::new(),
+            left_panel_width: 260.0,
+            right_panel_width: 300.0,
+            bottom_panel_height: 180.0,
+            last_editor_tab: None,
+            clipboard_paste_serial: 0,
+            pending_action: None,
+            show_unsaved_prompt: false,
+        }
+    }
 }
 
 pub struct SeekHoldState {
@@ -1285,6 +1918,15 @@ pub struct DebugState {
     pub tab_switch_started_at: Option<Instant>,
     pub tab_switch_started_path: Option<PathBuf>,
     pub tab_switch_to_interactive_ms: VecDeque<f32>,
+    pub editor_open_started_at: Option<Instant>,
+    pub editor_open_started_path: Option<PathBuf>,
+    pub editor_open_partial_logged: bool,
+    pub editor_open_first_paint_logged: bool,
+    pub editor_open_to_partial_ms: VecDeque<f32>,
+    pub editor_open_to_final_ms: VecDeque<f32>,
+    pub editor_open_to_first_paint_ms: VecDeque<f32>,
+    pub editor_mixdown_build_ms: VecDeque<f32>,
+    pub editor_wave_render_ms: VecDeque<f32>,
     pub select_to_preview_ms: VecDeque<f32>,
     pub select_to_play_ms: VecDeque<f32>,
     pub metadata_probe_ms: VecDeque<f32>,
@@ -1365,6 +2007,15 @@ impl DebugState {
             tab_switch_started_at: None,
             tab_switch_started_path: None,
             tab_switch_to_interactive_ms: VecDeque::new(),
+            editor_open_started_at: None,
+            editor_open_started_path: None,
+            editor_open_partial_logged: false,
+            editor_open_first_paint_logged: false,
+            editor_open_to_partial_ms: VecDeque::new(),
+            editor_open_to_final_ms: VecDeque::new(),
+            editor_open_to_first_paint_ms: VecDeque::new(),
+            editor_mixdown_build_ms: VecDeque::new(),
+            editor_wave_render_ms: VecDeque::new(),
             select_to_preview_ms: VecDeque::new(),
             select_to_play_ms: VecDeque::new(),
             metadata_probe_ms: VecDeque::new(),

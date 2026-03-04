@@ -1,4 +1,4 @@
-use crate::app::types::{RateMode, ToolKind};
+use crate::app::types::{EffectGraphRunMode, RateMode, ToolKind};
 use egui::{Align, Color32, Key, RichText, Sense};
 use std::time::Duration;
 
@@ -159,6 +159,11 @@ impl crate::app::WavesPreviewer {
                         }
                     });
                     ui.menu_button("Tools", |ui| {
+                        if ui.button("Effect Graph...").clicked() {
+                            self.open_effect_graph_workspace();
+                            ui.close();
+                        }
+                        ui.separator();
                         if ui.button("Settings...").clicked() {
                             self.show_export_settings = true;
                             ui.close();
@@ -263,12 +268,12 @@ impl crate::app::WavesPreviewer {
                     if vol_resp.changed() {
                         self.apply_effective_volume();
                     }
-                    let vol_up = if vol_resp.has_focus() && self.active_tab.is_none() {
+                    let vol_up = if vol_resp.has_focus() && self.is_list_workspace_active() {
                         ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp))
                     } else {
                         false
                     };
-                    let vol_down = if vol_resp.has_focus() && self.active_tab.is_none() {
+                    let vol_down = if vol_resp.has_focus() && self.is_list_workspace_active() {
                         ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown))
                     } else {
                         false
@@ -341,7 +346,7 @@ impl crate::app::WavesPreviewer {
                             );
                         }
                     }
-                    let list_loading = self.active_tab.is_none()
+                    let list_loading = self.is_list_workspace_active()
                         && (self.list_play_pending
                             || self.list_preview_pending_path.is_some()
                             || (self.list_preview_rx.is_some()
@@ -358,6 +363,15 @@ impl crate::app::WavesPreviewer {
                         .unwrap_or_default();
                     let list_loading_visible =
                         list_loading && list_loading_elapsed >= Duration::from_millis(120);
+                    let effect_graph_apply_elapsed = self
+                        .effect_graph
+                        .runner
+                        .started_at
+                        .map(|t| t.elapsed())
+                        .unwrap_or_default();
+                    let effect_graph_apply_visible = self.effect_graph.runner.mode
+                        == Some(EffectGraphRunMode::ApplyToListSelection)
+                        && effect_graph_apply_elapsed >= Duration::from_millis(120);
                     let show_activity = self.scan_in_progress
                         || self.processing.is_some()
                         || self.editor_decode_state.is_some()
@@ -375,6 +389,7 @@ impl crate::app::WavesPreviewer {
                         || self.project_open_state.is_some()
                         || self.bulk_resample_state.is_some()
                         || list_loading_visible
+                        || effect_graph_apply_visible
                         || sort_loading_visible;
                     if show_activity {
                         ui.separator();
@@ -414,20 +429,18 @@ impl crate::app::WavesPreviewer {
                             }
                             if let Some(state) = &self.editor_decode_state {
                                 if state.started_at.elapsed() >= Duration::from_millis(120) {
-                                    let (msg, progress) = if state.partial_ready {
-                                        ("Loading full audio", 0.65f32)
-                                    } else {
-                                        ("Decoding preview", 0.25f32)
-                                    };
-                                    ui.add(egui::Spinner::new());
-                                    ui.label(RichText::new(msg).weak());
-                                    ui.add(
-                                        egui::ProgressBar::new(progress)
-                                            .desired_width(60.0)
-                                            .show_percentage(),
-                                    );
-                                    if ui.button("Cancel").clicked() {
-                                        self.cancel_editor_decode();
+                                    if let Some(status) = self.editor_decode_ui_status(None) {
+                                        ui.add(egui::Spinner::new());
+                                        ui.label(RichText::new(status.message).weak());
+                                        let mut bar = egui::ProgressBar::new(status.progress)
+                                            .desired_width(60.0);
+                                        if status.show_percentage {
+                                            bar = bar.show_percentage();
+                                        }
+                                        ui.add(bar);
+                                        if ui.button("Cancel").clicked() {
+                                            self.cancel_editor_decode();
+                                        }
                                     }
                                 }
                             }
@@ -440,6 +453,41 @@ impl crate::app::WavesPreviewer {
                                     "Loading audio...".to_string()
                                 };
                                 ui.label(RichText::new(label).weak());
+                            }
+                            if effect_graph_apply_visible {
+                                let elapsed = effect_graph_apply_elapsed.as_secs_f32();
+                                let total = self.effect_graph.runner.total.max(1);
+                                let done = self.effect_graph.runner.done.min(total);
+                                let template_name = self
+                                    .effect_graph
+                                    .runner
+                                    .template_stamp
+                                    .as_ref()
+                                    .map(|stamp| stamp.template_name.as_str())
+                                    .unwrap_or("Effect Graph");
+                                let current_label = self
+                                    .effect_graph
+                                    .runner
+                                    .current_path
+                                    .as_ref()
+                                    .and_then(|path| path.file_name().and_then(|name| name.to_str()))
+                                    .map(|name| format!(": {name}"))
+                                    .unwrap_or_default();
+                                ui.add(egui::Spinner::new());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Effect Graph {template_name}: {done}/{total} ({elapsed:.1}s){current_label}"
+                                    ))
+                                    .weak(),
+                                );
+                                ui.add(
+                                    egui::ProgressBar::new(done as f32 / total as f32)
+                                        .desired_width(80.0)
+                                        .show_percentage(),
+                                );
+                                if ui.button("Cancel").clicked() {
+                                    self.cancel_effect_graph_run();
+                                }
                             }
                             if let Some(t) = &self.heavy_preview_tool {
                                 ui.add(egui::Spinner::new());
@@ -720,20 +768,22 @@ impl crate::app::WavesPreviewer {
                                 if resp.changed() {
                                     self.audio.set_rate(self.playback_rate);
                                 }
-                                let nav_up = if resp.has_focus() && self.active_tab.is_none() {
+                                let nav_up = if resp.has_focus() && self.is_list_workspace_active()
+                                {
                                     ctx.input_mut(|i| {
                                         i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
                                     })
                                 } else {
                                     false
                                 };
-                                let nav_down = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| {
-                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                                    })
-                                } else {
-                                    false
-                                };
+                                let nav_down =
+                                    if resp.has_focus() && self.is_list_workspace_active() {
+                                        ctx.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                                        })
+                                    } else {
+                                        false
+                                    };
                                 if nav_up || nav_down {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
@@ -764,20 +814,22 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(1.0);
                                     self.rebuild_current_buffer_with_mode();
                                 }
-                                let nav_up = if resp.has_focus() && self.active_tab.is_none() {
+                                let nav_up = if resp.has_focus() && self.is_list_workspace_active()
+                                {
                                     ctx.input_mut(|i| {
                                         i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
                                     })
                                 } else {
                                     false
                                 };
-                                let nav_down = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| {
-                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                                    })
-                                } else {
-                                    false
-                                };
+                                let nav_down =
+                                    if resp.has_focus() && self.is_list_workspace_active() {
+                                        ctx.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                                        })
+                                    } else {
+                                        false
+                                    };
                                 if nav_up || nav_down {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
@@ -808,20 +860,22 @@ impl crate::app::WavesPreviewer {
                                     self.audio.set_rate(1.0);
                                     self.rebuild_current_buffer_with_mode();
                                 }
-                                let nav_up = if resp.has_focus() && self.active_tab.is_none() {
+                                let nav_up = if resp.has_focus() && self.is_list_workspace_active()
+                                {
                                     ctx.input_mut(|i| {
                                         i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
                                     })
                                 } else {
                                     false
                                 };
-                                let nav_down = if resp.has_focus() && self.active_tab.is_none() {
-                                    ctx.input_mut(|i| {
-                                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                                    })
-                                } else {
-                                    false
-                                };
+                                let nav_down =
+                                    if resp.has_focus() && self.is_list_workspace_active() {
+                                        ctx.input_mut(|i| {
+                                            i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                                        })
+                                    } else {
+                                        false
+                                    };
                                 if nav_up || nav_down {
                                     self.suppress_list_enter = true;
                                     resp.surrender_focus();
@@ -857,7 +911,7 @@ impl crate::app::WavesPreviewer {
                         .add_sized(egui::vec2(110.0, 22.0), egui::Button::new(play_text))
                         .clicked()
                     {
-                        if self.active_tab.is_none() {
+                        if self.is_list_workspace_active() {
                             let now_playing = self
                                 .audio
                                 .shared
@@ -907,7 +961,7 @@ impl crate::app::WavesPreviewer {
                         })
                     {
                         resp.surrender_focus();
-                        if self.active_tab.is_none() {
+                        if self.is_list_workspace_active() {
                             ctx.memory_mut(|m| {
                                 m.request_focus(crate::app::WavesPreviewer::list_focus_id())
                             });

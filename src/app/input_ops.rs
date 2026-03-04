@@ -31,7 +31,7 @@ impl super::WavesPreviewer {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
                 // Keep preview audio/overlay when toggling playback.
                 // In list view, if preview decode is still pending, request play once ready.
-                if self.active_tab.is_none() {
+                if self.is_list_workspace_active() {
                     let now_playing = self
                         .audio
                         .shared
@@ -57,9 +57,10 @@ impl super::WavesPreviewer {
             }
         }
 
-        let allow_list_shortcuts = self.active_tab.is_none() && !search_focused;
+        let allow_list_shortcuts = self.is_list_workspace_active() && !search_focused;
         // Keep list shortcuts responsive even when the list currently owns keyboard focus.
-        let allow_volume_shortcuts = !search_focused && (self.active_tab.is_none() || !wants_kb);
+        let allow_volume_shortcuts =
+            !search_focused && (self.is_list_workspace_active() || !wants_kb);
         if allow_volume_shortcuts {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::A)) {
                 self.adjust_volume_db(-1.0);
@@ -96,7 +97,7 @@ impl super::WavesPreviewer {
                     if let Some(prev) = self.active_tab {
                         self.clear_preview_if_any(prev);
                     }
-                    self.active_tab = None;
+                    self.workspace_view = super::types::WorkspaceView::List;
                     self.pending_activate_path = None;
                     self.pending_activate_ready = false;
                     self.audio.stop();
@@ -112,6 +113,7 @@ impl super::WavesPreviewer {
                         }
                         if let Some(tab) = self.tabs.get(tab_idx) {
                             let tab_path = tab.path.clone();
+                            self.workspace_view = super::types::WorkspaceView::Editor;
                             self.active_tab = Some(tab_idx);
                             self.audio.stop();
                             self.debug_mark_tab_switch_start(&tab_path);
@@ -152,7 +154,16 @@ impl super::WavesPreviewer {
                 }
             }
         } else if save {
-            if let Err(err) = self.save_project() {
+            if self.is_effect_graph_workspace_active() {
+                if let Err(err) = self.save_effect_graph_draft(false) {
+                    self.push_effect_graph_console(
+                        super::types::EffectGraphSeverity::Error,
+                        "library",
+                        err,
+                        None,
+                    );
+                }
+            } else if let Err(err) = self.save_project() {
                 self.debug_log(format!("session save error: {err}"));
             }
         }
@@ -162,7 +173,9 @@ impl super::WavesPreviewer {
         }
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
-            if let Some(active_idx) = self.active_tab {
+            if self.is_effect_graph_workspace_active() {
+                self.request_close_effect_graph_workspace();
+            } else if let Some(active_idx) = self.active_tab {
                 self.close_tab_at(active_idx, ctx);
             }
         }
@@ -475,8 +488,17 @@ impl super::WavesPreviewer {
             return;
         }
         let mut handled = false;
+        let prefer_graph = self.is_effect_graph_workspace_active()
+            || self.last_undo_scope == UndoScope::EffectGraph;
+        if prefer_graph {
+            handled = if redo {
+                self.effect_graph_redo()
+            } else {
+                self.effect_graph_undo()
+            };
+        }
         let prefer_list = self.last_undo_scope == UndoScope::List;
-        if prefer_list {
+        if !handled && prefer_list {
             handled = if redo {
                 self.list_redo()
             } else {

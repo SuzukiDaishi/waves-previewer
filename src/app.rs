@@ -19,6 +19,7 @@ mod clipboard_ops;
 mod debug_ops;
 mod dialogs;
 mod editor_ops;
+mod effect_graph_ops;
 mod export_ops;
 mod external;
 mod external_load_jobs;
@@ -72,7 +73,7 @@ use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, StartupConfig,
-    ToolKind, ViewMode,
+    ToolKind, ViewMode, WorkspaceView,
 };
 use self::{helpers::*, types::*};
 
@@ -231,6 +232,8 @@ pub struct WavesPreviewer {
     pub meter_db: f32,
     pub tabs: Vec<EditorTab>,
     pub active_tab: Option<usize>,
+    workspace_view: WorkspaceView,
+    effect_graph: EffectGraphState,
     pub meta_rx: Option<std::sync::mpsc::Receiver<meta::MetaUpdate>>,
     pub meta_pool: Option<meta::MetaPool>,
     pub meta_inflight: HashSet<PathBuf>,
@@ -518,6 +521,9 @@ impl WavesPreviewer {
                 self.tabs.len() - 1
             };
             self.active_tab = Some(new_active);
+            if self.workspace_view == WorkspaceView::Editor {
+                self.workspace_view = WorkspaceView::Editor;
+            }
             if let Some(tab) = self.tabs.get(new_active) {
                 let path = tab.path.clone();
                 self.debug_mark_tab_switch_start(&path);
@@ -525,6 +531,9 @@ impl WavesPreviewer {
             }
         } else {
             self.active_tab = None;
+            if !self.effect_graph.workspace_open {
+                self.workspace_view = WorkspaceView::List;
+            }
             self.request_list_focus(ctx);
         }
     }
@@ -1878,6 +1887,8 @@ impl WavesPreviewer {
             meter_db: -80.0,
             tabs: Vec::new(),
             active_tab: None,
+            workspace_view: WorkspaceView::List,
+            effect_graph: EffectGraphState::default(),
             meta_rx: None,
             meta_pool: None,
             meta_inflight: HashSet::new(),
@@ -2130,6 +2141,8 @@ impl WavesPreviewer {
         app.refresh_music_ai_status();
         app.reload_zoo_gif_frames();
         app.load_tools_config();
+        app.load_effect_graph_library();
+        app.revalidate_effect_graph_draft();
         app.apply_startup_paths();
         app.setup_debug_automation();
         app.setup_mcp_server(&startup);
@@ -2413,6 +2426,7 @@ impl eframe::App for WavesPreviewer {
 
         // Drain LUFS (with gain) recompute results
         self.drain_lufs_recalc_results();
+        self.drain_effect_graph_runner(ctx);
 
         // Pump LUFS recompute worker (debounced)
         self.pump_lufs_recalc_worker();
@@ -2428,7 +2442,7 @@ impl eframe::App for WavesPreviewer {
         egui::CentralPanel::default().show(ctx, |ui| {
             // Tabs
             ui.horizontal_wrapped(|ui| {
-                let is_list = self.active_tab.is_none();
+                let is_list = self.is_list_workspace_active();
                 let list_label = if is_list {
                     RichText::new("[List]").strong()
                 } else {
@@ -2438,18 +2452,37 @@ impl eframe::App for WavesPreviewer {
                     if let Some(idx) = self.active_tab {
                         self.clear_preview_if_any(idx);
                     }
-                    self.active_tab = None;
+                    self.workspace_view = WorkspaceView::List;
                     self.pending_activate_path = None;
                     self.pending_activate_ready = false;
                     self.audio.stop();
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
                 }
+                if self.effect_graph.workspace_open {
+                    ui.horizontal(|ui| {
+                        let active = self.is_effect_graph_workspace_active();
+                        let text = if active {
+                            RichText::new("[Effect Graph]").strong()
+                        } else {
+                            RichText::new("Effect Graph")
+                        };
+                        if ui.selectable_label(active, text).clicked() {
+                            self.workspace_view = WorkspaceView::EffectGraph;
+                            self.effect_graph.workspace_open = true;
+                            self.effect_graph.last_editor_tab = self.active_tab;
+                            self.audio.stop();
+                        }
+                        if ui.button("x").on_hover_text("Close").clicked() {
+                            self.request_close_effect_graph_workspace();
+                        }
+                    });
+                }
                 let mut to_close: Option<usize> = None;
                 let tabs_len = self.tabs.len();
                 for i in 0..tabs_len {
                     // avoid holding immutable borrow over calls that mutate self inside closure
-                    let active = self.active_tab == Some(i);
+                    let active = self.workspace_view == WorkspaceView::Editor && self.active_tab == Some(i);
                     let tab = &self.tabs[i];
                     let mut display = tab.display_name.clone();
                     if tab.dirty || tab.loop_markers_dirty || tab.markers_dirty {
@@ -2470,6 +2503,7 @@ impl eframe::App for WavesPreviewer {
                                 }
                             }
                             // mutate self safely here
+                            self.workspace_view = WorkspaceView::Editor;
                             self.active_tab = Some(i);
                             self.debug_mark_tab_switch_start(&path_for_activate);
                             activate_path = Some(path_for_activate.clone());
@@ -2487,14 +2521,15 @@ impl eframe::App for WavesPreviewer {
                 }
             });
             ui.separator();
-            if let Some(tab_idx) = self.active_tab {
+            if self.is_effect_graph_workspace_active() {
+                self.ui_effect_graph_view(ui, ctx);
+            } else if let Some(tab_idx) = self
+                .active_tab
+                .filter(|_| self.workspace_view == WorkspaceView::Editor)
+            {
                 self.ui_editor_view(ui, ctx, tab_idx);
             } else {
-                // List view
-                // extracted implementation:
-                {
-                    self.ui_list_view(ui, ctx);
-                }
+                self.ui_list_view(ui, ctx);
                 // legacy path kept under an always-false guard for transition
                 if false {
                     let mut to_open: Option<PathBuf> = None;
@@ -3166,7 +3201,7 @@ impl eframe::App for WavesPreviewer {
             || self.bulk_resample_state.is_some();
         let repaint_ms = if fast_repaint {
             16
-        } else if self.zoo_enabled && self.active_tab.is_none() {
+        } else if self.zoo_enabled && self.is_list_workspace_active() {
             50
         } else if self.zoo_enabled {
             33

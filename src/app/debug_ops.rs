@@ -36,7 +36,9 @@ impl WavesPreviewer {
         self.debug_log("external merge test started");
     }
     pub(super) fn default_screenshot_path(&mut self) -> PathBuf {
-        let tag = if self.active_tab.is_some() {
+        let tag = if self.is_effect_graph_workspace_active() {
+            "effect_graph"
+        } else if self.is_editor_workspace_active() {
             "editor"
         } else {
             "list"
@@ -192,6 +194,89 @@ impl WavesPreviewer {
         self.debug.tab_switch_started_path = Some(path.to_path_buf());
     }
 
+    pub(super) fn debug_mark_editor_open_start(&mut self, path: &Path) {
+        self.debug.editor_open_started_at = Some(std::time::Instant::now());
+        self.debug.editor_open_started_path = Some(path.to_path_buf());
+        self.debug.editor_open_partial_logged = false;
+        self.debug.editor_open_first_paint_logged = false;
+        self.debug_log(format!("editor open start: {}", path.display()));
+    }
+
+    pub(super) fn debug_mark_editor_open_partial(
+        &mut self,
+        path: &Path,
+        decoded_frames: usize,
+        stage: crate::app::types::EditorDecodeStage,
+    ) {
+        let Some(started_at) = self.debug.editor_open_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .editor_open_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+            && !self.debug.editor_open_partial_logged
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(&mut self.debug.editor_open_to_partial_ms, elapsed_ms);
+            self.debug.editor_open_partial_logged = true;
+            self.debug_log(format!(
+                "editor open partial: {} {:.1} ms stage={stage:?} frames={decoded_frames}",
+                path.display(),
+                elapsed_ms
+            ));
+        }
+    }
+
+    pub(super) fn debug_mark_editor_open_final(&mut self, path: &Path, decoded_frames: usize) {
+        let Some(started_at) = self.debug.editor_open_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .editor_open_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(&mut self.debug.editor_open_to_final_ms, elapsed_ms);
+            self.debug_log(format!(
+                "editor open final: {} {:.1} ms frames={decoded_frames}",
+                path.display(),
+                elapsed_ms
+            ));
+        }
+    }
+
+    pub(super) fn debug_mark_editor_open_first_paint(&mut self, path: &Path, samples_len: usize) {
+        let Some(started_at) = self.debug.editor_open_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .editor_open_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+            && !self.debug.editor_open_first_paint_logged
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(
+                &mut self.debug.editor_open_to_first_paint_ms,
+                elapsed_ms,
+            );
+            self.debug.editor_open_first_paint_logged = true;
+            self.debug_log(format!(
+                "editor open first paint: {} {:.1} ms samples={samples_len}",
+                path.display(),
+                elapsed_ms
+            ));
+        }
+    }
+
     pub(super) fn debug_mark_tab_switch_interactive(&mut self, path: &Path) {
         let Some(started_at) = self.debug.tab_switch_started_at else {
             return;
@@ -231,6 +316,14 @@ impl WavesPreviewer {
 
     pub(super) fn debug_push_src_resample_sample(&mut self, value_ms: f32) {
         Self::debug_push_latency_sample(&mut self.debug.src_resample_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_editor_mixdown_build_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.editor_mixdown_build_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_editor_wave_render_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.editor_wave_render_ms, value_ms);
     }
 
     pub(super) fn debug_mark_list_preview_ready(&mut self, path: &Path) {
@@ -351,6 +444,26 @@ impl WavesPreviewer {
         lines.push(format!(
             "select_to_play_ms: {}",
             summarize(&self.debug.select_to_play_ms)
+        ));
+        lines.push(format!(
+            "editor_open_to_partial_ms: {}",
+            summarize(&self.debug.editor_open_to_partial_ms)
+        ));
+        lines.push(format!(
+            "editor_open_to_first_paint_ms: {}",
+            summarize(&self.debug.editor_open_to_first_paint_ms)
+        ));
+        lines.push(format!(
+            "editor_open_to_final_ms: {}",
+            summarize(&self.debug.editor_open_to_final_ms)
+        ));
+        lines.push(format!(
+            "editor_mixdown_build_ms: {}",
+            summarize(&self.debug.editor_mixdown_build_ms)
+        ));
+        lines.push(format!(
+            "editor_wave_render_ms: {}",
+            summarize(&self.debug.editor_wave_render_ms)
         ));
         lines.push(format!(
             "metadata_probe_ms: {}",
@@ -1075,7 +1188,7 @@ impl WavesPreviewer {
     pub(super) fn execute_debug_action(&mut self, ctx: &egui::Context, action: DebugAction) {
         match action {
             DebugAction::OpenFirst => {
-                if self.active_tab.is_none() {
+                if self.is_list_workspace_active() {
                     self.open_first_in_list();
                     self.debug_log("auto: open first");
                 }
