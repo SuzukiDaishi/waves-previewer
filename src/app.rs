@@ -157,9 +157,16 @@ struct TranscriptModelDownloadResult {
     error: Option<String>,
 }
 
+enum TranscriptModelDownloadEvent {
+    Progress { done: usize, total: usize },
+    Finished(TranscriptModelDownloadResult),
+}
+
 struct TranscriptModelDownloadState {
-    started_at: std::time::Instant,
-    rx: std::sync::mpsc::Receiver<TranscriptModelDownloadResult>,
+    _started_at: std::time::Instant,
+    done: usize,
+    total: usize,
+    rx: std::sync::mpsc::Receiver<TranscriptModelDownloadEvent>,
 }
 
 struct MusicAnalyzeItemResult {
@@ -211,9 +218,44 @@ struct MusicModelDownloadResult {
     error: Option<String>,
 }
 
+enum MusicModelDownloadEvent {
+    Progress { done: usize, total: usize },
+    Finished(MusicModelDownloadResult),
+}
+
 struct MusicModelDownloadState {
-    started_at: std::time::Instant,
-    rx: std::sync::mpsc::Receiver<MusicModelDownloadResult>,
+    _started_at: std::time::Instant,
+    done: usize,
+    total: usize,
+    rx: std::sync::mpsc::Receiver<MusicModelDownloadEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PlaybackSourceKind {
+    None,
+    ListPreview(PathBuf),
+    EditorTab(PathBuf),
+    EffectGraph,
+    ToolPreview,
+}
+
+#[derive(Clone, Debug)]
+struct PlaybackSessionState {
+    source: PlaybackSourceKind,
+    user_speed: f32,
+    src_sr: u32,
+    is_playing: bool,
+}
+
+impl Default for PlaybackSessionState {
+    fn default() -> Self {
+        Self {
+            source: PlaybackSourceKind::None,
+            user_speed: 1.0,
+            src_sr: 48_000,
+            is_playing: false,
+        }
+    }
 }
 
 pub struct WavesPreviewer {
@@ -226,7 +268,11 @@ pub struct WavesPreviewer {
     pub next_media_id: MediaId,
     pub selected: Option<usize>,
     pub volume_db: f32,
+    audio_output_device_name: Option<String>,
+    audio_output_devices: Vec<String>,
+    audio_output_error: Option<String>,
     pub playback_rate: f32,
+    playback_session: PlaybackSessionState,
     // unified numeric control via DragValue; no string normalization
     pub pitch_semitones: f32,
     pub meter_db: f32,
@@ -500,6 +546,68 @@ pub struct WavesPreviewer {
 }
 
 impl WavesPreviewer {
+    fn playback_is_playing_now(&self) -> bool {
+        self.audio
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn playback_user_speed_for_mode(&self) -> f32 {
+        if self.mode == RateMode::Speed {
+            self.playback_rate
+        } else {
+            1.0
+        }
+    }
+
+    fn playback_rate_from_values(user_speed: f32, src_sr: u32, out_sr: u32) -> f32 {
+        let src = src_sr.max(1) as f32;
+        let out = out_sr.max(1) as f32;
+        let ratio = (src / out).clamp(0.25, 4.0);
+        (user_speed.clamp(0.25, 4.0) * ratio).clamp(0.25, 4.0)
+    }
+
+    pub(super) fn playback_mark_source(&mut self, source: PlaybackSourceKind, src_sr: u32) {
+        self.playback_session.source = source;
+        self.playback_session.src_sr = src_sr.max(1);
+        self.playback_session.user_speed = self.playback_user_speed_for_mode();
+        self.playback_session.is_playing = self.playback_is_playing_now();
+        let rate = Self::playback_rate_from_values(
+            self.playback_session.user_speed,
+            self.playback_session.src_sr,
+            self.audio.shared.out_sample_rate.max(1),
+        );
+        self.audio.set_rate(rate);
+    }
+
+    pub(super) fn playback_refresh_rate_for_current_source(&mut self) {
+        self.playback_session.user_speed = self.playback_user_speed_for_mode();
+        let rate = Self::playback_rate_from_values(
+            self.playback_session.user_speed,
+            self.playback_session.src_sr,
+            self.audio.shared.out_sample_rate.max(1),
+        );
+        self.audio.set_rate(rate);
+    }
+
+    pub(super) fn playback_sync_state_snapshot(&mut self) {
+        self.playback_session.is_playing = self.playback_is_playing_now();
+    }
+
+    fn playback_stop_if_editor_source_invalidated(&mut self, path: &Path) {
+        let should_stop = matches!(
+            &self.playback_session.source,
+            PlaybackSourceKind::EditorTab(src) if src.as_path() == path
+        );
+        if should_stop {
+            self.audio.stop();
+            self.playback_session.source = PlaybackSourceKind::None;
+            self.playback_session.is_playing = false;
+            self.playback_session.src_sr = self.audio.shared.out_sample_rate.max(1);
+        }
+    }
+
     fn queue_tab_activation(&mut self, path: PathBuf) {
         self.pending_activate_path = Some(path);
         self.pending_activate_ready = false;
@@ -507,12 +615,16 @@ impl WavesPreviewer {
 
     fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
         self.close_plugin_gui_for_tab(idx);
+        let mut closing_path: Option<PathBuf> = None;
         if let Some(path) = self.tabs.get(idx).map(|t| t.path.clone()) {
             self.cancel_music_preview_if_path(path.as_path());
+            closing_path = Some(path);
         }
         self.clear_preview_if_any(idx);
+        if let Some(path) = closing_path.as_ref() {
+            self.playback_stop_if_editor_source_invalidated(path.as_path());
+        }
         self.cache_dirty_tab_at(idx);
-        self.audio.stop();
         self.tabs.remove(idx);
         if !self.tabs.is_empty() {
             let new_active = if idx < self.tabs.len() {
@@ -1562,10 +1674,10 @@ impl WavesPreviewer {
                 if self.mode != prev {
                     match self.mode {
                         RateMode::Speed => {
-                            self.audio.set_rate(self.playback_rate);
+                            self.playback_refresh_rate_for_current_source();
                         }
                         _ => {
-                            self.audio.set_rate(1.0);
+                            self.playback_refresh_rate_for_current_source();
                             self.rebuild_current_buffer_with_mode();
                         }
                     }
@@ -1576,10 +1688,10 @@ impl WavesPreviewer {
                 self.playback_rate = args.rate;
                 match self.mode {
                     RateMode::Speed => {
-                        self.audio.set_rate(self.playback_rate);
+                        self.playback_refresh_rate_for_current_source();
                     }
                     RateMode::TimeStretch => {
-                        self.audio.set_rate(1.0);
+                        self.playback_refresh_rate_for_current_source();
                         self.rebuild_current_buffer_with_mode();
                     }
                     _ => {}
@@ -1589,7 +1701,7 @@ impl WavesPreviewer {
             mcp::UiCommand::SetPitch(args) => {
                 self.pitch_semitones = args.semitones;
                 if self.mode == RateMode::PitchShift {
-                    self.audio.set_rate(1.0);
+                    self.playback_refresh_rate_for_current_source();
                     self.rebuild_current_buffer_with_mode();
                 }
                 ok(json!({"ok": true}))
@@ -1597,7 +1709,7 @@ impl WavesPreviewer {
             mcp::UiCommand::SetStretch(args) => {
                 self.playback_rate = args.rate;
                 if self.mode == RateMode::TimeStretch {
-                    self.audio.set_rate(1.0);
+                    self.playback_refresh_rate_for_current_source();
                     self.rebuild_current_buffer_with_mode();
                 }
                 ok(json!({"ok": true}))
@@ -1882,7 +1994,11 @@ impl WavesPreviewer {
             next_media_id: 1,
             selected: None,
             volume_db: -12.0,
+            audio_output_device_name: None,
+            audio_output_devices: Vec::new(),
+            audio_output_error: None,
             playback_rate: 1.0,
+            playback_session: PlaybackSessionState::default(),
             pitch_semitones: 0.0,
             meter_db: -80.0,
             tabs: Vec::new(),
@@ -2137,6 +2253,11 @@ impl WavesPreviewer {
             test_dialogs: TestDialogQueue::default(),
         };
         app.load_prefs();
+        app.refresh_audio_output_devices();
+        if app.audio_output_device_name.is_some() {
+            let preferred = app.audio_output_device_name.clone();
+            let _ = app.apply_audio_output_device_selection(preferred, false);
+        }
         app.refresh_transcript_ai_status();
         app.refresh_music_ai_status();
         app.reload_zoo_gif_frames();
@@ -2369,6 +2490,7 @@ impl eframe::App for WavesPreviewer {
                 -80.0
             };
             self.meter_db = db.clamp(-80.0, 6.0);
+            self.playback_sync_state_snapshot();
         }
         // Ensure effective volume (global vol x per-file gain) is always applied
         self.apply_effective_volume();
@@ -2455,7 +2577,6 @@ impl eframe::App for WavesPreviewer {
                     self.workspace_view = WorkspaceView::List;
                     self.pending_activate_path = None;
                     self.pending_activate_ready = false;
-                    self.audio.stop();
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
                 }
@@ -2471,7 +2592,6 @@ impl eframe::App for WavesPreviewer {
                             self.workspace_view = WorkspaceView::EffectGraph;
                             self.effect_graph.workspace_open = true;
                             self.effect_graph.last_editor_tab = self.active_tab;
-                            self.audio.stop();
                         }
                         if ui.button("x").on_hover_text("Close").clicked() {
                             self.request_close_effect_graph_workspace();
@@ -2507,12 +2627,10 @@ impl eframe::App for WavesPreviewer {
                             self.active_tab = Some(i);
                             self.debug_mark_tab_switch_start(&path_for_activate);
                             activate_path = Some(path_for_activate.clone());
-                            self.audio.stop();
                         }
                         if ui.button("x").on_hover_text("Close").clicked() {
                             self.clear_preview_if_any(i);
                             to_close = Some(i);
-                            self.audio.stop();
                         }
                     });
                 }
@@ -3102,6 +3220,7 @@ impl eframe::App for WavesPreviewer {
                 let p = pending;
                 self.pending_activate_path = None;
                 self.pending_activate_ready = false;
+                self.playing_path = Some(p.clone());
                 if !self.apply_dirty_tab_audio_with_mode(&p) {
                     // Reload the activated tab from in-memory samples first.
                     let mut used_tab_samples = false;
@@ -3120,15 +3239,19 @@ impl eframe::App for WavesPreviewer {
                                             &mut channels,
                                             in_sr,
                                         );
-                                        self.audio.set_rate(self.playback_rate);
                                         self.audio.set_samples_channels(channels);
-                                        self.audio.stop();
+                                        self.playback_mark_source(
+                                            PlaybackSourceKind::EditorTab(p.clone()),
+                                            self.audio.shared.out_sample_rate.max(1),
+                                        );
                                     }
                                     _ => {
-                                        self.audio.set_rate(1.0);
                                         // Prime with selected tab source before heavy processing result arrives.
                                         self.audio.set_samples_channels(channels.clone());
-                                        self.audio.stop();
+                                        self.playback_mark_source(
+                                            PlaybackSourceKind::EditorTab(p.clone()),
+                                            self.audio.shared.out_sample_rate.max(1),
+                                        );
                                         self.spawn_heavy_processing_from_channels(
                                             p.clone(),
                                             channels,
@@ -3149,10 +3272,13 @@ impl eframe::App for WavesPreviewer {
                             }
                         }
                         match self.mode {
-                            RateMode::Speed => self.audio.set_rate(self.playback_rate),
-                            _ => self.audio.set_rate(1.0),
+                            RateMode::Speed | RateMode::PitchShift | RateMode::TimeStretch => {
+                                self.playback_mark_source(
+                                    PlaybackSourceKind::EditorTab(p.clone()),
+                                    self.audio.shared.out_sample_rate.max(1),
+                                );
+                            }
                         }
-                        self.audio.stop();
                     }
                     if let Some(idx) = self.active_tab {
                         if let Some(tab) = self.tabs.get(idx) {
@@ -3232,14 +3358,12 @@ impl eframe::App for WavesPreviewer {
                                 Some(LeaveIntent::ToTab(i)) => {
                                     if let Some(t) = self.tabs.get(i) {
                                         self.active_tab = Some(i);
-                                        self.audio.stop();
                                         self.queue_tab_activation(t.path.clone());
                                     }
                                     self.rebuild_current_buffer_with_mode();
                                 }
                                 Some(LeaveIntent::ToList) => {
                                     self.active_tab = None;
-                                    self.audio.stop();
                                     self.audio.set_loop_enabled(false);
                                     self.request_list_focus(ctx);
                                 }

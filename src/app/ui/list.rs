@@ -55,6 +55,25 @@ impl crate::app::WavesPreviewer {
                 }
             }
         });
+        ui.menu_button("Effect Graph", |ui| {
+            let can_open = has_selection;
+            if ui
+                .add_enabled(can_open, egui::Button::new("Open"))
+                .clicked()
+            {
+                if let Some(path) = selected.first().cloned() {
+                    self.open_effect_graph_workspace();
+                    self.effect_graph.tester.target_path = Some(path.clone());
+                    self.effect_graph.tester.target_path_input = path.display().to_string();
+                    self.effect_graph.tester.last_input_bus = None;
+                    self.effect_graph.tester.last_input_audio = None;
+                    self.effect_graph.tester.last_output_bus = None;
+                    self.effect_graph.tester.last_output_audio = None;
+                    self.effect_graph.tester.playback_target = None;
+                }
+                ui.close();
+            }
+        });
         let transcript_targets: Vec<_> = selected
             .iter()
             .filter(|path| {

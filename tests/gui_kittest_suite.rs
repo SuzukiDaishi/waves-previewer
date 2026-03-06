@@ -6,7 +6,7 @@ mod kittest_suite {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use egui::{Key, Modifiers};
+    use egui::{Key, Modifiers, MouseWheelUnit};
     use egui_kittest::{kittest::Queryable, Harness};
     use neowaves::app::ToolKind;
     use neowaves::kittest::{harness_default, harness_with_startup};
@@ -1126,5 +1126,337 @@ mod kittest_suite {
             ),
             "Mel"
         );
+    }
+
+    #[test]
+    fn loop_inspector_shows_three_windows() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.state().audio.seek_to_sample(1200);
+        harness.key_press(Key::K);
+        harness.run_steps(1);
+        harness.state().audio.seek_to_sample(7200);
+        harness.key_press(Key::P);
+        harness.run_steps(3);
+
+        assert!(
+            !harness
+                .query_all_by_label("Pre-Loop window")
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+        assert!(
+            !harness
+                .query_all_by_label("Seam preview")
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+        assert!(
+            !harness
+                .query_all_by_label("Post-Loop window")
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn editor_ctrl_wheel_zoom_in_changes_samples_per_px() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+        assert!(spp_before > 0.0, "samples_per_px should be initialized");
+
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        let hover_pos = egui::pos2(
+            (inspector_rect.left() - 220.0).max(40.0),
+            inspector_rect.center().y,
+        );
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 120.0),
+                modifiers: Modifiers::COMMAND,
+            },
+            Modifiers::COMMAND,
+        );
+        harness.run_steps(3);
+
+        let spp_after = harness.state().tabs[tab_idx].samples_per_px;
+        assert!(
+            spp_after < spp_before,
+            "ctrl+wheel zoom in should reduce samples_per_px: before={spp_before} after={spp_after}"
+        );
+    }
+
+    #[test]
+    fn trim_set_add_virtual_keeps_editor_waveform_playback_source() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let source_path = harness.state().tabs[tab_idx].path.clone();
+        let source_len = harness.state().tabs[tab_idx].samples_len;
+        let virtual_before = harness.state().test_virtual_item_count();
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_selection_frac(0.20, 0.60));
+        harness.run_steps(2);
+
+        harness.get_by_label("Set").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].preview_audio_tool,
+            Some(ToolKind::Trim),
+            "trim preview should be armed after Set"
+        );
+
+        harness.get_by_label("Add Trim As Virtual").click();
+        harness.run_steps(3);
+        assert!(
+            harness.state().test_virtual_item_count() > virtual_before,
+            "Add Trim As Virtual should create a new virtual item"
+        );
+        assert_eq!(
+            harness.state().test_active_tab_path(),
+            Some(source_path.clone()),
+            "active editor tab should remain on source waveform"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].preview_audio_tool,
+            None,
+            "trim preview should be cleared after creating virtual item"
+        );
+
+        harness.key_press(Key::Space);
+        harness.run_steps(3);
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "space should start playback in editor"
+        );
+        assert_eq!(
+            audio_buffer_len(harness.state()),
+            source_len,
+            "editor playback should use visible source waveform after Add Trim As Virtual"
+        );
+        assert_eq!(
+            harness.state().test_playing_path().cloned(),
+            Some(source_path),
+            "playing path should remain source tab path"
+        );
+    }
+
+    #[test]
+    fn topbar_playing_indicator_tracks_playback_state() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        select_first_row(&mut harness);
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label("Playing")
+                .collect::<Vec<_>>()
+                .is_empty(),
+            "Playing indicator should be hidden while stopped"
+        );
+
+        harness.state_mut().audio.play();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            harness.run_steps(1);
+            if harness.state().test_audio_is_playing() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(harness.state().test_audio_is_playing());
+        assert!(
+            !harness
+                .query_all_by_label("Playing")
+                .collect::<Vec<_>>()
+                .is_empty(),
+            "Playing indicator should be visible while playing"
+        );
+
+        harness.state_mut().audio.stop();
+        harness.run_steps(3);
+        assert!(
+            harness
+                .query_all_by_label("Playing")
+                .collect::<Vec<_>>()
+                .is_empty(),
+            "Playing indicator should hide after stop"
+        );
+    }
+
+    #[test]
+    fn list_context_effect_graph_open_sets_target_path() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        let path = select_first_row(&mut harness);
+        let label = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("file name")
+            .to_string();
+
+        harness.get_by_label(&label).click_secondary();
+        harness.run_steps(2);
+        harness.get_by_label("Effect Graph ⏵").click();
+        harness.run_steps(1);
+        harness.get_by_label("Open").click();
+        harness.run_steps(3);
+
+        assert!(harness.state().test_effect_graph_workspace_open());
+        assert_eq!(harness.state().test_effect_graph_target_path(), Some(path));
+    }
+
+    #[test]
+    fn spectrogram_hop_ui_shows_derived_overlap() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_show_export_settings(true);
+        harness.state_mut().test_set_spectro_hop_size(128);
+        harness.run_steps(3);
+
+        harness.get_by_label("Hop Size:");
+        harness.get_by_label("Overlap: 93.8% (derived)");
+    }
+
+    #[test]
+    fn settings_output_device_controls_visible() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_show_export_settings(true);
+        harness.run_steps(3);
+
+        harness.get_by_label("Audio Output:");
+        harness.get_by_label("Refresh");
+    }
+
+    #[test]
+    fn music_stem_preview_gain_clamps_to_plus_24_in_editor_ui() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::MusicAnalyze));
+        assert!(harness.state_mut().test_set_music_analysis_result_mock(true));
+        assert!(harness
+            .state_mut()
+            .test_set_music_preview_gains_db(77.0, 33.0, 48.0, 60.0));
+        harness.run_steps(3);
+
+        let gains = harness
+            .state()
+            .test_music_preview_gains_db()
+            .expect("music preview gains");
+        assert!(gains.0 <= 24.0 && gains.0 >= -80.0);
+        assert!(gains.1 <= 24.0 && gains.1 >= -80.0);
+        assert!(gains.2 <= 24.0 && gains.2 >= -80.0);
+        assert!(gains.3 <= 24.0 && gains.3 >= -80.0);
+        assert!((gains.0 - 24.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn model_download_progress_labels_show_n_over_n() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        harness
+            .state_mut()
+            .test_set_mock_transcript_model_download_progress(3, 7);
+        harness
+            .state_mut()
+            .test_set_mock_music_model_download_progress(5, 9);
+        harness.run_steps(2);
+
+        harness.get_by_label("Downloading transcript model... 3/7");
+        harness.get_by_label("Downloading music analyze model... 5/9");
+        harness.state_mut().test_clear_mock_model_download_progress();
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_saves_editor_screenshot_png() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+
+        let image = harness
+            .render()
+            .expect("kittest render should produce an image");
+        assert!(image.width() >= 640);
+        assert!(image.height() >= 360);
+
+        let dir = make_temp_dir("kittest_render_shot");
+        let out = dir.join("editor_kittest_render.png");
+        image
+            .save(&out)
+            .unwrap_or_else(|e| panic!("save kittest render png failed: {e}"));
+        let size = std::fs::metadata(&out).expect("png metadata").len();
+        assert!(size > 1024, "rendered png looks too small: {size} bytes");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_zoom_ctrl_wheel_saves_before_after_screenshots() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+
+        let before = harness
+            .render()
+            .expect("kittest render should produce pre-zoom image");
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        let hover_pos = egui::pos2(
+            (inspector_rect.left() - 220.0).max(40.0),
+            inspector_rect.center().y,
+        );
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 120.0),
+                modifiers: Modifiers::COMMAND,
+            },
+            Modifiers::COMMAND,
+        );
+        harness.run_steps(3);
+        let after = harness
+            .render()
+            .expect("kittest render should produce post-zoom image");
+        assert_eq!(before.width(), after.width());
+        assert_eq!(before.height(), after.height());
+
+        let changed_pixels = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        assert!(
+            changed_pixels > 1024,
+            "zoom render difference too small: {changed_pixels} changed pixels"
+        );
+
+        let dir = make_temp_dir("kittest_zoom_ctrl_wheel");
+        let before_out = dir.join("zoom_before.png");
+        let after_out = dir.join("zoom_after.png");
+        before
+            .save(&before_out)
+            .unwrap_or_else(|e| panic!("save pre-zoom png failed: {e}"));
+        after
+            .save(&after_out)
+            .unwrap_or_else(|e| panic!("save post-zoom png failed: {e}"));
+        assert!(std::fs::metadata(&before_out).is_ok());
+        assert!(std::fs::metadata(&after_out).is_ok());
     }
 }

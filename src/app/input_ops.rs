@@ -100,7 +100,6 @@ impl super::WavesPreviewer {
                     self.workspace_view = super::types::WorkspaceView::List;
                     self.pending_activate_path = None;
                     self.pending_activate_ready = false;
-                    self.audio.stop();
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
                 } else {
@@ -115,7 +114,6 @@ impl super::WavesPreviewer {
                             let tab_path = tab.path.clone();
                             self.workspace_view = super::types::WorkspaceView::Editor;
                             self.active_tab = Some(tab_idx);
-                            self.audio.stop();
                             self.debug_mark_tab_switch_start(&tab_path);
                             self.queue_tab_activation(tab_path);
                         }

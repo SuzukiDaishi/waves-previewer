@@ -323,8 +323,10 @@ impl super::WavesPreviewer {
                             self.audio.shared.out_sample_rate,
                         );
                         self.audio.set_samples_channels(channels);
-                        self.audio.stop();
-                        self.audio.set_rate(self.playback_rate);
+                        self.playback_mark_source(
+                            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                            self.audio.shared.out_sample_rate.max(1),
+                        );
                     }
                     _ => {
                         if decode_failed {
@@ -334,13 +336,17 @@ impl super::WavesPreviewer {
                                 self.audio.shared.out_sample_rate,
                             );
                             self.audio.set_samples_channels(channels);
-                            self.audio.stop();
-                            self.audio.set_rate(1.0);
+                            self.playback_mark_source(
+                                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                                self.audio.shared.out_sample_rate.max(1),
+                            );
                         } else {
-                            self.audio.set_rate(1.0);
                             // Prime with target tab audio so tab switch never keeps old-tab content.
                             self.audio.set_samples_channels(channels.clone());
-                            self.audio.stop();
+                            self.playback_mark_source(
+                                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                                self.audio.shared.out_sample_rate.max(1),
+                            );
                             self.spawn_heavy_processing_from_channels(path.to_path_buf(), channels);
                         }
                     }
@@ -362,8 +368,10 @@ impl super::WavesPreviewer {
                     self.audio.shared.out_sample_rate,
                 );
                 self.audio.set_samples_channels(channels);
-                self.audio.stop();
-                self.audio.set_rate(self.playback_rate);
+                self.playback_mark_source(
+                    super::PlaybackSourceKind::EditorTab(tab_path.clone()),
+                    self.audio.shared.out_sample_rate.max(1),
+                );
             }
             _ => {
                 // Decode failures avoid heavy processing; we play cached samples directly.
@@ -374,13 +382,17 @@ impl super::WavesPreviewer {
                         self.audio.shared.out_sample_rate,
                     );
                     self.audio.set_samples_channels(channels);
-                    self.audio.stop();
-                    self.audio.set_rate(1.0);
+                    self.playback_mark_source(
+                        super::PlaybackSourceKind::EditorTab(tab_path.clone()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
                 } else {
-                    self.audio.set_rate(1.0);
                     // Prime with target tab audio so tab switch never keeps old-tab content.
                     self.audio.set_samples_channels(channels.clone());
-                    self.audio.stop();
+                    self.playback_mark_source(
+                        super::PlaybackSourceKind::EditorTab(tab_path.clone()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
                     self.spawn_heavy_processing_from_channels(tab_path.clone(), channels);
                 }
             }
@@ -424,10 +436,13 @@ impl super::WavesPreviewer {
             Self::reset_tab_defaults(tab);
         }
         if update_audio {
-            self.audio.set_rate(1.0);
             let mut channels = audio.channels.clone();
             self.apply_sample_rate_preview_for_path(&path, &mut channels, virtual_in_sr);
             self.audio.set_samples_channels(channels);
+            self.playback_mark_source(
+                super::PlaybackSourceKind::EditorTab(path.clone()),
+                self.audio.shared.out_sample_rate.max(1),
+            );
             self.apply_effective_volume();
         }
         true
@@ -608,6 +623,8 @@ impl super::WavesPreviewer {
         tab.view_mode = crate::app::types::ViewMode::Waveform;
         tab.snap_zero_cross = true;
         tab.drag_select_anchor = None;
+        tab.right_drag_mode = None;
+        tab.right_drag_anchor = None;
         tab.active_tool = crate::app::types::ToolKind::LoopEdit;
         tab.tool_state = crate::app::types::ToolState {
             fade_in_ms: 0.0,
@@ -663,7 +680,6 @@ impl super::WavesPreviewer {
                             self.playback_rate,
                             Self::to_wave_resample_quality(self.src_quality),
                         );
-                        self.audio.set_rate(self.playback_rate);
                     }
                 } else if update_audio {
                     let _ = crate::wave::prepare_for_speed_quality(
@@ -673,7 +689,6 @@ impl super::WavesPreviewer {
                         self.playback_rate,
                         Self::to_wave_resample_quality(self.src_quality),
                     );
-                    self.audio.set_rate(self.playback_rate);
                 }
                 let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
                     Ok(v) => v,
@@ -718,13 +733,20 @@ impl super::WavesPreviewer {
                     Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
                 }
                 if update_audio {
-                    self.audio.set_rate(1.0);
+                    self.playback_mark_source(
+                        super::PlaybackSourceKind::EditorTab(path.clone()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
                     self.spawn_heavy_processing(&path);
                 }
             }
         }
         if update_audio {
             self.playing_path = Some(path.clone());
+            self.playback_mark_source(
+                super::PlaybackSourceKind::EditorTab(path.clone()),
+                self.audio.shared.out_sample_rate.max(1),
+            );
             if let Some(tab) = self.tabs.get(idx) {
                 self.apply_loop_mode_for_tab(tab);
             }
@@ -1890,6 +1912,8 @@ impl super::WavesPreviewer {
                     seek_hold: None,
                     snap_zero_cross: cached.snap_zero_cross,
                     drag_select_anchor: None,
+                    right_drag_mode: None,
+                    right_drag_anchor: None,
                     active_tool: cached.active_tool,
                     tool_state: cached.tool_state,
                     loop_mode: cached.loop_mode,
@@ -1972,7 +1996,9 @@ impl super::WavesPreviewer {
                 bpm_offset_sec: 0.0,
                 seek_hold: None,
                 snap_zero_cross: true,
-                drag_select_anchor: None,
+                    drag_select_anchor: None,
+                    right_drag_mode: None,
+                    right_drag_anchor: None,
                 active_tool: crate::app::types::ToolKind::LoopEdit,
                 tool_state: crate::app::types::ToolState {
                     fade_in_ms: 0.0,
@@ -2003,14 +2029,19 @@ impl super::WavesPreviewer {
             self.playing_path = Some(path.to_path_buf());
             match self.mode {
                 RateMode::Speed => {
-                    self.audio.set_rate(self.playback_rate);
                     self.audio.set_samples_channels(chs);
+                    self.playback_mark_source(
+                        super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
                 }
                 _ => {
-                    self.audio.set_rate(1.0);
                     // Prime with source audio to avoid replaying previous tab content.
                     self.audio.set_samples_channels(chs.clone());
-                    self.audio.stop();
+                    self.playback_mark_source(
+                        super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
                     self.spawn_heavy_processing_from_channels(path.to_path_buf(), chs);
                 }
             }
@@ -2023,8 +2054,6 @@ impl super::WavesPreviewer {
         }
         let decode_failed = self.is_decode_failed_path(path);
         // 郢ｧ・ｿ郢晄じ・帝ｫ｢荵晢ｿ･/郢ｧ・｢郢ｧ・ｯ郢昴・縺・ｹ晞摩蝟ｧ邵ｺ蜷ｶ・玖ｭ弱ｅ竊馴ｫｻ・ｳ陞｢・ｰ郢ｧ雋樞酪雎・ｽ｢
-        self.audio.stop();
-
         if let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(idx);
@@ -2088,6 +2117,8 @@ impl super::WavesPreviewer {
                 seek_hold: None,
                 snap_zero_cross: cached.snap_zero_cross,
                 drag_select_anchor: None,
+                right_drag_mode: None,
+                right_drag_anchor: None,
                 active_tool: cached.active_tool,
                 tool_state: cached.tool_state,
                 loop_mode: cached.loop_mode,
@@ -2163,6 +2194,8 @@ impl super::WavesPreviewer {
             seek_hold: None,
             snap_zero_cross: true,
             drag_select_anchor: None,
+            right_drag_mode: None,
+            right_drag_anchor: None,
             active_tool: crate::app::types::ToolKind::LoopEdit,
             tool_state: crate::app::types::ToolState {
                 fade_in_ms: 0.0,
@@ -2191,12 +2224,11 @@ impl super::WavesPreviewer {
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);
         self.playing_path = Some(path.to_path_buf());
-        match self.mode {
-            RateMode::Speed => self.audio.set_rate(self.playback_rate),
-            _ => self.audio.set_rate(1.0),
-        }
         self.audio.set_samples_channels(Vec::new());
-        self.audio.stop();
+        self.playback_mark_source(
+            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+            self.audio.shared.out_sample_rate.max(1),
+        );
         self.apply_effective_volume();
         if !decode_failed {
             self.debug_mark_editor_open_start(path);
@@ -2581,10 +2613,16 @@ impl super::WavesPreviewer {
                                 self.audio.shared.out_sample_rate,
                             );
                             self.audio.set_samples_channels(channels);
-                            self.audio.set_rate(self.playback_rate);
+                            self.playback_mark_source(
+                                super::PlaybackSourceKind::EditorTab(tab_path),
+                                self.audio.shared.out_sample_rate.max(1),
+                            );
                         }
                         _ => {
-                            self.audio.set_rate(1.0);
+                            self.playback_mark_source(
+                                super::PlaybackSourceKind::EditorTab(tab_path.clone()),
+                                self.audio.shared.out_sample_rate.max(1),
+                            );
                             self.spawn_heavy_processing_from_channels(tab_path, channels);
                         }
                     }
@@ -2608,10 +2646,16 @@ impl super::WavesPreviewer {
                 match self.mode {
                     RateMode::Speed => {
                         self.audio.set_samples_channels(channels);
-                        self.audio.set_rate(self.playback_rate);
+                        self.playback_mark_source(
+                            super::PlaybackSourceKind::EditorTab(p),
+                            self.audio.shared.out_sample_rate.max(1),
+                        );
                     }
                     _ => {
-                        self.audio.set_rate(1.0);
+                        self.playback_mark_source(
+                            super::PlaybackSourceKind::EditorTab(p.clone()),
+                            self.audio.shared.out_sample_rate.max(1),
+                        );
                         self.spawn_heavy_processing_from_channels(p, channels);
                     }
                 }
@@ -2630,14 +2674,14 @@ impl super::WavesPreviewer {
                     } else if let Some(row_idx) = self.row_for_path(&p) {
                         self.select_and_load(row_idx, false);
                     }
-                    self.audio.set_rate(self.playback_rate);
+                    self.playback_refresh_rate_for_current_source();
                 }
                 _ => {
                     if !self.is_decode_failed_path(&p) {
-                        self.audio.set_rate(1.0);
+                        self.playback_refresh_rate_for_current_source();
                         self.spawn_heavy_processing(&p);
                     } else {
-                        self.audio.set_rate(1.0);
+                        self.playback_refresh_rate_for_current_source();
                     }
                 }
             }

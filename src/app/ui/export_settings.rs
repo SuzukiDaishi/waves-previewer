@@ -120,6 +120,59 @@ impl crate::app::WavesPreviewer {
                                 self.set_theme(ctx, next_theme);
                             }
                             ui.separator();
+                            ui.label("Audio Output:");
+                            let mut pending_output_change: Option<Option<String>> = None;
+                            ui.horizontal_wrapped(|ui| {
+                                let selected = self.audio_output_device_name.clone();
+                                let selected_text = selected
+                                    .as_deref()
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "Default".to_string());
+                                egui::ComboBox::from_id_salt("audio_output_device")
+                                    .selected_text(selected_text)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(selected.is_none(), "Default")
+                                            .clicked()
+                                        {
+                                            pending_output_change = Some(None);
+                                        }
+                                        let has_selected = selected
+                                            .as_ref()
+                                            .map(|v| self.audio_output_devices.iter().any(|d| d == v))
+                                            .unwrap_or(true);
+                                        if let Some(name) = selected.as_ref() {
+                                            if !has_selected {
+                                                let text = format!("{name} (Unavailable)");
+                                                if ui.selectable_label(true, text).clicked() {
+                                                    pending_output_change =
+                                                        Some(Some(name.clone()));
+                                                }
+                                            }
+                                        }
+                                        for name in &self.audio_output_devices {
+                                            let is_selected =
+                                                selected.as_ref().map(|v| v == name).unwrap_or(false);
+                                            if ui.selectable_label(is_selected, name).clicked() {
+                                                pending_output_change = Some(Some(name.clone()));
+                                            }
+                                        }
+                                    });
+                                if ui.button("Refresh").clicked() {
+                                    self.refresh_audio_output_devices();
+                                }
+                            });
+                            if let Some(next) = pending_output_change {
+                                let _ = self.apply_audio_output_device_selection(next, true);
+                            }
+                            if let Some(err) = self.audio_output_error.as_ref() {
+                                ui.label(
+                                    RichText::new(err)
+                                        .small()
+                                        .color(egui::Color32::LIGHT_RED),
+                                );
+                            }
+                            ui.separator();
                             ui.label("List:");
                             let mut next_skip = self.skip_dotfiles;
                             if ui.checkbox(&mut next_skip, "Skip dotfiles (.*)").changed() {
@@ -281,6 +334,7 @@ impl crate::app::WavesPreviewer {
                                     next_cfg = crate::app::types::SpectrogramConfig {
                                         fft_size: 4096,
                                         window: WindowFunction::BlackmanHarris,
+                                        hop_size: 410,
                                         overlap: 0.9,
                                         max_frames: 8192,
                                         scale: SpectrogramScale::Log,
@@ -329,14 +383,24 @@ impl crate::app::WavesPreviewer {
                                     });
                             });
                             ui.horizontal_wrapped(|ui| {
-                                ui.label("Overlap:");
-                                let mut pct = next_cfg.overlap * 100.0;
+                                ui.label("Hop Size:");
+                                let max_hop = next_cfg.fft_size.saturating_sub(1).max(1) as i64;
+                                let mut hop = next_cfg.hop_size.max(1) as i64;
                                 if ui
-                                    .add(egui::Slider::new(&mut pct, 50.0..=95.0).suffix("%"))
+                                    .add(egui::DragValue::new(&mut hop).range(1..=max_hop))
                                     .changed()
                                 {
-                                    next_cfg.overlap = pct / 100.0;
+                                    next_cfg.hop_size = hop.max(1) as usize;
                                 }
+                                let overlap_pct = (1.0
+                                    - (next_cfg.hop_size.max(1) as f32
+                                        / next_cfg.fft_size.max(1) as f32))
+                                    .clamp(0.0, 0.95)
+                                    * 100.0;
+                                ui.label(
+                                    RichText::new(format!("Overlap: {overlap_pct:.1}% (derived)"))
+                                        .weak(),
+                                );
                             });
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Max Frames:");

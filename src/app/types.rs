@@ -294,6 +294,7 @@ pub enum WindowFunction {
 pub struct SpectrogramConfig {
     pub fft_size: usize,
     pub window: WindowFunction,
+    pub hop_size: usize, // hop size in samples
     pub overlap: f32, // 0.0..0.95 (fraction)
     pub max_frames: usize,
     pub scale: SpectrogramScale,
@@ -308,6 +309,7 @@ impl Default for SpectrogramConfig {
         Self {
             fft_size: 2048,
             window: WindowFunction::BlackmanHarris,
+            hop_size: 256,
             overlap: 0.875,
             max_frames: 4096,
             scale: SpectrogramScale::Log,
@@ -596,6 +598,12 @@ pub enum MarkerKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RightDragMode {
+    Seek,
+    SelectRange,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoopXfadeShape {
     Linear,
     EqualPower,
@@ -710,6 +718,8 @@ pub struct EditorTab {
     pub seek_hold: Option<SeekHoldState>,    // key repeat state for seek
     pub snap_zero_cross: bool,               // enable zero-cross snapping
     pub drag_select_anchor: Option<usize>,   // transient during drag
+    pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
+    pub right_drag_anchor: Option<usize>,    // anchor for Shift+right-drag selection
     pub active_tool: ToolKind,               // current editing tool
     pub tool_state: ToolState,               // simple per-tool parameters
     pub loop_mode: LoopMode,                 // Off / On (whole) / Marker

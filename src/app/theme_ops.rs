@@ -159,10 +159,17 @@ impl WavesPreviewer {
             cfg.fft_size = cfg.fft_size.next_power_of_two();
         }
         cfg.fft_size = cfg.fft_size.clamp(256, 65536);
-        if !cfg.overlap.is_finite() {
-            cfg.overlap = 0.875;
+        if cfg.hop_size == 0 {
+            let overlap = if cfg.overlap.is_finite() {
+                cfg.overlap.clamp(0.0, 0.95)
+            } else {
+                0.875
+            };
+            cfg.hop_size = ((cfg.fft_size as f32) * (1.0 - overlap)).round().max(1.0) as usize;
         }
-        cfg.overlap = cfg.overlap.clamp(0.0, 0.95);
+        let max_hop = cfg.fft_size.saturating_sub(1).max(1);
+        cfg.hop_size = cfg.hop_size.clamp(1, max_hop);
+        cfg.overlap = (1.0 - (cfg.hop_size as f32 / cfg.fft_size as f32)).clamp(0.0, 0.95);
         if cfg.max_frames == 0 {
             cfg.max_frames = 4096;
         }
@@ -197,10 +204,16 @@ impl WavesPreviewer {
         let Some(path) = Self::prefs_path() else {
             return;
         };
+        self.load_prefs_from_path(path.as_path());
+    }
+
+    pub(super) fn load_prefs_from_path(&mut self, path: &std::path::Path) {
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };
         let mut plugin_paths = Vec::<PathBuf>::new();
+        let mut spectro_hop_loaded = false;
+        let mut spectro_overlap_legacy: Option<f32> = None;
         for line in text.lines() {
             let line = line.trim();
             if let Some(rest) = line.strip_prefix("theme=") {
@@ -226,9 +239,14 @@ impl WavesPreviewer {
                     "hann" => WindowFunction::Hann,
                     _ => WindowFunction::BlackmanHarris,
                 };
+            } else if let Some(rest) = line.strip_prefix("spectro_hop=") {
+                if let Ok(v) = rest.trim().parse::<usize>() {
+                    self.spectro_cfg.hop_size = v.max(1);
+                    spectro_hop_loaded = true;
+                }
             } else if let Some(rest) = line.strip_prefix("spectro_overlap=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
-                    self.spectro_cfg.overlap = v;
+                    spectro_overlap_legacy = Some(v);
                 }
             } else if let Some(rest) = line.strip_prefix("spectro_max_frames=") {
                 if let Ok(v) = rest.trim().parse::<usize>() {
@@ -266,6 +284,13 @@ impl WavesPreviewer {
                     "fast" => SrcQuality::Fast,
                     "best" => SrcQuality::Best,
                     _ => SrcQuality::Good,
+                };
+            } else if let Some(rest) = line.strip_prefix("audio_output_device=") {
+                let v = rest.trim();
+                self.audio_output_device_name = if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
                 };
             } else if let Some(rest) = line.strip_prefix("transcript_ai_opt_in=") {
                 self.transcript_ai_opt_in = matches!(rest.trim(), "1" | "true" | "yes" | "on");
@@ -418,6 +443,19 @@ impl WavesPreviewer {
                 self.zoo_flip_manual = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             }
         }
+        if !spectro_hop_loaded {
+            if let Some(overlap) = spectro_overlap_legacy {
+                let overlap = if overlap.is_finite() {
+                    overlap.clamp(0.0, 0.95)
+                } else {
+                    0.875
+                };
+                self.spectro_cfg.hop_size =
+                    ((self.spectro_cfg.fft_size.max(2) as f32) * (1.0 - overlap))
+                        .round()
+                        .max(1.0) as usize;
+            }
+        }
         Self::normalize_spectro_cfg(&mut self.spectro_cfg);
         if !plugin_paths.is_empty() {
             self.plugin_search_paths = plugin_paths;
@@ -430,6 +468,10 @@ impl WavesPreviewer {
         let Some(path) = Self::prefs_path() else {
             return;
         };
+        self.save_prefs_to_path(path.as_path());
+    }
+
+    pub(super) fn save_prefs_to_path(&self, path: &std::path::Path) {
         let theme = match self.theme_mode {
             ThemeMode::Dark => "dark",
             ThemeMode::Light => "light",
@@ -462,6 +504,7 @@ impl WavesPreviewer {
             SrcQuality::Good => "good",
             SrcQuality::Best => "best",
         };
+        let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
         let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
         let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
             "1"
@@ -510,6 +553,7 @@ impl WavesPreviewer {
 zero_cross_eps={:.6}\n\
 spectro_fft={}\n\
 spectro_window={}\n\
+spectro_hop={}\n\
 spectro_overlap={:.4}\n\
 spectro_max_frames={}\n\
 spectro_scale={}\n\
@@ -519,6 +563,7 @@ spectro_max_hz={:.1}\n\
 spectro_note_labels={}\n\
 item_bg_mode={}\n\
 src_quality={}\n\
+audio_output_device={}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -553,6 +598,7 @@ zoo_flip_manual={}\n",
             self.zero_cross_epsilon,
             self.spectro_cfg.fft_size,
             window,
+            self.spectro_cfg.hop_size,
             self.spectro_cfg.overlap,
             self.spectro_cfg.max_frames,
             scale,
@@ -562,6 +608,7 @@ zoo_flip_manual={}\n",
             note_labels,
             item_bg_mode,
             src_quality,
+            audio_output_device,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,
@@ -618,6 +665,9 @@ zoo_flip_manual={}\n",
             out.push_str("plugin_search_path=");
             out.push_str(&path_text);
             out.push('\n');
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(path, out);
     }

@@ -6,7 +6,8 @@ mod small_fix_regressions {
 
     use egui_kittest::Harness;
     use hound::{SampleFormat, WavSpec, WavWriter};
-    use neowaves::kittest::harness_with_startup;
+    use neowaves::app::ToolKind;
+    use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
 
     fn make_temp_dir(tag: &str) -> PathBuf {
@@ -408,6 +409,285 @@ mod small_fix_regressions {
             );
             std::thread::sleep(Duration::from_millis(15));
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_non_source_tab_keeps_playback_running() {
+        let dir = make_temp_dir("close_non_source_tab");
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        write_wav_32_float(&a, 48_000, 3.0);
+        write_wav_32_float(&b, 48_000, 3.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&a));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&b));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&a));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().audio.play();
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing(), "playback should be active");
+
+        assert!(harness.state_mut().test_close_tab_for_path(&b));
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "closing a non-source tab should not stop playback"
+        );
+        assert_eq!(
+            harness.state().test_playing_path().map(|p| p.as_path()),
+            Some(a.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_source_tab_stops_playback() {
+        let dir = make_temp_dir("close_source_tab");
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        write_wav_32_float(&a, 48_000, 2.0);
+        write_wav_32_float(&b, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&a));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&b));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&a));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().audio.play();
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing(), "playback should start");
+        assert_eq!(
+            harness.state().test_playing_path().map(|p| p.as_path()),
+            Some(a.as_path())
+        );
+
+        assert!(harness.state_mut().test_close_tab_for_path(&a));
+        harness.run_steps(3);
+
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "closing current source tab should stop playback"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shift_right_drag_selects_from_playhead_anchor() {
+        let dir = make_temp_dir("right_drag_shift");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state().audio.seek_to_sample(4_000);
+        assert!(harness.state_mut().test_simulate_right_drag(true, 0.80));
+        harness.run_steps(1);
+
+        let selection = harness.state().test_tab_selection().expect("selection");
+        assert!(selection.1 > selection.0);
+        assert!(selection.0 <= 4_000 && 4_000 <= selection.1);
+        assert_eq!(harness.state().test_tab_right_drag_mode(), None);
+        assert_eq!(harness.state().test_audio_play_pos(), 4_000);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn right_drag_seek_keeps_existing_selection() {
+        let dir = make_temp_dir("right_drag_seek");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.10, 0.25));
+
+        let before_sel = harness.state().test_tab_selection();
+        let before_pos = harness.state().test_audio_play_pos();
+        assert!(harness.state_mut().test_simulate_right_drag(false, 0.75));
+        harness.run_steps(1);
+
+        let after_pos = harness.state().test_audio_play_pos();
+        assert_ne!(after_pos, before_pos);
+        assert_eq!(harness.state().test_tab_selection(), before_sel);
+        assert_eq!(harness.state().test_tab_right_drag_mode(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speed_mode_rate_stays_stable_across_workspace_switch() {
+        let dir = make_temp_dir("speed_rate_switch");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.37);
+        harness.state_mut().test_refresh_playback_rate();
+        harness.run_steps(2);
+        let rate_before = harness.state().test_audio_rate();
+
+        harness.state_mut().test_switch_to_list();
+        harness.run_steps(2);
+        let rate_in_list = harness.state().test_audio_rate();
+        assert!(
+            (rate_in_list - rate_before).abs() < 1e-6,
+            "speed rate changed after switching to list: before={rate_before} after={rate_in_list}"
+        );
+
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        harness.run_steps(4);
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - rate_before).abs() < 1e-6,
+            "speed rate changed after tab/workspace switch: before={rate_before} after={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spectrogram_hop_roundtrip_via_session_keeps_derived_overlap() {
+        let dir = make_temp_dir("spectro_hop_roundtrip");
+        let src = dir.join("src.wav");
+        let sess = dir.join("hop_roundtrip.nwsess");
+        write_wav_32_float(&src, 48_000, 1.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_spectro_hop_size(128);
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_spectro_hop_size(), 128);
+        assert!(
+            (harness.state().test_spectro_overlap() - 0.9375).abs() < 1.0e-4,
+            "overlap should be derived from hop/fft"
+        );
+
+        assert!(harness.state_mut().test_save_session_to(&sess));
+        harness.state_mut().test_set_spectro_hop_size(512);
+        harness.run_steps(1);
+        assert_eq!(harness.state().test_spectro_hop_size(), 512);
+
+        assert!(harness.state_mut().test_open_session_from(&sess));
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(8) {
+            harness.run_steps(1);
+            if harness.state().test_spectro_hop_size() == 128 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(harness.state().test_spectro_hop_size(), 128);
+        assert!(
+            (harness.state().test_spectro_overlap() - 0.9375).abs() < 1.0e-4,
+            "restored overlap should remain hop-derived"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn music_stem_preview_gain_clamps_to_plus_24_db() {
+        let dir = make_temp_dir("stem_preview_gain_clamp");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::MusicAnalyze));
+        assert!(harness.state_mut().test_set_music_analysis_result_mock(true));
+        assert!(harness
+            .state_mut()
+            .test_set_music_preview_gains_db(80.0, 30.0, 42.0, 100.0));
+        harness.run_steps(3);
+
+        let gains = harness
+            .state()
+            .test_music_preview_gains_db()
+            .expect("music preview gains");
+        assert!(gains.0 <= 24.0 && gains.0 >= -80.0);
+        assert!(gains.1 <= 24.0 && gains.1 >= -80.0);
+        assert!(gains.2 <= 24.0 && gains.2 >= -80.0);
+        assert!(gains.3 <= 24.0 && gains.3 >= -80.0);
+        assert!(
+            (gains.0 - 24.0).abs() < 1.0e-6,
+            "bass should clamp to +24dB"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn audio_output_device_pref_roundtrip_and_fallback() {
+        let mut harness = harness_default();
+        let dir = make_temp_dir("audio_output_prefs");
+        let prefs = dir.join("prefs_test.txt");
+
+        harness
+            .state_mut()
+            .test_set_audio_output_device_pref(Some("Dummy Output Device"));
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness.state_mut().test_set_audio_output_device_pref(None);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert_eq!(
+            harness.state().test_audio_output_device_pref().as_deref(),
+            Some("Dummy Output Device")
+        );
+
+        harness
+            .state_mut()
+            .test_set_audio_output_devices(vec!["Device-A".to_string()]);
+        assert!(harness
+            .state_mut()
+            .test_apply_audio_output_device_selection(Some("Missing-Device"), false));
+        assert_eq!(harness.state().test_audio_output_device_pref(), None);
+        let err = harness
+            .state()
+            .test_audio_output_error()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            err.contains("not available"),
+            "fallback error message should mention unavailable device: {err}"
+        );
+
+        assert!(harness
+            .state_mut()
+            .test_apply_audio_output_device_selection(Some("Device-A"), false));
+        assert_eq!(
+            harness.state().test_audio_output_device_pref().as_deref(),
+            Some("Device-A")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

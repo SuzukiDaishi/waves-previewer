@@ -23,10 +23,8 @@ pub fn spectrogram_params(len: usize, cfg: &SpectrogramConfig) -> SpectrogramPar
         };
     }
     let max_frames = cfg.max_frames.max(1);
-    let mut frame_step = ((win as f32) * (1.0 - cfg.overlap)).round() as usize;
-    if frame_step == 0 {
-        frame_step = 1;
-    }
+    let mut frame_step = cfg.hop_size.max(1);
+    frame_step = frame_step.min(win.saturating_sub(1).max(1));
     let mut frames = ((len + frame_step - 1) / frame_step).max(1);
     if frames > max_frames {
         frame_step = (len / max_frames).max(1);

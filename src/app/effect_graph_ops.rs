@@ -2731,6 +2731,14 @@ impl WavesPreviewer {
     }
 
     pub(super) fn close_effect_graph_workspace_now(&mut self) {
+        if matches!(
+            self.playback_session.source,
+            crate::app::PlaybackSourceKind::EffectGraph
+        ) {
+            self.audio.stop();
+            self.playback_session.source = crate::app::PlaybackSourceKind::None;
+            self.playback_session.is_playing = false;
+        }
         self.effect_graph.workspace_open = false;
         self.effect_graph.pending_action = None;
         self.effect_graph.show_unsaved_prompt = false;

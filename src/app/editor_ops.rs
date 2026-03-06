@@ -147,6 +147,10 @@ impl crate::app::WavesPreviewer {
         if tab.drag_select_anchor.map(|v| v > len).unwrap_or(false) {
             tab.drag_select_anchor = None;
         }
+        if tab.right_drag_anchor.map(|v| v > len).unwrap_or(false) {
+            tab.right_drag_anchor = None;
+            tab.right_drag_mode = None;
+        }
         if tab.preview_offset_samples.map(|v| v > len).unwrap_or(false) {
             tab.preview_offset_samples = None;
         }
@@ -239,6 +243,9 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn add_trim_range_as_virtual(&mut self, tab_idx: usize, range: (usize, usize)) {
+        // "Set" in Trim inspector can route transport to preview mono.
+        // Restore the visible editor waveform before creating/selecting the virtual item.
+        self.clear_preview_if_any(tab_idx);
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -730,6 +737,14 @@ impl crate::app::WavesPreviewer {
                     tab.drag_select_anchor = Some(anchor.saturating_add(shift));
                 } else if anchor >= s {
                     tab.drag_select_anchor = None;
+                }
+            }
+            if let Some(anchor) = tab.right_drag_anchor {
+                if anchor >= e {
+                    tab.right_drag_anchor = Some(anchor.saturating_add(shift));
+                } else if anchor >= s {
+                    tab.right_drag_anchor = None;
+                    tab.right_drag_mode = None;
                 }
             }
             tab.loop_region = None;

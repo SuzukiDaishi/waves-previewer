@@ -388,6 +388,17 @@ fn sanitize_transcript_language_task(
     (next_language, next_task)
 }
 
+fn fold_download_progress(
+    prev_done: usize,
+    prev_total: usize,
+    next_done: usize,
+    next_total: usize,
+) -> (usize, usize) {
+    let total = prev_total.max(next_total.max(1));
+    let done = prev_done.min(total).max(next_done.min(total));
+    (done, total)
+}
+
 fn has_vad_model_file(path: &Path) -> bool {
     path.is_file()
         && path
@@ -453,7 +464,10 @@ fn transcribable_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-fn download_model_snapshot() -> Result<PathBuf, String> {
+fn download_model_snapshot_with_progress<F>(mut on_progress: F) -> Result<PathBuf, String>
+where
+    F: FnMut(usize, usize),
+{
     use hf_hub::api::sync::Api;
     use hf_hub::{Repo, RepoType};
     let api = Api::new().map_err(|e| format!("hf-hub init failed: {e}"))?;
@@ -485,11 +499,16 @@ fn download_model_snapshot() -> Result<PathBuf, String> {
         "onnx/decoder_with_past_model.onnx_data",
         "onnx/decoder_with_past_model_fp16.onnx_data",
     ];
+    let total = required.len().saturating_add(2);
+    let mut done = 0usize;
+    on_progress(done, total.max(1));
     let mut any = None::<PathBuf>;
     for rel in required {
         if let Ok(path) = repo.get(rel) {
             any = Some(path);
         }
+        done = done.saturating_add(1).min(total.max(1));
+        on_progress(done, total.max(1));
     }
     let vad_repo = api.repo(hf_hub::Repo::with_revision(
         VAD_MODEL_ID.to_string(),
@@ -498,6 +517,8 @@ fn download_model_snapshot() -> Result<PathBuf, String> {
     ));
     for rel in ["silero_vad.onnx", "silero_vad_half.onnx"] {
         let _ = vad_repo.get(rel);
+        done = done.saturating_add(1).min(total.max(1));
+        on_progress(done, total.max(1));
     }
     let Some(path) = any else {
         return Err("No required model files could be downloaded.".to_string());
@@ -514,6 +535,10 @@ fn download_model_snapshot() -> Result<PathBuf, String> {
     }
     resolve_model_dir_for_variant(TranscriptModelVariant::Auto)
         .ok_or_else(|| "Model download finished but snapshot was not found.".into())
+}
+
+fn download_model_snapshot() -> Result<PathBuf, String> {
+    download_model_snapshot_with_progress(|_, _| {})
 }
 
 fn is_probably_oom(err: &str) -> bool {
@@ -789,9 +814,14 @@ impl super::WavesPreviewer {
         if self.transcript_model_download_state.is_some() {
             return;
         }
-        let (tx, rx) = std::sync::mpsc::channel::<super::TranscriptModelDownloadResult>();
+        let (tx, rx) = std::sync::mpsc::channel::<super::TranscriptModelDownloadEvent>();
         std::thread::spawn(move || {
-            let msg = match download_model_snapshot() {
+            let result = match download_model_snapshot_with_progress(|done, total| {
+                let _ = tx.send(super::TranscriptModelDownloadEvent::Progress {
+                    done: done.min(total.max(1)),
+                    total: total.max(1),
+                });
+            }) {
                 Ok(dir) => super::TranscriptModelDownloadResult {
                     model_dir: Some(dir),
                     error: None,
@@ -801,10 +831,12 @@ impl super::WavesPreviewer {
                     error: Some(err),
                 },
             };
-            let _ = tx.send(msg);
+            let _ = tx.send(super::TranscriptModelDownloadEvent::Finished(result));
         });
         self.transcript_model_download_state = Some(super::TranscriptModelDownloadState {
-            started_at: std::time::Instant::now(),
+            _started_at: std::time::Instant::now(),
+            done: 0,
+            total: 1,
             rx,
         });
         self.transcript_ai_last_error = None;
@@ -1144,10 +1176,26 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_transcript_model_download_results(&mut self, ctx: &egui::Context) {
-        let Some(state) = &self.transcript_model_download_state else {
+        let Some(_) = &self.transcript_model_download_state else {
             return;
         };
-        if let Ok(result) = state.rx.try_recv() {
+        let mut finished: Option<super::TranscriptModelDownloadResult> = None;
+        if let Some(state) = self.transcript_model_download_state.as_mut() {
+            while let Ok(event) = state.rx.try_recv() {
+                match event {
+                    super::TranscriptModelDownloadEvent::Progress { done, total } => {
+                        let (next_done, next_total) =
+                            fold_download_progress(state.done, state.total, done, total);
+                        state.done = next_done;
+                        state.total = next_total;
+                    }
+                    super::TranscriptModelDownloadEvent::Finished(result) => {
+                        finished = Some(result);
+                    }
+                }
+            }
+        }
+        if let Some(result) = finished {
             self.transcript_model_download_state = None;
             if let Some(err) = result.error {
                 self.transcript_ai_last_error = Some(err.clone());
@@ -1158,9 +1206,11 @@ impl super::WavesPreviewer {
                 self.refresh_transcript_ai_status();
                 self.transcript_ai_last_error = None;
             }
-            ctx.request_repaint();
-        } else {
+        }
+        if self.transcript_model_download_state.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -1261,7 +1311,7 @@ impl super::WavesPreviewer {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_transcript_languages, has_required_model_files_for_variant,
+        canonical_transcript_languages, fold_download_progress, has_required_model_files_for_variant,
         sanitize_transcript_language_task, transcript_catalog_from_generation_config,
         transcript_catalog_from_tokenizer,
     };
@@ -1366,5 +1416,16 @@ mod tests {
         assert!(!langs.iter().any(|v| v == "aa"));
         assert!(!langs.iter().any(|v| v == "ability"));
         assert_eq!(langs.len(), 100);
+    }
+
+    #[test]
+    fn download_progress_fold_is_monotonic() {
+        let mut done = 0usize;
+        let mut total = 1usize;
+        for (next_done, next_total) in [(0, 3), (1, 3), (1, 3), (0, 3), (3, 3)] {
+            (done, total) = fold_download_progress(done, total, next_done, next_total);
+        }
+        assert_eq!(total, 3);
+        assert_eq!(done, 3);
     }
 }

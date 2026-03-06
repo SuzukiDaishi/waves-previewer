@@ -263,6 +263,13 @@ impl crate::app::WavesPreviewer {
                         }
                     });
                     ui.separator();
+                    if self.playback_session.is_playing {
+                        ui.label(
+                            RichText::new("Playing")
+                                .color(Color32::from_rgb(120, 220, 140))
+                                .strong(),
+                        );
+                    }
                     ui.label("Volume (dB)");
                     let vol_resp = ui.add(egui::Slider::new(&mut self.volume_db, -80.0..=6.0));
                     if vol_resp.changed() {
@@ -615,12 +622,18 @@ impl crate::app::WavesPreviewer {
                             }
                             if let Some(state) = &self.transcript_model_download_state {
                                 ui.add(egui::Spinner::new());
-                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                let total = state.total.max(1);
+                                let done = state.done.min(total);
                                 ui.label(
                                     RichText::new(format!(
-                                        "Downloading transcript model... ({elapsed:.1}s)"
+                                        "Downloading transcript model... {done}/{total}"
                                     ))
                                     .weak(),
+                                );
+                                ui.add(
+                                    egui::ProgressBar::new(done as f32 / total as f32)
+                                        .desired_width(80.0)
+                                        .show_percentage(),
                                 );
                             }
                             if let Some(err) = &self.transcript_ai_last_error {
@@ -653,12 +666,18 @@ impl crate::app::WavesPreviewer {
                             }
                             if let Some(state) = &self.music_model_download_state {
                                 ui.add(egui::Spinner::new());
-                                let elapsed = state.started_at.elapsed().as_secs_f32();
+                                let total = state.total.max(1);
+                                let done = state.done.min(total);
                                 ui.label(
                                     RichText::new(format!(
-                                        "Downloading music analyze model... ({elapsed:.1}s)"
+                                        "Downloading music analyze model... {done}/{total}"
                                     ))
                                     .weak(),
+                                );
+                                ui.add(
+                                    egui::ProgressBar::new(done as f32 / total as f32)
+                                        .desired_width(80.0)
+                                        .show_percentage(),
                                 );
                             }
                             if let Some(err) = &self.music_ai_last_error {
@@ -748,10 +767,10 @@ impl crate::app::WavesPreviewer {
                         if self.mode != prev_mode {
                             match self.mode {
                                 RateMode::Speed => {
-                                    self.audio.set_rate(self.playback_rate);
+                                    self.playback_refresh_rate_for_current_source();
                                 }
                                 _ => {
-                                    self.audio.set_rate(1.0);
+                                    self.playback_refresh_rate_for_current_source();
                                     self.rebuild_current_buffer_with_mode();
                                 }
                             }
@@ -766,7 +785,7 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" x"),
                                 );
                                 if resp.changed() {
-                                    self.audio.set_rate(self.playback_rate);
+                                    self.playback_refresh_rate_for_current_source();
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()
                                 {
@@ -811,7 +830,7 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" st"),
                                 );
                                 if resp.changed() {
-                                    self.audio.set_rate(1.0);
+                                    self.playback_refresh_rate_for_current_source();
                                     self.rebuild_current_buffer_with_mode();
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()
@@ -857,7 +876,7 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" x"),
                                 );
                                 if resp.changed() {
-                                    self.audio.set_rate(1.0);
+                                    self.playback_refresh_rate_for_current_source();
                                     self.rebuild_current_buffer_with_mode();
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()

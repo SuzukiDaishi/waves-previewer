@@ -3,12 +3,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::music_onnx::{
-    analyze_music, download_music_model_snapshot, has_required_music_model_files, is_cancel_error,
-    load_or_demix_stems_for_preview, music_model_repo_root, resolve_demucs_model_path,
-    resolve_music_model_dir, resolve_stem_paths, MusicAnalyzeOutput,
+    analyze_music, download_music_model_snapshot_with_progress, has_required_music_model_files,
+    is_cancel_error, load_or_demix_stems_for_preview, music_model_repo_root,
+    resolve_demucs_model_path, resolve_music_model_dir, resolve_stem_paths, MusicAnalyzeOutput,
 };
 use super::types::{MusicAnalysisSourceKind, MusicStemSet, StemGainsDb, ToolKind};
 use crate::markers::MarkerEntry;
+
+fn fold_download_progress(
+    prev_done: usize,
+    prev_total: usize,
+    next_done: usize,
+    next_total: usize,
+) -> (usize, usize) {
+    let total = prev_total.max(next_total.max(1));
+    let done = prev_done.min(total).max(next_done.min(total));
+    (done, total)
+}
 
 impl crate::app::WavesPreviewer {
     pub(super) fn refresh_music_ai_status(&mut self) {
@@ -35,9 +46,14 @@ impl crate::app::WavesPreviewer {
         if self.music_model_download_state.is_some() {
             return;
         }
-        let (tx, rx) = std::sync::mpsc::channel::<super::MusicModelDownloadResult>();
+        let (tx, rx) = std::sync::mpsc::channel::<super::MusicModelDownloadEvent>();
         std::thread::spawn(move || {
-            let msg = match download_music_model_snapshot() {
+            let result = match download_music_model_snapshot_with_progress(|done, total| {
+                let _ = tx.send(super::MusicModelDownloadEvent::Progress {
+                    done: done.min(total.max(1)),
+                    total: total.max(1),
+                });
+            }) {
                 Ok(dir) => super::MusicModelDownloadResult {
                     model_dir: Some(dir),
                     error: None,
@@ -47,10 +63,12 @@ impl crate::app::WavesPreviewer {
                     error: Some(err),
                 },
             };
-            let _ = tx.send(msg);
+            let _ = tx.send(super::MusicModelDownloadEvent::Finished(result));
         });
         self.music_model_download_state = Some(super::MusicModelDownloadState {
-            started_at: std::time::Instant::now(),
+            _started_at: std::time::Instant::now(),
+            done: 0,
+            total: 1,
             rx,
         });
         self.music_ai_last_error = None;
@@ -259,10 +277,26 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn drain_music_model_download_results(&mut self, ctx: &egui::Context) {
-        let Some(state) = &self.music_model_download_state else {
+        let Some(_) = &self.music_model_download_state else {
             return;
         };
-        if let Ok(result) = state.rx.try_recv() {
+        let mut finished: Option<super::MusicModelDownloadResult> = None;
+        if let Some(state) = self.music_model_download_state.as_mut() {
+            while let Ok(event) = state.rx.try_recv() {
+                match event {
+                    super::MusicModelDownloadEvent::Progress { done, total } => {
+                        let (next_done, next_total) =
+                            fold_download_progress(state.done, state.total, done, total);
+                        state.done = next_done;
+                        state.total = next_total;
+                    }
+                    super::MusicModelDownloadEvent::Finished(result) => {
+                        finished = Some(result);
+                    }
+                }
+            }
+        }
+        if let Some(result) = finished {
             self.music_model_download_state = None;
             if let Some(err) = result.error {
                 self.music_ai_last_error = Some(err.clone());
@@ -273,9 +307,11 @@ impl crate::app::WavesPreviewer {
                 self.music_ai_last_error = None;
             }
             self.refresh_music_ai_status();
-            ctx.request_repaint();
-        } else {
+        }
+        if self.music_model_download_state.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -910,8 +946,8 @@ fn sanitize_and_clip_channels(channels: &mut [Vec<f32>]) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        gain_to_amp, is_ai_marker_label, mix_stems_with_gains, music_progress_phase, remap_sample,
-        sanitize_and_clip_channels,
+        fold_download_progress, gain_to_amp, is_ai_marker_label, mix_stems_with_gains,
+        music_progress_phase, remap_sample, sanitize_and_clip_channels,
     };
     use crate::app::types::{MusicStemSet, StemGainsDb};
 
@@ -993,5 +1029,16 @@ mod tests {
             music_progress_phase("Analyze: postprocessing..."),
             "Postprocess"
         );
+    }
+
+    #[test]
+    fn download_progress_fold_is_monotonic() {
+        let mut done = 0usize;
+        let mut total = 1usize;
+        for (next_done, next_total) in [(0, 4), (2, 4), (1, 4), (3, 4), (4, 4)] {
+            (done, total) = fold_download_progress(done, total, next_done, next_total);
+        }
+        assert_eq!(total, 4);
+        assert_eq!(done, 4);
     }
 }

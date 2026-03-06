@@ -477,7 +477,10 @@ impl crate::app::WavesPreviewer {
             return;
         }
         self.audio.stop();
-        self.audio.set_rate(1.0);
+        self.playback_mark_source(
+            crate::app::PlaybackSourceKind::EffectGraph,
+            self.audio.shared.out_sample_rate.max(1),
+        );
         self.audio.set_samples_buffer(audio);
         self.audio.play();
         self.effect_graph.tester.playback_target = Some(target);

@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::app::types::{LoopMode, LoopXfadeShape, RateMode, SortDir, SortKey, ToolKind, ViewMode};
+use crate::app::types::{
+    LoopMode, LoopXfadeShape, MusicAnalysisResult, RateMode, SortDir, SortKey, ToolKind, ViewMode,
+};
 
 #[cfg(feature = "kittest")]
 impl super::WavesPreviewer {
@@ -59,6 +61,42 @@ impl super::WavesPreviewer {
 
     pub fn test_set_show_transcription_settings(&mut self, show: bool) {
         self.show_transcription_settings = show;
+    }
+
+    pub fn test_audio_output_device_pref(&self) -> Option<String> {
+        self.audio_output_device_name.clone()
+    }
+
+    pub fn test_audio_output_devices(&self) -> Vec<String> {
+        self.audio_output_devices.clone()
+    }
+
+    pub fn test_audio_output_error(&self) -> Option<String> {
+        self.audio_output_error.clone()
+    }
+
+    pub fn test_set_audio_output_device_pref(&mut self, name: Option<&str>) {
+        self.audio_output_device_name = name.map(|v| v.to_string());
+    }
+
+    pub fn test_set_audio_output_devices(&mut self, devices: Vec<String>) {
+        self.audio_output_devices = devices;
+    }
+
+    pub fn test_apply_audio_output_device_selection(
+        &mut self,
+        next: Option<&str>,
+        persist: bool,
+    ) -> bool {
+        self.apply_audio_output_device_selection(next.map(|v| v.to_string()), persist)
+    }
+
+    pub fn test_save_prefs_to_path(&self, path: &Path) {
+        self.save_prefs_to_path(path);
+    }
+
+    pub fn test_load_prefs_from_path(&mut self, path: &Path) {
+        self.load_prefs_from_path(path);
     }
 
     pub fn test_pending_gain_count(&self) -> usize {
@@ -121,8 +159,19 @@ impl super::WavesPreviewer {
         self.playback_rate = rate;
     }
 
+    pub fn test_refresh_playback_rate(&mut self) {
+        self.playback_refresh_rate_for_current_source();
+    }
+
     pub fn test_playback_rate(&self) -> f32 {
         self.playback_rate
+    }
+
+    pub fn test_audio_rate(&self) -> f32 {
+        self.audio
+            .shared
+            .rate
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn test_selected_pending_gain_db(&self) -> Option<f32> {
@@ -320,6 +369,63 @@ impl super::WavesPreviewer {
         };
         tab.selection = Some((s, e));
         tab.drag_select_anchor = None;
+        tab.right_drag_mode = None;
+        tab.right_drag_anchor = None;
+        true
+    }
+
+    pub fn test_tab_selection(&self) -> Option<(usize, usize)> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).and_then(|tab| tab.selection)
+    }
+
+    pub fn test_tab_right_drag_mode(&self) -> Option<&'static str> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        tab.right_drag_mode.map(|mode| match mode {
+            crate::app::types::RightDragMode::Seek => "Seek",
+            crate::app::types::RightDragMode::SelectRange => "SelectRange",
+        })
+    }
+
+    pub fn test_simulate_right_drag(&mut self, shift: bool, to_frac: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        if tab.samples_len == 0 {
+            return false;
+        }
+        let max_idx = tab.samples_len.saturating_sub(1);
+        let target = ((tab.samples_len as f32) * to_frac.clamp(0.0, 1.0))
+            .round()
+            .clamp(0.0, max_idx as f32) as usize;
+        let anchor = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(max_idx);
+        tab.right_drag_mode = Some(if shift {
+            crate::app::types::RightDragMode::SelectRange
+        } else {
+            crate::app::types::RightDragMode::Seek
+        });
+        tab.right_drag_anchor = Some(anchor);
+        if shift {
+            let (s, e) = if target >= anchor {
+                (anchor, target)
+            } else {
+                (target, anchor)
+            };
+            tab.selection = Some((s, e));
+        } else {
+            self.audio.seek_to_sample(target);
+        }
+        tab.right_drag_mode = None;
+        tab.right_drag_anchor = None;
         true
     }
 
@@ -455,6 +561,52 @@ impl super::WavesPreviewer {
         } else {
             false
         }
+    }
+
+    pub fn test_set_music_preview_gains_db(
+        &mut self,
+        bass: f32,
+        drums: f32,
+        other: f32,
+        vocals: f32,
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.music_analysis_draft.preview_gains_db.bass = bass;
+        tab.music_analysis_draft.preview_gains_db.drums = drums;
+        tab.music_analysis_draft.preview_gains_db.other = other;
+        tab.music_analysis_draft.preview_gains_db.vocals = vocals;
+        true
+    }
+
+    pub fn test_set_music_analysis_result_mock(&mut self, enabled: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.music_analysis_draft.result = if enabled {
+            Some(MusicAnalysisResult::default())
+        } else {
+            None
+        };
+        true
+    }
+
+    pub fn test_music_preview_gains_db(&self) -> Option<(f32, f32, f32, f32)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some((
+            tab.music_analysis_draft.preview_gains_db.bass,
+            tab.music_analysis_draft.preview_gains_db.drums,
+            tab.music_analysis_draft.preview_gains_db.other,
+            tab.music_analysis_draft.preview_gains_db.vocals,
+        ))
     }
 
     pub fn test_set_waveform_overlay(&mut self, enabled: bool) -> bool {
@@ -656,6 +808,15 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_close_tab_for_path(&mut self, path: &Path) -> bool {
+        let Some(idx) = self.tabs.iter().position(|t| t.path.as_path() == path) else {
+            return false;
+        };
+        let ctx = egui::Context::default();
+        self.close_tab_at(idx, &ctx);
+        true
+    }
+
     pub fn test_audio_buffer_len(&self) -> usize {
         self.audio
             .shared
@@ -819,5 +980,54 @@ impl super::WavesPreviewer {
 
     pub fn test_debug_summary_text(&self) -> String {
         self.debug_summary()
+    }
+
+    pub fn test_effect_graph_workspace_open(&self) -> bool {
+        self.effect_graph.workspace_open
+    }
+
+    pub fn test_effect_graph_target_path(&self) -> Option<PathBuf> {
+        self.effect_graph.tester.target_path.clone()
+    }
+
+    pub fn test_set_spectro_hop_size(&mut self, hop_size: usize) {
+        let mut next = self.spectro_cfg.clone();
+        next.hop_size = hop_size.max(1);
+        self.apply_spectro_config(next);
+    }
+
+    pub fn test_spectro_hop_size(&self) -> usize {
+        self.spectro_cfg.hop_size
+    }
+
+    pub fn test_spectro_overlap(&self) -> f32 {
+        self.spectro_cfg.overlap
+    }
+
+    pub fn test_set_mock_transcript_model_download_progress(&mut self, done: usize, total: usize) {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let total = total.max(1);
+        self.transcript_model_download_state = Some(super::TranscriptModelDownloadState {
+            _started_at: std::time::Instant::now(),
+            done: done.min(total),
+            total,
+            rx,
+        });
+    }
+
+    pub fn test_set_mock_music_model_download_progress(&mut self, done: usize, total: usize) {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let total = total.max(1);
+        self.music_model_download_state = Some(super::MusicModelDownloadState {
+            _started_at: std::time::Instant::now(),
+            done: done.min(total),
+            total,
+            rx,
+        });
+    }
+
+    pub fn test_clear_mock_model_download_progress(&mut self) {
+        self.transcript_model_download_state = None;
+        self.music_model_download_state = None;
     }
 }

@@ -268,6 +268,8 @@ pub struct ProjectListColumns {
 pub struct ProjectSpectrogram {
     pub fft_size: usize,
     pub window: String,
+    #[serde(default)]
+    pub hop_size: Option<usize>,
     pub overlap: f32,
     pub max_frames: usize,
     pub scale: String,
@@ -588,10 +590,21 @@ pub fn spectro_config_from_project(p: &ProjectSpectrogram) -> SpectrogramConfig 
         "log" => SpectrogramScale::Log,
         _ => SpectrogramScale::Linear,
     };
+    let fft = p.fft_size.max(2);
+    let hop_size = p.hop_size.filter(|v| *v > 0).unwrap_or_else(|| {
+        let overlap = if p.overlap.is_finite() {
+            p.overlap.clamp(0.0, 0.95)
+        } else {
+            0.875
+        };
+        ((fft as f32) * (1.0 - overlap)).round().max(1.0) as usize
+    });
+    let overlap = (1.0 - (hop_size as f32 / fft as f32)).clamp(0.0, 0.95);
     SpectrogramConfig {
         fft_size: p.fft_size,
         window,
-        overlap: p.overlap,
+        hop_size,
+        overlap,
         max_frames: p.max_frames,
         scale,
         mel_scale,
@@ -617,6 +630,7 @@ pub fn project_spectrogram_from_cfg(cfg: &SpectrogramConfig) -> ProjectSpectrogr
     ProjectSpectrogram {
         fft_size: cfg.fft_size,
         window: window.to_string(),
+        hop_size: Some(cfg.hop_size.max(1)),
         overlap: cfg.overlap,
         max_frames: cfg.max_frames,
         scale: scale.to_string(),
@@ -1179,5 +1193,40 @@ files = []
     fn tool_kind_parser_supports_pluginfx_and_loudness() {
         assert_eq!(tool_kind_from_str("PluginFx"), ToolKind::PluginFx);
         assert_eq!(tool_kind_from_str("Loudness"), ToolKind::Loudness);
+    }
+
+    #[test]
+    fn spectrogram_project_hop_migration_keeps_legacy_overlap_compatible() {
+        let legacy = ProjectSpectrogram {
+            fft_size: 2048,
+            window: "hann".to_string(),
+            hop_size: None,
+            overlap: 0.875,
+            max_frames: 1024,
+            scale: "log".to_string(),
+            mel_scale: "linear".to_string(),
+            db_floor: -120.0,
+            max_freq_hz: 0.0,
+            show_note_labels: false,
+        };
+        let cfg_legacy = spectro_config_from_project(&legacy);
+        assert_eq!(cfg_legacy.hop_size, 256);
+        assert!((cfg_legacy.overlap - 0.875).abs() < 1e-4);
+
+        let modern = ProjectSpectrogram {
+            fft_size: 2048,
+            window: "hann".to_string(),
+            hop_size: Some(128),
+            overlap: 0.0,
+            max_frames: 1024,
+            scale: "log".to_string(),
+            mel_scale: "linear".to_string(),
+            db_floor: -120.0,
+            max_freq_hz: 0.0,
+            show_note_labels: false,
+        };
+        let cfg_modern = spectro_config_from_project(&modern);
+        assert_eq!(cfg_modern.hop_size, 128);
+        assert!((cfg_modern.overlap - 0.9375).abs() < 1e-4);
     }
 }

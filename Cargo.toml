@@ -55,6 +55,7 @@ default = ["glow", "plugin_native_vst3", "plugin_native_clap"]
 glow = ["eframe/glow"]
 wgpu = ["eframe/wgpu"]
 kittest = ["egui_kittest"]
+kittest_render = ["kittest", "egui_kittest/wgpu"]
 plugin_native_vst3 = ["vst3", "libloading"]
 plugin_native_clap = ["clack-host", "clack-extensions"]
 

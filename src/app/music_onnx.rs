@@ -177,9 +177,15 @@ pub(super) fn resolve_demucs_model_path(model_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-pub(super) fn download_music_model_snapshot() -> Result<PathBuf, String> {
+pub(super) fn download_music_model_snapshot_with_progress<F>(
+    mut on_progress: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(usize, usize),
+{
     use hf_hub::api::sync::Api;
     use hf_hub::{Repo, RepoType};
+    use std::collections::HashSet;
 
     let api = Api::new().map_err(|e| format!("hf-hub init failed: {e}"))?;
     let repo = api.repo(Repo::with_revision(
@@ -189,7 +195,7 @@ pub(super) fn download_music_model_snapshot() -> Result<PathBuf, String> {
     ));
 
     // Seed files first.
-    let seed_files = [
+    let seed_files = vec![
         "onnx/ensemble_manifest.json",
         "onnx/harmonix-all-20480.onnx",
         "onnx/harmonix-all-20480.json",
@@ -202,19 +208,34 @@ pub(super) fn download_music_model_snapshot() -> Result<PathBuf, String> {
         "htdemucs.onnx",
         "onnx/htdemucs.onnx",
     ];
+    let mut ordered: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for rel in seed_files {
-        let _ = repo.get(rel);
+        if seen.insert(rel.to_string()) {
+            ordered.push(rel.to_string());
+        }
     }
 
-    // If manifest exists, download every listed model/config.
+    // If manifest exists, include every listed model/config.
     if let Ok(manifest_path) = repo.get("onnx/ensemble_manifest.json") {
         if let Ok(text) = std::fs::read_to_string(&manifest_path) {
             if let Ok(manifest) = serde_json::from_str::<EnsembleManifest>(&text) {
                 for rel in manifest.models.iter().chain(manifest.configs.iter()) {
-                    let _ = repo.get(rel);
+                    let rel = rel.to_string();
+                    if seen.insert(rel.clone()) {
+                        ordered.push(rel);
+                    }
                 }
             }
         }
+    }
+    let total = ordered.len().max(1);
+    let mut done = 0usize;
+    on_progress(done, total);
+    for rel in ordered {
+        let _ = repo.get(&rel);
+        done = done.saturating_add(1).min(total);
+        on_progress(done, total);
     }
 
     resolve_music_model_dir().ok_or_else(|| {

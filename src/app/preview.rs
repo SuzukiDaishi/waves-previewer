@@ -5,18 +5,28 @@ use super::types::{PreviewOverlay, ToolKind, ViewMode};
 use super::{WavesPreviewer, LIVE_PREVIEW_SAMPLE_LIMIT};
 
 impl WavesPreviewer {
-    pub(super) fn preview_restore_audio_for_tab(&self, tab_idx: usize) {
+    pub(super) fn preview_restore_audio_for_tab(&mut self, tab_idx: usize) {
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.audio.stop();
             self.audio.set_samples_channels(tab.ch_samples.clone());
             // Reapply loop mode
             self.apply_loop_mode_for_tab(tab);
+            let tab_path = tab.path.clone();
+            let source_sr = self
+                .effective_sample_rate_for_path(&tab_path)
+                .unwrap_or(self.audio.shared.out_sample_rate.max(1))
+                .max(1);
+            self.playback_mark_source(super::PlaybackSourceKind::EditorTab(tab_path), source_sr);
         }
     }
 
     pub(super) fn set_preview_mono(&mut self, tab_idx: usize, tool: ToolKind, mono: Vec<f32>) {
         self.audio.stop();
         self.audio.set_samples_mono(mono);
+        self.playback_mark_source(
+            super::PlaybackSourceKind::ToolPreview,
+            self.audio.shared.out_sample_rate.max(1),
+        );
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.preview_audio_tool = Some(tool);
         }
@@ -33,6 +43,10 @@ impl WavesPreviewer {
     ) {
         self.audio.stop();
         self.audio.set_samples_channels(channels);
+        self.playback_mark_source(
+            super::PlaybackSourceKind::ToolPreview,
+            self.audio.shared.out_sample_rate.max(1),
+        );
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.preview_audio_tool = Some(tool);
         }

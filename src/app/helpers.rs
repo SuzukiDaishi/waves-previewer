@@ -3,8 +3,11 @@ use regex::RegexBuilder;
 
 use super::types::{SortDir, SortKey};
 
+pub const GAIN_DB_MIN: f32 = -80.0;
+pub const GAIN_DB_MAX: f32 = 24.0;
+
 pub fn db_to_amp(db: f32) -> f32 {
-    if db <= -80.0 {
+    if db <= GAIN_DB_MIN {
         0.0
     } else {
         (10.0f32).powf(db / 20.0)

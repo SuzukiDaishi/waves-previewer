@@ -1220,6 +1220,8 @@ impl WavesPreviewer {
                         if let Some((s, e)) = Self::debug_range_for_tab(tab, start_frac, end_frac) {
                             tab.selection = Some((s, e));
                             tab.drag_select_anchor = None;
+                            tab.right_drag_mode = None;
+                            tab.right_drag_anchor = None;
                             self.debug_log(format!("auto: selection {s}..{e}"));
                         }
                     }

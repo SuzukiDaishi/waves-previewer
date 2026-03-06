@@ -53,11 +53,16 @@ pub struct SharedAudio {
     pub loop_xfade_samples: std::sync::atomic::AtomicUsize,
     pub loop_xfade_shape: std::sync::atomic::AtomicU8, // 0=Linear,1=EqualPower
     pub rate: AtomicF32,                               // playback rate (0.25..4.0)
+    pub ramp_gain: AtomicF32,                          // short de-click output ramp 0.0..1.0
+    pub ramp_target: AtomicF32,
+    pub ramp_step: AtomicF32,
+    pub ramp_events: std::sync::atomic::AtomicUsize,
 }
 
 pub struct AudioEngine {
     _stream: Option<cpal::Stream>,
     pub shared: Arc<SharedAudio>,
+    output_device_name: Option<String>,
 }
 
 impl AudioEngine {
@@ -78,14 +83,67 @@ impl AudioEngine {
             loop_xfade_samples: std::sync::atomic::AtomicUsize::new(0),
             loop_xfade_shape: std::sync::atomic::AtomicU8::new(0),
             rate: AtomicF32::new(1.0),
+            ramp_gain: AtomicF32::new(1.0),
+            ramp_target: AtomicF32::new(1.0),
+            ramp_step: AtomicF32::new(1.0),
+            ramp_events: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
     pub fn new() -> Result<Self> {
+        Self::new_with_output_device_name(None)
+    }
+
+    pub fn list_output_devices() -> Result<Vec<String>> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .context("No default output device")?;
+        let devices = host
+            .output_devices()
+            .context("failed to enumerate output devices")?;
+        let mut names = Vec::new();
+        for device in devices {
+            if let Ok(name) = device.name() {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    names.push(trimmed.to_string());
+                }
+            }
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
+    pub fn new_with_output_device_name(name: Option<&str>) -> Result<Self> {
+        let host = cpal::default_host();
+        let requested = name.map(str::trim).filter(|v| !v.is_empty());
+        let device = if let Some(requested_name) = requested {
+            let mut found = None;
+            let devices = host
+                .output_devices()
+                .context("failed to enumerate output devices")?;
+            for candidate in devices {
+                let candidate_name = match candidate.name() {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if candidate_name == requested_name {
+                    found = Some(candidate);
+                    break;
+                }
+            }
+            found.with_context(|| format!("output device not found: {requested_name}"))?
+        } else {
+            host.default_output_device()
+                .context("No default output device")?
+        };
+        let device_name = device.name().ok().and_then(|v| {
+            let trimmed = v.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
         let cfg = device
             .default_output_config()
             .context("No default output config")?;
@@ -108,6 +166,7 @@ impl AudioEngine {
         Ok(Self {
             _stream: Some(stream),
             shared,
+            output_device_name: device_name,
         })
     }
 
@@ -116,7 +175,16 @@ impl AudioEngine {
         Self {
             _stream: None,
             shared,
+            output_device_name: Some("Test Output Device".to_string()),
         }
+    }
+
+    pub fn output_device_name(&self) -> Option<&str> {
+        self.output_device_name.as_deref()
+    }
+
+    pub fn has_output_stream(&self) -> bool {
+        self._stream.is_some()
     }
 
     fn build_stream<T>(
@@ -148,6 +216,18 @@ impl AudioEngine {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let loop_start = shared.loop_start.load(std::sync::atomic::Ordering::Relaxed);
                 let loop_end = shared.loop_end.load(std::sync::atomic::Ordering::Relaxed);
+                let mut ramp_gain = shared.ramp_gain.load(std::sync::atomic::Ordering::Relaxed);
+                if !ramp_gain.is_finite() {
+                    ramp_gain = 1.0;
+                }
+                let ramp_target = shared
+                    .ramp_target
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    .clamp(0.0, 1.0);
+                let mut ramp_step = shared.ramp_step.load(std::sync::atomic::Ordering::Relaxed);
+                if !ramp_step.is_finite() || ramp_step <= 0.0 {
+                    ramp_step = 1.0;
+                }
                 if playing {
                     if let Some(samples_arc) = maybe_samples.as_ref() {
                         let samples = samples_arc.as_ref();
@@ -169,16 +249,21 @@ impl AudioEngine {
                         let mut pos = pos_f.floor() as usize;
                         let valid_loop = looping && loop_end > loop_start && loop_end <= len;
                         for frame in data.chunks_mut(channels) {
-                            if pos >= len {
-                                if valid_loop {
-                                    pos_f = loop_start as f32;
-                                } else {
-                                    shared
+                                if pos >= len {
+                                    if valid_loop {
+                                        pos_f = loop_start as f32;
+                                    } else {
+                                        shared
                                         .playing
                                         .store(false, std::sync::atomic::Ordering::Relaxed);
                                     for ch in frame.iter_mut() {
                                         *ch = T::from_sample(0.0);
                                     }
+                                    Self::advance_ramp_gain(
+                                        &mut ramp_gain,
+                                        ramp_target,
+                                        ramp_step,
+                                    );
                                     continue;
                                 }
                             }
@@ -257,7 +342,7 @@ impl AudioEngine {
                                         }
                                     }
                                 }
-                                let s = (s_lin * vol).clamp(-1.0, 1.0);
+                                let s = (s_lin * vol * ramp_gain).clamp(-1.0, 1.0);
                                 frame_sum += s;
                                 *out_sample = T::from_sample(s);
                             }
@@ -266,6 +351,7 @@ impl AudioEngine {
                             n += 1;
                             pos_f += rate;
                             pos = pos_f.floor() as usize;
+                            Self::advance_ramp_gain(&mut ramp_gain, ramp_target, ramp_step);
                         }
                         shared
                             .play_pos
@@ -279,6 +365,7 @@ impl AudioEngine {
                             for ch in frame.iter_mut() {
                                 *ch = T::from_sample(0.0);
                             }
+                            Self::advance_ramp_gain(&mut ramp_gain, ramp_target, ramp_step);
                         }
                     }
                 } else {
@@ -287,8 +374,12 @@ impl AudioEngine {
                         for ch in frame.iter_mut() {
                             *ch = T::from_sample(0.0);
                         }
+                        Self::advance_ramp_gain(&mut ramp_gain, ramp_target, ramp_step);
                     }
                 }
+                shared
+                    .ramp_gain
+                    .store(ramp_gain, std::sync::atomic::Ordering::Relaxed);
 
                 if n > 0 {
                     let rms = (sum_sq / n as f32).sqrt();
@@ -396,6 +487,13 @@ impl AudioEngine {
                 .loop_end
                 .store(new_len, std::sync::atomic::Ordering::Relaxed);
         }
+        if self
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.start_output_ramp(0.0, 1.0, 8.0);
+        }
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -426,6 +524,7 @@ impl AudioEngine {
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
         if now {
+            self.start_output_ramp(0.0, 1.0, 6.0);
             // on play, if at end, rewind
             let pos = self
                 .shared
@@ -448,6 +547,7 @@ impl AudioEngine {
         if self.shared.samples.load().is_none() {
             return;
         }
+        self.start_output_ramp(0.0, 1.0, 6.0);
         self.shared
             .playing
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -508,6 +608,39 @@ impl AudioEngine {
             .store(rate.clamp(0.25, 4.0), std::sync::atomic::Ordering::Relaxed);
     }
 
+    fn advance_ramp_gain(ramp_gain: &mut f32, ramp_target: f32, ramp_step: f32) {
+        if (*ramp_gain - ramp_target).abs() <= 1e-6 {
+            *ramp_gain = ramp_target;
+            return;
+        }
+        if *ramp_gain < ramp_target {
+            *ramp_gain = (*ramp_gain + ramp_step).min(ramp_target);
+        } else {
+            *ramp_gain = (*ramp_gain - ramp_step).max(ramp_target);
+        }
+    }
+
+    fn start_output_ramp(&self, start: f32, target: f32, duration_ms: f32) {
+        let start = if start.is_finite() { start } else { 0.0 }.clamp(0.0, 1.0);
+        let target = if target.is_finite() { target } else { 1.0 }.clamp(0.0, 1.0);
+        let duration_ms = duration_ms.max(0.1);
+        let sr = self.shared.out_sample_rate.max(1) as f32;
+        let frames = ((duration_ms / 1000.0) * sr).round().max(1.0);
+        let step = ((target - start).abs() / frames).max(1e-5);
+        self.shared
+            .ramp_gain
+            .store(start, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .ramp_target
+            .store(target, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .ramp_step
+            .store(step, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .ramp_events
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn seek_to_sample(&self, pos: usize) {
         // Clamp to buffer length if present
         if let Some(buf) = self.shared.samples.load().as_ref() {
@@ -520,5 +653,45 @@ impl AudioEngine {
                 .play_pos_f
                 .store(p as f32, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn play_triggers_output_ramp_event() {
+        let audio = AudioEngine::new_for_test();
+        audio.set_samples_mono(vec![0.0, 0.1, -0.1, 0.0]);
+        let before = audio
+            .shared
+            .ramp_events
+            .load(std::sync::atomic::Ordering::Relaxed);
+        audio.play();
+        let after = audio
+            .shared
+            .ramp_events
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after > before, "expected ramp event on play");
+    }
+
+    #[test]
+    fn replace_samples_keep_pos_triggers_ramp_when_playing() {
+        let audio = AudioEngine::new_for_test();
+        audio.set_samples_mono(vec![0.0, 0.1, 0.2, 0.3]);
+        audio.play();
+        let before = audio
+            .shared
+            .ramp_events
+            .load(std::sync::atomic::Ordering::Relaxed);
+        audio.replace_samples_keep_pos(Arc::new(AudioBuffer::from_mono(vec![
+            0.1, 0.0, -0.1, 0.0,
+        ])));
+        let after = audio
+            .shared
+            .ramp_events
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(after > before, "expected ramp event on buffer replace");
     }
 }

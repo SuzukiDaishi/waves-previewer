@@ -251,6 +251,62 @@ impl crate::app::WavesPreviewer {
         );
     }
 
+    fn draw_loop_window_preview(
+        ui: &mut egui::Ui,
+        samples: &[f32],
+        sample_rate: u32,
+        accent: Color32,
+    ) {
+        let desired = egui::vec2(ui.available_width().max(96.0), 84.0);
+        let (resp, painter) = ui.allocate_painter(desired, Sense::hover());
+        let rect = resp.rect;
+        painter.rect_filled(rect, 6.0, Color32::from_rgb(15, 18, 24));
+        painter.rect_stroke(
+            rect,
+            6.0,
+            Stroke::new(1.0, Color32::from_rgb(52, 62, 78)),
+            egui::StrokeKind::Outside,
+        );
+        if samples.is_empty() {
+            return;
+        }
+        let wave_rect = rect.shrink2(egui::vec2(10.0, 8.0));
+        let wave_rect = egui::Rect::from_min_max(
+            wave_rect.min,
+            egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
+        );
+        let center_y = wave_rect.center().y;
+        let amp = wave_rect.height() * 0.42;
+        painter.line_segment(
+            [
+                egui::pos2(wave_rect.left(), center_y),
+                egui::pos2(wave_rect.right(), center_y),
+            ],
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 30)),
+        );
+        let bins = wave_rect.width().round().max(8.0) as usize;
+        let mut tmp = Vec::new();
+        build_minmax(&mut tmp, samples, bins);
+        let denom = (tmp.len().saturating_sub(1)).max(1) as f32;
+        for (idx, (mn, mx)) in tmp.iter().enumerate() {
+            let x = egui::lerp(wave_rect.x_range(), idx as f32 / denom);
+            let y0 = center_y - mx.clamp(-1.0, 1.0) * amp;
+            let y1 = center_y - mn.clamp(-1.0, 1.0) * amp;
+            painter.line_segment(
+                [egui::pos2(x, y0), egui::pos2(x, y1)],
+                Stroke::new(1.1, accent.gamma_multiply(0.45)),
+            );
+        }
+        let ms = (samples.len() as f32 / sample_rate.max(1) as f32) * 1000.0;
+        painter.text(
+            egui::pos2(rect.center().x, rect.bottom() - 10.0),
+            egui::Align2::CENTER_CENTER,
+            format!("{ms:.1} ms"),
+            TextStyle::Small.resolve(ui.style()),
+            Color32::from_rgb(150, 162, 184),
+        );
+    }
+
     fn find_zero_cross_display(&self, tab_idx: usize, cur: usize, dir: i32) -> usize {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return cur;
@@ -782,6 +838,8 @@ impl crate::app::WavesPreviewer {
                         }
                     } else if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.drag_select_anchor = None;
+                        tab.right_drag_mode = None;
+                        tab.right_drag_anchor = None;
                     }
                     if new_display != cur_display {
                         request_seek = Some(map_display_to_audio(new_display));
@@ -1303,39 +1361,59 @@ impl crate::app::WavesPreviewer {
             // Detect hover using pointer position against our canvas rect (robust across senses)
             let pointer_over_canvas = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| rect.contains(p));
             if pointer_over_canvas {
-                // Zoom with Ctrl + wheel (use hovered pos over this widget)
-                // Combine raw wheel delta with low-level events as a fallback (covers trackpads/pinch, some platforms).
-                let wheel_raw = ui.input(|i| i.raw_scroll_delta);
-                let mut wheel = wheel_raw;
-                let mut pinch_zoom_factor: f32 = 1.0;
-                let events = ctx.input(|i| i.events.clone());
-                for ev in events {
-                    match ev {
-                        egui::Event::MouseWheel { delta, .. } => {
-                            wheel += delta;
-                        }
-                        egui::Event::Zoom(z) => {
-                            pinch_zoom_factor *= z;
-                        }
-                        _ => {}
-                    }
-                }
+                // Zoom with wheel/pinch over this widget.
+                // `zoom_delta` captures ctrl/cmd+wheel and pinch gestures robustly.
+                let (wheel_raw, wheel_smooth, zoom_delta, modifiers) = ui.input(|i| {
+                    (
+                        i.raw_scroll_delta,
+                        i.smooth_scroll_delta,
+                        i.zoom_delta(),
+                        i.modifiers,
+                    )
+                });
+                let wheel = if wheel_raw != egui::Vec2::ZERO {
+                    wheel_raw
+                } else {
+                    wheel_smooth
+                };
                 let scroll_y = wheel.y;
-                let modifiers = ui.input(|i| i.modifiers);
                 let pointer_pos = resp.hover_pos();
+                let zoom_factor_from_input = if zoom_delta.is_finite()
+                    && (zoom_delta - 1.0).abs() > 1e-4
+                {
+                    // egui zoom_delta > 1 means "zoom in". For samples-per-pixel we invert it.
+                    Some((1.0 / zoom_delta.max(1e-3)).clamp(0.2, 5.0))
+                } else {
+                    None
+                };
                 // Debug trace (dev builds): log incoming deltas and modifiers when over canvas
                 #[cfg(debug_assertions)]
-                if wheel_raw != egui::Vec2::ZERO || pinch_zoom_factor != 1.0 {
+                if wheel_raw != egui::Vec2::ZERO
+                    || wheel_smooth != egui::Vec2::ZERO
+                    || zoom_factor_from_input.is_some()
+                {
                     eprintln!(
-                        "wheel_raw=({:.2},{:.2}) wheel_total=({:.2},{:.2}) ctrl={} shift={} pinch={:.3}",
-                        wheel_raw.x, wheel_raw.y, wheel.x, wheel.y, modifiers.ctrl, modifiers.shift, pinch_zoom_factor
+                        "wheel_raw=({:.2},{:.2}) wheel_smooth=({:.2},{:.2}) wheel_used=({:.2},{:.2}) ctrl={} shift={} zoom_delta={:.3}",
+                        wheel_raw.x,
+                        wheel_raw.y,
+                        wheel_smooth.x,
+                        wheel_smooth.y,
+                        wheel.x,
+                        wheel.y,
+                        modifiers.ctrl,
+                        modifiers.shift,
+                        zoom_delta
                     );
                 }
-                // Zoom: plain wheel (unless Shift is held for pan) or pinch zoom
-                if (((scroll_y.abs() > 0.0) && !modifiers.shift) || (pinch_zoom_factor != 1.0)) && tab.samples_len > 0 {
+                // Zoom: plain wheel (unless Shift is held for pan) or gesture zoom.
+                if (((scroll_y.abs() > 0.0) && !modifiers.shift)
+                    || zoom_factor_from_input.is_some())
+                    && tab.samples_len > 0
+                {
                     // Wheel up = zoom in
-                    let factor = if pinch_zoom_factor != 1.0 { pinch_zoom_factor } else if scroll_y < 0.0 { 0.9 } else { 1.1 };
-                    let factor = factor.clamp(0.2, 5.0);
+                    let factor = zoom_factor_from_input
+                        .unwrap_or_else(|| if scroll_y < 0.0 { 0.9 } else { 1.1 })
+                        .clamp(0.2, 5.0);
                     let old_spp = tab.samples_per_px.max(0.0001);
                     let cursor_x = pointer_pos.map(|p| p.x).unwrap_or(wave_left + wave_w * 0.5).clamp(wave_left, wave_left + wave_w);
                     let t = ((cursor_x - wave_left) / wave_w).clamp(0.0, 1.0);
@@ -1373,15 +1451,14 @@ impl crate::app::WavesPreviewer {
                     if off as usize > max_left { off = max_left as isize; }
                     tab.view_offset = off as usize;
                 }
-                // Pan with Middle / Right drag, or Alt + Left drag (DAW-like)
-                let (left_down, mid_down, right_down, alt_mod) = ui.input(|i| (
+                // Pan with Middle drag or Alt + Left drag (DAW-like).
+                let (left_down, mid_down, alt_mod) = ui.input(|i| (
                     i.pointer.button_down(egui::PointerButton::Primary),
                     i.pointer.button_down(egui::PointerButton::Middle),
-                    i.pointer.button_down(egui::PointerButton::Secondary),
                     i.modifiers.alt,
                 ));
                 let alt_left_pan = alt_mod && left_down;
-                if (mid_down || right_down || alt_left_pan) && tab.samples_len > 0 {
+                if (mid_down || alt_left_pan) && tab.samples_len > 0 {
                     let dx = ui.input(|i| i.pointer.delta().x);
                     if dx.abs() > 0.0 {
                         let delta = (-dx * tab.samples_per_px) as isize;
@@ -1396,6 +1473,80 @@ impl crate::app::WavesPreviewer {
             }
             // Drag markers for LoopEdit (primary button only)
             let mut suppress_seek = false;
+            let alt_now = ui.input(|i| i.modifiers.alt);
+            // Right drag is dedicated to seek/playhead movement.
+            // Shift+Right drag switches to range selection with playhead anchor.
+            if pointer_over_canvas
+                && !alt_now
+                && tab.samples_len > 0
+                && tab.dragging_marker.is_none()
+            {
+                let right_drag_started = resp.drag_started_by(egui::PointerButton::Secondary);
+                let right_dragging = resp.dragged_by(egui::PointerButton::Secondary);
+                let right_drag_stopped = resp.drag_stopped_by(egui::PointerButton::Secondary);
+                let shift_now = ui.input(|i| i.modifiers.shift);
+                let spp = tab.samples_per_px.max(0.0001);
+                let vis = (wave_w * spp).ceil() as usize;
+                let to_display_sample = |x: f32| -> usize {
+                    let x = x.clamp(wave_left, wave_left + wave_w);
+                    tab.view_offset
+                        .saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize)
+                        .min(tab.samples_len)
+                };
+
+                if right_drag_started {
+                    let playhead_anchor = playhead_display_now.min(tab.samples_len);
+                    tab.right_drag_mode = Some(if shift_now {
+                        RightDragMode::SelectRange
+                    } else {
+                        RightDragMode::Seek
+                    });
+                    tab.right_drag_anchor = Some(playhead_anchor);
+                    if shift_now {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let samp = to_display_sample(pos.x);
+                            let (s, e) = if samp >= playhead_anchor {
+                                (playhead_anchor, samp)
+                            } else {
+                                (samp, playhead_anchor)
+                            };
+                            tab.selection = Some((s, e));
+                            suppress_seek = true;
+                        }
+                    }
+                }
+                if right_dragging {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let samp = to_display_sample(pos.x);
+                        match tab.right_drag_mode.unwrap_or(if shift_now {
+                            RightDragMode::SelectRange
+                        } else {
+                            RightDragMode::Seek
+                        }) {
+                            RightDragMode::Seek => {
+                                request_seek = Some(map_display_to_audio(samp));
+                                suppress_seek = true;
+                            }
+                            RightDragMode::SelectRange => {
+                                let anchor = tab
+                                    .right_drag_anchor
+                                    .unwrap_or_else(|| playhead_display_now.min(tab.samples_len));
+                                let (s, e) = if samp >= anchor {
+                                    (anchor, samp)
+                                } else {
+                                    (samp, anchor)
+                                };
+                                tab.selection = Some((s, e));
+                                suppress_seek = true;
+                            }
+                        }
+                    }
+                }
+                if right_drag_stopped {
+                    tab.right_drag_mode = None;
+                    tab.right_drag_anchor = None;
+                }
+            }
             if pointer_over_canvas
                 && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && tab.samples_len > 0
@@ -1472,7 +1623,6 @@ impl crate::app::WavesPreviewer {
                 }
             }
             // Drag to select a range (independent of tool), unless we are dragging markers
-            let alt_now = ui.input(|i| i.modifiers.alt);
             if pointer_over_canvas
                 && !alt_now
                 && tab.samples_len > 0
@@ -2934,11 +3084,31 @@ impl crate::app::WavesPreviewer {
                                             self.audio.shared.out_sample_rate,
                                         ) {
                                             ui.separator();
-                                            ui.label("Loop seam");
-                                            Self::draw_loop_seam_preview(ui, &seam_preview);
+                                            ui.label("Loop inspector");
+                                            ui.columns(3, |cols| {
+                                                cols[0].label("Pre-Loop window");
+                                                Self::draw_loop_window_preview(
+                                                    &mut cols[0],
+                                                    &seam_preview.raw_left,
+                                                    seam_preview.sample_rate,
+                                                    Color32::from_rgb(120, 176, 255),
+                                                );
+                                                cols[1].label("Seam preview");
+                                                Self::draw_loop_seam_preview(
+                                                    &mut cols[1],
+                                                    &seam_preview,
+                                                );
+                                                cols[2].label("Post-Loop window");
+                                                Self::draw_loop_window_preview(
+                                                    &mut cols[2],
+                                                    &seam_preview.raw_right,
+                                                    seam_preview.sample_rate,
+                                                    Color32::from_rgb(92, 255, 224),
+                                                );
+                                            });
                                         } else {
                                             ui.separator();
-                                            ui.label(RichText::new("Loop seam: -").weak());
+                                            ui.label(RichText::new("Loop inspector: -").weak());
                                         }
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):
@@ -3895,7 +4065,8 @@ impl crate::app::WavesPreviewer {
                                                 .add(
                                                     egui::Slider::new(
                                                         &mut tab.music_analysis_draft.preview_gains_db.bass,
-                                                        -80.0..=6.0,
+                                                        crate::app::helpers::GAIN_DB_MIN
+                                                            ..=crate::app::helpers::GAIN_DB_MAX,
                                                     )
                                                     .text("bass"),
                                                 )
@@ -3904,7 +4075,8 @@ impl crate::app::WavesPreviewer {
                                                 .add(
                                                     egui::Slider::new(
                                                         &mut tab.music_analysis_draft.preview_gains_db.drums,
-                                                        -80.0..=6.0,
+                                                        crate::app::helpers::GAIN_DB_MIN
+                                                            ..=crate::app::helpers::GAIN_DB_MAX,
                                                     )
                                                     .text("drums"),
                                                 )
@@ -3913,7 +4085,8 @@ impl crate::app::WavesPreviewer {
                                                 .add(
                                                     egui::Slider::new(
                                                         &mut tab.music_analysis_draft.preview_gains_db.other,
-                                                        -80.0..=6.0,
+                                                        crate::app::helpers::GAIN_DB_MIN
+                                                            ..=crate::app::helpers::GAIN_DB_MAX,
                                                     )
                                                     .text("other"),
                                                 )
@@ -3922,7 +4095,8 @@ impl crate::app::WavesPreviewer {
                                                 .add(
                                                     egui::Slider::new(
                                                         &mut tab.music_analysis_draft.preview_gains_db.vocals,
-                                                        -80.0..=6.0,
+                                                        crate::app::helpers::GAIN_DB_MIN
+                                                            ..=crate::app::helpers::GAIN_DB_MAX,
                                                     )
                                                     .text("vocals"),
                                                 )
@@ -3931,22 +4105,34 @@ impl crate::app::WavesPreviewer {
                                                 .music_analysis_draft
                                                 .preview_gains_db
                                                 .bass
-                                                .clamp(-80.0, 6.0);
+                                                .clamp(
+                                                    crate::app::helpers::GAIN_DB_MIN,
+                                                    crate::app::helpers::GAIN_DB_MAX,
+                                                );
                                             tab.music_analysis_draft.preview_gains_db.drums = tab
                                                 .music_analysis_draft
                                                 .preview_gains_db
                                                 .drums
-                                                .clamp(-80.0, 6.0);
+                                                .clamp(
+                                                    crate::app::helpers::GAIN_DB_MIN,
+                                                    crate::app::helpers::GAIN_DB_MAX,
+                                                );
                                             tab.music_analysis_draft.preview_gains_db.other = tab
                                                 .music_analysis_draft
                                                 .preview_gains_db
                                                 .other
-                                                .clamp(-80.0, 6.0);
+                                                .clamp(
+                                                    crate::app::helpers::GAIN_DB_MIN,
+                                                    crate::app::helpers::GAIN_DB_MAX,
+                                                );
                                             tab.music_analysis_draft.preview_gains_db.vocals = tab
                                                 .music_analysis_draft
                                                 .preview_gains_db
                                                 .vocals
-                                                .clamp(-80.0, 6.0);
+                                                .clamp(
+                                                    crate::app::helpers::GAIN_DB_MIN,
+                                                    crate::app::helpers::GAIN_DB_MAX,
+                                                );
                                             if slider_changed {
                                                 tab.music_analysis_draft.preview_active = false;
                                                 pending_music_preview_refresh = true;
