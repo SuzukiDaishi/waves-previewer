@@ -179,6 +179,39 @@ impl super::WavesPreviewer {
             .unwrap_or(false)
     }
 
+    fn normalize_loaded_sidecar_buffer(
+        &mut self,
+        path: &Path,
+        mut channels: Vec<Vec<f32>>,
+        sidecar_sr: u32,
+        stored_buffer_sr: Option<u32>,
+        source_label: &str,
+    ) -> (Vec<Vec<f32>>, u32) {
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let mut buffer_sr = stored_buffer_sr.filter(|v| *v > 0).unwrap_or_else(|| {
+            if sidecar_sr.max(1) != out_sr {
+                self.debug_log(format!(
+                    "legacy session sidecar missing buffer_sample_rate: {} path={} sidecar_sr={} -> assuming output_sr={}",
+                    source_label,
+                    path.display(),
+                    sidecar_sr.max(1),
+                    out_sr
+                ));
+                out_sr
+            } else {
+                sidecar_sr.max(1)
+            }
+        });
+        if buffer_sr != out_sr {
+            let quality = Self::to_wave_resample_quality(self.src_quality);
+            for ch in channels.iter_mut() {
+                *ch = crate::wave::resample_quality(ch, buffer_sr, out_sr, quality);
+            }
+            buffer_sr = out_sr;
+        }
+        (channels, buffer_sr)
+    }
+
     pub(super) fn save_project(&mut self) -> Result<(), String> {
         let path = match self.project_path.clone() {
             Some(p) => p,
@@ -487,9 +520,7 @@ impl super::WavesPreviewer {
             let mut preview_audio = None;
             let mut preview_tool = None;
             if tab.dirty && !tab.ch_samples.is_empty() {
-                let sidecar_sr = self
-                    .effective_sample_rate_for_path(&tab.path)
-                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                let sidecar_sr = tab.buffer_sample_rate.max(1);
                 match save_sidecar_audio(&path, idx, &tab.ch_samples, sidecar_sr) {
                     Ok(p) => {
                         edited_audio = Some(p);
@@ -529,9 +560,7 @@ impl super::WavesPreviewer {
             if cached.ch_samples.is_empty() {
                 continue;
             }
-            let sidecar_sr = self
-                .effective_sample_rate_for_path(item_path)
-                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+            let sidecar_sr = cached.buffer_sample_rate.max(1);
             let edited_audio =
                 match save_sidecar_cached_audio(&path, idx, &cached.ch_samples, sidecar_sr) {
                     Ok(p) => p,
@@ -542,6 +571,7 @@ impl super::WavesPreviewer {
             cached_edits.push(ProjectEdit {
                 path: rel_path(item_path, base_dir),
                 edited_audio: rel_path(&edited_audio, base_dir),
+                buffer_sample_rate: Some(cached.buffer_sample_rate.max(1)),
                 dirty: cached.dirty,
                 loop_region: cached.loop_region.map(|v| [v.0, v.1]),
                 loop_markers_saved: cached.loop_markers_saved.map(|v| [v.0, v.1]),
@@ -1023,21 +1053,28 @@ impl super::WavesPreviewer {
             let Some((chans, sr, _)) = edited else {
                 continue;
             };
-            let sr = sr.max(1);
+            let (chans, buffer_sr) = self.normalize_loaded_sidecar_buffer(
+                &path,
+                chans,
+                sr.max(1),
+                edit.buffer_sample_rate,
+                "cached edit",
+            );
             let samples_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
-            let mut waveform = Vec::new();
-            let mono = super::WavesPreviewer::mixdown_channels(&chans, samples_len);
-            crate::wave::build_minmax(&mut waveform, &mono, 2048);
+            let (waveform, waveform_pyramid) =
+                super::WavesPreviewer::build_editor_waveform_cache(&chans, samples_len);
             let bits = self.effective_bits_for_path(&path).unwrap_or(32);
             let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
-                &chans, sr, bits,
+                &chans, buffer_sr, bits,
             ));
             self.edited_cache.insert(
                 path,
                 super::types::CachedEdit {
                     ch_samples: chans,
                     samples_len,
+                    buffer_sample_rate: buffer_sr,
                     waveform_minmax: waveform,
+                    waveform_pyramid,
                     display_meta,
                     dirty: edit.dirty,
                     loop_region: edit.loop_region.map(|v| (v[0], v[1])),
@@ -1090,23 +1127,28 @@ impl super::WavesPreviewer {
                 None
             };
             if let Some((chans, sr, _)) = edited {
-                let sr = sr.max(1);
-                let mut waveform = Vec::new();
-                let mono = super::WavesPreviewer::mixdown_channels(
-                    &chans,
-                    chans.get(0).map(|c| c.len()).unwrap_or(0),
+                let (chans, buffer_sr) = self.normalize_loaded_sidecar_buffer(
+                    &tab_path,
+                    chans,
+                    sr.max(1),
+                    tab.buffer_sample_rate,
+                    "tab edit",
                 );
-                crate::wave::build_minmax(&mut waveform, &mono, 2048);
+                let samples_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
+                let (waveform, waveform_pyramid) =
+                    super::WavesPreviewer::build_editor_waveform_cache(&chans, samples_len);
                 let bits = self.effective_bits_for_path(&tab_path).unwrap_or(32);
                 let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
-                    &chans, sr, bits,
+                    &chans, buffer_sr, bits,
                 ));
                 self.edited_cache.insert(
                     tab_path.clone(),
                     super::types::CachedEdit {
                         ch_samples: chans,
-                        samples_len: mono.len(),
+                        samples_len,
+                        buffer_sample_rate: buffer_sr,
                         waveform_minmax: waveform,
+                        waveform_pyramid,
                         display_meta,
                         dirty: tab.dirty,
                         loop_region: tab.loop_region.map(|v| (v[0], v[1])),

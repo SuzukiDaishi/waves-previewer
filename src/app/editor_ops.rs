@@ -924,7 +924,12 @@ impl crate::app::WavesPreviewer {
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
                     tab.ch_samples = applied_channels;
+                    tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                     tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                    let (waveform_minmax, waveform_pyramid) =
+                        Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
+                    tab.waveform_minmax = waveform_minmax;
+                    tab.waveform_pyramid = waveform_pyramid;
                     let new_len = tab.samples_len.max(1);
                     if old_len > 0 && new_len > 0 {
                         let ratio = (new_len as f32) / (old_len as f32);
@@ -947,9 +952,21 @@ impl crate::app::WavesPreviewer {
                 self.heavy_overlay_rx = None;
                 self.overlay_expected_tool = None;
                 self.audio.stop();
-                if let Some(tab) = self.tabs.get(res.tab_idx) {
-                    self.audio.set_samples_channels(tab.ch_samples.clone());
-                    self.apply_loop_mode_for_tab(tab);
+                if let Some((path, buffer_sr, channels)) = self.tabs.get(res.tab_idx).map(|tab| {
+                    (
+                        tab.path.clone(),
+                        tab.buffer_sample_rate.max(1),
+                        tab.ch_samples.clone(),
+                    )
+                }) {
+                    self.audio.set_samples_channels(channels);
+                    self.playback_mark_source(
+                        crate::app::PlaybackSourceKind::EditorTab(path),
+                        buffer_sr,
+                    );
+                    if let Some(tab) = self.tabs.get(res.tab_idx) {
+                        self.apply_loop_mode_for_tab(tab);
+                    }
                 } else if !res.samples.is_empty() {
                     self.audio.set_samples_mono(res.samples);
                 }

@@ -563,7 +563,12 @@ impl crate::app::WavesPreviewer {
                 .max()
                 .unwrap_or(tab.samples_len);
             tab.ch_samples = channels.clone();
+            tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
             tab.samples_len = samples_len;
+            let (waveform_minmax, waveform_pyramid) =
+                Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
+            tab.waveform_minmax = waveform_minmax;
+            tab.waveform_pyramid = waveform_pyramid;
             tab.dirty = true;
             tab.music_analysis_draft.preview_active = false;
             tab.music_analysis_draft.preview_error = None;
@@ -577,8 +582,18 @@ impl crate::app::WavesPreviewer {
         self.audio.set_samples_channels(channels);
         self.audio.stop();
         self.on_audio_length_changed(tab_idx);
-        if let Some(tab) = self.tabs.get(tab_idx) {
-            self.apply_loop_mode_for_tab(tab);
+        if let Some((path, buffer_sr)) = self
+            .tabs
+            .get(tab_idx)
+            .map(|tab| (tab.path.clone(), tab.buffer_sample_rate.max(1)))
+        {
+            self.playback_mark_source(
+                crate::app::PlaybackSourceKind::EditorTab(path),
+                buffer_sr,
+            );
+            if let Some(tab) = self.tabs.get(tab_idx) {
+                self.apply_loop_mode_for_tab(tab);
+            }
         }
     }
 

@@ -58,7 +58,7 @@ impl WavesPreviewer {
         self.cancel_list_preview_job();
         self.playback_session.source = crate::app::PlaybackSourceKind::None;
         self.playback_session.is_playing = false;
-        self.playback_session.src_sr = self.audio.shared.out_sample_rate.max(1);
+        self.playback_session.buffer_sr = self.audio.shared.out_sample_rate.max(1);
         self.playback_refresh_rate_for_current_source();
         self.apply_effective_volume();
     }

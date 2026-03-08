@@ -361,6 +361,73 @@ pub fn build_minmax(out: &mut Vec<(f32, f32)>, samples: &[f32], bins: usize) {
     }
 }
 
+pub fn build_waveform_minmax_from_channels(
+    channels: &[Vec<f32>],
+    samples_len: usize,
+    bins: usize,
+) -> Vec<(f32, f32)> {
+    if channels.is_empty() || samples_len == 0 || bins == 0 {
+        return Vec::new();
+    }
+    let len = samples_len.min(channels[0].len());
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut waveform = Vec::with_capacity(bins.min(len));
+    let step = (len as f32 / bins as f32).max(1.0);
+    let mut pos = 0.0f32;
+    let channel_count = channels.len() as f32;
+    for _ in 0..bins {
+        let start = pos as usize;
+        let end = ((pos + step) as usize).min(len);
+        if start >= end {
+            waveform.push((0.0, 0.0));
+        } else if channels.len() == 1 {
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            for &v in &channels[0][start..end] {
+                if v < mn {
+                    mn = v;
+                }
+                if v > mx {
+                    mx = v;
+                }
+            }
+            waveform.push(if mn.is_finite() && mx.is_finite() {
+                (mn, mx)
+            } else {
+                (0.0, 0.0)
+            });
+        } else {
+            let mut mn = f32::INFINITY;
+            let mut mx = f32::NEG_INFINITY;
+            for sample_idx in start..end {
+                let mut sum = 0.0f32;
+                for channel in channels {
+                    sum += channel.get(sample_idx).copied().unwrap_or(0.0);
+                }
+                let mixed = sum / channel_count;
+                if mixed < mn {
+                    mn = mixed;
+                }
+                if mixed > mx {
+                    mx = mixed;
+                }
+            }
+            waveform.push(if mn.is_finite() && mx.is_finite() {
+                (mn, mx)
+            } else {
+                (0.0, 0.0)
+            });
+        }
+        pos += step;
+        if (pos as usize) >= len {
+            break;
+        }
+    }
+    waveform
+}
+
 // Parse RIFF WAVE 'smpl' chunk and extract the first loop's start/end in samples (if present).
 pub fn read_wav_loop_markers(path: &Path) -> Option<(u32, u32)> {
     use std::fs;

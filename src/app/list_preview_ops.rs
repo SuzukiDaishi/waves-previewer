@@ -416,7 +416,7 @@ impl super::WavesPreviewer {
                             && self.playing_path.as_ref() == Some(&res.path)
                         {
                             self.audio.replace_samples_keep_pos(audio);
-                            self.apply_list_preview_rate(res.play_sr.max(1));
+                            self.mark_list_preview_source(&res.path, res.play_sr.max(1));
                             if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                                 self.audio.set_loop_region(0, buf.len());
                             }
@@ -491,7 +491,7 @@ impl super::WavesPreviewer {
                         let use_cached_now = !truncated || cached_secs >= min_secs;
                         if use_cached_now {
                             self.audio.set_samples_buffer(audio);
-                            self.apply_list_preview_rate(play_sr);
+                            self.mark_list_preview_source(&path, play_sr);
                             if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                                 self.audio.set_loop_region(0, buf.len());
                             }

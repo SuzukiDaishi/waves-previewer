@@ -3407,12 +3407,14 @@ impl WavesPreviewer {
         Ok(())
     }
 
-    fn waveform_from_channels(channels: &[Vec<f32>]) -> Vec<(f32, f32)> {
+    fn waveform_from_channels(
+        channels: &[Vec<f32>],
+    ) -> (
+        Vec<(f32, f32)>,
+        Option<std::sync::Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
+    ) {
         let len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
-        let mono = Self::mixdown_channels(channels, len);
-        let mut waveform = Vec::new();
-        crate::wave::build_minmax(&mut waveform, &mono, 2048);
-        waveform
+        Self::build_editor_waveform_cache(channels, len)
     }
 
     fn apply_effect_graph_result_to_path(
@@ -3422,7 +3424,7 @@ impl WavesPreviewer {
         final_sample_rate: u32,
     ) {
         let bits = self.effective_bits_for_path(path).unwrap_or(32);
-        let waveform = Self::waveform_from_channels(&channels);
+        let (waveform, waveform_pyramid) = Self::waveform_from_channels(&channels);
         let display_meta = Some(Self::build_meta_from_audio(
             &channels,
             final_sample_rate.max(1),
@@ -3449,8 +3451,10 @@ impl WavesPreviewer {
                 tab.markers_saved = remap_markers(&tab.markers_saved, old_len, new_len);
                 tab.markers_applied = remap_markers(&tab.markers_applied, old_len, new_len);
                 tab.ch_samples = channels.clone();
+                tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                 tab.samples_len = new_len;
                 tab.waveform_minmax = waveform.clone();
+                tab.waveform_pyramid = waveform_pyramid.clone();
                 tab.dirty = true;
                 tab.preview_overlay = None;
                 tab.preview_audio_tool = None;
@@ -3465,7 +3469,9 @@ impl WavesPreviewer {
             CachedEdit {
                 ch_samples: tab.ch_samples.clone(),
                 samples_len: tab.samples_len,
+                buffer_sample_rate: tab.buffer_sample_rate.max(1),
                 waveform_minmax: tab.waveform_minmax.clone(),
+                waveform_pyramid: tab.waveform_pyramid.clone(),
                 display_meta: display_meta.clone(),
                 dirty: tab.dirty,
                 loop_region: tab.loop_region,
@@ -3502,7 +3508,9 @@ impl WavesPreviewer {
             CachedEdit {
                 ch_samples: channels.clone(),
                 samples_len: new_len,
+                buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
                 waveform_minmax: waveform.clone(),
+                waveform_pyramid: waveform_pyramid.clone(),
                 display_meta: display_meta.clone(),
                 dirty: true,
                 loop_region: remap_range(existing.loop_region, old_len, new_len),
@@ -3542,7 +3550,9 @@ impl WavesPreviewer {
             CachedEdit {
                 ch_samples: channels.clone(),
                 samples_len: new_len,
+                buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
                 waveform_minmax: waveform.clone(),
+                waveform_pyramid: waveform_pyramid.clone(),
                 display_meta: display_meta.clone(),
                 dirty: true,
                 loop_region: None,
@@ -3580,8 +3590,10 @@ impl WavesPreviewer {
             }
         };
         cached.ch_samples = channels;
+        cached.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
         cached.samples_len = new_len;
         cached.waveform_minmax = waveform;
+        cached.waveform_pyramid = waveform_pyramid;
         cached.display_meta = display_meta;
         cached.dirty = true;
         cached.applied_effect_graph = template_stamp;

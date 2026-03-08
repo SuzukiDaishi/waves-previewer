@@ -69,6 +69,20 @@ mod small_fix_regressions {
         }
     }
 
+    fn wait_for_audio_samples(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_audio_has_samples() {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(8) {
+                panic!("audio sample load timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_for_bits_label(harness: &mut Harness<'static, WavesPreviewer>) -> String {
         let start = Instant::now();
         loop {
@@ -121,6 +135,88 @@ mod small_fix_regressions {
             writer.write_sample(r).expect("write right");
         }
         writer.finalize().expect("finalize float32");
+    }
+
+    #[test]
+    fn audio_info_wav_reports_total_frames() {
+        let dir = make_temp_dir("audio_info_total_frames");
+        let wav = dir.join("frames.wav");
+        write_wav_32_float(&wav, 48_000, 2.0);
+
+        let info = neowaves::audio_io::read_audio_info(&wav).expect("read audio info");
+        assert_eq!(info.sample_rate, 48_000);
+        assert_eq!(info.total_frames, Some(96_000));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wav_proxy_preview_preserves_duration_with_reduced_frames() {
+        let dir = make_temp_dir("wav_proxy_preview");
+        let wav = dir.join("proxy.wav");
+        write_wav_32_float(&wav, 48_000, 90.0);
+
+        let proxy = neowaves::audio_io::build_wav_proxy_preview(&wav, 100_000)
+            .expect("build wav proxy")
+            .expect("wav proxy available");
+        let proxy_frames = proxy.channels.first().map(|ch| ch.len()).unwrap_or(0);
+        let source_secs = proxy.total_source_frames as f64 / 48_000.0f64;
+        let proxy_secs = proxy_frames as f64 / proxy.sample_rate.max(1) as f64;
+
+        assert_eq!(proxy.total_source_frames, 4_320_000);
+        assert_eq!(proxy.channels.len(), 2, "stereo proxy should preserve channels");
+        assert!(
+            proxy_frames < proxy.total_source_frames,
+            "proxy should reduce frame count: proxy={proxy_frames} source={}",
+            proxy.total_source_frames
+        );
+        assert!(
+            (proxy_secs - source_secs).abs() < 0.2,
+            "proxy duration should stay close to source: proxy={proxy_secs:.3}s source={source_secs:.3}s sr={}",
+            proxy.sample_rate
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wav_streaming_decode_emits_progressive_chunks() {
+        let dir = make_temp_dir("wav_streaming_chunks");
+        let wav = dir.join("stream.wav");
+        write_wav_32_float(&wav, 48_000, 12.0);
+
+        let mut events: Vec<(usize, bool)> = Vec::new();
+        neowaves::audio_io::decode_audio_multi_streaming_chunks(
+            &wav,
+            0.25,
+            || false,
+            |chunk, _sr, decoded_frames, is_final| {
+                assert!(!chunk.is_empty(), "streaming chunk should include channels");
+                assert!(
+                    chunk[0].len() > 0,
+                    "streaming chunk should include decoded samples"
+                );
+                events.push((decoded_frames, is_final));
+                true
+            },
+        )
+        .expect("streaming decode");
+
+        assert!(
+            events.len() > 2,
+            "expected multiple progressive chunk events, got {}",
+            events.len()
+        );
+        for pair in events.windows(2) {
+            assert!(
+                pair[1].0 > pair[0].0,
+                "decoded frame count should increase monotonically: {:?}",
+                pair
+            );
+        }
+        assert!(events.last().map(|(_, is_final)| *is_final).unwrap_or(false));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -567,6 +663,522 @@ mod small_fix_regressions {
         assert!(
             (rate_after - rate_before).abs() < 1e-6,
             "speed rate changed after tab/workspace switch: before={rate_before} after={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preview_restore_keeps_rate_for_resampled_editor_buffer() {
+        let dir = make_temp_dir("preview_restore_rate");
+        let src = dir.join("src_44100.wav");
+        write_wav_32_float(&src, 44_100, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&src));
+        assert!(harness.state_mut().test_set_selected_sample_rate_override(48_000));
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.25);
+        harness.state_mut().test_refresh_playback_rate();
+        harness.run_steps(2);
+        let rate_before = harness.state().test_audio_rate();
+        assert!(
+            (rate_before - 1.25).abs() < 1.0e-6,
+            "editor buffer should already be aligned to output SR before preview restore"
+        );
+
+        assert!(harness.state_mut().test_force_preview_restore_active_tab());
+        harness.run_steps(2);
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - rate_before).abs() < 1.0e-6,
+            "preview restore should keep output-buffer playback rate stable: before={rate_before} after={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_sidecar_roundtrip_keeps_editor_rate_stable() {
+        let dir = make_temp_dir("session_rate_roundtrip");
+        let src = dir.join("src_44100.wav");
+        let sess = dir.join("roundtrip_rate.nwsess");
+        write_wav_32_float(&src, 44_100, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_apply_gain(0.10, 0.30, 3.0));
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_save_session_to(&sess));
+
+        assert!(harness.state_mut().test_open_session_from(&sess));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.11);
+        harness.state_mut().test_refresh_playback_rate();
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_force_preview_restore_active_tab());
+        harness.run_steps(2);
+
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - 1.11).abs() < 1.0e-6,
+            "session sidecar reopen should keep output-buffer playback rate stable: rate={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_preview_rate_uses_source_buffer_sample_rate() {
+        let dir = make_temp_dir("list_preview_rate");
+        let src = dir.join("src_44100.wav");
+        write_wav_32_float(&src, 44_100, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.20);
+        assert!(harness.state_mut().test_select_path(&src));
+        wait_for_audio_samples(&mut harness);
+
+        let rate_before = harness.state().test_audio_rate();
+        let expected = 1.20 * (44_100.0f32 / 48_000.0f32);
+        assert!(
+            (rate_before - expected).abs() < 1.0e-6,
+            "list preview should keep its source-buffer sample-rate ratio: expected={expected} actual={rate_before}"
+        );
+
+        let _ = harness.state_mut().test_force_load_selected_list_preview_for_play();
+        wait_for_audio_samples(&mut harness);
+
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - rate_before).abs() < 1.0e-6,
+            "list preview rate changed after explicit play request: before={rate_before} after={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_stream_discards_stale_processing_result_without_rate_jump() {
+        let dir = make_temp_dir("editor_processing_stale_mode");
+        let src = dir.join("src_44100.wav");
+        write_wav_32_float(&src, 44_100, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness.state_mut().test_refresh_playback_rate();
+        assert!(harness.state().test_audio_is_streaming_wav(&src));
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing());
+
+        let rate_before = harness.state().test_audio_rate();
+        harness.state_mut().test_inject_processing_result(
+            &src,
+            true,
+            true,
+            neowaves::app::RateMode::PitchShift,
+            neowaves::app::RateMode::PitchShift,
+            7,
+            7,
+        );
+        harness.run_steps(2);
+
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - rate_before).abs() < 1.0e-6,
+            "stale editor processing result changed exact stream rate: before={rate_before} after={rate_after}"
+        );
+        assert!(
+            harness.state().test_audio_is_streaming_wav(&src),
+            "exact editor stream should remain active after stale processing result"
+        );
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "stale processing result should not stop current editor playback"
+        );
+        assert!(
+            !harness.state().test_processing_active(),
+            "stale processing state should be cleared after discard"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stream_to_buffer_rebuild_preserves_playback_timebase() {
+        let dir = make_temp_dir("editor_stream_buffer_timebase");
+        let src = dir.join("src_44100.wav");
+        write_wav_32_float(&src, 44_100, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness.state_mut().test_refresh_playback_rate();
+        assert!(harness.state().test_audio_is_streaming_wav(&src));
+
+        harness.state_mut().test_audio_seek_to_sample(44_100);
+        harness.run_steps(1);
+        let time_before = harness.state().test_audio_play_pos_f() / 44_100.0;
+
+        assert!(harness.state_mut().test_set_selected_sample_rate_override(48_000));
+        harness.state_mut().test_rebuild_current_buffer_with_mode();
+        harness.run_steps(2);
+
+        assert!(
+            !harness.state().test_audio_is_streaming_wav(&src),
+            "sample-rate override should force buffer transport"
+        );
+        let time_after = harness.state().test_audio_play_pos_f() / 48_000.0;
+        assert!(
+            (time_after - time_before).abs() < 0.01,
+            "stream -> buffer rebuild should preserve playback time: before={time_before:.6} after={time_after:.6}"
+        );
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - 1.0).abs() < 1.0e-6,
+            "buffer transport should run at output-sr rate after rebuild: rate={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_processing_result_job_id_mismatch_is_discarded() {
+        let dir = make_temp_dir("editor_processing_job_mismatch");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_pitch_shift();
+        harness.state_mut().test_request_workspace_play_toggle();
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing());
+
+        let rate_before = harness.state().test_audio_rate();
+        harness.state_mut().test_inject_processing_result(
+            &src,
+            true,
+            true,
+            neowaves::app::RateMode::PitchShift,
+            neowaves::app::RateMode::PitchShift,
+            11,
+            12,
+        );
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "job-id-mismatched processing result should not stop playback"
+        );
+        let rate_after = harness.state().test_audio_rate();
+        assert!(
+            (rate_after - rate_before).abs() < 1.0e-6,
+            "job-id-mismatched processing result changed rate: before={rate_before} after={rate_after}"
+        );
+        assert!(
+            !harness.state().test_processing_active(),
+            "job-id-mismatched processing state should be cleared after discard"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_processing_result_does_not_leak_into_active_editor_tab() {
+        let dir = make_temp_dir("editor_processing_target_mismatch");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_pitch_shift();
+        harness.state_mut().test_request_workspace_play_toggle();
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_is_playing());
+
+        harness.state_mut().test_inject_processing_result(
+            &src,
+            false,
+            false,
+            neowaves::app::RateMode::PitchShift,
+            neowaves::app::RateMode::PitchShift,
+            21,
+            21,
+        );
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "list-target processing result should not stop editor playback"
+        );
+        assert!(
+            !harness.state().test_processing_active(),
+            "target-mismatched processing state should be cleared after discard"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn speed_mode_does_not_spawn_heavy_processing_for_editor_tab() {
+        let dir = make_temp_dir("editor_processing_speed_noop");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        assert!(
+            !harness.state_mut().test_spawn_heavy_processing_from_active_tab(),
+            "Speed mode should not create heavy processing jobs for editor tabs"
+        );
+        assert!(
+            !harness.state().test_processing_active(),
+            "Speed mode should leave processing state empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_reopen_rebuilds_waveform_cache_without_crash() {
+        let dir = make_temp_dir("waveform_cache_reopen");
+        let src = dir.join("src.wav");
+        let sess = dir.join("waveform_cache_roundtrip.nwsess");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+        assert!(
+            harness.state().test_active_tab_waveform_pyramid_ready(),
+            "initial editor tab should build waveform pyramid"
+        );
+        assert!(harness.state_mut().test_save_session_to(&sess));
+
+        assert!(harness.state_mut().test_open_session_from(&sess));
+        wait_for_tab_ready(&mut harness);
+        assert!(
+            harness.state().test_active_tab_waveform_pyramid_ready(),
+            "session reopen should rebuild waveform pyramid"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_wav_loading_progress_advances_and_waveform_updates_before_final() {
+        let dir = make_temp_dir("editor_wav_progress");
+        let wav = dir.join("long.wav");
+        write_wav_32_float(&wav, 48_000, 90.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&wav));
+        assert!(harness.state_mut().test_open_tab_for_path(&wav));
+
+        let started = Instant::now();
+        let mut saw_loading_waveform = false;
+        let mut saw_nonflat_loading_waveform = false;
+        let mut saw_whole_timeline_while_loading = false;
+        let mut saw_streaming_while_loading = false;
+        let mut saw_exact_audio_ready_while_loading = false;
+        let mut saw_playing_while_loading = false;
+        let mut saw_final_ready = false;
+        let mut max_progress = 0.0f32;
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_tab_loading() {
+                if harness.state().test_active_tab_loading_waveform_ready() {
+                    saw_loading_waveform = true;
+                }
+                if harness.state().test_active_tab_loading_waveform_nonflat() {
+                    saw_nonflat_loading_waveform = true;
+                }
+                if harness.state().test_audio_is_streaming_wav(&wav) {
+                    saw_streaming_while_loading = true;
+                }
+                if harness.state().test_active_editor_exact_audio_ready() {
+                    saw_exact_audio_ready_while_loading = true;
+                }
+                if !harness.state().test_audio_is_playing() {
+                    harness.state_mut().test_request_workspace_play_toggle();
+                }
+                if harness.state().test_audio_is_playing() {
+                    saw_playing_while_loading = true;
+                }
+                let progress = harness.state().test_editor_decode_progress().unwrap_or(0.0);
+                max_progress = max_progress.max(progress);
+                let visual_len = harness.state().test_active_tab_samples_len_visual();
+                let audio_len = harness.state().test_tab_samples_len();
+                if visual_len > 0 && visual_len >= audio_len {
+                    saw_whole_timeline_while_loading = true;
+                }
+            } else if harness.state().test_active_editor_exact_audio_ready() {
+                saw_final_ready = true;
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                panic!(
+                    "wav editor loading timeout: waveform={saw_loading_waveform} whole_timeline={saw_whole_timeline_while_loading} streaming={saw_streaming_while_loading} exact_ready_loading={saw_exact_audio_ready_while_loading} playing_loading={saw_playing_while_loading} final_ready={saw_final_ready} max_progress={max_progress:.3}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            saw_loading_waveform,
+            "loading waveform overview should update before final"
+        );
+        assert!(
+            saw_nonflat_loading_waveform,
+            "loading waveform overview should become non-flat before final"
+        );
+        assert!(
+            saw_whole_timeline_while_loading,
+            "loading state should keep a usable whole-file timeline while detail decode is still pending"
+        );
+        assert!(
+            saw_streaming_while_loading,
+            "loading wav should activate exact streaming transport before final decode"
+        );
+        assert!(
+            saw_exact_audio_ready_while_loading,
+            "exact audio should already be ready during loading via stream transport"
+        );
+        assert!(
+            saw_playing_while_loading,
+            "playback should be able to start during loading once exact stream transport is active"
+        );
+        assert!(
+            saw_final_ready,
+            "full decode should still finish after stream playback becomes available"
+        );
+        assert!(
+            max_progress > 0.20,
+            "loading progress should move past initial preview region: {max_progress:.3}"
+        );
+
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should remain active after final decode completes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_wav_finalizing_exact_audio_keeps_stream_rate_while_playing() {
+        let dir = make_temp_dir("editor_wav_finalizing_rate");
+        let wav = dir.join("long_44100.wav");
+        write_wav_32_float(&wav, 44_100, 24.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&wav));
+        assert!(harness.state_mut().test_open_tab_for_path(&wav));
+
+        let started = Instant::now();
+        let mut rate_while_loading: Option<f32> = None;
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_tab_loading() {
+                if harness.state().test_active_editor_exact_audio_ready()
+                    && !harness.state().test_audio_is_playing()
+                {
+                    harness.state_mut().test_request_workspace_play_toggle();
+                }
+                if harness.state().test_audio_is_playing()
+                    && harness.state().test_audio_is_streaming_wav(&wav)
+                {
+                    rate_while_loading.get_or_insert_with(|| harness.state().test_audio_rate());
+                }
+            } else if harness.state().test_active_editor_exact_audio_ready() {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(20) {
+                panic!(
+                    "wav exact finalize timeout: loading={} exact_ready={} playing={} streaming={} rate={:?}",
+                    harness.state().test_tab_loading(),
+                    harness.state().test_active_editor_exact_audio_ready(),
+                    harness.state().test_audio_is_playing(),
+                    harness.state().test_audio_is_streaming_wav(&wav),
+                    rate_while_loading
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let rate_while_loading = rate_while_loading.expect("stream rate during loading");
+        let rate_after_final = harness.state().test_audio_rate();
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should remain active after final decode completes"
+        );
+        assert!(
+            harness.state().test_audio_is_streaming_wav(&wav),
+            "pristine wav exact stream should remain active after final decode"
+        );
+        assert!(
+            (rate_after_final - rate_while_loading).abs() < 1.0e-6,
+            "final exact audio should not change playback rate mid-play: loading={rate_while_loading} final={rate_after_final}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_open_seeds_loading_overview_before_decode_finishes() {
+        let dir = make_temp_dir("editor_loading_overview_seed");
+        let wav = dir.join("seed.wav");
+        write_wav_32_float(&wav, 48_000, 12.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&wav));
+        assert!(harness.state_mut().test_open_tab_for_path(&wav));
+        harness.run_steps(1);
+
+        assert!(harness.state().test_tab_loading(), "tab should enter loading state");
+        assert!(
+            harness.state().test_active_tab_loading_waveform_ready(),
+            "loading overview should be available immediately after open"
+        );
+        assert!(
+            harness.state().test_active_tab_samples_len_visual() > 0,
+            "visual length should be known immediately after open"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

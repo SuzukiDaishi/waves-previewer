@@ -112,6 +112,8 @@ pub struct ProjectVirtualOp {
 pub struct ProjectEdit {
     pub path: String,
     pub edited_audio: String,
+    #[serde(default)]
+    pub buffer_sample_rate: Option<u32>,
     pub dirty: bool,
     pub loop_region: Option<[usize; 2]>,
     pub loop_markers_saved: Option<[usize; 2]>,
@@ -316,6 +318,8 @@ pub struct ProjectTab {
     pub view_offset: usize,
     pub samples_per_px: f32,
     pub dirty: bool,
+    #[serde(default)]
+    pub buffer_sample_rate: Option<u32>,
     pub edited_audio: Option<String>,
     #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
@@ -706,6 +710,7 @@ pub fn project_tab_from_tab(
         view_offset: tab.view_offset,
         samples_per_px: tab.samples_per_px,
         dirty: tab.dirty,
+        buffer_sample_rate: Some(tab.buffer_sample_rate.max(1)),
         edited_audio: edited_audio.map(|p| rel_path(&p, base)),
         plugin_fx_draft: project_plugin_fx_draft_from_draft(&tab.plugin_fx_draft),
     }
@@ -882,6 +887,7 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         sample_value_kind: super::types::SampleValueKind::Unknown,
         bit_rate_bps: None,
         duration_secs: None,
+        total_frames: None,
         rms_db: None,
         peak_db: None,
         lufs_i: None,

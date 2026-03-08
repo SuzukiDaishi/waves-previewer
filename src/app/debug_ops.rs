@@ -174,7 +174,10 @@ impl WavesPreviewer {
         }
     }
 
-    fn debug_push_latency_sample(samples: &mut std::collections::VecDeque<f32>, value_ms: f32) {
+    pub(super) fn debug_push_latency_sample(
+        samples: &mut std::collections::VecDeque<f32>,
+        value_ms: f32,
+    ) {
         if !value_ms.is_finite() || value_ms < 0.0 {
             return;
         }
@@ -326,6 +329,18 @@ impl WavesPreviewer {
         Self::debug_push_latency_sample(&mut self.debug.editor_wave_render_ms, value_ms);
     }
 
+    pub(super) fn debug_push_waveform_render_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.waveform_render_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_waveform_query_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.waveform_query_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_waveform_draw_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.waveform_draw_ms, value_ms);
+    }
+
     pub(super) fn debug_mark_list_preview_ready(&mut self, path: &Path) {
         let Some(started_at) = self.debug.list_select_started_at else {
             return;
@@ -383,6 +398,16 @@ impl WavesPreviewer {
         let processing = self.processing.is_some();
         let export = self.export_state.is_some();
         let decoding = self.editor_decode_state.is_some();
+        let live_loading_updates = self
+            .editor_decode_state
+            .as_ref()
+            .map(|state| state.loading_waveform_updates)
+            .unwrap_or(0);
+        let live_loading_gap_ms = self
+            .editor_decode_state
+            .as_ref()
+            .map(|state| state.max_progress_gap_ms)
+            .unwrap_or(0.0);
         let meta_pending = self.scan_in_progress || !self.meta_inflight.is_empty();
         let gain_dirty = self.pending_gain_count();
         let mut lines = Vec::new();
@@ -464,6 +489,46 @@ impl WavesPreviewer {
         lines.push(format!(
             "editor_wave_render_ms: {}",
             summarize(&self.debug.editor_wave_render_ms)
+        ));
+        lines.push(format!(
+            "editor_decode_progress_emit_ms: {}",
+            summarize(&self.debug.editor_decode_progress_emit_ms)
+        ));
+        lines.push(format!(
+            "editor_decode_finalize_audio_ms: {}",
+            summarize(&self.debug.editor_decode_finalize_audio_ms)
+        ));
+        lines.push(format!(
+            "editor_decode_finalize_waveform_ms: {}",
+            summarize(&self.debug.editor_decode_finalize_waveform_ms)
+        ));
+        lines.push(format!(
+            "editor_loading_progress_max_gap_ms: {} live_max={:.1}",
+            summarize(&self.debug.editor_loading_progress_max_gap_ms),
+            live_loading_gap_ms
+        ));
+        lines.push(format!(
+            "editor_loading_waveform_updates: total={} live={}",
+            self.debug.editor_loading_waveform_updates,
+            live_loading_updates
+        ));
+        lines.push(format!(
+            "waveform_render_ms: {}",
+            summarize(&self.debug.waveform_render_ms)
+        ));
+        lines.push(format!(
+            "waveform_query_ms: {}",
+            summarize(&self.debug.waveform_query_ms)
+        ));
+        lines.push(format!(
+            "waveform_draw_ms: {}",
+            summarize(&self.debug.waveform_draw_ms)
+        ));
+        lines.push(format!(
+            "waveform_lod_counts: raw={} visible={} pyramid={}",
+            self.debug.waveform_lod_raw_count,
+            self.debug.waveform_lod_visible_count,
+            self.debug.waveform_lod_pyramid_count
         ));
         lines.push(format!(
             "metadata_probe_ms: {}",
@@ -1456,7 +1521,7 @@ impl WavesPreviewer {
                 self.debug_log("auto: toggle mode");
             }
             DebugAction::PlayPause => {
-                self.audio.toggle_play();
+                self.request_workspace_play_toggle();
                 self.debug_log("auto: play/pause");
             }
             DebugAction::SelectNext => {

@@ -926,32 +926,21 @@ impl crate::app::WavesPreviewer {
                     } else {
                         "Play (Space)"
                     };
+                    let play_enabled = !self.is_editor_workspace_active()
+                        || self.active_editor_exact_audio_ready()
+                        || self
+                            .audio
+                            .shared
+                            .playing
+                            .load(std::sync::atomic::Ordering::Relaxed);
                     if ui
-                        .add_sized(egui::vec2(110.0, 22.0), egui::Button::new(play_text))
+                        .add_enabled(
+                            play_enabled,
+                            egui::Button::new(play_text).min_size(egui::vec2(110.0, 22.0)),
+                        )
                         .clicked()
                     {
-                        if self.is_list_workspace_active() {
-                            let now_playing = self
-                                .audio
-                                .shared
-                                .playing
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            if now_playing {
-                                self.audio.stop();
-                                self.list_play_pending = false;
-                            } else {
-                                if self.force_load_selected_list_preview_for_play() {
-                                    self.audio.play();
-                                    if let Some(path) = self.selected_path_buf() {
-                                        self.debug_mark_list_play_start(&path);
-                                    }
-                                } else {
-                                    self.list_play_pending = true;
-                                }
-                            }
-                        } else {
-                            self.audio.toggle_play();
-                        }
+                        self.request_workspace_play_toggle();
                     }
                     ui.checkbox(&mut self.auto_play_list_nav, "Auto Play");
                     ui.separator();

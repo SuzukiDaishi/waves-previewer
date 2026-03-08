@@ -1,6 +1,6 @@
 use egui::{Color32, RichText};
 
-use super::types::ProcessingResult;
+use super::types::{ProcessingResult, ProcessingTarget};
 use super::BULK_RESAMPLE_BLOCK_SECS;
 
 impl super::WavesPreviewer {
@@ -12,51 +12,82 @@ impl super::WavesPreviewer {
             }
         }
         if let Some((res, autoplay_when_ready)) = processing_done {
+            if let Some(reason) = self
+                .processing
+                .as_ref()
+                .and_then(|state| self.processing_discard_reason(state, &res))
+            {
+                self.debug_log(format!(
+                    "processing discarded: job={} mode={:?} target={} reason={reason}",
+                    res.job_id,
+                    res.mode,
+                    Self::format_processing_target(&res.target),
+                ));
+                self.processing = None;
+                ctx.request_repaint();
+                return;
+            }
             let ProcessingResult {
                 path,
+                job_id,
+                mode,
+                target,
                 samples,
-                waveform,
                 mut channels,
+                waveform: _waveform,
             } = res;
-            let active_tab_path = self
-                .active_tab
-                .and_then(|idx| self.tabs.get(idx))
-                .map(|tab| tab.path.clone());
-            let should_apply_audio = if let Some(active_path) = active_tab_path.as_ref() {
-                active_path == &path
+            let rebuilt_cache = if matches!(target, ProcessingTarget::EditorTab(_)) && !channels.is_empty() {
+                let samples_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
+                Some(Self::build_editor_waveform_cache(&channels, samples_len))
             } else {
-                self.selected_path_buf().as_ref() == Some(&path)
-                    || self.playing_path.as_ref() == Some(&path)
+                None
             };
-            // Apply processed buffer only when the result still matches the current target.
-            if should_apply_audio {
-                if channels.is_empty() {
-                    self.audio.set_samples_mono(samples);
-                } else {
-                    self.apply_sample_rate_preview_for_path(
-                        &path,
-                        &mut channels,
-                        self.audio.shared.out_sample_rate,
-                    );
-                    self.audio.set_samples_channels(channels);
-                }
-                self.audio.stop();
-            }
-            if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
-                if let Some(tab) = self.tabs.get_mut(idx) {
-                    tab.waveform_minmax = waveform;
+            if matches!(target, ProcessingTarget::EditorTab(_)) {
+                if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
+                    if let Some(tab) = self.tabs.get_mut(idx) {
+                        if let Some((waveform, waveform_pyramid)) = rebuilt_cache.clone() {
+                            tab.waveform_minmax = waveform;
+                            tab.waveform_pyramid = waveform_pyramid;
+                        } else {
+                            tab.waveform_minmax.clear();
+                            tab.waveform_pyramid = None;
+                        }
+                    }
                 }
             }
-            if should_apply_audio {
-                // update current playing path (for effective volume using pending gains)
-                self.playing_path = Some(path.clone());
-                // full-buffer loop region if needed
-                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
-                    self.audio.set_loop_region(0, buf.len());
+            if channels.is_empty() {
+                self.audio.set_samples_mono(samples);
+            } else {
+                self.apply_sample_rate_preview_for_path(
+                    &path,
+                    &mut channels,
+                    self.audio.shared.out_sample_rate,
+                );
+                self.audio.set_samples_channels(channels.clone());
+            }
+            let source = match &target {
+                ProcessingTarget::EditorTab(path) => super::PlaybackSourceKind::EditorTab(path.clone()),
+                ProcessingTarget::ListPreview(path) => {
+                    super::PlaybackSourceKind::ListPreview(path.clone())
                 }
+            };
+            self.playback_mark_source(source, self.audio.shared.out_sample_rate.max(1));
+            self.debug_log(format!(
+                "processing applied: job={} mode={:?} target={} buffer_sr={}",
+                job_id,
+                mode,
+                Self::format_processing_target(&target),
+                self.audio.shared.out_sample_rate.max(1),
+            ));
+            self.audio.stop();
+            // update current playing path (for effective volume using pending gains)
+            self.playing_path = Some(path.clone());
+            // full-buffer loop region if needed
+            if let Some(buf) = self.audio.shared.samples.load().as_ref() {
+                self.audio.set_loop_region(0, buf.len());
             }
             self.processing = None;
-            let should_resume_list_play = should_apply_audio
+            let should_resume_list_play = matches!(target, ProcessingTarget::ListPreview(_))
                 && self.is_list_workspace_active()
                 && self.selected_path_buf().as_ref() == Some(&path)
                 && (autoplay_when_ready || self.list_play_pending);

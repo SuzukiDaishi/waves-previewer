@@ -71,8 +71,10 @@ mod zoo_ops;
 use self::dialogs::TestDialogQueue;
 use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
+use self::render::waveform_pyramid::WaveformScratch;
 pub use self::types::{
-    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, StartupConfig,
+    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
+    StartupConfig,
     ToolKind, ViewMode, WorkspaceView,
 };
 use self::{helpers::*, types::*};
@@ -243,7 +245,7 @@ pub(super) enum PlaybackSourceKind {
 struct PlaybackSessionState {
     source: PlaybackSourceKind,
     user_speed: f32,
-    src_sr: u32,
+    buffer_sr: u32,
     is_playing: bool,
 }
 
@@ -252,7 +254,7 @@ impl Default for PlaybackSessionState {
         Self {
             source: PlaybackSourceKind::None,
             user_speed: 1.0,
-            src_sr: 48_000,
+            buffer_sr: 48_000,
             is_playing: false,
         }
     }
@@ -277,6 +279,7 @@ pub struct WavesPreviewer {
     pub pitch_semitones: f32,
     pub meter_db: f32,
     pub tabs: Vec<EditorTab>,
+    waveform_scratch: WaveformScratch,
     pub active_tab: Option<usize>,
     workspace_view: WorkspaceView,
     effect_graph: EffectGraphState,
@@ -413,6 +416,7 @@ pub struct WavesPreviewer {
     mode: RateMode,
     // heavy processing state (overlay)
     processing: Option<ProcessingState>,
+    processing_job_id: u64,
     // background full load for list preview
     list_preview_rx: Option<std::sync::mpsc::Receiver<ListPreviewResult>>,
     list_preview_job_id: u64,
@@ -561,21 +565,21 @@ impl WavesPreviewer {
         }
     }
 
-    fn playback_rate_from_values(user_speed: f32, src_sr: u32, out_sr: u32) -> f32 {
-        let src = src_sr.max(1) as f32;
+    fn playback_rate_from_values(user_speed: f32, buffer_sr: u32, out_sr: u32) -> f32 {
+        let src = buffer_sr.max(1) as f32;
         let out = out_sr.max(1) as f32;
         let ratio = (src / out).clamp(0.25, 4.0);
         (user_speed.clamp(0.25, 4.0) * ratio).clamp(0.25, 4.0)
     }
 
-    pub(super) fn playback_mark_source(&mut self, source: PlaybackSourceKind, src_sr: u32) {
+    pub(super) fn playback_mark_source(&mut self, source: PlaybackSourceKind, buffer_sr: u32) {
         self.playback_session.source = source;
-        self.playback_session.src_sr = src_sr.max(1);
+        self.playback_session.buffer_sr = buffer_sr.max(1);
         self.playback_session.user_speed = self.playback_user_speed_for_mode();
         self.playback_session.is_playing = self.playback_is_playing_now();
         let rate = Self::playback_rate_from_values(
             self.playback_session.user_speed,
-            self.playback_session.src_sr,
+            self.playback_session.buffer_sr,
             self.audio.shared.out_sample_rate.max(1),
         );
         self.audio.set_rate(rate);
@@ -585,7 +589,7 @@ impl WavesPreviewer {
         self.playback_session.user_speed = self.playback_user_speed_for_mode();
         let rate = Self::playback_rate_from_values(
             self.playback_session.user_speed,
-            self.playback_session.src_sr,
+            self.playback_session.buffer_sr,
             self.audio.shared.out_sample_rate.max(1),
         );
         self.audio.set_rate(rate);
@@ -604,7 +608,7 @@ impl WavesPreviewer {
             self.audio.stop();
             self.playback_session.source = PlaybackSourceKind::None;
             self.playback_session.is_playing = false;
-            self.playback_session.src_sr = self.audio.shared.out_sample_rate.max(1);
+            self.playback_session.buffer_sr = self.audio.shared.out_sample_rate.max(1);
         }
     }
 
@@ -813,22 +817,16 @@ impl WavesPreviewer {
         cf
     }
     fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
-        let audio_len = self
-            .audio
-            .shared
-            .samples
-            .load()
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let audio_len = self.audio.current_source_len();
+        let display_len = Self::editor_display_samples_len(tab);
         let map_display_count_to_audio = |display_count: usize| -> usize {
-            if audio_len == 0 || tab.samples_len == 0 || audio_len == tab.samples_len {
+            if audio_len == 0 || display_len == 0 || audio_len == display_len {
                 return display_count;
             }
             ((display_count as u128)
                 .saturating_mul(audio_len as u128)
-                .saturating_add((tab.samples_len / 2) as u128)
-                / (tab.samples_len as u128)) as usize
+                .saturating_add((display_len / 2) as u128)
+                / (display_len as u128)) as usize
         };
         match tab.loop_mode {
             LoopMode::Off => {
@@ -1050,6 +1048,7 @@ impl WavesPreviewer {
             },
             bit_rate_bps: None,
             duration_secs,
+            total_frames: Some(frames as u64),
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i,
@@ -1132,42 +1131,30 @@ impl WavesPreviewer {
     }
 
     fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
-        let audio_len = self
-            .audio
-            .shared
-            .samples
-            .load()
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
-        if audio_len == 0 || tab.samples_len == 0 || audio_len == tab.samples_len {
-            return audio_pos.min(tab.samples_len);
+        let audio_len = self.audio.current_source_len();
+        let display_len = Self::editor_display_samples_len(tab);
+        if audio_len == 0 || display_len == 0 || audio_len == display_len {
+            return audio_pos.min(display_len);
         }
         let mapped = ((audio_pos as u128)
-            .saturating_mul(tab.samples_len as u128)
+            .saturating_mul(display_len as u128)
             .saturating_add((audio_len / 2) as u128)
             / (audio_len as u128)) as usize;
-        mapped.min(tab.samples_len)
+        mapped.min(display_len)
     }
     fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
-        let audio_len = self
-            .audio
-            .shared
-            .samples
-            .load()
-            .as_ref()
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let audio_len = self.audio.current_source_len();
+        let display_len = Self::editor_display_samples_len(tab);
         if audio_len == 0 {
             return display_pos;
         }
-        if tab.samples_len == 0 || audio_len == tab.samples_len {
+        if display_len == 0 || audio_len == display_len {
             return display_pos.min(audio_len);
         }
         let mapped = ((display_pos as u128)
             .saturating_mul(audio_len as u128)
-            .saturating_add((tab.samples_len / 2) as u128)
-            / (tab.samples_len as u128)) as usize;
+            .saturating_add((display_len / 2) as u128)
+            / (display_len as u128)) as usize;
         mapped.min(audio_len)
     }
 
@@ -1643,7 +1630,7 @@ impl WavesPreviewer {
                     .playing
                     .load(std::sync::atomic::Ordering::Relaxed);
                 if !playing {
-                    self.audio.toggle_play();
+                    self.request_workspace_play_toggle();
                 }
                 ok(json!({"ok": true}))
             }
@@ -1654,7 +1641,8 @@ impl WavesPreviewer {
                     .playing
                     .load(std::sync::atomic::Ordering::Relaxed);
                 if playing {
-                    self.audio.toggle_play();
+                    self.audio.stop();
+                    self.list_play_pending = false;
                 }
                 ok(json!({"ok": true}))
             }
@@ -2002,6 +1990,7 @@ impl WavesPreviewer {
             pitch_semitones: 0.0,
             meter_db: -80.0,
             tabs: Vec::new(),
+            waveform_scratch: WaveformScratch::default(),
             active_tab: None,
             workspace_view: WorkspaceView::List,
             effect_graph: EffectGraphState::default(),
@@ -2127,6 +2116,7 @@ impl WavesPreviewer {
             zero_cross_epsilon: 1.0e-4,
             mode: RateMode::Speed,
             processing: None,
+            processing_job_id: 0,
             list_preview_rx: None,
             list_preview_job_id: 0,
             list_preview_job_epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2281,6 +2271,10 @@ impl WavesPreviewer {
         EditorUndoState {
             ch_samples: tab.ch_samples.clone(),
             samples_len: tab.samples_len,
+            samples_len_visual: tab.samples_len_visual,
+            buffer_sample_rate: tab.buffer_sample_rate.max(1),
+            waveform_minmax: tab.waveform_minmax.clone(),
+            waveform_pyramid: tab.waveform_pyramid.clone(),
             view_offset: tab.view_offset,
             samples_per_px: tab.samples_per_px,
             selection: tab.selection,
@@ -2364,6 +2358,12 @@ impl WavesPreviewer {
             tab.preview_overlay = None;
             tab.ch_samples = state.ch_samples;
             tab.samples_len = state.samples_len;
+            tab.samples_len_visual = state.samples_len_visual;
+            tab.loading = false;
+            tab.loading_waveform_minmax.clear();
+            tab.buffer_sample_rate = state.buffer_sample_rate.max(1);
+            tab.waveform_minmax = state.waveform_minmax;
+            tab.waveform_pyramid = state.waveform_pyramid;
             tab.view_offset = state.view_offset;
             tab.samples_per_px = state.samples_per_px;
             tab.selection = state.selection;
@@ -2393,12 +2393,24 @@ impl WavesPreviewer {
             tab.dirty = state.dirty;
             Self::update_loop_markers_dirty(tab);
         }
-        let Some(tab) = self.tabs.get(tab_idx) else {
+        let Some((path, buffer_sample_rate, channels)) = self.tabs.get(tab_idx).map(|tab| {
+            (
+                tab.path.clone(),
+                tab.buffer_sample_rate.max(1),
+                tab.ch_samples.clone(),
+            )
+        }) else {
             return false;
         };
         self.audio.stop();
-        self.audio.set_samples_channels(tab.ch_samples.clone());
-        self.apply_loop_mode_for_tab(tab);
+        self.audio.set_samples_channels(channels);
+        self.playback_mark_source(
+            PlaybackSourceKind::EditorTab(path),
+            buffer_sample_rate,
+        );
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
         true
     }
 
@@ -2819,6 +2831,7 @@ impl eframe::App for WavesPreviewer {
                                                     },
                                                     bit_rate_bps: info.bit_rate_bps,
                                                     duration_secs: info.duration_secs,
+                                                    total_frames: info.total_frames,
                                                     rms_db: None,
                                                     peak_db: None,
                                                     lufs_i: None,
@@ -3222,16 +3235,21 @@ impl eframe::App for WavesPreviewer {
                 self.pending_activate_ready = false;
                 self.playing_path = Some(p.clone());
                 if !self.apply_dirty_tab_audio_with_mode(&p) {
-                    // Reload the activated tab from in-memory samples first.
-                    let mut used_tab_samples = false;
+                    // Reload the activated tab from stream or in-memory samples first.
+                    let mut used_tab_transport = false;
                     if let Some(idx) = self.active_tab {
-                        if let Some(tab) = self.tabs.get(idx) {
+                        let same_tab = self
+                            .tabs
+                            .get(idx)
+                            .map(|tab| tab.path == p)
+                            .unwrap_or(false);
+                        if same_tab && self.try_activate_editor_stream_transport_for_tab(idx) {
+                            used_tab_transport = true;
+                        } else if let Some(tab) = self.tabs.get(idx) {
                             if tab.path == p && !tab.ch_samples.is_empty() {
-                                used_tab_samples = true;
+                                used_tab_transport = true;
                                 let mut channels = tab.ch_samples.clone();
-                                let in_sr = self
-                                    .effective_sample_rate_for_path(&p)
-                                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                                let in_sr = tab.buffer_sample_rate.max(1);
                                 match self.mode {
                                     RateMode::Speed => {
                                         self.apply_sample_rate_preview_for_path(
@@ -3239,7 +3257,11 @@ impl eframe::App for WavesPreviewer {
                                             &mut channels,
                                             in_sr,
                                         );
-                                        self.audio.set_samples_channels(channels);
+                                        self.set_editor_buffer_transport_preserving_time(
+                                            p.as_path(),
+                                            channels,
+                                            self.audio.shared.out_sample_rate.max(1),
+                                        );
                                         self.playback_mark_source(
                                             PlaybackSourceKind::EditorTab(p.clone()),
                                             self.audio.shared.out_sample_rate.max(1),
@@ -3247,6 +3269,11 @@ impl eframe::App for WavesPreviewer {
                                     }
                                     _ => {
                                         // Prime with selected tab source before heavy processing result arrives.
+                                        self.apply_sample_rate_preview_for_path(
+                                            &p,
+                                            &mut channels,
+                                            in_sr,
+                                        );
                                         self.audio.set_samples_channels(channels.clone());
                                         self.playback_mark_source(
                                             PlaybackSourceKind::EditorTab(p.clone()),
@@ -3255,13 +3282,14 @@ impl eframe::App for WavesPreviewer {
                                         self.spawn_heavy_processing_from_channels(
                                             p.clone(),
                                             channels,
+                                            ProcessingTarget::EditorTab(p.clone()),
                                         );
                                     }
                                 }
                             }
                         }
                     }
-                    if !used_tab_samples {
+                    if !used_tab_transport {
                         // Defer decode to background worker to keep tab switching responsive.
                         if let Some(idx) = self.active_tab {
                             if let Some(tab) = self.tabs.get_mut(idx) {

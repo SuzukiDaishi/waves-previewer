@@ -1258,7 +1258,12 @@ impl crate::app::WavesPreviewer {
                             tab.preview_audio_tool = None;
                             tab.preview_overlay = None;
                             tab.ch_samples = result.channels;
+                            tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                             tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
+                            let (waveform_minmax, waveform_pyramid) =
+                                Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
+                            tab.waveform_minmax = waveform_minmax;
+                            tab.waveform_pyramid = waveform_pyramid;
                             tab.dirty = true;
                             Self::editor_clamp_ranges(tab);
                             tab.plugin_fx_draft.state_blob = result.state_blob;
@@ -1295,11 +1300,29 @@ impl crate::app::WavesPreviewer {
                             tab.plugin_fx_draft.last_backend_log =
                                 Self::join_backend_log_lines(lines);
                         }
-                        if let Some(tab) = self.tabs.get(result.tab_idx) {
+                        if let Some((path, buffer_sr, channels)) =
+                            self.tabs.get(result.tab_idx).map(|tab| {
+                                (
+                                    tab.path.clone(),
+                                    tab.buffer_sample_rate.max(1),
+                                    tab.ch_samples.clone(),
+                                )
+                            })
+                        {
                             self.audio.stop();
-                            self.audio.set_samples_channels(tab.ch_samples.clone());
-                            self.apply_loop_mode_for_tab(tab);
-                            let len = tab.samples_len;
+                            self.audio.set_samples_channels(channels);
+                            self.playback_mark_source(
+                                crate::app::PlaybackSourceKind::EditorTab(path),
+                                buffer_sr,
+                            );
+                            let len = self
+                                .tabs
+                                .get(result.tab_idx)
+                                .map(|tab| tab.samples_len)
+                                .unwrap_or(0);
+                            if let Some(tab) = self.tabs.get(result.tab_idx) {
+                                self.apply_loop_mode_for_tab(tab);
+                            }
                             let clamped_pos = if len == 0 {
                                 0usize
                             } else {

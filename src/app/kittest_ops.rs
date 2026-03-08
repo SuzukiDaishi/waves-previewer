@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::app::types::{
-    LoopMode, LoopXfadeShape, MusicAnalysisResult, RateMode, SortDir, SortKey, ToolKind, ViewMode,
+    LoopMode, LoopXfadeShape, MusicAnalysisResult, ProcessingResult, ProcessingState,
+    ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -22,13 +23,11 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_audio_has_samples(&self) -> bool {
-        self.audio
-            .shared
-            .samples
-            .load()
-            .as_ref()
-            .map(|buf| buf.len() > 0)
-            .unwrap_or(false)
+        self.audio.has_audio_source()
+    }
+
+    pub fn test_audio_is_streaming_wav(&self, path: &Path) -> bool {
+        self.audio.is_streaming_wav_path(path)
     }
 
     pub fn test_set_auto_play_list_nav(&mut self, enabled: bool) {
@@ -163,6 +162,22 @@ impl super::WavesPreviewer {
         self.playback_refresh_rate_for_current_source();
     }
 
+    pub fn test_rebuild_current_buffer_with_mode(&mut self) {
+        self.rebuild_current_buffer_with_mode();
+    }
+
+    pub fn test_audio_seek_to_sample(&mut self, pos: usize) {
+        self.audio.seek_to_sample(pos);
+    }
+
+    pub fn test_force_preview_restore_active_tab(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.preview_restore_audio_for_tab(tab_idx);
+        true
+    }
+
     pub fn test_playback_rate(&self) -> f32 {
         self.playback_rate
     }
@@ -184,6 +199,70 @@ impl super::WavesPreviewer {
             .as_ref()
             .map(|p| p.autoplay_when_ready)
             .unwrap_or(false)
+    }
+
+    pub fn test_processing_active(&self) -> bool {
+        self.processing.is_some()
+    }
+
+    pub fn test_inject_processing_result(
+        &mut self,
+        path: &Path,
+        state_target_editor: bool,
+        result_target_editor: bool,
+        state_mode: RateMode,
+        result_mode: RateMode,
+        state_job_id: u64,
+        result_job_id: u64,
+    ) {
+        use std::sync::mpsc;
+        let make_target = |editor: bool| {
+            if editor {
+                ProcessingTarget::EditorTab(path.to_path_buf())
+            } else {
+                ProcessingTarget::ListPreview(path.to_path_buf())
+            }
+        };
+        let state_target = make_target(state_target_editor);
+        let result_target = make_target(result_target_editor);
+        let (tx, rx) = mpsc::channel();
+        let channels = vec![vec![0.0; 1024], vec![0.0; 1024]];
+        let _ = tx.send(ProcessingResult {
+            path: path.to_path_buf(),
+            job_id: result_job_id,
+            mode: result_mode,
+            target: result_target,
+            samples: vec![0.0; 1024],
+            waveform: Vec::new(),
+            channels,
+        });
+        self.processing = Some(ProcessingState {
+            msg: "Test processing".to_string(),
+            path: path.to_path_buf(),
+            job_id: state_job_id,
+            mode: state_mode,
+            target: state_target,
+            autoplay_when_ready: false,
+            started_at: std::time::Instant::now(),
+            rx,
+        });
+    }
+
+    pub fn test_spawn_heavy_processing_from_active_tab(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let path = tab.path.clone();
+        let channels = tab.ch_samples.clone();
+        self.spawn_heavy_processing_from_channels(
+            path.clone(),
+            channels,
+            ProcessingTarget::EditorTab(path),
+        );
+        self.processing.is_some()
     }
 
     pub fn test_set_sort(&mut self, key: SortKey, dir: SortDir) {
@@ -635,6 +714,57 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).map(|t| t.loading).unwrap_or(false)
     }
 
+    pub fn test_editor_decode_progress(&self) -> Option<f32> {
+        self.editor_decode_ui_status(None).map(|status| status.progress)
+    }
+
+    pub fn test_editor_decode_message(&self) -> Option<String> {
+        self.editor_decode_ui_status(None)
+            .map(|status| status.message)
+    }
+
+    pub fn test_active_tab_loading_waveform_ready(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|tab| !tab.loading_waveform_minmax.is_empty())
+            .unwrap_or(false)
+    }
+
+    pub fn test_active_tab_loading_waveform_nonflat(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|tab| {
+                tab.loading_waveform_minmax
+                    .iter()
+                    .any(|(mn, mx)| mn.abs() > 1.0e-5 || mx.abs() > 1.0e-5 || (mx - mn).abs() > 1.0e-5)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn test_request_workspace_play_toggle(&mut self) {
+        self.request_workspace_play_toggle();
+    }
+
+    pub fn test_active_editor_exact_audio_ready(&self) -> bool {
+        self.active_editor_exact_audio_ready()
+    }
+
+    pub fn test_active_tab_samples_len_visual(&self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|tab| tab.samples_len_visual)
+            .unwrap_or(0)
+    }
+
     pub fn test_active_tab_path(&self) -> Option<PathBuf> {
         let Some(tab_idx) = self.active_tab else {
             return None;
@@ -674,7 +804,10 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_set_selected_sample_rate_override(&mut self, sample_rate: u32) -> bool {
-        let Some(path) = self.selected_path_buf() else {
+        let path = self
+            .selected_path_buf()
+            .or_else(|| self.active_tab.and_then(|idx| self.tabs.get(idx).map(|tab| tab.path.clone())));
+        let Some(path) = path else {
             return false;
         };
         if sample_rate == 0 {
@@ -834,6 +967,13 @@ impl super::WavesPreviewer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn test_audio_play_pos_f(&self) -> f32 {
+        self.audio
+            .shared
+            .play_pos_f
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub fn test_tab_ranges_in_bounds(&self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -880,6 +1020,63 @@ impl super::WavesPreviewer {
 
     pub fn test_open_session_from(&mut self, path: &Path) -> bool {
         self.open_project_file(path.to_path_buf()).is_ok()
+    }
+
+    pub fn test_set_channel_view_mixdown(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.channel_view = crate::app::types::ChannelView::mixdown();
+        true
+    }
+
+    pub fn test_set_channel_view_all(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.channel_view = crate::app::types::ChannelView {
+            mode: crate::app::types::ChannelViewMode::All,
+            selected: Vec::new(),
+        };
+        true
+    }
+
+    pub fn test_set_channel_view_custom(&mut self, selected: Vec<usize>) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.channel_view = crate::app::types::ChannelView {
+            mode: crate::app::types::ChannelViewMode::Custom,
+            selected,
+        };
+        true
+    }
+
+    pub fn test_waveform_lod_counts(&self) -> (u64, u64, u64) {
+        (
+            self.debug.waveform_lod_raw_count,
+            self.debug.waveform_lod_visible_count,
+            self.debug.waveform_lod_pyramid_count,
+        )
+    }
+
+    pub fn test_active_tab_waveform_pyramid_ready(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.waveform_pyramid.as_ref())
+            .is_some()
     }
 
     pub fn test_set_export_save_mode_overwrite(&mut self, overwrite: bool) {

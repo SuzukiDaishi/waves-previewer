@@ -29,31 +29,7 @@ impl super::WavesPreviewer {
 
         if !search_focused {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
-                // Keep preview audio/overlay when toggling playback.
-                // In list view, if preview decode is still pending, request play once ready.
-                if self.is_list_workspace_active() {
-                    let now_playing = self
-                        .audio
-                        .shared
-                        .playing
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    if now_playing {
-                        // Explicit pause in list mode.
-                        self.audio.stop();
-                        self.list_play_pending = false;
-                    } else {
-                        if self.force_load_selected_list_preview_for_play() {
-                            self.audio.play();
-                            if let Some(path) = self.selected_path_buf() {
-                                self.debug_mark_list_play_start(&path);
-                            }
-                        } else {
-                            self.list_play_pending = true;
-                        }
-                    }
-                } else {
-                    self.audio.toggle_play();
-                }
+                self.request_workspace_play_toggle();
             }
         }
 

@@ -6,17 +6,23 @@ use super::{WavesPreviewer, LIVE_PREVIEW_SAMPLE_LIMIT};
 
 impl WavesPreviewer {
     pub(super) fn preview_restore_audio_for_tab(&mut self, tab_idx: usize) {
+        if self.try_activate_editor_stream_transport_for_tab(tab_idx) {
+            return;
+        }
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.audio.stop();
-            self.audio.set_samples_channels(tab.ch_samples.clone());
+            self.set_editor_buffer_transport_preserving_time(
+                tab.path.as_path(),
+                tab.ch_samples.clone(),
+                tab.buffer_sample_rate,
+            );
             // Reapply loop mode
             self.apply_loop_mode_for_tab(tab);
             let tab_path = tab.path.clone();
-            let source_sr = self
-                .effective_sample_rate_for_path(&tab_path)
-                .unwrap_or(self.audio.shared.out_sample_rate.max(1))
-                .max(1);
-            self.playback_mark_source(super::PlaybackSourceKind::EditorTab(tab_path), source_sr);
+            self.playback_mark_source(
+                super::PlaybackSourceKind::EditorTab(tab_path),
+                tab.buffer_sample_rate,
+            );
         }
     }
 

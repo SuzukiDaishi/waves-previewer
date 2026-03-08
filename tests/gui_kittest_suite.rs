@@ -363,6 +363,47 @@ mod kittest_suite {
         path
     }
 
+    fn editor_canvas_hover_pos(harness: &Harness<'static, WavesPreviewer>) -> egui::Pos2 {
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        egui::pos2(
+            (inspector_rect.left() - 220.0).max(40.0),
+            inspector_rect.center().y,
+        )
+    }
+
+    fn editor_zoom_in_once(harness: &mut Harness<'static, WavesPreviewer>) {
+        let hover_pos = editor_canvas_hover_pos(harness);
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 120.0),
+                modifiers: Modifiers::COMMAND,
+            },
+            Modifiers::COMMAND,
+        );
+        harness.run_steps(3);
+    }
+
+    fn editor_shift_pan_once(harness: &mut Harness<'static, WavesPreviewer>) {
+        let hover_pos = editor_canvas_hover_pos(harness);
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 120.0),
+                modifiers: Modifiers::SHIFT,
+            },
+            Modifiers::SHIFT,
+        );
+        harness.run_steps(3);
+    }
+
+    fn editor_wave_width(harness: &Harness<'static, WavesPreviewer>) -> f32 {
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        (inspector_rect.left() - 40.0).max(64.0)
+    }
+
     fn top_menu_button<'a>(
         harness: &'a Harness<'static, WavesPreviewer>,
         label: &'a str,
@@ -1171,27 +1212,212 @@ mod kittest_suite {
         let spp_before = harness.state().tabs[tab_idx].samples_per_px;
         assert!(spp_before > 0.0, "samples_per_px should be initialized");
 
-        let inspector_rect = harness.get_by_label("Inspector").rect();
-        let hover_pos = egui::pos2(
-            (inspector_rect.left() - 220.0).max(40.0),
-            inspector_rect.center().y,
-        );
-        harness.hover_at(hover_pos);
-        harness.event_modifiers(
-            egui::Event::MouseWheel {
-                unit: MouseWheelUnit::Point,
-                delta: egui::vec2(0.0, 120.0),
-                modifiers: Modifiers::COMMAND,
-            },
-            Modifiers::COMMAND,
-        );
-        harness.run_steps(3);
+        editor_zoom_in_once(&mut harness);
 
         let spp_after = harness.state().tabs[tab_idx].samples_per_px;
         assert!(
             spp_after < spp_before,
             "ctrl+wheel zoom in should reduce samples_per_px: before={spp_before} after={spp_after}"
         );
+    }
+
+    #[test]
+    fn editor_shift_wheel_pan_changes_view_offset() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        editor_zoom_in_once(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = harness.state().tabs[tab_idx].view_offset;
+        editor_shift_pan_once(&mut harness);
+
+        let after = harness.state().tabs[tab_idx].view_offset;
+        assert_ne!(after, before, "Shift+wheel should pan the editor view");
+    }
+
+    #[test]
+    fn editor_zoom_then_pan_then_zoom_preserves_anchor_reasonably() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        editor_zoom_in_once(&mut harness);
+        editor_shift_pan_once(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before_second_zoom_spp = harness.state().tabs[tab_idx].samples_per_px;
+        let view_before_second_zoom = harness.state().tabs[tab_idx].view_offset as i64;
+        let visible_before_second_zoom =
+            (before_second_zoom_spp * editor_wave_width(&harness)).round() as i64;
+
+        editor_zoom_in_once(&mut harness);
+
+        let after_second_zoom = &harness.state().tabs[tab_idx];
+        let delta = (after_second_zoom.view_offset as i64 - view_before_second_zoom).abs();
+        assert!(
+            after_second_zoom.samples_per_px < before_second_zoom_spp,
+            "second zoom should still zoom in"
+        );
+        assert!(
+            delta < visible_before_second_zoom.max(256),
+            "zoom after pan should keep anchor reasonably stable: delta={delta} visible={visible_before_second_zoom}"
+        );
+    }
+
+    #[test]
+    fn editor_middle_drag_pan_changes_view_offset() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        editor_zoom_in_once(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before = harness.state().tabs[tab_idx].view_offset;
+        let start = editor_canvas_hover_pos(&harness);
+        let end = egui::pos2(start.x + 140.0, start.y);
+        harness.hover_at(start);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Middle,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.event_modifiers(egui::Event::PointerMoved(end), Modifiers::NONE);
+        harness.run_steps(2);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Middle,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(2);
+
+        let after = harness.state().tabs[tab_idx].view_offset;
+        assert_ne!(after, before, "Middle drag should pan the editor view");
+    }
+
+    #[test]
+    fn editor_waveform_overlay_in_spec_mode_survives_zoom_and_pan() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
+        assert!(harness.state_mut().test_set_waveform_overlay(true));
+        harness.run_steps(3);
+
+        editor_zoom_in_once(&mut harness);
+        editor_shift_pan_once(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert_eq!(
+            harness.state().tabs[tab_idx].view_mode,
+            neowaves::ViewMode::Spectrogram
+        );
+        assert!(harness.state().tabs[tab_idx].show_waveform_overlay);
+        assert!(
+            harness.state().test_active_tab_waveform_pyramid_ready(),
+            "waveform cache should remain ready in spectrogram overlay mode"
+        );
+    }
+
+    #[test]
+    fn editor_channel_view_switch_all_custom_mixdown_keeps_waveform_visible() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+
+        assert!(harness.state_mut().test_set_channel_view_all());
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+
+        assert!(harness.state_mut().test_set_channel_view_custom(vec![0]));
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+
+        assert!(harness.state_mut().test_set_channel_view_mixdown());
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        assert!(
+            harness.state().test_tab_samples_len() > 0,
+            "waveform should remain renderable across channel view switches"
+        );
+    }
+
+    #[test]
+    fn editor_undo_redo_keeps_waveform_cache_renderable() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+
+        assert!(harness.state_mut().test_apply_reverse(0.1, 0.4));
+        harness.run_steps(3);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        harness.run_steps(3);
+        assert!(
+            harness.state().test_active_tab_waveform_pyramid_ready(),
+            "undo should keep waveform cache renderable"
+        );
+
+        harness.key_press_modifiers(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z);
+        harness.run_steps(3);
+        assert!(
+            harness.state().test_active_tab_waveform_pyramid_ready(),
+            "redo should keep waveform cache renderable"
+        );
+    }
+
+    #[test]
+    fn editor_waveform_lod_counters_cover_raw_visible_and_pyramid() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+
+        let (_, _, pyramid_before) = harness.state().test_waveform_lod_counts();
+        harness.run_steps(2);
+        let (_, _, pyramid_after) = harness.state().test_waveform_lod_counts();
+        assert!(
+            pyramid_after > pyramid_before,
+            "fit-whole editor view should use pyramid LOD"
+        );
+
+        let visible_before = harness.state().test_waveform_lod_counts().1;
+        for _ in 0..4 {
+            editor_zoom_in_once(&mut harness);
+        }
+        harness.run_steps(2);
+        let visible_after = harness.state().test_waveform_lod_counts().1;
+        assert!(
+            visible_after > visible_before,
+            "mid zoom should use visible-range min/max LOD"
+        );
+
+        let raw_before = harness.state().test_waveform_lod_counts().0;
+        for _ in 0..12 {
+            editor_zoom_in_once(&mut harness);
+        }
+        harness.run_steps(2);
+        let raw_after = harness.state().test_waveform_lod_counts().0;
+        assert!(raw_after > raw_before, "deep zoom should use raw LOD");
+
+        let summary = harness.state().test_debug_summary_text();
+        assert!(summary.contains("waveform_render_ms:"));
+        assert!(summary.contains("waveform_query_ms:"));
+        assert!(summary.contains("waveform_draw_ms:"));
+        assert!(summary.contains("waveform_lod_counts:"));
     }
 
     #[test]
@@ -1456,6 +1682,104 @@ mod kittest_suite {
         after
             .save(&after_out)
             .unwrap_or_else(|e| panic!("save post-zoom png failed: {e}"));
+        assert!(std::fs::metadata(&before_out).is_ok());
+        assert!(std::fs::metadata(&after_out).is_ok());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_pan_changes_waveform_position_png() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        editor_zoom_in_once(&mut harness);
+        harness.run_steps(2);
+
+        let before = harness.render().expect("pre-pan render");
+        editor_shift_pan_once(&mut harness);
+        let after = harness.render().expect("post-pan render");
+
+        let changed_pixels = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        assert!(changed_pixels > 1024, "pan diff too small: {changed_pixels}");
+
+        let dir = make_temp_dir("kittest_pan_shift_wheel");
+        let before_out = dir.join("pan_before.png");
+        let after_out = dir.join("pan_after.png");
+        before.save(&before_out).expect("save pan before");
+        after.save(&after_out).expect("save pan after");
+        assert!(std::fs::metadata(&before_out).is_ok());
+        assert!(std::fs::metadata(&after_out).is_ok());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_channel_view_all_vs_mixdown_differs_png() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+
+        let mixdown = harness.render().expect("mixdown render");
+        assert!(harness.state_mut().test_set_channel_view_all());
+        harness.run_steps(3);
+        let all = harness.render().expect("all-channels render");
+
+        let changed_pixels = mixdown
+            .pixels()
+            .zip(all.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        assert!(
+            changed_pixels > 2048,
+            "channel view render difference too small: {changed_pixels}"
+        );
+
+        let dir = make_temp_dir("kittest_channel_view_modes");
+        let mixdown_out = dir.join("mixdown.png");
+        let all_out = dir.join("all_channels.png");
+        mixdown.save(&mixdown_out).expect("save mixdown");
+        all.save(&all_out).expect("save all");
+        assert!(std::fs::metadata(&mixdown_out).is_ok());
+        assert!(std::fs::metadata(&all_out).is_ok());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_waveform_overlay_spec_zoom_png() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
+        assert!(harness.state_mut().test_set_waveform_overlay(true));
+        harness.run_steps(3);
+
+        let before = harness.render().expect("spec overlay pre-zoom render");
+        editor_zoom_in_once(&mut harness);
+        editor_shift_pan_once(&mut harness);
+        let after = harness.render().expect("spec overlay post-zoom render");
+
+        let changed_pixels = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        assert!(
+            changed_pixels > 1024,
+            "spec overlay zoom/pan diff too small: {changed_pixels}"
+        );
+
+        let dir = make_temp_dir("kittest_spec_overlay_zoom");
+        let before_out = dir.join("spec_overlay_before.png");
+        let after_out = dir.join("spec_overlay_after.png");
+        before.save(&before_out).expect("save spec overlay before");
+        after.save(&after_out).expect("save spec overlay after");
         assert!(std::fs::metadata(&before_out).is_ok());
         assert!(std::fs::metadata(&after_out).is_ok());
     }

@@ -1,8 +1,9 @@
 use crate::audio::AudioBuffer;
+use crate::app::render::waveform_pyramid::WaveformPyramidSet;
 use crate::markers::MarkerEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -672,11 +673,15 @@ pub struct EditorTab {
     pub path: PathBuf,
     pub display_name: String,
     pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     #[allow(dead_code)]
     pub loop_enabled: bool,
     pub loading: bool,
-    pub ch_samples: Vec<Vec<f32>>, // per-channel samples (device SR)
+    pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
+    pub buffer_sample_rate: u32,   // current sample rate of ch_samples
     pub samples_len: usize,        // length in samples
+    pub samples_len_visual: usize, // length used for viewport math while loading
+    pub loading_waveform_minmax: Vec<(f32, f32)>, // coarse overview while full decode streams
     pub view_offset: usize,        // first visible sample index
     pub samples_per_px: f32,       // time zoom: samples per pixel
     pub last_wave_w: f32,          // last waveform width (for resize anchoring)
@@ -747,6 +752,7 @@ pub struct FileMeta {
     pub sample_value_kind: SampleValueKind,
     pub bit_rate_bps: Option<u32>,
     pub duration_secs: Option<f32>,
+    pub total_frames: Option<u64>,
     #[allow(dead_code)]
     pub rms_db: Option<f32>,
     pub peak_db: Option<f32>,
@@ -796,10 +802,34 @@ pub enum ScanMessage {
     Done,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProcessingTarget {
+    EditorTab(PathBuf),
+    ListPreview(PathBuf),
+}
+
+impl ProcessingTarget {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::EditorTab(path) | Self::ListPreview(path) => path.as_path(),
+        }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::EditorTab(_) => "editor",
+            Self::ListPreview(_) => "list",
+        }
+    }
+}
+
 pub struct ProcessingState {
     pub msg: String,
     #[allow(dead_code)]
     pub path: PathBuf,
+    pub job_id: u64,
+    pub mode: RateMode,
+    pub target: ProcessingTarget,
     pub autoplay_when_ready: bool,
     pub started_at: std::time::Instant,
     pub rx: std::sync::mpsc::Receiver<ProcessingResult>,
@@ -807,6 +837,9 @@ pub struct ProcessingState {
 
 pub struct ProcessingResult {
     pub path: PathBuf,
+    pub job_id: u64,
+    pub mode: RateMode,
+    pub target: ProcessingTarget,
     pub samples: Vec<f32>,
     pub waveform: Vec<(f32, f32)>,
     #[allow(dead_code)]
@@ -832,16 +865,41 @@ pub struct EditorApplyResult {
 pub enum EditorDecodeStage {
     Preview,
     StreamingFull,
+    FinalizingAudio,
+    FinalizingWaveform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorDecodeStrategy {
+    CompressedProgressiveFull,
+    StreamingOverviewFinalAudio,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorDecodeEvent {
+    Progress,
+    FinalReady,
+    Failed,
 }
 
 pub struct EditorDecodeResult {
     pub path: PathBuf,
+    pub event: EditorDecodeEvent,
     pub channels: Vec<Vec<f32>>,
-    pub is_final: bool,
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
+    pub loading_waveform_minmax: Vec<(f32, f32)>,
+    pub buffer_sample_rate: u32,
     pub job_id: u64,
     pub error: Option<String>,
     pub stage: EditorDecodeStage,
     pub decoded_frames: usize,
+    pub decoded_source_frames: usize,
+    pub total_source_frames: Option<usize>,
+    pub visual_total_frames: Option<usize>,
+    pub progress_emit_gap_ms: Option<f32>,
+    pub finalize_audio_ms: Option<f32>,
+    pub finalize_waveform_ms: Option<f32>,
 }
 
 pub struct EditorDecodeState {
@@ -854,6 +912,11 @@ pub struct EditorDecodeState {
     pub stage: EditorDecodeStage,
     pub decoded_frames: usize,
     pub estimated_total_frames: Option<usize>,
+    pub total_source_frames: Option<usize>,
+    pub visual_total_frames: Option<usize>,
+    pub decoded_source_frames: usize,
+    pub loading_waveform_updates: u64,
+    pub max_progress_gap_ms: f32,
 }
 
 pub struct EditorDecodeUiStatus {
@@ -866,6 +929,10 @@ pub struct EditorDecodeUiStatus {
 pub struct EditorUndoState {
     pub ch_samples: Vec<Vec<f32>>,
     pub samples_len: usize,
+    pub samples_len_visual: usize,
+    pub buffer_sample_rate: u32,
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub view_offset: usize,
     pub samples_per_px: f32,
     pub selection: Option<(usize, usize)>,
@@ -897,7 +964,9 @@ pub struct EditorUndoState {
 pub struct CachedEdit {
     pub ch_samples: Vec<Vec<f32>>,
     pub samples_len: usize,
+    pub buffer_sample_rate: u32,
     pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub display_meta: Option<FileMeta>,
     pub dirty: bool,
     pub loop_region: Option<(usize, usize)>,
@@ -1937,6 +2006,17 @@ pub struct DebugState {
     pub editor_open_to_first_paint_ms: VecDeque<f32>,
     pub editor_mixdown_build_ms: VecDeque<f32>,
     pub editor_wave_render_ms: VecDeque<f32>,
+    pub editor_decode_progress_emit_ms: VecDeque<f32>,
+    pub editor_decode_finalize_audio_ms: VecDeque<f32>,
+    pub editor_decode_finalize_waveform_ms: VecDeque<f32>,
+    pub editor_loading_progress_max_gap_ms: VecDeque<f32>,
+    pub editor_loading_waveform_updates: u64,
+    pub waveform_render_ms: VecDeque<f32>,
+    pub waveform_query_ms: VecDeque<f32>,
+    pub waveform_draw_ms: VecDeque<f32>,
+    pub waveform_lod_raw_count: u64,
+    pub waveform_lod_visible_count: u64,
+    pub waveform_lod_pyramid_count: u64,
     pub select_to_preview_ms: VecDeque<f32>,
     pub select_to_play_ms: VecDeque<f32>,
     pub metadata_probe_ms: VecDeque<f32>,
@@ -2026,6 +2106,17 @@ impl DebugState {
             editor_open_to_first_paint_ms: VecDeque::new(),
             editor_mixdown_build_ms: VecDeque::new(),
             editor_wave_render_ms: VecDeque::new(),
+            editor_decode_progress_emit_ms: VecDeque::new(),
+            editor_decode_finalize_audio_ms: VecDeque::new(),
+            editor_decode_finalize_waveform_ms: VecDeque::new(),
+            editor_loading_progress_max_gap_ms: VecDeque::new(),
+            editor_loading_waveform_updates: 0,
+            waveform_render_ms: VecDeque::new(),
+            waveform_query_ms: VecDeque::new(),
+            waveform_draw_ms: VecDeque::new(),
+            waveform_lod_raw_count: 0,
+            waveform_lod_visible_count: 0,
+            waveform_lod_pyramid_count: 0,
             select_to_preview_ms: VecDeque::new(),
             select_to_play_ms: VecDeque::new(),
             metadata_probe_ms: VecDeque::new(),

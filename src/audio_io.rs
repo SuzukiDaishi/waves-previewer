@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -20,6 +21,7 @@ use symphonia::core::sample::SampleFormat;
 use symphonia::default::{get_codecs, get_probe};
 
 pub const SUPPORTED_EXTS: &[&str] = &["wav", "mp3", "m4a", "ogg"];
+pub const EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES: usize = 16_384;
 
 fn io_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -107,6 +109,7 @@ pub struct AudioInfo {
     pub sample_value_kind: SampleValueKind,
     pub bit_rate_bps: Option<u32>,
     pub duration_secs: Option<f32>,
+    pub total_frames: Option<u64>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
 }
@@ -126,6 +129,13 @@ fn is_m4a_path(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("m4a"))
+        .unwrap_or(false)
+}
+
+fn is_wav_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("wav"))
         .unwrap_or(false)
 }
 
@@ -181,6 +191,11 @@ fn read_audio_info_m4a_mp4(
         })
         .unwrap_or(2);
     let duration_secs = track.duration().as_secs_f32();
+    let total_frames = if duration_secs.is_finite() && duration_secs > 0.0 {
+        Some(((duration_secs as f64) * sample_rate as f64).round().max(0.0) as u64)
+    } else {
+        None
+    };
     let bit_rate_bps = if duration_secs.is_finite() && duration_secs > 0.0 {
         file_size
             .map(|bytes| ((bytes as f64) * 8.0 / duration_secs as f64).round() as u32)
@@ -195,6 +210,7 @@ fn read_audio_info_m4a_mp4(
         sample_value_kind: SampleValueKind::Unknown,
         bit_rate_bps,
         duration_secs: Some(duration_secs),
+        total_frames,
         created_at,
         modified_at,
     })
@@ -240,9 +256,472 @@ fn read_audio_info_wav(
         sample_value_kind,
         bit_rate_bps,
         duration_secs,
+        total_frames: Some(frames as u64),
         created_at,
         modified_at,
     })
+}
+
+#[derive(Clone, Debug)]
+pub struct AudioProxyPreview {
+    pub channels: Vec<Vec<f32>>,
+    pub sample_rate: u32,
+    pub source_sample_rate: u32,
+    pub total_source_frames: usize,
+    pub is_full_resolution: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WavProxyHeader {
+    audio_format: u16,
+    channels: u16,
+    sample_rate: u32,
+    bits_per_sample: u16,
+    block_align: u16,
+    data_offset: u64,
+    data_len: u64,
+}
+
+fn proxy_keep_channel_count(source_channels: usize) -> usize {
+    if source_channels <= 2 {
+        source_channels.max(1)
+    } else {
+        1
+    }
+}
+
+fn proxy_frame_stride(total_source_frames: usize, keep_channels: usize, max_total_samples: usize) -> usize {
+    if total_source_frames == 0 {
+        return 1;
+    }
+    let per_channel_budget = (max_total_samples / keep_channels.max(1)).max(1);
+    total_source_frames.div_ceil(per_channel_budget).max(1)
+}
+
+fn proxy_output_sample_rate(
+    source_sample_rate: u32,
+    total_source_frames: usize,
+    proxy_frames: usize,
+) -> u32 {
+    if source_sample_rate == 0 || total_source_frames == 0 || proxy_frames == 0 {
+        return source_sample_rate.max(1);
+    }
+    (((proxy_frames as u128)
+        .saturating_mul(source_sample_rate as u128)
+        .saturating_add((total_source_frames as u128) / 2))
+        / (total_source_frames as u128)) as u32
+}
+
+fn read_wav_proxy_header(path: &Path) -> Result<Option<WavProxyHeader>> {
+    let mut file = File::open(path).with_context(|| format!("open wav proxy header: {}", path.display()))?;
+    let mut riff = [0u8; 12];
+    file.read_exact(&mut riff)
+        .with_context(|| format!("read wav header: {}", path.display()))?;
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return Ok(None);
+    }
+    let mut fmt_audio_format = 0u16;
+    let mut fmt_channels = 0u16;
+    let mut fmt_sample_rate = 0u32;
+    let mut fmt_bits = 0u16;
+    let mut fmt_block_align = 0u16;
+    let mut data_offset = None;
+    let mut data_len = 0u64;
+    loop {
+        let mut chunk_header = [0u8; 8];
+        match file.read_exact(&mut chunk_header) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(err).with_context(|| format!("read wav chunk header: {}", path.display())),
+        }
+        let id = &chunk_header[0..4];
+        let size = u32::from_le_bytes([
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ]) as u64;
+        let chunk_data_pos = file.stream_position()?;
+        if id == b"fmt " {
+            let mut fmt = vec![0u8; size as usize];
+            file.read_exact(&mut fmt)
+                .with_context(|| format!("read wav fmt chunk: {}", path.display()))?;
+            if fmt.len() >= 16 {
+                fmt_audio_format = u16::from_le_bytes([fmt[0], fmt[1]]);
+                fmt_channels = u16::from_le_bytes([fmt[2], fmt[3]]);
+                fmt_sample_rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
+                fmt_block_align = u16::from_le_bytes([fmt[12], fmt[13]]);
+                fmt_bits = u16::from_le_bytes([fmt[14], fmt[15]]);
+            }
+        } else if id == b"data" {
+            data_offset = Some(chunk_data_pos);
+            data_len = size;
+            break;
+        }
+        let next = chunk_data_pos
+            .saturating_add(size)
+            .saturating_add(size & 1);
+        file.seek(SeekFrom::Start(next))?;
+    }
+    let Some(data_offset) = data_offset else {
+        return Ok(None);
+    };
+    if fmt_channels == 0 || fmt_sample_rate == 0 || fmt_bits == 0 || fmt_block_align == 0 {
+        return Ok(None);
+    }
+    Ok(Some(WavProxyHeader {
+        audio_format: fmt_audio_format,
+        channels: fmt_channels,
+        sample_rate: fmt_sample_rate,
+        bits_per_sample: fmt_bits,
+        block_align: fmt_block_align,
+        data_offset,
+        data_len,
+    }))
+}
+
+fn read_wav_frame_channel_sample(
+    frame: &[u8],
+    header: WavProxyHeader,
+    channel_index: usize,
+) -> Option<f32> {
+    let channels = header.channels.max(1) as usize;
+    if channel_index >= channels {
+        return None;
+    }
+    let bytes_per_sample = (header.block_align as usize) / channels.max(1);
+    let start = channel_index.saturating_mul(bytes_per_sample);
+    let end = start.saturating_add(bytes_per_sample);
+    let sample = frame.get(start..end)?;
+    match (header.audio_format, header.bits_per_sample) {
+        (3, 32) if sample.len() >= 4 => Some(f32::from_le_bytes([
+            sample[0], sample[1], sample[2], sample[3],
+        ]).clamp(-1.0, 1.0)),
+        (1, 8) if !sample.is_empty() => Some(((sample[0] as f32 - 128.0) / 128.0).clamp(-1.0, 1.0)),
+        (1, 16) if sample.len() >= 2 => Some(
+            (i16::from_le_bytes([sample[0], sample[1]]) as f32 / i16::MAX as f32).clamp(-1.0, 1.0),
+        ),
+        (1, 24) if sample.len() >= 3 => {
+            let sign = if (sample[2] & 0x80) != 0 { 0xFF } else { 0x00 };
+            let value = i32::from_le_bytes([sample[0], sample[1], sample[2], sign]);
+            Some((value as f32 / 8_388_607.0).clamp(-1.0, 1.0))
+        }
+        (1, 32) if sample.len() >= 4 => Some(
+            (i32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]) as f32
+                / i32::MAX as f32)
+                .clamp(-1.0, 1.0),
+        ),
+        _ => None,
+    }
+}
+
+fn build_wav_proxy_preview_sparse(
+    path: &Path,
+    max_total_samples: usize,
+) -> Result<Option<AudioProxyPreview>> {
+    let Some(header) = read_wav_proxy_header(path)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        (header.audio_format, header.bits_per_sample),
+        (1, 8) | (1, 16) | (1, 24) | (1, 32) | (3, 32)
+    ) {
+        return Ok(None);
+    }
+    let frame_bytes = header.block_align.max(1) as usize;
+    if frame_bytes == 0 {
+        return Ok(None);
+    }
+    let total_source_frames = (header.data_len / frame_bytes as u64) as usize;
+    if total_source_frames == 0 {
+        return Ok(None);
+    }
+    let source_channels = header.channels.max(1) as usize;
+    let keep_channels = proxy_keep_channel_count(source_channels);
+    let stride = proxy_frame_stride(total_source_frames, keep_channels, max_total_samples.max(1));
+    let proxy_frames = total_source_frames.div_ceil(stride).max(1);
+    let mut out: Vec<Vec<f32>> = (0..keep_channels)
+        .map(|_| Vec::with_capacity(proxy_frames))
+        .collect();
+    let mut reader =
+        BufReader::new(File::open(path).with_context(|| format!("open wav proxy data: {}", path.display()))?);
+    reader.seek(SeekFrom::Start(header.data_offset))?;
+    let mut frame = vec![0u8; frame_bytes];
+    let mut source_frame = 0usize;
+    while source_frame < total_source_frames {
+        reader
+            .read_exact(&mut frame)
+            .with_context(|| format!("read wav proxy frame: {}", path.display()))?;
+        if keep_channels == 1 {
+            let mut acc = 0.0f32;
+            let mut count = 0usize;
+            for channel_index in 0..source_channels {
+                if let Some(sample) = read_wav_frame_channel_sample(&frame, header, channel_index) {
+                    acc += sample;
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                out[0].push((acc / count as f32).clamp(-1.0, 1.0));
+            } else {
+                out[0].push(0.0);
+            }
+        } else {
+            for channel_index in 0..keep_channels {
+                out[channel_index].push(
+                    read_wav_frame_channel_sample(&frame, header, channel_index).unwrap_or(0.0),
+                );
+            }
+        }
+        source_frame = source_frame.saturating_add(1);
+        let remaining = total_source_frames.saturating_sub(source_frame);
+        let skip_frames = stride.saturating_sub(1).min(remaining);
+        if skip_frames > 0 {
+            reader.seek(SeekFrom::Current(
+                (skip_frames as u64).saturating_mul(frame_bytes as u64) as i64,
+            ))?;
+            source_frame = source_frame.saturating_add(skip_frames);
+        }
+    }
+    let actual_proxy_frames = out.first().map(|ch| ch.len()).unwrap_or(0);
+    if actual_proxy_frames == 0 {
+        return Ok(None);
+    }
+    let proxy_sample_rate = proxy_output_sample_rate(
+        header.sample_rate.max(1),
+        total_source_frames,
+        actual_proxy_frames,
+    )
+    .clamp(1, header.sample_rate.max(1));
+    Ok(Some(AudioProxyPreview {
+        channels: out,
+        sample_rate: proxy_sample_rate,
+        source_sample_rate: header.sample_rate.max(1),
+        total_source_frames,
+        is_full_resolution: stride == 1 && keep_channels == source_channels,
+    }))
+}
+
+fn collect_wav_proxy_mono<F>(
+    channels: usize,
+    stride: usize,
+    total_source_frames: usize,
+    mut next_sample: F,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: FnMut() -> Option<Result<f32>>,
+{
+    let proxy_frames = total_source_frames.div_ceil(stride.max(1)).max(1);
+    let mut out = vec![Vec::with_capacity(proxy_frames)];
+    let mut frame_acc = 0.0f32;
+    let mut channel_index = 0usize;
+    let mut frame_index = 0usize;
+    while let Some(sample) = next_sample() {
+        let sample = sample?;
+        frame_acc += sample;
+        channel_index += 1;
+        if channel_index >= channels {
+            if frame_index % stride == 0 {
+                out[0].push(frame_acc / channels.max(1) as f32);
+            }
+            frame_acc = 0.0;
+            channel_index = 0;
+            frame_index += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn collect_wav_proxy_channels<F>(
+    channels: usize,
+    keep_channels: usize,
+    stride: usize,
+    total_source_frames: usize,
+    mut next_sample: F,
+) -> Result<Vec<Vec<f32>>>
+where
+    F: FnMut() -> Option<Result<f32>>,
+{
+    let proxy_frames = total_source_frames.div_ceil(stride.max(1)).max(1);
+    let mut out: Vec<Vec<f32>> = (0..keep_channels)
+        .map(|_| Vec::with_capacity(proxy_frames))
+        .collect();
+    let mut channel_index = 0usize;
+    let mut frame_index = 0usize;
+    while let Some(sample) = next_sample() {
+        let sample = sample?;
+        if frame_index % stride == 0 && channel_index < keep_channels {
+            out[channel_index].push(sample);
+        }
+        channel_index += 1;
+        if channel_index >= channels {
+            channel_index = 0;
+            frame_index += 1;
+        }
+    }
+    Ok(out)
+}
+
+pub fn build_wav_proxy_preview(path: &Path, max_total_samples: usize) -> Result<Option<AudioProxyPreview>> {
+    if !is_wav_path(path) {
+        return Ok(None);
+    }
+    if let Some(proxy) = build_wav_proxy_preview_sparse(path, max_total_samples)? {
+        io_trace(
+            "decode_wav_proxy_preview_sparse",
+            path,
+            "wav",
+            "proxy",
+            proxy.sample_rate,
+            proxy.channels.len() as u16,
+            32,
+            proxy.channels.first().map(|ch| ch.len()),
+        );
+        return Ok(Some(proxy));
+    }
+    let mut reader =
+        hound::WavReader::open(path).with_context(|| format!("open wav proxy: {}", path.display()))?;
+    let spec = reader.spec();
+    let source_channels = spec.channels.max(1) as usize;
+    let total_source_frames = reader.duration() as usize;
+    if total_source_frames == 0 || spec.sample_rate == 0 {
+        return Ok(None);
+    }
+    let keep_channels = proxy_keep_channel_count(source_channels);
+    let stride = proxy_frame_stride(total_source_frames, keep_channels, max_total_samples.max(1));
+    let channels = match spec.sample_format {
+        hound::SampleFormat::Float => {
+            if keep_channels == 1 {
+                let mut samples = reader.samples::<f32>();
+                collect_wav_proxy_mono(source_channels, stride, total_source_frames, || {
+                    samples.next().map(|sample| sample.map_err(Into::into))
+                })?
+            } else {
+                let mut samples = reader.samples::<f32>();
+                collect_wav_proxy_channels(
+                    source_channels,
+                    keep_channels,
+                    stride,
+                    total_source_frames,
+                    || samples.next().map(|sample| sample.map_err(Into::into)),
+                )?
+            }
+        }
+        hound::SampleFormat::Int => {
+            let bits = spec.bits_per_sample.max(1);
+            if bits <= 8 {
+                let scale = i8::MAX as f32;
+                if keep_channels == 1 {
+                    let mut samples = reader.samples::<i8>();
+                    collect_wav_proxy_mono(source_channels, stride, total_source_frames, || {
+                        samples.next().map(|sample| {
+                            sample
+                                .map(|v| (v as f32 / scale).clamp(-1.0, 1.0))
+                                .map_err(Into::into)
+                        })
+                    })?
+                } else {
+                    let mut samples = reader.samples::<i8>();
+                    collect_wav_proxy_channels(
+                        source_channels,
+                        keep_channels,
+                        stride,
+                        total_source_frames,
+                        || {
+                            samples.next().map(|sample| {
+                                sample
+                                    .map(|v| (v as f32 / scale).clamp(-1.0, 1.0))
+                                    .map_err(Into::into)
+                            })
+                        },
+                    )?
+                }
+            } else if bits <= 16 {
+                let scale = i16::MAX as f32;
+                if keep_channels == 1 {
+                    let mut samples = reader.samples::<i16>();
+                    collect_wav_proxy_mono(source_channels, stride, total_source_frames, || {
+                        samples.next().map(|sample| {
+                            sample
+                                .map(|v| (v as f32 / scale).clamp(-1.0, 1.0))
+                                .map_err(Into::into)
+                        })
+                    })?
+                } else {
+                    let mut samples = reader.samples::<i16>();
+                    collect_wav_proxy_channels(
+                        source_channels,
+                        keep_channels,
+                        stride,
+                        total_source_frames,
+                        || {
+                            samples.next().map(|sample| {
+                                sample
+                                    .map(|v| (v as f32 / scale).clamp(-1.0, 1.0))
+                                    .map_err(Into::into)
+                            })
+                        },
+                    )?
+                }
+            } else {
+                let scale = if bits >= 32 {
+                    i32::MAX as f32
+                } else {
+                    ((1i64 << (bits as i64 - 1)) - 1) as f32
+                }
+                .max(1.0);
+                if keep_channels == 1 {
+                    let mut samples = reader.samples::<i32>();
+                    collect_wav_proxy_mono(source_channels, stride, total_source_frames, || {
+                        samples.next().map(|sample| {
+                            sample
+                                .map(|v| (v as f32 / scale).clamp(-1.0, 1.0))
+                                .map_err(Into::into)
+                        })
+                    })?
+                } else {
+                    let mut samples = reader.samples::<i32>();
+                    collect_wav_proxy_channels(
+                        source_channels,
+                        keep_channels,
+                        stride,
+                        total_source_frames,
+                        || {
+                            samples.next().map(|sample| {
+                                sample
+                                    .map(|v| (v as f32 / scale).clamp(-1.0, 1.0))
+                                    .map_err(Into::into)
+                            })
+                        },
+                    )?
+                }
+            }
+        }
+    };
+    let proxy_frames = channels.first().map(|ch| ch.len()).unwrap_or(0);
+    if proxy_frames == 0 {
+        return Ok(None);
+    }
+    let proxy_sample_rate =
+        proxy_output_sample_rate(spec.sample_rate.max(1), total_source_frames, proxy_frames)
+            .clamp(1, spec.sample_rate.max(1));
+    io_trace(
+        "decode_wav_proxy_preview",
+        path,
+        "wav",
+        "proxy",
+        proxy_sample_rate,
+        channels.len() as u16,
+        32,
+        Some(proxy_frames),
+    );
+    Ok(Some(AudioProxyPreview {
+        channels,
+        sample_rate: proxy_sample_rate,
+        source_sample_rate: spec.sample_rate.max(1),
+        total_source_frames,
+        is_full_resolution: stride == 1 && keep_channels == source_channels,
+    }))
 }
 
 fn audio_specific_config_bytes(profile: u8, freq_index: u8, chan_conf: u8) -> [u8; 2] {
@@ -362,6 +841,296 @@ fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, 
         }
     }
     Ok((chans, sample_rate, reached_eof))
+}
+
+fn emit_ready_chunk<F>(
+    path: &Path,
+    stage: &str,
+    sample_rate: u32,
+    pending: &mut Vec<Vec<f32>>,
+    decoded_frames: usize,
+    is_final: bool,
+    on_chunk: &mut F,
+) -> bool
+where
+    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
+{
+    if pending.is_empty() || pending.first().map(|c| c.is_empty()).unwrap_or(true) {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    let mut chunk = std::mem::take(pending);
+    #[cfg(not(debug_assertions))]
+    let chunk = std::mem::take(pending);
+    #[cfg(debug_assertions)]
+    sanitize_non_finite_multi(path, stage, &mut chunk);
+    io_trace(
+        stage,
+        path,
+        path.extension().and_then(|s| s.to_str()).unwrap_or("-"),
+        "-",
+        sample_rate,
+        chunk.len() as u16,
+        32,
+        chunk.first().map(|c| c.len()),
+    );
+    let keep_channels = chunk.len().max(1);
+    let keep_cap = chunk.first().map(|c| c.capacity()).unwrap_or(0);
+    let sent = on_chunk(chunk, sample_rate, decoded_frames, is_final);
+    *pending = (0..keep_channels)
+        .map(|_| Vec::with_capacity(keep_cap))
+        .collect();
+    sent
+}
+
+pub fn decode_m4a_fdk_progressive_chunks<C, F>(
+    path: &Path,
+    emit_every_secs: f32,
+    mut should_cancel: C,
+    mut on_chunk: F,
+) -> Result<()>
+where
+    C: FnMut() -> bool,
+    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
+{
+    let file = File::open(path).with_context(|| format!("open m4a: {}", path.display()))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut reader =
+        Mp4Reader::read_header(file, size).map_err(|e| anyhow::anyhow!("mp4 header: {e:?}"))?;
+    let mut picked = None;
+    for (&track_id, track) in reader.tracks() {
+        if let Ok(TrackType::Audio) = track.track_type() {
+            picked = Some((track_id, track));
+            break;
+        }
+    }
+    let (track_id, track) = picked.context("m4a: no audio track")?;
+    let sample_rate = track
+        .sample_freq_index()
+        .map(|idx| idx.freq())
+        .unwrap_or_else(|_| track.timescale())
+        .max(1);
+    let channel_cfg = track.channel_config().unwrap_or(ChannelConfig::Stereo);
+    let channels = channel_config_count(channel_cfg).max(1) as usize;
+    let profile = track
+        .trak
+        .mdia
+        .minf
+        .stbl
+        .stsd
+        .mp4a
+        .as_ref()
+        .and_then(|m| m.esds.as_ref())
+        .map(|esds| esds.es_desc.dec_config.dec_specific.profile)
+        .unwrap_or(2);
+    let freq_index = track
+        .sample_freq_index()
+        .map(|idx| idx as u8)
+        .unwrap_or(mp4::SampleFreqIndex::Freq44100 as u8);
+    let chan_conf = channel_cfg as u8;
+    let asc = audio_specific_config_bytes(profile, freq_index, chan_conf);
+    let mut decoder = AacDecoder::new(AacTransport::Raw);
+    decoder
+        .config_raw(&asc)
+        .map_err(|e| anyhow::anyhow!("m4a decoder config: {e}"))?;
+    let sample_count = reader.sample_count(track_id)?;
+    let emit_frames = ((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize;
+    let emit_frames = emit_frames.max(1);
+    let mut pending: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let mut decoded_frames = 0usize;
+    for sample_id in 1..=sample_count {
+        if should_cancel() {
+            return Ok(());
+        }
+        let Some(sample) = reader.read_sample(track_id, sample_id)? else {
+            continue;
+        };
+        let mut offset = 0usize;
+        while offset < sample.bytes.len() {
+            if should_cancel() {
+                return Ok(());
+            }
+            let used = decoder
+                .fill(&sample.bytes[offset..])
+                .map_err(|e| anyhow::anyhow!("m4a decoder fill: {e}"))?;
+            if used == 0 {
+                break;
+            }
+            offset += used;
+            let mut frame_size = decoder.decoded_frame_size();
+            if frame_size == 0 {
+                frame_size = 2048 * channels;
+            }
+            let mut pcm = vec![0i16; frame_size];
+            match decoder.decode_frame(&mut pcm) {
+                Ok(()) => {
+                    let info = decoder.stream_info();
+                    let ch = info.numChannels.max(1) as usize;
+                    let frames = info.frameSize as usize;
+                    let needed = ch.saturating_mul(frames);
+                    if needed == 0 || pcm.len() < needed {
+                        continue;
+                    }
+                    if pending.len() != ch {
+                        pending = vec![Vec::new(); ch];
+                    }
+                    for i in 0..frames {
+                        for c in 0..ch {
+                            let v = pcm[i * ch + c] as f32 / i16::MAX as f32;
+                            pending[c].push(v);
+                        }
+                    }
+                    decoded_frames = decoded_frames.saturating_add(frames);
+                    if pending.first().map(|c| c.len()).unwrap_or(0) >= emit_frames
+                        && !emit_ready_chunk(
+                            path,
+                            "decode_multi_m4a_progressive_chunk",
+                            sample_rate,
+                            &mut pending,
+                            decoded_frames,
+                            false,
+                            &mut on_chunk,
+                        )
+                    {
+                        return Ok(());
+                    }
+                }
+                Err(err) => {
+                    if err == AacDecoderError::NOT_ENOUGH_BITS
+                        || err == AacDecoderError::TRANSPORT_SYNC_ERROR
+                    {
+                        break;
+                    }
+                    return Err(anyhow::anyhow!("m4a decode: {err}"));
+                }
+            }
+        }
+    }
+    if should_cancel() {
+        return Ok(());
+    }
+    let _ = emit_ready_chunk(
+        path,
+        "decode_multi_m4a_progressive_final",
+        sample_rate,
+        &mut pending,
+        decoded_frames,
+        true,
+        &mut on_chunk,
+    );
+    Ok(())
+}
+
+pub fn decode_audio_multi_symphonia_chunks<C, F>(
+    path: &Path,
+    emit_every_secs: f32,
+    mut should_cancel: C,
+    mut on_chunk: F,
+) -> Result<()>
+where
+    C: FnMut() -> bool,
+    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
+{
+    let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
+    let mut pending: Vec<Vec<f32>> = Vec::new();
+    let mut decoded_frames = 0usize;
+    let mut emit_frames = if sample_rate > 0 {
+        (((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize).max(1)
+    } else {
+        0
+    };
+    loop {
+        if should_cancel() {
+            return Ok(());
+        }
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(SymphoniaError::ResetRequired) => break,
+            Err(err) => return Err(err.into()),
+        };
+        if packet.track_id() != track_id {
+            continue;
+        }
+        let decoded = match decoder.decode(&packet) {
+            Ok(d) => d,
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if sample_rate == 0 {
+            sample_rate = decoded.spec().rate.max(1);
+            emit_frames = (((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize)
+                .max(1);
+        }
+        let channels = decoded.spec().channels.count().max(1);
+        if pending.is_empty() {
+            pending = vec![Vec::new(); channels];
+        }
+        let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        buf.copy_interleaved_ref(decoded);
+        for frame in buf.samples().chunks(channels) {
+            for (ci, &v) in frame.iter().enumerate() {
+                pending[ci].push(v);
+            }
+            decoded_frames = decoded_frames.saturating_add(1);
+        }
+        if pending.first().map(|c| c.len()).unwrap_or(0) >= emit_frames
+            && !emit_ready_chunk(
+                path,
+                "decode_multi_progressive_chunk",
+                sample_rate.max(1),
+                &mut pending,
+                decoded_frames,
+                false,
+                &mut on_chunk,
+            )
+        {
+            return Ok(());
+        }
+    }
+    if sample_rate == 0 {
+        anyhow::bail!("unknown sample rate: {}", path.display());
+    }
+    if should_cancel() {
+        return Ok(());
+    }
+    let _ = emit_ready_chunk(
+        path,
+        "decode_multi_progressive_final",
+        sample_rate,
+        &mut pending,
+        decoded_frames,
+        true,
+        &mut on_chunk,
+    );
+    Ok(())
+}
+
+pub fn decode_audio_multi_streaming_chunks<C, F>(
+    path: &Path,
+    emit_every_secs: f32,
+    should_cancel: C,
+    on_chunk: F,
+) -> Result<()>
+where
+    C: FnMut() -> bool,
+    F: FnMut(Vec<Vec<f32>>, u32, usize, bool) -> bool,
+{
+    if is_m4a_path(path) {
+        decode_m4a_fdk_progressive_chunks(path, emit_every_secs, should_cancel, on_chunk)
+    } else {
+        decode_audio_multi_symphonia_chunks(path, emit_every_secs, should_cancel, on_chunk)
+    }
 }
 
 fn mixdown_to_mono(chans: &[Vec<f32>]) -> Vec<f32> {
@@ -524,6 +1293,7 @@ pub fn read_audio_info(path: &Path) -> Result<AudioInfo> {
         sample_value_kind,
         bit_rate_bps,
         duration_secs,
+        total_frames: cp.n_frames,
         created_at,
         modified_at,
     })

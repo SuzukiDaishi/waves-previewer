@@ -718,12 +718,16 @@ enum EditorOtherSubView { F0, Tempogram, Chromagram }
 - C. Editor 再生速度不正変化の禁止: **実装済み**
   - `PlaybackSessionState`/`PlaybackSourceKind` 導入、`rate` 計算を
     `playback_rate_from_values()` に集約。
+  - `EditorTab/CachedEdit` に `buffer_sample_rate` を追加し、
+    preview restore / session sidecar save-load / tab reopen で一貫して使用。
   - 回帰: `tests/small_fix_regressions.rs::speed_mode_rate_stays_stable_across_workspace_switch`。
 - D. List 冒頭 crackle 解消: **実装済み**
-  - `AudioEngine` に再生開始/差し替え時 ramp を導入（`start_output_ramp`）。
-  - list prefix->full 差し替えは `replace_samples_keep_pos()` 優先で連続性を維持。
+  - `AudioEngine` は明示 `play()` 時だけ短い ramp を維持。
+  - buffer 差し替え (`replace_samples_keep_pos`) の `0->1 ramp` 再注入を廃止し、
+    96-frame swap crossfade へ変更。
+  - list prefix->full 差し替えは `replace_samples_keep_pos()` + crossfade で連続性を維持。
   - 回帰: `tests/mp3_preview_timing.rs`（timing/continuity/handoff 系）、
-    `src/audio.rs` の ramp unit test。
+    `cargo test --lib audio::tests` の audio unit test。
 - E. 音量上限 24dB 統一: **実装済み**
   - `src/app/helpers.rs` に `GAIN_DB_MIN/GAIN_DB_MAX` の共通定数を導入し、
     gain UI の上限を統一。
@@ -786,7 +790,8 @@ enum EditorOtherSubView { F0, Tempogram, Chromagram }
 
 - `cargo check` -> **ok**
 - `cargo test --no-run` -> **ok**
-- `cargo test --features kittest --test small_fix_regressions -- --nocapture` -> **14 passed**
+- `cargo test --lib audio::tests -- --nocapture` -> **2 passed**
+- `cargo test --features kittest --test small_fix_regressions -- --nocapture` -> **17 passed**
 - `cargo test --features kittest --test mp3_preview_timing -- --nocapture` -> **5 passed**
 - `cargo test --features kittest --test ui_focus_input_regressions -- --nocapture` -> **6 passed**
 - `cargo test --features kittest --test gui_kittest_suite -- --nocapture` -> **47 passed / 5 ignored**
@@ -804,6 +809,136 @@ enum EditorOtherSubView { F0, Tempogram, Chromagram }
 - E: `src/app/ui/editor.rs` の Stem Preview slider/clamp が `-80.0..=24.0` へ更新
 - K: `src/audio.rs` の device 指定初期化 + `src/app/ui/export_settings.rs` の
   Settings UI + `src/app/theme_ops.rs` の prefs 保存/復元対応
+
+### 12-5. 2026-03-06 追加修正（再生速度変動 / ぶつぶつ音 / 波形表示遅延）
+
+2026-03-06 の追加調査を受け、C/D/F と editor 波形表示に追補修正を入れた。
+
+- 再生速度変動:
+  - `PlaybackSessionState.src_sr` 相当を `buffer_sr` として再定義。
+  - `EditorTab/CachedEdit` に `buffer_sample_rate` を追加し、
+    preview restore / session sidecar save-load / undo/redo / reopen で共通利用。
+  - `preview_restore_audio_for_tab()` は元ファイル SR ではなく
+    `tab.buffer_sample_rate` で復帰するよう修正。
+- session sidecar:
+  - 保存時は `tab/cached.buffer_sample_rate` を sidecar WAV header に書き出す。
+  - `ProjectTab/ProjectEdit` に `buffer_sample_rate` を追加し、
+    reopen 時はそれを優先して current output SR へ正規化する。
+  - 旧 session（`buffer_sample_rate` なし）は output SR 前提で救済し、
+    debug log に記録する。
+- ぶつぶつ音:
+  - `replace_samples_keep_pos()` の再生中 `start_output_ramp(0->1)` を廃止。
+  - callback 側で old/new buffer を 96-frame crossfade する swap state を追加。
+- transport 統一:
+  - list preview も `PlaybackSourceKind::ListPreview` を実使用し、
+    `playback_mark_source()` 経由で rate を決めるよう統一。
+- 波形表示:
+  - `EditorDecodeResult` に `waveform_minmax` を追加し、worker 側で生成。
+  - UI thread の full `mixdown + build_minmax` は撤去。
+  - 圧縮音源 editor decode は prefix 後も `0.75s` ごとに中間 emit して、
+    波形が段階的に伸びるよう変更。
+
+追加回帰:
+
+- `tests/small_fix_regressions.rs::preview_restore_keeps_rate_for_resampled_editor_buffer`
+- `tests/small_fix_regressions.rs::session_sidecar_roundtrip_keeps_editor_rate_stable`
+- `tests/small_fix_regressions.rs::list_preview_rate_uses_source_buffer_sample_rate`
+
+実測メモ（`debug/long_load_test.mp3`）:
+
+- `editor_open_to_partial_ms`: **201.8ms**
+- `editor_open_to_first_paint_ms`: **204.7ms**
+- `editor_open_to_final_ms`: **6060.5ms**
+- `editor_mixdown_build_ms`: **0**（UI thread から除去済み）
+
+注記:
+
+- full 完了時間は decode 本体に強く依存する。
+- ただし UI thread 側の full waveform 生成は撤去済みで、
+  初回表示と途中更新は background decode の進行に追従する。
+
+### 12-6. 2026-03-06 追加実装（Editor 波形高速化 / Peak-first LOD）
+
+2026-03-06 の追加依頼を受け、Editor の base waveform 描画を
+`Peak Pyramid + visible range only + allocation reuse` へ置き換えた。
+対象は **Editor の波形表示のみ** とし、List 行サムネイル、Effect Graph preview、
+スペクトログラム本体描画は今回スコープ外とした。
+
+- 実装要点:
+  - `src/app/render/waveform_pyramid.rs` を新設し、
+    `Peak / PeakLevel / PeakPyramid / WaveformPyramidSet / WaveformScratch`
+    を追加。
+  - `WaveformPyramidSet` は runtime-only cache とし、session/prefs/project/sidecar
+    には保存しない。
+  - `build_editor_waveform_cache()` を追加し、
+    `waveform_minmax(2048-bin overview)` と `waveform_pyramid` を同時生成する
+    方式へ統一。
+  - `EditorTab / CachedEdit / EditorUndoState / EditorDecodeResult` に
+    `waveform_pyramid` を追加し、decode / session reopen / undo-redo /
+    editor apply / plugin apply / music AI / effect graph apply / virtual reset
+    の全経路で再利用する。
+  - `WavesPreviewer` に `waveform_scratch` を 1 つ持たせ、描画時の
+    `Vec<Shape> / line points / peaks / mono mix` を再利用する。
+- 描画 LOD:
+  - `spp < 2.0`: raw polyline / stems
+  - `2.0 <= spp < 32.0`: 可視範囲のみを直接 min/max 化
+  - `spp >= 32.0`: `PeakPyramid::query_columns()` を使う広域 LOD
+  - 広域表示で毎フレームの長い `build_minmax` を廃止し、
+    visible range と px-column 数だけを処理するよう変更。
+- 互換維持:
+  - `samples_per_px`、`view_offset`、Ctrl/Cmd+Wheel zoom、Shift+Wheel pan、
+    Middle/Alt+Left drag pan、右ドラッグ系、fit whole、resize anchor は維持。
+  - `waveform_minmax` は削除せず、既存 overview / 互換用途として残す。
+  - waveform overlay、playhead、selection、trim、loop、fade、marker overlay の
+    座標系は変更しない。
+- debug/perf:
+  - `debug_summary` に `waveform_render_ms / waveform_query_ms / waveform_draw_ms /
+    waveform_lod_counts` を追加。
+  - 広域表示時に `pyramid`、中間で `visible`、深い zoom で `raw` が使われたかを
+    確認できるようにした。
+
+追加テスト:
+
+- unit:
+  - `cargo test --lib waveform_pyramid -- --nocapture` -> **4 passed**
+    - level0 固定 bin size
+    - pairwise merge
+    - `query_columns()` の direct build 整合
+    - `build_mixdown_minmax_visible()` の実 mixdown 整合
+- GUI / integration:
+  - `cargo test --features kittest --test small_fix_regressions -- --nocapture`
+    -> **18 passed**
+  - `cargo test --features kittest --test gui_kittest_suite -- --nocapture`
+    -> **54 passed / 5 ignored**
+  - 追加した主な GUI テスト:
+    - `editor_shift_wheel_pan_changes_view_offset`
+    - `editor_middle_drag_pan_changes_view_offset`
+    - `editor_zoom_then_pan_then_zoom_preserves_anchor_reasonably`
+    - `editor_channel_view_switch_all_custom_mixdown_keeps_waveform_visible`
+    - `editor_undo_redo_keeps_waveform_cache_renderable`
+    - `editor_waveform_overlay_in_spec_mode_survives_zoom_and_pan`
+    - `editor_waveform_lod_counters_cover_raw_visible_and_pyramid`
+- kittest_render:
+  - `cargo test --features kittest_render --test gui_kittest_suite kittest_render_pan_changes_waveform_position_png -- --nocapture`
+    -> **1 passed**
+  - `cargo test --features kittest_render --test gui_kittest_suite kittest_render_channel_view_all_vs_mixdown_differs_png -- --nocapture`
+    -> **1 passed**
+  - `cargo test --features kittest_render --test gui_kittest_suite kittest_render_waveform_overlay_spec_zoom_png -- --nocapture`
+    -> **1 passed**
+
+実測メモ:
+
+- `debug/summary_waveform_perf_20260306.txt`
+  - `editor_open_to_partial_ms: n=1 p50=99.3`
+  - `editor_open_to_first_paint_ms: n=1 p50=101.6`
+  - `waveform_render_ms: n=139 p50=0.2 p95=0.2 max=0.3`
+  - `waveform_query_ms: n=139 p50=0.0 p95=0.0 max=0.1`
+  - `waveform_draw_ms: n=139 p50=0.1 p95=0.2 max=0.2`
+  - `waveform_lod_counts: raw=0 visible=0 pyramid=139`
+- この summary 取得時点では full decode は完了前で、`editor_open_to_final_ms` は
+  未計測だった。
+- ただし広域表示で `pyramid` LOD が継続使用され、描画時間が sub-millisecond
+  帯へ落ちていることは確認できた。
 
 ---
 
@@ -867,3 +1002,385 @@ enum EditorOtherSubView { F0, Tempogram, Chromagram }
 - Z1: 実装済み（`editor.rs` zoom 入力統合 + 係数反転適用）
 - Z2: 実装済み（`add_trim_range_as_virtual` で preview 復帰）
 - 追加テスト: 実装済み（GUI/kittest/kittest_render）
+
+---
+
+## 14. 非progressive Editor Decode 改善（2026-03-07）
+
+### 14-1. 目的
+
+- `wav/m4a` の Editor decode で `Loading full audio 3%` 付近に張り付く問題を解消する。
+- loading 中も波形概形がリアルタイムに伸びるようにし、1 秒以上の「止まって見える」状態を減らす。
+- final 完了後は既存の高精度 waveform LOD へ自動復帰し、zoom/pan/seek の仕様は維持する。
+
+### 14-2. 実装内容
+
+- decode 戦略を 2 系統へ整理:
+  - `CompressedProgressiveFull`
+    - `mp3/ogg` の既存 progressive full 更新を継続
+  - `StreamingOverviewFinalAudio`
+    - `wav/m4a` 用に新設
+    - source decode を chunk 単位で進め、progress と coarse overview だけを逐次通知
+    - full PCM resample/quantize と full waveform cache build は final で 1 回だけ実行
+- `AudioInfo.total_frames` と `FileMeta.total_frames` を追加。
+  - `wav` は header `duration()` から取得
+  - `m4a` は track duration と sample rate から換算
+  - 進捗率と loading 中の visual 尺推定に使用
+- Editor decode を event 駆動へ拡張:
+  - `EditorDecodeEvent`
+    - `Progress`
+    - `FinalReady`
+    - `Failed`
+  - `EditorDecodeStage`
+    - `Preview`
+    - `StreamingFull`
+    - `FinalizingAudio`
+    - `FinalizingWaveform`
+- `wav/m4a` 用 source chunk helper を追加:
+  - `decode_audio_multi_streaming_chunks()`
+  - `decode_audio_multi_symphonia_chunks()`
+  - `decode_m4a_fdk_progressive_chunks()`
+  - callback には「累積全量」ではなく「今回増えた chunk」のみを渡す
+- loading 用 runtime-only overview を追加:
+  - `StreamingWaveformOverview`
+  - 固定 `2048` bins の mixdown min/max を chunk append で更新
+  - progress event 送信時だけ snapshot を UI に渡す
+- `EditorTab` に loading 時専用 state を追加:
+  - `samples_len_visual`
+  - `loading_waveform_minmax`
+  - loading 中は表示長に `samples_len_visual` を使い、再生本体は `samples_len/ch_samples` のまま維持
+- Editor render を loading-aware に変更:
+  - `tab.loading && !loading_waveform_minmax.is_empty()` では loading overview を描画
+  - final 完了後は既存 `raw / visible minmax / pyramid` の 3 LOD へ戻す
+- progress bar を stage-aware 化:
+  - `Preview: 0.00..0.15`
+  - `StreamingFull: 0.15..0.92`
+  - `FinalizingAudio: 0.95`
+  - `FinalizingWaveform: 0.99`
+  - `%` 表示は維持しつつ、non-progressive 形式でも単調増加するようにした
+- debug/perf:
+  - `editor_decode_progress_emit_ms`
+  - `editor_decode_finalize_audio_ms`
+  - `editor_decode_finalize_waveform_ms`
+  - `editor_loading_progress_max_gap_ms`
+  - `editor_loading_waveform_updates`
+  - を `debug_summary` に追加
+
+### 14-3. 互換・非変更点
+
+- session/project/prefs/sidecar 形式は変更しない。
+- loading 用 overview と `samples_len_visual` は runtime-only とする。
+- `mp3/ogg` の既存 progressive full 更新方針は維持する。
+- Ctrl/Cmd + Wheel zoom、Shift+Wheel pan、Middle/Alt+Left drag pan、右ドラッグ系、overlay、loop/trim/fade/marker の仕様は変更しない。
+
+### 14-4. 追加テスト
+
+- unit:
+  - `cargo test --lib waveform_pyramid -- --nocapture` -> **5 passed**
+    - `StreamingWaveformOverview` の bin 更新単調性を追加
+- regression / kittest:
+  - `cargo test --features kittest --test small_fix_regressions -- --nocapture`
+    -> **21 passed**
+  - 追加した主なテスト:
+    - `audio_info_wav_reports_total_frames`
+    - `wav_streaming_decode_emits_progressive_chunks`
+    - `editor_wav_loading_progress_advances_and_waveform_updates_before_final`
+- 既存回帰:
+  - `cargo test --features kittest --test ui_focus_input_regressions -- --nocapture`
+    -> **6 passed**
+  - `cargo test --features kittest --test mp3_preview_timing -- --nocapture`
+    -> **5 passed**
+  - `cargo test --features kittest --test gui_kittest_suite -- --nocapture`
+    -> **54 passed / 5 ignored**
+
+### 14-5. 手動確認ポイント
+
+- `E:\PC移行\sounds\music\学マス` の長い `wav` を Editor で開く
+  - `Loading full audio` の `%` が進む
+  - coarse overview が loading 中に伸びる
+  - final 後に高精度波形へ切り替わる
+- loading 中に zoom/pan しても view が壊れない
+- `debug_summary` で
+  - `editor_decode_progress_emit_ms`
+  - `editor_loading_progress_max_gap_ms`
+  - `editor_loading_waveform_updates`
+  - を確認できる
+
+---
+
+## 15. Editor 軽量化と当初性能仕様の再確認（2026-03-08）
+
+### 15-1. 当初仕様の確認結果
+
+- `docs/PERFORMANCE_SCALABILITY_PLAN.md`
+  - `300k files` でも list を軽く保つ
+  - `3 hours` 級 long audio でも responsive に見せる
+  - `Stage 1: quick header/meta`
+  - `Stage 2: downsampled waveform preview`
+  - `Stage 3: full decode`
+- `AGENTS.md`
+  - list は常に速く保つ
+  - editor は多少重くてもよいが、必ず progress/feedback/cancel を出す
+  - long audio は preview first / full decode later の progressive loading を優先する
+
+### 15-2. 現状アーキテクチャ上の整理
+
+- list 側は `scan_ops.rs` の time budget drain と `meta/header` 分離で、
+  「大量件数でも UI を止めない」方向には沿っている。
+- editor 側は描画 LOD 最適化で `waveform_render_ms` 自体はかなり軽くなったが、
+  開始直後の体感は decode / proxy 準備にまだ支配される。
+- 再生 transport は `src/audio.rs` の `AudioBuffer` 常駐再生が基本であり、
+  **真に 3 時間級を高音質のまま即時全域再生するには file-backed / streamed transport が別途必要**。
+- そのため今回の実装方針は、
+  - UI をまず 1 秒未満で反応させる
+  - 全体波形を粗く先に出す
+  - 再生は exact audio 完了までロックする
+  - full PCM / full waveform は後から埋める
+  という 3 段ロードへ寄せる。
+
+### 15-3. 今回の追加実装
+
+- WAV editor open の順序を次で固定した。
+  1. tab open 直後:
+     - `samples_len_visual` と placeholder overview で全体タイムラインを即表示
+  2. ultra-fast whole overview:
+     - `EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES = 16_384`
+     - very small sparse WAV proxy から `loading_waveform_minmax` を先に送る
+     - これにより full audio 前でも「全体の粗い波形」が出る
+  3. final exact audio:
+     - background で full source decode
+     - loading 中は `Progress` で overview だけ更新する
+     - `FinalReady` 到着までは playback を許可しない
+  4. final detail:
+     - final で full PCM + `waveform_pyramid` を差し替える
+- `EditorDecodeUiStatus` は overview が届いた時点で `3%` 固定に見えにくいよう、
+  pre-preview でも小さく前進するよう調整した。
+
+### 15-4. 実測（実データ / 学マス最大 WAV）
+
+- 対象:
+  - `E:\PC移行\sounds\music\学マス\学園アイドルマスター_初星学園_十王星南_小さな野望\学園アイドルマスター_初星学園_十王星南_小さな野望.wav`
+  - size: `188,878,080 bytes`
+- 旧実測:
+  - `debug/wav_loading_real_late3.txt`
+    - `editor_open_to_partial_ms: 2956.3`
+    - `editor_open_to_first_paint_ms: 2960.3`
+  - `debug/wav_proxy_measure_openfirst_v2.txt`
+    - `editor_open_to_partial_ms: 2455.3`
+    - `editor_open_to_first_paint_ms: 2465.1`
+- 今回実測:
+  - `debug/editor_wave_ui_summary_20260308_openfirst_30f.txt`
+    - `editor_open_to_partial_ms: 687.6`
+    - `editor_open_to_first_paint_ms: 692.4`
+    - `editor_decode_progress_emit_ms: n=82 p50=5.2 p95=5.7 max=6.5`
+    - `editor_loading_waveform_updates: total=0 live=84`
+    - `waveform_render_ms: n=30 p50=0.2 p95=0.2 max=0.3`
+- スクリーンショット:
+  - `debug/editor_wave_ui_30_20260308_openfirst.png`
+    - `30 frame` 時点で全体尺 `5:26.2` が表示され、
+      coarse whole waveform と `Loading full audio 20%` が確認できる
+
+### 15-5. 現時点の評価
+
+- 達成できたこと
+  - 1 秒未満で editor 初回表示に到達
+  - 全体タイムラインは open 直後から表示
+  - coarse whole waveform は final 前に見える
+  - loading 中は再生をブロックし、exact audio 完了後のみ再生する
+  - 既存 zoom/pan/overlay/selection は維持
+- まだ未達のこと
+  - 3 時間級音源を **高音質そのまま** 即時全域再生すること
+  - これは現 transport が in-memory `AudioBuffer` 前提のため、
+    proxy ではなく file-backed streaming を別計画で入れる必要がある
+
+### 15-6. 次段でやるべきこと
+
+- Phase A
+  - current overview-first editor open を他形式にも広げる
+  - `m4a` の ultra-fast overview 経路を追加する
+- Phase B
+  - editor transport を file-backed / paged streaming 化する
+  - 3 時間級でも「高音質のまま全域再生」を proxy なしで行えるようにする
+- Phase C
+  - edit apply を region/segment ベースへ寄せ、
+    full buffer 再構築を減らして編集自体も軽くする
+
+---
+
+## 16. File-backed Editor Transport 第1段（2026-03-08）
+
+### 16-1. 目的
+
+- `AudioBuffer` 常駐前提の限界を緩和し、長尺 source audio の exact playback を
+  RAM 常駐に依存せず行えるようにする。
+- 表示は従来どおり rough overview / full decode worker を維持しつつ、
+  再生だけを file-backed transport へ切り出す。
+
+### 16-2. 今回の実装範囲
+
+- 対象は **Editor / Speed mode / pristine source WAV tab** に限定。
+- 条件:
+  - source file が `wav`
+  - virtual ではない
+  - destructive edit 未適用 (`dirty == false`)
+  - preview audio / preview overlay なし
+  - sample-rate / bit-depth override なし
+- 上記条件を満たす active tab は `Vec<Vec<f32>>` 常駐ではなく、
+  **memory-mapped WAV transport** を使って exact audio を再生する。
+- loading 中でも stream transport が立てば再生可能。
+- final decode 完了後も pristine source WAV のままなら stream transport を維持する。
+
+### 16-3. 実装内容
+
+- `Cargo.toml`
+  - `memmap2` を追加
+- `src/audio.rs`
+  - `MappedWavSource` を追加
+  - WAV `fmt/data` chunk を読んで `mmap` する file-backed source を実装
+  - callback は `AudioBuffer` が無い場合、`MappedWavSource` から直接 sample interpolate する
+  - `WAVE_FORMAT_EXTENSIBLE` (`PCM` / `float`) を transport 側でも解釈
+  - `AudioEngine` に以下を追加:
+    - `set_streaming_wav_path()`
+    - `has_audio_source()`
+    - `current_source_len()`
+    - `streaming_wav_sample_rate()`
+    - `is_streaming_wav_path()`
+- `src/app/logic.rs`
+  - `editor_stream_transport_source_sr()`
+  - `try_activate_editor_stream_transport_for_tab()`
+  - を追加
+  - `active_editor_exact_audio_ready()` は
+    - exact stream active
+    - または final buffer ready
+    のどちらでも true になるよう変更
+  - `rebuild_current_buffer_with_mode()` と final decode apply は
+    pristine source WAV の場合 stream transport を優先する
+- `src/app/preview.rs`
+  - preview restore は eligible な source WAV なら buffer ではなく stream へ戻す
+- `src/app.rs` / `src/app/ui/editor.rs`
+  - playhead / seek / loop の audio length 参照を
+    `AudioBuffer.len()` 固定から current transport length 参照へ変更
+  - loading 中の visual length と source-stream length の変換を維持
+
+### 16-4. 非変更点 / 制限
+
+- `mp3/m4a/ogg` はまだ file-backed transport 対象外。
+- dirty tab / edited tab / effect result / preview tool は従来どおり buffer transport。
+- つまり今回の段階は
+  - **長尺 pristine WAV source の exact playback**
+  に限った transport 改修。
+- 「3時間級の全形式・全編集状態を stream で再生」はまだ未達。
+
+### 16-5. 追加テスト
+
+- `cargo test --lib audio::tests -- --nocapture` -> **3 passed**
+  - `streaming_wav_source_reports_length_and_rate_without_heap_buffer`
+- `cargo test --features kittest --test small_fix_regressions -- --nocapture` -> **23 passed**
+  - `editor_wav_loading_progress_advances_and_waveform_updates_before_final`
+    - loading 中に exact stream transport が立つこと
+    - loading 中でも playback 開始できること
+    - final decode 完了後も継続すること
+- `cargo test --features kittest --test gui_kittest_suite -- --nocapture` -> **54 passed / 5 ignored**
+
+### 16-6. 次段の候補
+
+- `m4a` / `mp3` へ file-backed transport を広げる
+- dirty tab を segment graph + paged render にして edit 後も常駐 buffer 依存を減らす
+- loop / seek の stream crossfade を強化して source->buffer 切替時の click をさらに減らす
+
+---
+
+## 17. Editor 再生途中のピッチ上昇 修正（2026-03-08）
+
+### 17-1. 原因
+
+- `Editor exact stream` 再生中に、後から完了した `processing` 結果が
+  current audio source を `output-SR buffer` へ上書きし得る経路が残っていた。
+- このとき `playback_mark_source(..., out_sr)` が再実行され、
+  `buffer_sr / out_sr` 比が `source_sr / out_sr -> 1.0` に変わるため、
+  44.1kHz source / 48kHz output のようなケースで
+  再生途中に pitch / speed が上がる危険があった。
+- さらに `processing` は `path` 基準で apply していたため、
+  stale job や list preview 向け result が active editor へ漏れる余地もあった。
+
+### 17-2. 今回の修正
+
+- `ProcessingState` / `ProcessingResult` に以下を追加
+  - `job_id`
+  - `mode`
+  - `target` (`EditorTab(PathBuf)` / `ListPreview(PathBuf)`)
+- `tick_processing_state()` は
+  - `job_id`
+  - `mode`
+  - `target`
+  - current workspace / current target
+  - exact stream active 状態
+  を照合し、条件不一致の result を **discard** するよう変更
+- `Speed` mode では heavy processing job 自体を新規 spawn しない
+- `try_activate_editor_stream_transport_for_tab()` と
+  `rebuild_current_buffer_with_mode()` の `Speed` 経路では、
+  同 target 向け pending processing を軽量 invalidate するよう変更
+- `ListPreview` 向け processing result は
+  active editor tab の waveform cache / audio source を更新しないよう修正
+
+### 17-3. 追加テスト
+
+- `cargo check` -> **passed**
+- `cargo test --features kittest --test small_fix_regressions -- --nocapture` -> **27 passed**
+  - `editor_stream_discards_stale_processing_result_without_rate_jump`
+  - `editor_processing_result_job_id_mismatch_is_discarded`
+  - `list_processing_result_does_not_leak_into_active_editor_tab`
+  - `speed_mode_does_not_spawn_heavy_processing_for_editor_tab`
+- `cargo test --features kittest --test gui_kittest_suite -- --nocapture` -> **54 passed / 5 ignored**
+
+### 17-4. 現時点の保証
+
+- exact stream 再生中に stale `processing` result が current source を上書きしない
+- `Speed -> Pitch/Stretch -> Speed` と戻した後でも、旧 job 完了で rate が跳ねない
+- list preview 用 processing result が active editor へ漏れない
+- `Speed` mode で不要な heavy processing job を積まない
+
+---
+
+## 18. `Finalizing exact audio` 中の pitch 変化 修正（2026-03-08）
+
+### 18-1. 原因
+
+- `Finalizing exact audio` の完了時に `stream -> buffer` あるいは `buffer -> buffer` の source 差し替えが走る経路では、
+  playhead を「秒」ではなく「サンプル番号」のまま持ち回していた。
+- そのため `44.1kHz source -> 48kHz output buffer` のような切替で、
+  `play_pos_f=44100` をそのまま新 buffer に適用してしまい、
+  `1.0 秒地点` ではなく `0.91875 秒地点` を再生する危険があった。
+- これが再生途中の pitch / speed 変化として聞こえていた。
+
+### 18-2. 今回の修正
+
+- `AudioEngine` に `set_samples_buffer_keep_time_pos()` /
+  `set_samples_channels_keep_time_pos()` を追加
+  - 旧 source の `play_pos_f` と `from_sr`
+  - 新 source の `to_sr`
+  から **時間基準で新 playhead を再計算** して適用する
+- `replace_samples_keep_pos()` とは別に、
+  **sample-rate が変わる source 差し替え専用** の API として分離
+- Editor の以下の経路をこの helper に切替
+  - `Finalizing exact audio` 完了時の active tab 反映
+  - `rebuild_current_buffer_with_mode()` の `Speed` 経路
+  - active tab 再アクティベート時の `Speed` buffer fallback
+  - `preview_restore_audio_for_tab()`
+- kittest helper の `sample_rate_override` 設定は、
+  list selection が無い editor active 状態でも active tab を対象にできるよう補強
+
+### 18-3. 追加テスト
+
+- `cargo test --lib audio::tests -- --nocapture` -> **4 passed**
+  - `remap_play_pos_to_sample_rate_preserves_time_when_switching_sources`
+- `cargo test --features kittest --test small_fix_regressions -- --nocapture` -> **29 passed**
+  - `stream_to_buffer_rebuild_preserves_playback_timebase`
+  - `editor_wav_finalizing_exact_audio_keeps_stream_rate_while_playing`
+- `cargo test --features kittest --test gui_kittest_suite -- --nocapture` -> **54 passed / 5 ignored**
+
+### 18-4. 現時点の保証
+
+- `Finalizing exact audio` 完了時に source が差し替わっても playhead は時間基準で維持される
+- pristine WAV の exact stream 再生中は、final 完了後も `rate` が途中で変わらない
+- `stream -> buffer` / `buffer -> buffer` の切替で pitch / speed が途中から跳ねない
