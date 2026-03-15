@@ -192,7 +192,11 @@ fn read_audio_info_m4a_mp4(
         .unwrap_or(2);
     let duration_secs = track.duration().as_secs_f32();
     let total_frames = if duration_secs.is_finite() && duration_secs > 0.0 {
-        Some(((duration_secs as f64) * sample_rate as f64).round().max(0.0) as u64)
+        Some(
+            ((duration_secs as f64) * sample_rate as f64)
+                .round()
+                .max(0.0) as u64,
+        )
     } else {
         None
     };
@@ -290,7 +294,11 @@ fn proxy_keep_channel_count(source_channels: usize) -> usize {
     }
 }
 
-fn proxy_frame_stride(total_source_frames: usize, keep_channels: usize, max_total_samples: usize) -> usize {
+fn proxy_frame_stride(
+    total_source_frames: usize,
+    keep_channels: usize,
+    max_total_samples: usize,
+) -> usize {
     if total_source_frames == 0 {
         return 1;
     }
@@ -300,20 +308,20 @@ fn proxy_frame_stride(total_source_frames: usize, keep_channels: usize, max_tota
 
 fn proxy_output_sample_rate(
     source_sample_rate: u32,
-    total_source_frames: usize,
-    proxy_frames: usize,
+    _total_source_frames: usize,
+    _proxy_frames: usize,
 ) -> u32 {
-    if source_sample_rate == 0 || total_source_frames == 0 || proxy_frames == 0 {
-        return source_sample_rate.max(1);
-    }
-    (((proxy_frames as u128)
-        .saturating_mul(source_sample_rate as u128)
-        .saturating_add((total_source_frames as u128) / 2))
-        / (total_source_frames as u128)) as u32
+    // Audio-integrity guardrail:
+    // Proxy preview data is only for waveform overview and must never imply
+    // a different playback clock/sample-rate than the source. Keeping proxy
+    // sample_rate fixed to source_sample_rate avoids accidental tempo/pitch
+    // changes if this metadata is reused by mistake.
+    source_sample_rate.max(1)
 }
 
 fn read_wav_proxy_header(path: &Path) -> Result<Option<WavProxyHeader>> {
-    let mut file = File::open(path).with_context(|| format!("open wav proxy header: {}", path.display()))?;
+    let mut file =
+        File::open(path).with_context(|| format!("open wav proxy header: {}", path.display()))?;
     let mut riff = [0u8; 12];
     file.read_exact(&mut riff)
         .with_context(|| format!("read wav header: {}", path.display()))?;
@@ -332,7 +340,10 @@ fn read_wav_proxy_header(path: &Path) -> Result<Option<WavProxyHeader>> {
         match file.read_exact(&mut chunk_header) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(err) => return Err(err).with_context(|| format!("read wav chunk header: {}", path.display())),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read wav chunk header: {}", path.display()))
+            }
         }
         let id = &chunk_header[0..4];
         let size = u32::from_le_bytes([
@@ -358,9 +369,7 @@ fn read_wav_proxy_header(path: &Path) -> Result<Option<WavProxyHeader>> {
             data_len = size;
             break;
         }
-        let next = chunk_data_pos
-            .saturating_add(size)
-            .saturating_add(size & 1);
+        let next = chunk_data_pos.saturating_add(size).saturating_add(size & 1);
         file.seek(SeekFrom::Start(next))?;
     }
     let Some(data_offset) = data_offset else {
@@ -394,9 +403,9 @@ fn read_wav_frame_channel_sample(
     let end = start.saturating_add(bytes_per_sample);
     let sample = frame.get(start..end)?;
     match (header.audio_format, header.bits_per_sample) {
-        (3, 32) if sample.len() >= 4 => Some(f32::from_le_bytes([
-            sample[0], sample[1], sample[2], sample[3],
-        ]).clamp(-1.0, 1.0)),
+        (3, 32) if sample.len() >= 4 => {
+            Some(f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]).clamp(-1.0, 1.0))
+        }
         (1, 8) if !sample.is_empty() => Some(((sample[0] as f32 - 128.0) / 128.0).clamp(-1.0, 1.0)),
         (1, 16) if sample.len() >= 2 => Some(
             (i16::from_le_bytes([sample[0], sample[1]]) as f32 / i16::MAX as f32).clamp(-1.0, 1.0),
@@ -443,8 +452,9 @@ fn build_wav_proxy_preview_sparse(
     let mut out: Vec<Vec<f32>> = (0..keep_channels)
         .map(|_| Vec::with_capacity(proxy_frames))
         .collect();
-    let mut reader =
-        BufReader::new(File::open(path).with_context(|| format!("open wav proxy data: {}", path.display()))?);
+    let mut reader = BufReader::new(
+        File::open(path).with_context(|| format!("open wav proxy data: {}", path.display()))?,
+    );
     reader.seek(SeekFrom::Start(header.data_offset))?;
     let mut frame = vec![0u8; frame_bytes];
     let mut source_frame = 0usize;
@@ -562,7 +572,10 @@ where
     Ok(out)
 }
 
-pub fn build_wav_proxy_preview(path: &Path, max_total_samples: usize) -> Result<Option<AudioProxyPreview>> {
+pub fn build_wav_proxy_preview(
+    path: &Path,
+    max_total_samples: usize,
+) -> Result<Option<AudioProxyPreview>> {
     if !is_wav_path(path) {
         return Ok(None);
     }
@@ -579,8 +592,8 @@ pub fn build_wav_proxy_preview(path: &Path, max_total_samples: usize) -> Result<
         );
         return Ok(Some(proxy));
     }
-    let mut reader =
-        hound::WavReader::open(path).with_context(|| format!("open wav proxy: {}", path.display()))?;
+    let mut reader = hound::WavReader::open(path)
+        .with_context(|| format!("open wav proxy: {}", path.display()))?;
     let spec = reader.spec();
     let source_channels = spec.channels.max(1) as usize;
     let total_source_frames = reader.duration() as usize;
@@ -804,14 +817,28 @@ fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, 
             match decoder.decode_frame(&mut pcm) {
                 Ok(()) => {
                     let info = decoder.stream_info();
+                    let observed_sr = info.sampleRate.max(1) as u32;
+                    if observed_sr != sample_rate {
+                        anyhow::bail!(
+                            "decode_m4a_fdk: sample rate changed during decode: expected={} observed={} path={}",
+                            sample_rate,
+                            observed_sr,
+                            path.display()
+                        );
+                    }
                     let ch = info.numChannels.max(1) as usize;
+                    if ch != channels {
+                        anyhow::bail!(
+                            "decode_m4a_fdk: channel count changed during decode: expected={} observed={} path={}",
+                            channels,
+                            ch,
+                            path.display()
+                        );
+                    }
                     let frames = info.frameSize as usize;
                     let needed = ch.saturating_mul(frames);
                     if needed == 0 || pcm.len() < needed {
                         continue;
-                    }
-                    if chans.len() != ch {
-                        chans = vec![Vec::new(); ch];
                     }
                     for i in 0..frames {
                         for c in 0..ch {
@@ -881,6 +908,44 @@ where
         .map(|_| Vec::with_capacity(keep_cap))
         .collect();
     sent
+}
+
+fn enforce_stable_sample_rate(
+    path: &Path,
+    stage: &str,
+    expected_sample_rate: u32,
+    observed_sample_rate: u32,
+) -> Result<()> {
+    let expected = expected_sample_rate.max(1);
+    let observed = observed_sample_rate.max(1);
+    if observed != expected {
+        anyhow::bail!(
+            "{stage}: sample rate changed during progressive decode: expected={} observed={} path={}",
+            expected,
+            observed,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn enforce_stable_channel_count(
+    path: &Path,
+    stage: &str,
+    expected_channels: usize,
+    observed_channels: usize,
+) -> Result<()> {
+    let expected = expected_channels.max(1);
+    let observed = observed_channels.max(1);
+    if observed != expected {
+        anyhow::bail!(
+            "{stage}: channel count changed during progressive decode: expected={} observed={} path={}",
+            expected,
+            observed,
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub fn decode_m4a_fdk_progressive_chunks<C, F>(
@@ -966,12 +1031,25 @@ where
                 Ok(()) => {
                     let info = decoder.stream_info();
                     let ch = info.numChannels.max(1) as usize;
+                    enforce_stable_channel_count(
+                        path,
+                        "decode_multi_m4a_progressive_chunk",
+                        channels,
+                        ch,
+                    )?;
+                    let observed_sr = info.sampleRate.max(1) as u32;
+                    enforce_stable_sample_rate(
+                        path,
+                        "decode_multi_m4a_progressive_chunk",
+                        sample_rate,
+                        observed_sr,
+                    )?;
                     let frames = info.frameSize as usize;
                     let needed = ch.saturating_mul(frames);
                     if needed == 0 || pcm.len() < needed {
                         continue;
                     }
-                    if pending.len() != ch {
+                    if pending.is_empty() {
                         pending = vec![Vec::new(); ch];
                     }
                     for i in 0..frames {
@@ -1033,6 +1111,7 @@ where
 {
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut pending: Vec<Vec<f32>> = Vec::new();
+    let mut expected_channels: Option<usize> = None;
     let mut decoded_frames = 0usize;
     let mut emit_frames = if sample_rate > 0 {
         (((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize).max(1)
@@ -1069,10 +1148,27 @@ where
         };
         if sample_rate == 0 {
             sample_rate = decoded.spec().rate.max(1);
-            emit_frames = (((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize)
-                .max(1);
+            emit_frames =
+                (((sample_rate as f32) * emit_every_secs.max(0.05)).ceil() as usize).max(1);
         }
+        let observed_sr = decoded.spec().rate.max(1);
+        enforce_stable_sample_rate(
+            path,
+            "decode_multi_progressive_chunk",
+            sample_rate,
+            observed_sr,
+        )?;
         let channels = decoded.spec().channels.count().max(1);
+        if let Some(expected) = expected_channels {
+            enforce_stable_channel_count(
+                path,
+                "decode_multi_progressive_chunk",
+                expected,
+                channels,
+            )?;
+        } else {
+            expected_channels = Some(channels);
+        }
         if pending.is_empty() {
             pending = vec![Vec::new(); channels];
         }
@@ -1942,29 +2038,126 @@ where
     F: FnMut(Vec<Vec<f32>>, u32, bool) -> bool,
 {
     if is_m4a_path(path) {
-        let (chans, sr, _) = decode_m4a_fdk(path, None)?;
-        let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
-        if frames == 0 {
+        let wants_prefix = prefix_secs > 0.0;
+        let wants_emit = emit_every_secs > 0.0;
+        if !wants_prefix && !wants_emit {
+            let (chans, sr, _) = decode_m4a_fdk(path, None)?;
+            let _ = on_chunk(chans, sr, true);
             return Ok(());
         }
-        if prefix_secs > 0.0 {
-            let target = ((sr as f32) * prefix_secs).ceil() as usize;
-            let prefix_frames = target.max(1).min(frames);
-            let mut prefix = Vec::with_capacity(chans.len());
-            for ch in &chans {
-                prefix.push(ch[..prefix_frames].to_vec());
-            }
-            let is_final = prefix_frames >= frames;
-            if !on_chunk(prefix, sr, is_final) {
-                return Ok(());
-            }
-            if is_final {
-                return Ok(());
-            }
+
+        let mut accumulated: Vec<Vec<f32>> = Vec::new();
+        let mut sample_rate = 0u32;
+        let mut expected_channels: Option<usize> = None;
+        let mut prefix_frames: Option<usize> = None;
+        let mut emit_frames: Option<usize> = None;
+        let mut next_emit_frames: Option<usize> = None;
+        let mut prefix_sent = false;
+        let mut emitted_any = false;
+        let mut stream_error: Option<anyhow::Error> = None;
+
+        let chunk_secs = if wants_emit {
+            emit_every_secs.max(0.05)
+        } else {
+            prefix_secs.max(0.05)
+        };
+
+        decode_m4a_fdk_progressive_chunks(
+            path,
+            chunk_secs,
+            || should_cancel(),
+            |chunk, chunk_sr, _decoded_frames, is_final| {
+                if should_cancel() {
+                    return false;
+                }
+                let chunk_sr = chunk_sr.max(1);
+                if sample_rate == 0 {
+                    sample_rate = chunk_sr;
+                    if wants_prefix {
+                        let target = ((sample_rate as f32) * prefix_secs).ceil() as usize;
+                        prefix_frames = Some(target.max(1));
+                        next_emit_frames = prefix_frames;
+                    }
+                    if wants_emit {
+                        let target = ((sample_rate as f32) * emit_every_secs).ceil() as usize;
+                        emit_frames = Some(target.max(1));
+                        if next_emit_frames.is_none() {
+                            next_emit_frames = emit_frames;
+                        }
+                    }
+                }
+                if let Err(err) = enforce_stable_sample_rate(
+                    path,
+                    "decode_multi_progressive_m4a_chunk",
+                    sample_rate,
+                    chunk_sr,
+                ) {
+                    stream_error = Some(err);
+                    return false;
+                }
+
+                let observed_channels = chunk.len().max(1);
+                if let Some(expected) = expected_channels {
+                    if let Err(err) = enforce_stable_channel_count(
+                        path,
+                        "decode_multi_progressive_m4a_chunk",
+                        expected,
+                        observed_channels,
+                    ) {
+                        stream_error = Some(err);
+                        return false;
+                    }
+                } else {
+                    expected_channels = Some(observed_channels);
+                }
+
+                if accumulated.is_empty() {
+                    accumulated = vec![Vec::new(); observed_channels];
+                }
+                if accumulated.len() != observed_channels {
+                    stream_error = Some(anyhow::anyhow!(
+                        "decode_multi_progressive_m4a_chunk: channel buffer mismatch: expected={} observed={} path={}",
+                        accumulated.len(),
+                        observed_channels,
+                        path.display()
+                    ));
+                    return false;
+                }
+                for (dst, src) in accumulated.iter_mut().zip(chunk.iter()) {
+                    dst.extend_from_slice(src);
+                }
+                let frames_read = accumulated.first().map(|c| c.len()).unwrap_or(0);
+                let reached_threshold = next_emit_frames.map(|v| frames_read >= v).unwrap_or(false);
+                if reached_threshold || is_final {
+                    let is_prefix = !prefix_sent && prefix_frames.is_some() && reached_threshold;
+                    if !on_chunk(accumulated.clone(), sample_rate, is_final) {
+                        return false;
+                    }
+                    emitted_any = true;
+                    if is_prefix {
+                        prefix_sent = true;
+                    }
+                    if is_final {
+                        next_emit_frames = None;
+                    } else if let Some(step) = emit_frames {
+                        next_emit_frames = Some(frames_read.saturating_add(step));
+                    } else {
+                        next_emit_frames = None;
+                    }
+                }
+                true
+            },
+        )?;
+
+        if let Some(err) = stream_error {
+            return Err(err);
         }
-        let _ = emit_every_secs;
-        let _ = should_cancel;
-        let _ = on_chunk(chans, sr, true);
+        if should_cancel() {
+            return Ok(());
+        }
+        if !emitted_any && !accumulated.is_empty() {
+            let _ = on_chunk(accumulated, sample_rate.max(1), true);
+        }
         return Ok(());
     }
     let wants_prefix = prefix_secs > 0.0;
@@ -1976,6 +2169,7 @@ where
     }
     let (mut format, mut decoder, track_id, mut sample_rate) = open_decoder(path)?;
     let mut chans: Vec<Vec<f32>> = Vec::new();
+    let mut expected_channels: Option<usize> = None;
     let mut prefix_frames: Option<usize> = None;
     let mut emit_frames: Option<usize> = None;
     let mut next_emit_frames: Option<usize> = None;
@@ -2041,7 +2235,24 @@ where
                 }
             }
         }
+        let observed_sr = decoded.spec().rate.max(1);
+        enforce_stable_sample_rate(
+            path,
+            "decode_multi_progressive_chunk",
+            sample_rate,
+            observed_sr,
+        )?;
         let channels = decoded.spec().channels.count().max(1);
+        if let Some(expected) = expected_channels {
+            enforce_stable_channel_count(
+                path,
+                "decode_multi_progressive_chunk",
+                expected,
+                channels,
+            )?;
+        } else {
+            expected_channels = Some(channels);
+        }
         if chans.is_empty() {
             chans = vec![Vec::new(); channels];
         }
@@ -2333,4 +2544,85 @@ pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32
         anyhow::bail!("unknown sample rate: {}", path.display());
     }
     Ok((chans, sample_rate, decode_errors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        enforce_stable_channel_count, enforce_stable_sample_rate, proxy_output_sample_rate,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn proxy_output_sample_rate_keeps_source_rate_for_integrity() {
+        assert_eq!(proxy_output_sample_rate(44_100, 100_000, 10_000), 44_100);
+        assert_eq!(proxy_output_sample_rate(48_000, 100_000, 1_000), 48_000);
+        assert_eq!(proxy_output_sample_rate(32_000, 100_000, 100), 32_000);
+    }
+
+    #[test]
+    fn proxy_output_sample_rate_never_returns_zero() {
+        assert_eq!(proxy_output_sample_rate(0, 0, 0), 1);
+    }
+
+    #[test]
+    fn proxy_frame_stride_respects_budget() {
+        // 1000 frames, mono budget 100 samples -> stride should be 10
+        assert_eq!(super::proxy_frame_stride(1000, 1, 100), 10);
+        // stereo effectively halves per-channel budget
+        assert_eq!(super::proxy_frame_stride(1000, 2, 100), 20);
+    }
+
+    #[test]
+    fn proxy_keep_channel_count_downmixes_multichannel() {
+        assert_eq!(super::proxy_keep_channel_count(1), 1);
+        assert_eq!(super::proxy_keep_channel_count(2), 2);
+        assert_eq!(super::proxy_keep_channel_count(6), 1);
+    }
+
+    #[test]
+    fn enforce_stable_sample_rate_accepts_same_rate() {
+        let path = Path::new("dummy.wav");
+        let res = enforce_stable_sample_rate(path, "test", 48_000, 48_000);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn enforce_stable_sample_rate_rejects_rate_change() {
+        let path = Path::new("dummy.wav");
+        let err = enforce_stable_sample_rate(path, "test", 44_100, 48_000)
+            .expect_err("must reject sample-rate drift");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("sample rate changed"));
+    }
+
+    #[test]
+    fn enforce_stable_channel_count_accepts_same_count() {
+        let path = Path::new("dummy.wav");
+        let res = enforce_stable_channel_count(path, "test", 2, 2);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn enforce_stable_channel_count_rejects_change() {
+        let path = Path::new("dummy.wav");
+        let err = enforce_stable_channel_count(path, "test", 2, 1)
+            .expect_err("must reject channel-count drift");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("channel count changed"));
+    }
+
+    #[test]
+    fn enforce_stable_sample_rate_normalizes_zero_to_one() {
+        let path = Path::new("dummy.wav");
+        let res = enforce_stable_sample_rate(path, "test", 0, 1);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn enforce_stable_channel_count_normalizes_zero_to_one() {
+        let path = Path::new("dummy.wav");
+        let res = enforce_stable_channel_count(path, "test", 0, 1);
+        assert!(res.is_ok());
+    }
 }
