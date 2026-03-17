@@ -1181,24 +1181,18 @@ mod kittest_suite {
         harness.key_press(Key::P);
         harness.run_steps(3);
 
-        assert!(
-            !harness
-                .query_all_by_label("Pre-Loop window")
-                .collect::<Vec<_>>()
-                .is_empty()
-        );
-        assert!(
-            !harness
-                .query_all_by_label("Seam preview")
-                .collect::<Vec<_>>()
-                .is_empty()
-        );
-        assert!(
-            !harness
-                .query_all_by_label("Post-Loop window")
-                .collect::<Vec<_>>()
-                .is_empty()
-        );
+        assert!(!harness
+            .query_all_by_label("Pre-Loop window")
+            .collect::<Vec<_>>()
+            .is_empty());
+        assert!(!harness
+            .query_all_by_label("Seam preview")
+            .collect::<Vec<_>>()
+            .is_empty());
+        assert!(!harness
+            .query_all_by_label("Post-Loop window")
+            .collect::<Vec<_>>()
+            .is_empty());
     }
 
     #[test]
@@ -1574,7 +1568,9 @@ mod kittest_suite {
         assert!(harness
             .state_mut()
             .test_set_active_tool(ToolKind::MusicAnalyze));
-        assert!(harness.state_mut().test_set_music_analysis_result_mock(true));
+        assert!(harness
+            .state_mut()
+            .test_set_music_analysis_result_mock(true));
         assert!(harness
             .state_mut()
             .test_set_music_preview_gains_db(77.0, 33.0, 48.0, 60.0));
@@ -1605,7 +1601,9 @@ mod kittest_suite {
 
         harness.get_by_label("Downloading transcript model... 3/7");
         harness.get_by_label("Downloading music analyze model... 5/9");
-        harness.state_mut().test_clear_mock_model_download_progress();
+        harness
+            .state_mut()
+            .test_clear_mock_model_download_progress();
     }
 
     #[cfg(feature = "kittest_render")]
@@ -1704,7 +1702,10 @@ mod kittest_suite {
             .zip(after.pixels())
             .filter(|(a, b)| a.0 != b.0)
             .count();
-        assert!(changed_pixels > 1024, "pan diff too small: {changed_pixels}");
+        assert!(
+            changed_pixels > 1024,
+            "pan diff too small: {changed_pixels}"
+        );
 
         let dir = make_temp_dir("kittest_pan_shift_wheel");
         let before_out = dir.join("pan_before.png");

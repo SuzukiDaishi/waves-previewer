@@ -495,8 +495,9 @@ impl crate::app::WavesPreviewer {
             WaveformRenderLod::Raw => {
                 if use_mixdown {
                     wf_cache::build_mixdown_visible(&tab.ch_samples, start, end, mono);
-                } else if let Some(samples) =
-                    channel_index.and_then(|idx| tab.ch_samples.get(idx)).map(|ch| &ch[start..end])
+                } else if let Some(samples) = channel_index
+                    .and_then(|idx| tab.ch_samples.get(idx))
+                    .map(|ch| &ch[start..end])
                 {
                     if samples.is_empty() {
                         lod = WaveformRenderLod::VisibleMinMax;
@@ -505,9 +506,16 @@ impl crate::app::WavesPreviewer {
             }
             WaveformRenderLod::VisibleMinMax => {
                 if use_mixdown {
-                    wf_cache::build_mixdown_minmax_visible(&tab.ch_samples, start, end, bins, peaks);
-                } else if let Some(samples) =
-                    channel_index.and_then(|idx| tab.ch_samples.get(idx)).map(|ch| &ch[start..end])
+                    wf_cache::build_mixdown_minmax_visible(
+                        &tab.ch_samples,
+                        start,
+                        end,
+                        bins,
+                        peaks,
+                    );
+                } else if let Some(samples) = channel_index
+                    .and_then(|idx| tab.ch_samples.get(idx))
+                    .map(|ch| &ch[start..end])
                 {
                     wf_cache::build_visible_minmax(samples, bins, peaks);
                 }
@@ -592,8 +600,9 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                     }
-                } else if let Some(samples) =
-                    channel_index.and_then(|idx| tab.ch_samples.get(idx)).map(|ch| &ch[start..end])
+                } else if let Some(samples) = channel_index
+                    .and_then(|idx| tab.ch_samples.get(idx))
+                    .map(|ch| &ch[start..end])
                 {
                     if samples.len() == 1 {
                         let sx = lane_rect.left() + wave_w * 0.5;
@@ -2318,9 +2327,19 @@ impl crate::app::WavesPreviewer {
                                                 if o1 <= o0 { o1 = o0 + 1; }
                                                 o0 = o0.max(s1); o1 = o1.min(e1);
                                                 if o1 <= o0 { continue; }
-                                                let mut mn = f32::INFINITY; let mut mx = f32::NEG_INFINITY;
-                                                for &v in &buf[o0..o1] { if v < mn { mn = v; } if v > mx { mx = v; } }
-                                                if !mn.is_finite() || !mx.is_finite() { continue; }
+                                                let mut mn = f32::INFINITY;
+                                                let mut mx = f32::NEG_INFINITY;
+                                                for &v in &buf[o0..o1] {
+                                                    if v < mn {
+                                                        mn = v;
+                                                    }
+                                                    if v > mx {
+                                                        mx = v;
+                                                    }
+                                                }
+                                                if !mn.is_finite() || !mx.is_finite() {
+                                                    continue;
+                                                }
                                                 let mn = (mn * scale).clamp(-1.0, 1.0);
                                                 let mx = (mx * scale).clamp(-1.0, 1.0);
                                                 let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
@@ -2346,9 +2365,19 @@ impl crate::app::WavesPreviewer {
                                                 if o1 <= o0 { o1 = o0 + 1; }
                                                 o0 = o0.max(s2); o1 = o1.min(e2);
                                                 if o1 <= o0 { continue; }
-                                                let mut mn = f32::INFINITY; let mut mx = f32::NEG_INFINITY;
-                                                for &v in &buf[o0..o1] { if v < mn { mn = v; } if v > mx { mx = v; } }
-                                                if !mn.is_finite() || !mx.is_finite() { continue; }
+                                                let mut mn = f32::INFINITY;
+                                                let mut mx = f32::NEG_INFINITY;
+                                                for &v in &buf[o0..o1] {
+                                                    if v < mn {
+                                                        mn = v;
+                                                    }
+                                                    if v > mx {
+                                                        mx = v;
+                                                    }
+                                                }
+                                                if !mn.is_finite() || !mx.is_finite() {
+                                                    continue;
+                                                }
                                                 let mn = (mn * scale).clamp(-1.0, 1.0);
                                                 let mx = (mx * scale).clamp(-1.0, 1.0);
                                                 let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;

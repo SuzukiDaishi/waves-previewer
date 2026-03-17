@@ -509,8 +509,7 @@ impl WavesPreviewer {
         ));
         lines.push(format!(
             "editor_loading_waveform_updates: total={} live={}",
-            self.debug.editor_loading_waveform_updates,
-            live_loading_updates
+            self.debug.editor_loading_waveform_updates, live_loading_updates
         ));
         lines.push(format!(
             "waveform_render_ms: {}",

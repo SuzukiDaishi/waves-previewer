@@ -181,7 +181,7 @@ impl crate::app::WavesPreviewer {
         self.audio
             .shared
             .play_pos_f
-            .store(clamped_pos as f32, std::sync::atomic::Ordering::Relaxed);
+            .store(clamped_pos as f64, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub(super) fn editor_apply_reverse_range(&mut self, tab_idx: usize, range: (usize, usize)) {
@@ -960,7 +960,7 @@ impl crate::app::WavesPreviewer {
                     )
                 }) {
                     self.audio.set_samples_channels(channels);
-                    self.playback_mark_source(
+                    self.playback_mark_buffer_source(
                         crate::app::PlaybackSourceKind::EditorTab(path),
                         buffer_sr,
                     );

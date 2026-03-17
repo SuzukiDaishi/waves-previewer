@@ -6,8 +6,10 @@ use super::BULK_RESAMPLE_BLOCK_SECS;
 impl super::WavesPreviewer {
     pub(super) fn tick_processing_state(&mut self, ctx: &egui::Context) {
         let mut processing_done: Option<(ProcessingResult, bool)> = None;
+        let mut source_time_sec = None;
         if let Some(state) = &mut self.processing {
             if let Ok(res) = state.rx.try_recv() {
+                source_time_sec = state.source_time_sec;
                 processing_done = Some((res, state.autoplay_when_ready));
             }
         }
@@ -33,15 +35,16 @@ impl super::WavesPreviewer {
                 mode,
                 target,
                 samples,
-                mut channels,
+                channels,
                 waveform: _waveform,
             } = res;
-            let rebuilt_cache = if matches!(target, ProcessingTarget::EditorTab(_)) && !channels.is_empty() {
-                let samples_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
-                Some(Self::build_editor_waveform_cache(&channels, samples_len))
-            } else {
-                None
-            };
+            let rebuilt_cache =
+                if matches!(target, ProcessingTarget::EditorTab(_)) && !channels.is_empty() {
+                    let samples_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
+                    Some(Self::build_editor_waveform_cache(&channels, samples_len))
+                } else {
+                    None
+                };
             if matches!(target, ProcessingTarget::EditorTab(_)) {
                 if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
                     if let Some(tab) = self.tabs.get_mut(idx) {
@@ -58,20 +61,17 @@ impl super::WavesPreviewer {
             if channels.is_empty() {
                 self.audio.set_samples_mono(samples);
             } else {
-                self.apply_sample_rate_preview_for_path(
-                    &path,
-                    &mut channels,
-                    self.audio.shared.out_sample_rate,
-                );
                 self.audio.set_samples_channels(channels.clone());
             }
             let source = match &target {
-                ProcessingTarget::EditorTab(path) => super::PlaybackSourceKind::EditorTab(path.clone()),
+                ProcessingTarget::EditorTab(path) => {
+                    super::PlaybackSourceKind::EditorTab(path.clone())
+                }
                 ProcessingTarget::ListPreview(path) => {
                     super::PlaybackSourceKind::ListPreview(path.clone())
                 }
             };
-            self.playback_mark_source(source, self.audio.shared.out_sample_rate.max(1));
+            self.playback_mark_buffer_source(source, self.audio.shared.out_sample_rate.max(1));
             self.debug_log(format!(
                 "processing applied: job={} mode={:?} target={} buffer_sr={}",
                 job_id,
@@ -85,6 +85,9 @@ impl super::WavesPreviewer {
             // full-buffer loop region if needed
             if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                 self.audio.set_loop_region(0, buf.len());
+            }
+            if let Some(source_time_sec) = source_time_sec {
+                self.playback_seek_to_source_time(mode, source_time_sec);
             }
             self.processing = None;
             let should_resume_list_play = matches!(target, ProcessingTarget::ListPreview(_))

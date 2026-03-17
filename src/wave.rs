@@ -19,7 +19,7 @@ use vorbis_rs::VorbisEncoderBuilder;
 use crate::audio::AudioEngine;
 use crate::audio_io;
 use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    FftFixedInOut, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
     WindowFunction as RubatoWindowFunction,
 };
 use signalsmith_stretch::Stretch;
@@ -127,7 +127,7 @@ fn write_wav_range_with_depth(
     if s > e {
         std::mem::swap(&mut s, &mut e);
     }
-    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    let frames = chans.first().map(|c| c.len()).unwrap_or(0);
     let s = s.min(frames);
     let e = e.min(frames);
     let spec = match depth {
@@ -214,6 +214,33 @@ pub enum ResampleQuality {
     Best,
 }
 
+fn resample_quality_params(
+    quality: ResampleQuality,
+) -> (usize, f32, usize, SincInterpolationType, usize) {
+    match quality {
+        ResampleQuality::Fast => (64, 0.90, 64, SincInterpolationType::Linear, 1024),
+        ResampleQuality::Good => (128, 0.94, 128, SincInterpolationType::Quadratic, 1024),
+        ResampleQuality::Best => (256, 0.96, 256, SincInterpolationType::Cubic, 2048),
+    }
+}
+
+fn append_resampled_chunk(dst: &mut [Vec<f32>], src: &[Vec<f32>], frames: usize) {
+    for (dst_ch, src_ch) in dst.iter_mut().zip(src.iter()) {
+        let copy_len = frames.min(src_ch.len());
+        if copy_len > 0 {
+            dst_ch.extend_from_slice(&src_ch[..copy_len]);
+        }
+    }
+}
+
+fn fft_chunk_size_for_quality(quality: ResampleQuality) -> usize {
+    match quality {
+        ResampleQuality::Fast => 1024,
+        ResampleQuality::Good => 2048,
+        ResampleQuality::Best => 4096,
+    }
+}
+
 fn resample_with_rubato(
     mono: &[f32],
     in_sr: u32,
@@ -233,7 +260,7 @@ fn resample_with_rubato(
         let processed = resampler
             .process(&chunk, None)
             .map_err(|e| anyhow::anyhow!("rubato process failed: {e}"))?;
-        if let Some(ch) = processed.get(0) {
+        if let Some(ch) = processed.first() {
             out.extend_from_slice(ch);
         }
         pos += in_frames;
@@ -243,7 +270,7 @@ fn resample_with_rubato(
         let processed = resampler
             .process_partial(Some(&tail), None)
             .map_err(|e| anyhow::anyhow!("rubato process tail failed: {e}"))?;
-        if let Some(ch) = processed.get(0) {
+        if let Some(ch) = processed.first() {
             out.extend_from_slice(ch);
         }
     }
@@ -251,7 +278,7 @@ fn resample_with_rubato(
         let flushed = resampler
             .process_partial::<Vec<f32>>(None, None)
             .map_err(|e| anyhow::anyhow!("rubato flush failed: {e}"))?;
-        let Some(ch) = flushed.get(0) else {
+        let Some(ch) = flushed.first() else {
             break;
         };
         if ch.is_empty() {
@@ -268,6 +295,172 @@ fn resample_with_rubato(
     Ok(out)
 }
 
+fn resample_channels_with_rubato(
+    chans: &[Vec<f32>],
+    in_sr: u32,
+    out_sr: u32,
+    params: SincInterpolationParameters,
+    chunk_size: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if chans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ratio = out_sr as f64 / in_sr as f64;
+    let input_len = chans.iter().map(|ch| ch.len()).min().unwrap_or(0);
+    let expected_len = ((input_len as f64) * ratio).round().max(0.0) as usize;
+    let mut resampler =
+        SincFixedIn::<f32>::new(ratio, 2.0, params, chunk_size.max(32), chans.len())
+            .map_err(|e| anyhow::anyhow!("rubato multi-channel init failed: {e}"))?;
+    let mut out: Vec<Vec<f32>> = (0..chans.len())
+        .map(|_| Vec::with_capacity(expected_len.saturating_add(resampler.output_frames_max())))
+        .collect();
+    let mut out_buffer = resampler.output_buffer_allocate(true);
+    let mut pos = 0usize;
+    let mut input_frames_next = resampler.input_frames_next().max(1);
+
+    while pos + input_frames_next <= input_len {
+        let slices: Vec<&[f32]> = chans
+            .iter()
+            .map(|ch| &ch[pos..pos + input_frames_next])
+            .collect();
+        let (nbr_in, nbr_out) = resampler
+            .process_into_buffer(&slices, &mut out_buffer, None)
+            .map_err(|e| anyhow::anyhow!("rubato multi-channel process failed: {e}"))?;
+        append_resampled_chunk(&mut out, &out_buffer, nbr_out);
+        pos = pos.saturating_add(nbr_in);
+        input_frames_next = resampler.input_frames_next().max(1);
+    }
+
+    if pos < input_len {
+        let tail_slices: Vec<&[f32]> = chans.iter().map(|ch| &ch[pos..input_len]).collect();
+        let tail = resampler
+            .process_partial(Some(&tail_slices), None)
+            .map_err(|e| anyhow::anyhow!("rubato multi-channel tail failed: {e}"))?;
+        let tail_len = tail.first().map(|ch| ch.len()).unwrap_or(0);
+        append_resampled_chunk(&mut out, &tail, tail_len);
+    }
+
+    for _ in 0..4 {
+        let flushed = resampler
+            .process_partial::<Vec<f32>>(None, None)
+            .map_err(|e| anyhow::anyhow!("rubato multi-channel flush failed: {e}"))?;
+        let flushed_len = flushed.first().map(|ch| ch.len()).unwrap_or(0);
+        if flushed_len == 0 {
+            break;
+        }
+        append_resampled_chunk(&mut out, &flushed, flushed_len);
+        if expected_len > 0
+            && out
+                .first()
+                .map(|ch| ch.len() >= expected_len)
+                .unwrap_or(true)
+        {
+            break;
+        }
+    }
+
+    if expected_len > 0 {
+        for channel in &mut out {
+            if channel.len() > expected_len {
+                channel.truncate(expected_len);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn trim_offline_resampled_output(
+    channels: Vec<Vec<f32>>,
+    frames_to_skip: usize,
+    frames_to_keep: usize,
+) -> Vec<Vec<f32>> {
+    channels
+        .into_iter()
+        .map(|channel| {
+            if channel.len() <= frames_to_skip {
+                return Vec::new();
+            }
+            let end = (frames_to_skip + frames_to_keep).min(channel.len());
+            channel[frames_to_skip..end].to_vec()
+        })
+        .collect()
+}
+
+fn resample_channels_with_rubato_fft(
+    chans: &[Vec<f32>],
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResampleQuality,
+) -> Result<Vec<Vec<f32>>> {
+    if chans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input_len = chans.iter().map(|ch| ch.len()).min().unwrap_or(0);
+    let expected_len = ((input_len as f64) * out_sr as f64 / in_sr as f64)
+        .round()
+        .max(0.0) as usize;
+    let mut resampler = FftFixedInOut::<f32>::new(
+        in_sr.max(1) as usize,
+        out_sr.max(1) as usize,
+        fft_chunk_size_for_quality(quality).max(32),
+        chans.len(),
+    )
+    .map_err(|e| anyhow::anyhow!("rubato fft init failed: {e}"))?;
+    let mut input_frames_next = resampler.input_frames_next().max(1);
+    let delay = resampler.output_delay();
+    let mut out: Vec<Vec<f32>> = (0..chans.len())
+        .map(|_| {
+            Vec::with_capacity(
+                expected_len
+                    .saturating_add(delay)
+                    .saturating_add(resampler.output_frames_max()),
+            )
+        })
+        .collect();
+    let mut out_buffer = resampler.output_buffer_allocate(true);
+    let mut input_slices: Vec<&[f32]> = chans.iter().map(|ch| ch.as_slice()).collect();
+
+    while input_slices.first().map(|ch| ch.len()).unwrap_or(0) >= input_frames_next {
+        let (nbr_in, nbr_out) = resampler
+            .process_into_buffer(&input_slices, &mut out_buffer, None)
+            .map_err(|e| anyhow::anyhow!("rubato fft process failed: {e}"))?;
+        append_resampled_chunk(&mut out, &out_buffer, nbr_out);
+        for channel in &mut input_slices {
+            *channel = &channel[nbr_in..];
+        }
+        input_frames_next = resampler.input_frames_next().max(1);
+    }
+
+    if input_slices
+        .first()
+        .map(|ch| !ch.is_empty())
+        .unwrap_or(false)
+    {
+        let (_nbr_in, nbr_out) = resampler
+            .process_partial_into_buffer(Some(&input_slices), &mut out_buffer, None)
+            .map_err(|e| anyhow::anyhow!("rubato fft partial failed: {e}"))?;
+        append_resampled_chunk(&mut out, &out_buffer, nbr_out);
+    }
+
+    let required_frames = expected_len.saturating_add(delay);
+    while out
+        .first()
+        .map(|channel| channel.len() < required_frames)
+        .unwrap_or(false)
+    {
+        let no_input: Option<&[Vec<f32>]> = None;
+        let (_nbr_in, nbr_out) = resampler
+            .process_partial_into_buffer(no_input, &mut out_buffer, None)
+            .map_err(|e| anyhow::anyhow!("rubato fft flush failed: {e}"))?;
+        if nbr_out == 0 {
+            break;
+        }
+        append_resampled_chunk(&mut out, &out_buffer, nbr_out);
+    }
+
+    Ok(trim_offline_resampled_output(out, delay, expected_len))
+}
+
 pub fn resample_quality(
     mono: &[f32],
     in_sr: u32,
@@ -277,11 +470,8 @@ pub fn resample_quality(
     if in_sr == out_sr || mono.is_empty() || in_sr == 0 || out_sr == 0 {
         return mono.to_vec();
     }
-    let (sinc_len, f_cutoff, oversampling_factor, interpolation, chunk_size) = match quality {
-        ResampleQuality::Fast => (64, 0.90, 64, SincInterpolationType::Linear, 1024),
-        ResampleQuality::Good => (128, 0.94, 128, SincInterpolationType::Quadratic, 1024),
-        ResampleQuality::Best => (256, 0.96, 256, SincInterpolationType::Cubic, 2048),
-    };
+    let (sinc_len, f_cutoff, oversampling_factor, interpolation, chunk_size) =
+        resample_quality_params(quality);
     let params = SincInterpolationParameters {
         sinc_len,
         f_cutoff,
@@ -295,9 +485,41 @@ pub fn resample_quality(
     }
 }
 
+pub fn resample_channels_quality(
+    chans: &[Vec<f32>],
+    in_sr: u32,
+    out_sr: u32,
+    quality: ResampleQuality,
+) -> Vec<Vec<f32>> {
+    if chans.is_empty() || in_sr == out_sr || in_sr == 0 || out_sr == 0 {
+        return chans.to_vec();
+    }
+    if let Ok(out) = resample_channels_with_rubato_fft(chans, in_sr, out_sr, quality) {
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    let (sinc_len, f_cutoff, oversampling_factor, interpolation, chunk_size) =
+        resample_quality_params(quality);
+    let params = SincInterpolationParameters {
+        sinc_len,
+        f_cutoff,
+        oversampling_factor,
+        interpolation,
+        window: RubatoWindowFunction::BlackmanHarris2,
+    };
+    match resample_channels_with_rubato(chans, in_sr, out_sr, params, chunk_size) {
+        Ok(out) if !out.is_empty() => out,
+        _ => chans
+            .iter()
+            .map(|channel| resample_quality(channel, in_sr, out_sr, quality))
+            .collect(),
+    }
+}
+
 pub fn convert_wav_bit_depth(src: &Path, dst: &Path, depth: WavBitDepth) -> Result<()> {
     let (chans, in_sr) = decode_wav_multi(src)?;
-    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    let frames = chans.first().map(|c| c.len()).unwrap_or(0);
     write_wav_range_with_depth(&chans, in_sr, (0, frames), dst, depth)
 }
 
@@ -644,9 +866,7 @@ pub fn prepare_for_playback_quality(
     let (mut chans, in_sr) = decode_wav_multi(path)?;
     let out_sr = audio.shared.out_sample_rate;
     if in_sr != out_sr {
-        for c in chans.iter_mut() {
-            *c = resample_quality(c, in_sr, out_sr, quality);
-        }
+        chans = resample_channels_quality(&chans, in_sr, out_sr, quality);
     }
     let mono = mixdown_channels_mono(&chans);
     audio.set_samples_channels(chans);
@@ -668,34 +888,62 @@ pub fn prepare_for_list_preview_quality(
     let (mut chans, in_sr, truncated) = decode_wav_multi_prefix(path, max_secs)?;
     let out_sr = audio.shared.out_sample_rate;
     if in_sr != out_sr {
-        for c in chans.iter_mut() {
-            *c = resample_quality(c, in_sr, out_sr, quality);
-        }
+        chans = resample_channels_quality(&chans, in_sr, out_sr, quality);
     }
     audio.set_samples_channels(chans);
     audio.stop();
     Ok(truncated)
 }
 
-// Prepare with Speed mode (rate change without pitch preservation)
+// Prepare with Speed mode (rate change without pitch preservation) via offline render.
+pub fn prepare_for_speed_offline(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    rate: f32,
+) -> Result<()> {
+    prepare_for_speed_offline_quality(path, audio, out_waveform, rate, ResampleQuality::Good)
+}
+
+pub fn prepare_for_speed_offline_quality(
+    path: &Path,
+    audio: &AudioEngine,
+    out_waveform: &mut Vec<(f32, f32)>,
+    rate: f32,
+    quality: ResampleQuality,
+) -> Result<()> {
+    let (mut chans, in_sr) = decode_wav_multi(path)?;
+    let out_sr = audio.shared.out_sample_rate.max(1);
+    if in_sr != out_sr {
+        chans = resample_channels_quality(&chans, in_sr, out_sr, quality);
+    }
+    for channel in chans.iter_mut() {
+        *channel = process_speed_offline(channel, rate);
+    }
+    let mono = mixdown_channels_mono(&chans);
+    build_minmax(out_waveform, &mono, 2048);
+    audio.set_samples_channels(chans);
+    audio.stop();
+    Ok(())
+}
+
 pub fn prepare_for_speed(
     path: &Path,
     audio: &AudioEngine,
     out_waveform: &mut Vec<(f32, f32)>,
-    _rate: f32,
+    rate: f32,
 ) -> Result<()> {
-    prepare_for_speed_quality(path, audio, out_waveform, _rate, ResampleQuality::Good)
+    prepare_for_speed_offline(path, audio, out_waveform, rate)
 }
 
 pub fn prepare_for_speed_quality(
     path: &Path,
     audio: &AudioEngine,
     out_waveform: &mut Vec<(f32, f32)>,
-    _rate: f32,
+    rate: f32,
     quality: ResampleQuality,
 ) -> Result<()> {
-    // playback rate is applied in the audio engine; here we just set the base buffer
-    prepare_for_playback_quality(path, audio, out_waveform, quality)
+    prepare_for_speed_offline_quality(path, audio, out_waveform, rate, quality)
 }
 
 // Prepare with PitchShift mode (preserve duration, shift pitch in semitones)
@@ -879,7 +1127,7 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
             sample_format: spec.sample_format,
         },
     )?;
-    let frames = chans.get(0).map(|c| c.len()).unwrap_or(0);
+    let frames = chans.first().map(|c| c.len()).unwrap_or(0);
     match spec.sample_format {
         hound::SampleFormat::Float => {
             for i in 0..frames {
@@ -1054,8 +1302,7 @@ fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
         .build()
         .map_err(|e| anyhow::anyhow!("mp3 build: {e:?}"))?;
     let frames = chans[0].len().max(1);
-    let mut out = Vec::new();
-    out.reserve(max_required_buffer_size(frames));
+    let mut out = Vec::with_capacity(max_required_buffer_size(frames));
     if chans.len() == 1 {
         let input = MonoPcm(&chans[0]);
         encoder
@@ -1380,7 +1627,7 @@ pub fn export_channels_audio_with_depth(
         .to_lowercase();
     match ext.as_str() {
         "wav" => {
-            let len = chans.get(0).map(|c| c.len()).unwrap_or(0);
+            let len = chans.first().map(|c| c.len()).unwrap_or(0);
             export_selection_wav_with_depth(chans, sample_rate, (0, len), dst, wav_depth)
         }
         "mp3" => {
@@ -1497,10 +1744,10 @@ fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32
     let mut x2 = 0.0f32;
     let mut y1 = 0.0f32;
     let mut y2 = 0.0f32;
-    for n in 0..x.len() {
-        let xn = x[n];
+    for sample in x.iter_mut() {
+        let xn = *sample;
         let y = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-        x[n] = y;
+        *sample = y;
         x2 = x1;
         x1 = xn;
         y2 = y1;
@@ -1625,4 +1872,64 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
     let z_final = acc2 / n2 as f64;
     let l = K_CONST + 10.0 * (z_final.max(1e-24)).log10() as f32;
     Ok(l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resample_channels_quality, resample_quality, ResampleQuality};
+
+    fn make_signal(len: usize, freq_scale: f32) -> Vec<f32> {
+        (0..len)
+            .map(|idx| {
+                let t = idx as f32 / len.max(1) as f32;
+                let phase_a = t * freq_scale * std::f32::consts::TAU;
+                let phase_b = t * (freq_scale * 0.37 + 3.0) * std::f32::consts::TAU;
+                (phase_a.sin() * 0.7) + (phase_b.cos() * 0.3)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resample_channels_quality_noop_preserves_input() {
+        let chans = vec![make_signal(256, 11.0), make_signal(256, 19.0)];
+        let out = resample_channels_quality(&chans, 48_000, 48_000, ResampleQuality::Fast);
+        assert_eq!(out, chans);
+    }
+
+    #[test]
+    fn resample_channels_quality_matches_per_channel_path() {
+        let in_sr = 44_100;
+        let out_sr = 48_000;
+        let left = make_signal(8_192, 17.0);
+        let right = make_signal(8_192, 23.0);
+        let chans = vec![left.clone(), right.clone()];
+
+        let multi = resample_channels_quality(&chans, in_sr, out_sr, ResampleQuality::Good);
+        let expected_left = resample_quality(&left, in_sr, out_sr, ResampleQuality::Good);
+        let expected_right = resample_quality(&right, in_sr, out_sr, ResampleQuality::Good);
+
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0].len(), expected_left.len());
+        assert_eq!(multi[1].len(), expected_right.len());
+
+        let max_left_diff = multi[0]
+            .iter()
+            .zip(expected_left.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_right_diff = multi[1]
+            .iter()
+            .zip(expected_right.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(
+            max_left_diff < 5.0e-2,
+            "left channel drifted too far from the legacy sinc path: {max_left_diff}"
+        );
+        assert!(
+            max_right_diff < 5.0e-2,
+            "right channel drifted too far from the legacy sinc path: {max_right_diff}"
+        );
+    }
 }

@@ -1311,9 +1311,9 @@ impl super::WavesPreviewer {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_transcript_languages, fold_download_progress, has_required_model_files_for_variant,
-        sanitize_transcript_language_task, transcript_catalog_from_generation_config,
-        transcript_catalog_from_tokenizer,
+        canonical_transcript_languages, fold_download_progress,
+        has_required_model_files_for_variant, sanitize_transcript_language_task,
+        transcript_catalog_from_generation_config, transcript_catalog_from_tokenizer,
     };
     use crate::app::types::TranscriptModelVariant;
 

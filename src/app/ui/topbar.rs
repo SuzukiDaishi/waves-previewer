@@ -765,15 +765,8 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                         if self.mode != prev_mode {
-                            match self.mode {
-                                RateMode::Speed => {
-                                    self.playback_refresh_rate_for_current_source();
-                                }
-                                _ => {
-                                    self.playback_refresh_rate_for_current_source();
-                                    self.rebuild_current_buffer_with_mode();
-                                }
-                            }
+                            self.playback_refresh_rate_for_current_source();
+                            self.rebuild_current_buffer_with_mode();
                         }
                         match self.mode {
                             RateMode::Speed => {
@@ -786,6 +779,7 @@ impl crate::app::WavesPreviewer {
                                 );
                                 if resp.changed() {
                                     self.playback_refresh_rate_for_current_source();
+                                    self.rebuild_current_buffer_with_mode();
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()
                                 {

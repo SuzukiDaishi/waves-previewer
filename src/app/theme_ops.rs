@@ -450,10 +450,10 @@ impl WavesPreviewer {
                 } else {
                     0.875
                 };
-                self.spectro_cfg.hop_size =
-                    ((self.spectro_cfg.fft_size.max(2) as f32) * (1.0 - overlap))
-                        .round()
-                        .max(1.0) as usize;
+                self.spectro_cfg.hop_size = ((self.spectro_cfg.fft_size.max(2) as f32)
+                    * (1.0 - overlap))
+                    .round()
+                    .max(1.0) as usize;
             }
         }
         Self::normalize_spectro_cfg(&mut self.spectro_cfg);

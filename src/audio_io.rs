@@ -2062,12 +2062,14 @@ where
             prefix_secs.max(0.05)
         };
 
+        let should_cancel = std::cell::RefCell::new(should_cancel);
+
         decode_m4a_fdk_progressive_chunks(
             path,
             chunk_secs,
-            || should_cancel(),
+            || (should_cancel.borrow_mut())(),
             |chunk, chunk_sr, _decoded_frames, is_final| {
-                if should_cancel() {
+                if (should_cancel.borrow_mut())() {
                     return false;
                 }
                 let chunk_sr = chunk_sr.max(1);
@@ -2152,7 +2154,7 @@ where
         if let Some(err) = stream_error {
             return Err(err);
         }
-        if should_cancel() {
+        if (should_cancel.borrow_mut())() {
             return Ok(());
         }
         if !emitted_any && !accumulated.is_empty() {
