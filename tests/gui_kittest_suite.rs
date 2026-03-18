@@ -508,6 +508,83 @@ mod kittest_suite {
     }
 
     #[test]
+    fn open_tab_shell_before_deferred_stream_activation() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let wav = first_wav_file(&wav_dir()).expect("wav fixture");
+        assert!(harness.state_mut().test_select_path(&wav));
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_open_tab_for_path(&wav));
+
+        assert!(
+            harness.state().test_is_editor_workspace_active(),
+            "editor workspace should become active immediately when opening the selected WAV"
+        );
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(wav.as_path()),
+            "the selected WAV should open immediately in the editor shell"
+        );
+        assert!(
+            !harness.state().test_audio_is_streaming_wav(&wav),
+            "exact-stream activation should be deferred until after the first editor paint"
+        );
+
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_audio_is_streaming_wav(&wav) {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("deferred exact-stream activation timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn enter_opens_editor_with_placeholder_when_meta_is_missing() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let wav = first_wav_file(&wav_dir()).expect("wav fixture");
+        assert!(harness.state_mut().test_select_path(&wav));
+        harness.run_steps(2);
+        harness.state_mut().test_clear_meta_for_path(&wav);
+
+        harness.key_press(Key::Enter);
+        harness.run_steps(1);
+
+        assert!(
+            harness.state().test_is_editor_workspace_active(),
+            "editor workspace should open even when metadata is unavailable"
+        );
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(wav.as_path())
+        );
+        assert_eq!(
+            harness.state().test_active_tab_samples_len_visual(),
+            0,
+            "initial editor shell should allow an unknown visual length placeholder"
+        );
+
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_active_tab_samples_len_visual() > 0
+                && harness.state().test_active_tab_loading_waveform_ready()
+            {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("placeholder visual length never updated after decode started");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
     fn loop_toggle_in_editor() {
         let mut harness = harness_with_wavs(true);
         wait_for_scan(&mut harness);
@@ -810,6 +887,7 @@ mod kittest_suite {
             let sr = info.map(|i| i.sample_rate).unwrap_or(0);
             let initial_len = audio_buffer_len(harness.state());
             let mut max_len = initial_len;
+            let transport = harness.state().test_playback_transport_name().to_string();
             for _ in 0..160 {
                 harness.run_steps(1);
                 let len = audio_buffer_len(harness.state());
@@ -818,10 +896,11 @@ mod kittest_suite {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let already_long = sr > 0 && initial_len >= (sr as f32 * 3.0) as usize;
+            let already_long = transport == "ExactStreamWav"
+                || (sr > 0 && initial_len >= (sr as f32 * 3.0) as usize);
             assert!(
                 max_len > initial_len || already_long,
-                "list preview buffer did not grow for {} (initial={} max={} sr={})",
+                "list preview buffer did not grow for {} (initial={} max={} sr={} transport={transport})",
                 selected.display(),
                 initial_len,
                 max_len,
@@ -1478,6 +1557,18 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         select_first_row(&mut harness);
         harness.run_steps(2);
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            harness.run_steps(1);
+            if harness.state().test_audio_has_samples() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            harness.state().test_audio_has_samples(),
+            "selected list item should have an audio source before manual play"
+        );
         assert!(
             harness
                 .query_all_by_label("Playing")

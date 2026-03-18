@@ -248,6 +248,12 @@ pub(super) enum PlaybackTransportKind {
     ExactStreamWav,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingTabActivationKind {
+    TabSwitch,
+    InitialOpen,
+}
+
 #[derive(Clone, Debug)]
 struct PlaybackSessionState {
     source: PlaybackSourceKind,
@@ -537,6 +543,7 @@ pub struct WavesPreviewer {
     leave_intent: Option<LeaveIntent>,
     show_leave_prompt: bool,
     pending_activate_path: Option<PathBuf>,
+    pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
     // Heavy preview worker for Pitch/Stretch (mono)
     heavy_preview_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
@@ -610,7 +617,9 @@ impl WavesPreviewer {
                 let out_sr = out_sr.max(1) as f64;
                 let playback_rate = playback_rate.max(0.25) as f64;
                 match mode {
-                    RateMode::Speed | RateMode::TimeStretch => (output_pos_f / out_sr) * playback_rate,
+                    RateMode::Speed | RateMode::TimeStretch => {
+                        (output_pos_f / out_sr) * playback_rate
+                    }
                     RateMode::PitchShift => output_pos_f / out_sr,
                 }
             }
@@ -766,9 +775,14 @@ impl WavesPreviewer {
         }
     }
 
-    fn queue_tab_activation(&mut self, path: PathBuf) {
+    fn queue_tab_activation_with_kind(&mut self, path: PathBuf, kind: PendingTabActivationKind) {
         self.pending_activate_path = Some(path);
+        self.pending_activate_kind = Some(kind);
         self.pending_activate_ready = false;
+    }
+
+    fn queue_tab_activation(&mut self, path: PathBuf) {
+        self.queue_tab_activation_with_kind(path, PendingTabActivationKind::TabSwitch);
     }
 
     fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
@@ -2365,6 +2379,7 @@ impl WavesPreviewer {
             leave_intent: None,
             show_leave_prompt: false,
             pending_activate_path: None,
+            pending_activate_kind: None,
             pending_activate_ready: false,
             heavy_preview_rx: None,
             heavy_preview_tool: None,
@@ -2716,6 +2731,7 @@ impl eframe::App for WavesPreviewer {
                     }
                     self.workspace_view = WorkspaceView::List;
                     self.pending_activate_path = None;
+                    self.pending_activate_kind = None;
                     self.pending_activate_ready = false;
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
@@ -3359,7 +3375,11 @@ impl eframe::App for WavesPreviewer {
                 ctx.request_repaint();
             } else {
                 let p = pending;
+                let activation_kind = self
+                    .pending_activate_kind
+                    .unwrap_or(PendingTabActivationKind::TabSwitch);
                 self.pending_activate_path = None;
+                self.pending_activate_kind = None;
                 self.pending_activate_ready = false;
                 self.playing_path = Some(p.clone());
                 if !self.apply_dirty_tab_audio_with_mode(&p) {
@@ -3367,7 +3387,25 @@ impl eframe::App for WavesPreviewer {
                     let mut used_tab_transport = false;
                     let source_time_sec = self.playback_current_source_time_sec();
                     if let Some(idx) = self.active_tab {
-                        if self.try_activate_editor_stream_transport_for_tab(idx) {
+                        let measure_stream_activation =
+                            matches!(activation_kind, PendingTabActivationKind::InitialOpen)
+                                && self
+                                    .tabs
+                                    .get(idx)
+                                    .map(|tab| {
+                                        tab.path == p && self.editor_stream_transport_eligible(tab)
+                                    })
+                                    .unwrap_or(false);
+                        let activation_started =
+                            measure_stream_activation.then(std::time::Instant::now);
+                        let activated_stream =
+                            self.try_activate_editor_stream_transport_for_tab(idx);
+                        if let Some(started_at) = activation_started {
+                            self.debug_push_editor_stream_activation_sample(
+                                started_at.elapsed().as_secs_f32() * 1000.0,
+                            );
+                        }
+                        if activated_stream {
                             used_tab_transport = true;
                             if let Some(source_time_sec) = source_time_sec {
                                 self.playback_seek_to_source_time(self.mode, source_time_sec);
@@ -3401,7 +3439,10 @@ impl eframe::App for WavesPreviewer {
                                         self.audio.shared.out_sample_rate.max(1),
                                     );
                                     if let Some(source_time_sec) = source_time_sec {
-                                        self.playback_seek_to_source_time(self.mode, source_time_sec);
+                                        self.playback_seek_to_source_time(
+                                            self.mode,
+                                            source_time_sec,
+                                        );
                                     }
                                 }
                             }
@@ -3434,7 +3475,9 @@ impl eframe::App for WavesPreviewer {
                     // Update effective volume to include per-file gain for the activated tab
                     self.apply_effective_volume();
                 }
-                self.debug_mark_tab_switch_interactive(&p);
+                if matches!(activation_kind, PendingTabActivationKind::TabSwitch) {
+                    self.debug_mark_tab_switch_interactive(&p);
+                }
                 activated_tab_idx = self.active_tab;
             }
         }

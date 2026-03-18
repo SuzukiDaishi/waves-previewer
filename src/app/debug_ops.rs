@@ -201,8 +201,35 @@ impl WavesPreviewer {
         self.debug.editor_open_started_at = Some(std::time::Instant::now());
         self.debug.editor_open_started_path = Some(path.to_path_buf());
         self.debug.editor_open_partial_logged = false;
+        self.debug.editor_open_shell_paint_logged = false;
         self.debug.editor_open_first_paint_logged = false;
         self.debug_log(format!("editor open start: {}", path.display()));
+    }
+
+    pub(super) fn debug_mark_editor_open_shell_paint(&mut self, path: &Path) {
+        let Some(started_at) = self.debug.editor_open_started_at else {
+            return;
+        };
+        if self
+            .debug
+            .editor_open_started_path
+            .as_deref()
+            .map(|p| p == path)
+            .unwrap_or(false)
+            && !self.debug.editor_open_shell_paint_logged
+        {
+            let elapsed_ms = started_at.elapsed().as_secs_f32() * 1000.0;
+            Self::debug_push_latency_sample(
+                &mut self.debug.editor_open_to_shell_paint_ms,
+                elapsed_ms,
+            );
+            self.debug.editor_open_shell_paint_logged = true;
+            self.debug_log(format!(
+                "editor open shell paint: {} {:.1} ms",
+                path.display(),
+                elapsed_ms
+            ));
+        }
     }
 
     pub(super) fn debug_mark_editor_open_partial(
@@ -315,6 +342,10 @@ impl WavesPreviewer {
 
     pub(super) fn debug_push_bg_dbfs_job_sample(&mut self, value_ms: f32) {
         Self::debug_push_latency_sample(&mut self.debug.bg_dbfs_job_ms, value_ms);
+    }
+
+    pub(super) fn debug_push_editor_stream_activation_sample(&mut self, value_ms: f32) {
+        Self::debug_push_latency_sample(&mut self.debug.editor_stream_activation_ms, value_ms);
     }
 
     pub(super) fn debug_push_src_resample_sample(&mut self, value_ms: f32) {
@@ -471,6 +502,10 @@ impl WavesPreviewer {
             summarize(&self.debug.select_to_play_ms)
         ));
         lines.push(format!(
+            "editor_open_to_shell_paint_ms: {}",
+            summarize(&self.debug.editor_open_to_shell_paint_ms)
+        ));
+        lines.push(format!(
             "editor_open_to_partial_ms: {}",
             summarize(&self.debug.editor_open_to_partial_ms)
         ));
@@ -481,6 +516,10 @@ impl WavesPreviewer {
         lines.push(format!(
             "editor_open_to_final_ms: {}",
             summarize(&self.debug.editor_open_to_final_ms)
+        ));
+        lines.push(format!(
+            "editor_stream_activation_ms: {}",
+            summarize(&self.debug.editor_stream_activation_ms)
         ));
         lines.push(format!(
             "editor_mixdown_build_ms: {}",
@@ -601,6 +640,18 @@ impl WavesPreviewer {
         if self.debug.metadata_probe_ms.is_empty() {
             lines.push(
                 "warning: metadata_probe_ms has no samples (run sample-rate dependent operations)"
+                    .to_string(),
+            );
+        }
+        if self.debug.editor_open_to_shell_paint_ms.is_empty() {
+            lines.push(
+                "warning: editor_open_to_shell_paint_ms has no samples (open an editor tab)"
+                    .to_string(),
+            );
+        }
+        if self.debug.editor_stream_activation_ms.is_empty() {
+            lines.push(
+                "warning: editor_stream_activation_ms has no samples (open an eligible WAV tab)"
                     .to_string(),
             );
         }

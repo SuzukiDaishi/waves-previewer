@@ -75,6 +75,7 @@ impl super::WavesPreviewer {
                     }
                     self.workspace_view = super::types::WorkspaceView::List;
                     self.pending_activate_path = None;
+                    self.pending_activate_kind = None;
                     self.pending_activate_ready = false;
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);

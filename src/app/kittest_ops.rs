@@ -11,6 +11,10 @@ impl super::WavesPreviewer {
         self.playing_path.as_ref()
     }
 
+    pub fn test_is_editor_workspace_active(&self) -> bool {
+        self.is_editor_workspace_active()
+    }
+
     pub fn test_selected_path(&self) -> Option<&PathBuf> {
         self.selected.and_then(|row| self.path_for_row(row))
     }
@@ -166,7 +170,14 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_force_load_selected_list_preview_for_play(&mut self) -> bool {
-        self.force_load_selected_list_preview_for_play()
+        let ready = self.force_load_selected_list_preview_for_play();
+        if ready {
+            self.audio.play();
+            if let Some(path) = self.selected_path_buf() {
+                self.debug_mark_list_play_start(&path);
+            }
+        }
+        ready
     }
 
     pub fn test_set_rate_mode(&mut self, mode: RateMode) {
@@ -472,6 +483,11 @@ impl super::WavesPreviewer {
         }
         self.open_or_activate_tab(path);
         true
+    }
+
+    pub fn test_clear_meta_for_path(&mut self, path: &Path) {
+        self.clear_meta_for_path(path);
+        self.meta_inflight.remove(path);
     }
 
     pub fn test_set_active_tool(&mut self, tool: ToolKind) -> bool {

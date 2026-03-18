@@ -4887,6 +4887,7 @@ impl crate::app::WavesPreviewer {
 
         let painted_path = self.tabs[tab_idx].path.clone();
         let painted_samples_len = self.tabs[tab_idx].samples_len;
+        self.debug_mark_editor_open_shell_paint(&painted_path);
         if painted_samples_len > 0 {
             self.debug_mark_editor_open_first_paint(&painted_path, painted_samples_len);
         }

@@ -94,12 +94,17 @@ impl super::WavesPreviewer {
     }
 
     fn try_activate_list_stream_transport(&mut self, path: &Path) -> bool {
-        let Some(source_sr) = self.exact_stream_path_source_sr(path) else {
+        if !self.exact_stream_path_eligible_cached(path) {
             return false;
-        };
+        }
         self.audio.stop();
         match self.audio.set_streaming_wav_path(path) {
             Ok(()) => {
+                let source_sr = self
+                    .audio
+                    .streaming_wav_sample_rate()
+                    .or_else(|| self.cached_source_sample_rate_for_path(path))
+                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
                 self.playing_path = Some(path.to_path_buf());
                 self.audio.set_loop_enabled(false);
                 self.cancel_list_preview_job();
@@ -156,8 +161,7 @@ impl super::WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
-        (self.editor_stream_transport_source_sr(tab).is_some()
-            && self.audio.is_streaming_wav_path(&tab.path))
+        (self.editor_stream_transport_eligible(tab) && self.audio.is_streaming_wav_path(&tab.path))
             || (!tab.loading && !tab.ch_samples.is_empty())
     }
 
@@ -169,12 +173,18 @@ impl super::WavesPreviewer {
         }
     }
 
-    fn exact_stream_path_source_sr(&self, path: &Path) -> Option<u32> {
+    fn cached_source_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
+        self.meta_for_path(path)
+            .map(|meta| meta.sample_rate)
+            .filter(|v| *v > 0)
+    }
+
+    fn exact_stream_path_eligible_cached(&self, path: &Path) -> bool {
         if self.mode != RateMode::Speed {
-            return None;
+            return false;
         }
         if !path.is_file() {
-            return None;
+            return false;
         }
         let ext = path
             .extension()
@@ -182,16 +192,16 @@ impl super::WavesPreviewer {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
         if ext != "wav" {
-            return None;
+            return false;
         }
         if self.is_virtual_path(path) || self.has_pending_gain(path) {
-            return None;
+            return false;
         }
         if self.sample_rate_override.contains_key(path)
             || self.bit_depth_override.contains_key(path)
             || self.format_override.contains_key(path)
         {
-            return None;
+            return false;
         }
         if self
             .edited_cache
@@ -199,14 +209,14 @@ impl super::WavesPreviewer {
             .map(|cached| cached.dirty)
             .unwrap_or(false)
         {
-            return None;
+            return false;
         }
         if self
             .tabs
             .iter()
             .any(|tab| tab.path.as_path() == path && tab.dirty)
         {
-            return None;
+            return false;
         }
         if matches!(
             self.item_for_path(path).map(|item| item.source),
@@ -214,36 +224,33 @@ impl super::WavesPreviewer {
                 crate::app::types::MediaSource::Virtual | crate::app::types::MediaSource::External
             )
         ) {
-            return None;
+            return false;
         }
-        self.meta_for_path(path)
-            .map(|meta| meta.sample_rate)
-            .filter(|v| *v > 0)
-            .or_else(|| {
-                crate::audio_io::read_audio_info(path)
-                    .ok()
-                    .map(|info| info.sample_rate)
-                    .filter(|v| *v > 0)
-            })
+        true
     }
 
-    pub(super) fn editor_stream_transport_source_sr(&self, tab: &EditorTab) -> Option<u32> {
-        if tab.dirty || tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
-            return None;
-        }
-        self.exact_stream_path_source_sr(&tab.path)
+    pub(super) fn editor_stream_transport_eligible(&self, tab: &EditorTab) -> bool {
+        !tab.dirty
+            && tab.preview_audio_tool.is_none()
+            && tab.preview_overlay.is_none()
+            && self.exact_stream_path_eligible_cached(&tab.path)
     }
 
     pub(super) fn try_activate_editor_stream_transport_for_tab(&mut self, tab_idx: usize) -> bool {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
-        let Some(source_sr) = self.editor_stream_transport_source_sr(tab) else {
+        if !self.editor_stream_transport_eligible(tab) {
             return false;
-        };
+        }
         let tab_path = tab.path.clone();
         let target = ProcessingTarget::EditorTab(tab_path.clone());
         if self.audio.is_streaming_wav_path(&tab_path) {
+            let source_sr = self
+                .audio
+                .streaming_wav_sample_rate()
+                .or_else(|| self.cached_source_sample_rate_for_path(&tab_path))
+                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
             self.invalidate_processing_for_target(&target, "editor exact stream retained");
             self.playback_mark_source(
                 super::PlaybackSourceKind::EditorTab(tab_path),
@@ -258,6 +265,11 @@ impl super::WavesPreviewer {
         }
         match self.audio.set_streaming_wav_path(&tab_path) {
             Ok(()) => {
+                let source_sr = self
+                    .audio
+                    .streaming_wav_sample_rate()
+                    .or_else(|| self.cached_source_sample_rate_for_path(&tab_path))
+                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
                 self.invalidate_processing_for_target(&target, "editor exact stream activated");
                 self.playback_mark_source(
                     super::PlaybackSourceKind::EditorTab(tab_path),
@@ -365,7 +377,7 @@ impl super::WavesPreviewer {
                 }
                 if self.mode == RateMode::Speed
                     && self.audio.is_streaming_wav_path(path)
-                    && self.editor_stream_transport_source_sr(tab).is_some()
+                    && self.editor_stream_transport_eligible(tab)
                 {
                     return Some("editor exact stream active".to_string());
                 }
@@ -385,7 +397,7 @@ impl super::WavesPreviewer {
                     ));
                 }
                 if self.audio.is_streaming_wav_path(path)
-                    && self.exact_stream_path_source_sr(path).is_some()
+                    && self.exact_stream_path_eligible_cached(path)
                 {
                     return Some("list exact stream active".to_string());
                 }
@@ -477,18 +489,11 @@ impl super::WavesPreviewer {
             / source_sr) as usize
     }
 
-    fn estimate_editor_total_source_frames(&self, path: &Path) -> Option<usize> {
+    fn estimate_editor_total_source_frames_cached(&self, path: &Path) -> Option<usize> {
         self.meta_for_path(path)
             .and_then(|meta| meta.total_frames)
             .map(|v| v as usize)
             .filter(|v| *v > 0)
-            .or_else(|| {
-                crate::audio_io::read_audio_info(path)
-                    .ok()
-                    .and_then(|info| info.total_frames)
-                    .map(|v| v as usize)
-                    .filter(|v| *v > 0)
-            })
     }
 
     fn process_editor_decode_channels(
@@ -534,7 +539,7 @@ impl super::WavesPreviewer {
         chans
     }
 
-    fn estimate_editor_total_frames(&self, path: &Path, out_sr: u32) -> Option<usize> {
+    fn estimate_editor_total_frames_cached(&self, path: &Path, out_sr: u32) -> Option<usize> {
         if let Some(meta) = self.meta_for_path(path) {
             if let Some(source_frames) = meta.total_frames.filter(|v| *v > 0) {
                 return Some(
@@ -547,21 +552,6 @@ impl super::WavesPreviewer {
                 );
             }
             if let Some(secs) = meta.duration_secs.filter(|v| v.is_finite() && *v > 0.0) {
-                return Some(((secs * out_sr.max(1) as f32).round() as usize).max(1));
-            }
-        }
-        if let Ok(info) = crate::audio_io::read_audio_info(path) {
-            if let Some(source_frames) = info.total_frames.filter(|v| *v > 0) {
-                return Some(
-                    Self::convert_source_frames_to_output_frames(
-                        source_frames as usize,
-                        info.sample_rate.max(1),
-                        out_sr,
-                    )
-                    .max(1),
-                );
-            }
-            if let Some(secs) = info.duration_secs.filter(|v| v.is_finite() && *v > 0.0) {
                 return Some(((secs * out_sr.max(1) as f32).round() as usize).max(1));
             }
         }
@@ -1866,12 +1856,6 @@ impl super::WavesPreviewer {
             .meta_for_path(&path)
             .map(|meta| meta.sample_rate)
             .filter(|v| *v > 0);
-        let source_sr_hint = source_sr_hint.or_else(|| {
-            crate::audio_io::read_audio_info(&path)
-                .ok()
-                .map(|info| info.sample_rate)
-                .filter(|v| *v > 0)
-        });
         let preferred_out_sr = target_sr.or(source_sr_hint);
         let _ = self.ensure_output_sample_rate(preferred_out_sr);
 
@@ -1880,8 +1864,8 @@ impl super::WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate;
         let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         let bit_depth = self.bit_depth_override.get(&path).copied();
-        let estimated_total_frames = self.estimate_editor_total_frames(&path, out_sr);
-        let total_source_frames_hint = self.estimate_editor_total_source_frames(&path);
+        let estimated_total_frames = self.estimate_editor_total_frames_cached(&path, out_sr);
+        let total_source_frames_hint = self.estimate_editor_total_source_frames_cached(&path);
         let strategy = Self::editor_decode_strategy(&path);
         self.debug_log(format!(
             "editor decode spawn: {} strategy={} out_sr={} preferred_out_sr={:?} target_sr={:?} bits={:?} est_frames={:?}",
@@ -3152,8 +3136,9 @@ impl super::WavesPreviewer {
             .unwrap_or("(invalid)")
             .to_string();
         let loading = !decode_failed;
-        let estimated_visual_frames =
-            self.estimate_editor_total_frames(path, self.audio.shared.out_sample_rate.max(1));
+        self.debug_mark_editor_open_start(path);
+        let estimated_visual_frames = self
+            .estimate_editor_total_frames_cached(path, self.audio.shared.out_sample_rate.max(1));
         let default_bpm = self
             .meta_for_path(path)
             .and_then(|m| m.bpm)
@@ -3240,20 +3225,17 @@ impl super::WavesPreviewer {
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);
         self.playing_path = Some(path.to_path_buf());
-        let activated_stream = self
-            .active_tab
-            .map(|tab_idx| self.try_activate_editor_stream_transport_for_tab(tab_idx))
-            .unwrap_or(false);
-        if !activated_stream {
-            self.audio.set_samples_channels(Vec::new());
-            self.playback_mark_buffer_source(
-                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                self.audio.shared.out_sample_rate.max(1),
-            );
-            self.apply_effective_volume();
-        }
+        self.audio.set_samples_channels(Vec::new());
+        self.playback_mark_buffer_source(
+            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+            self.audio.shared.out_sample_rate.max(1),
+        );
+        self.apply_effective_volume();
+        self.queue_tab_activation_with_kind(
+            path.to_path_buf(),
+            super::PendingTabActivationKind::InitialOpen,
+        );
         if !decode_failed {
-            self.debug_mark_editor_open_start(path);
             self.spawn_editor_decode(path.to_path_buf());
         }
     }
