@@ -139,7 +139,9 @@ impl crate::app::WavesPreviewer {
                                         }
                                         let has_selected = selected
                                             .as_ref()
-                                            .map(|v| self.audio_output_devices.iter().any(|d| d == v))
+                                            .map(|v| {
+                                                self.audio_output_devices.iter().any(|d| d == v)
+                                            })
                                             .unwrap_or(true);
                                         if let Some(name) = selected.as_ref() {
                                             if !has_selected {
@@ -151,8 +153,10 @@ impl crate::app::WavesPreviewer {
                                             }
                                         }
                                         for name in &self.audio_output_devices {
-                                            let is_selected =
-                                                selected.as_ref().map(|v| v == name).unwrap_or(false);
+                                            let is_selected = selected
+                                                .as_ref()
+                                                .map(|v| v == name)
+                                                .unwrap_or(false);
                                             if ui.selectable_label(is_selected, name).clicked() {
                                                 pending_output_change = Some(Some(name.clone()));
                                             }
@@ -167,9 +171,7 @@ impl crate::app::WavesPreviewer {
                             }
                             if let Some(err) = self.audio_output_error.as_ref() {
                                 ui.label(
-                                    RichText::new(err)
-                                        .small()
-                                        .color(egui::Color32::LIGHT_RED),
+                                    RichText::new(err).small().color(egui::Color32::LIGHT_RED),
                                 );
                             }
                             ui.separator();

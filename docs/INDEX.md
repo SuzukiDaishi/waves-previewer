@@ -23,7 +23,9 @@
   - KNOWN ISSUES: docs/KNOWN_ISSUES.md
   - UPDATE REQUEST REVIEW (2026-02-02): docs/UPDATE_REQUEST_20260202.md
   - UPDATE REQUEST PLAN (2026-03-04): docs/UPDATE_REQUEST_20260304.md
+  - Ultra Scale Audio Plan (2026-03-15): docs/ULTRA_SCALE_AUDIO_PLAN_20260315.md
   - CHANGELOG: CHANGELOG.md
+  - Linux Debug Guide: docs/LINUX_DEBUG.md
 
 Notes
 - All docs are staged for iterative refinement; some Japanese content may include mojibake depending on editor encoding. Save files as UTF-8 (no BOM) for best results.

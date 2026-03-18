@@ -8,8 +8,8 @@ use walkdir::WalkDir;
 
 use super::types::{
     ChannelView, EditorDecodeEvent, EditorDecodeResult, EditorDecodeStage, EditorDecodeState,
-    EditorDecodeStrategy, EditorDecodeUiStatus, EditorTab, ProcessingResult, ProcessingState,
-    ProcessingTarget, RateMode, ScanMessage, SortDir, SortKey,
+    EditorDecodeStrategy, EditorDecodeUiStatus, EditorTab, OfflineRenderSpec, ProcessingResult,
+    ProcessingState, ProcessingTarget, RateMode, ScanMessage, SortDir, SortKey,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 0.35;
@@ -88,8 +88,43 @@ impl super::WavesPreviewer {
     pub(super) fn mark_list_preview_source(&mut self, path: &Path, play_sr: u32) {
         self.playback_mark_source(
             super::PlaybackSourceKind::ListPreview(path.to_path_buf()),
+            super::PlaybackTransportKind::Buffer,
             play_sr.max(1),
         );
+    }
+
+    fn try_activate_list_stream_transport(&mut self, path: &Path) -> bool {
+        if !self.exact_stream_path_eligible_cached(path) {
+            return false;
+        }
+        self.audio.stop();
+        match self.audio.set_streaming_wav_path(path) {
+            Ok(()) => {
+                let source_sr = self
+                    .audio
+                    .streaming_wav_sample_rate()
+                    .or_else(|| self.cached_source_sample_rate_for_path(path))
+                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
+                self.playing_path = Some(path.to_path_buf());
+                self.audio.set_loop_enabled(false);
+                self.cancel_list_preview_job();
+                self.list_preview_pending_path = None;
+                self.playback_mark_source(
+                    super::PlaybackSourceKind::ListPreview(path.to_path_buf()),
+                    super::PlaybackTransportKind::ExactStreamWav,
+                    source_sr,
+                );
+                self.apply_effective_volume();
+                true
+            }
+            Err(err) => {
+                self.debug_log(format!(
+                    "list exact stream activation failed: {} ({err})",
+                    path.display()
+                ));
+                false
+            }
+        }
     }
 
     pub(super) fn list_preview_cached_secs(&self, sample_len: usize, play_sr: u32) -> f32 {
@@ -126,8 +161,7 @@ impl super::WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
-        (self.editor_stream_transport_source_sr(tab).is_some()
-            && self.audio.is_streaming_wav_path(&tab.path))
+        (self.editor_stream_transport_eligible(tab) && self.audio.is_streaming_wav_path(&tab.path))
             || (!tab.loading && !tab.ch_samples.is_empty())
     }
 
@@ -139,45 +173,88 @@ impl super::WavesPreviewer {
         }
     }
 
-    pub(super) fn editor_stream_transport_source_sr(&self, tab: &EditorTab) -> Option<u32> {
-        if self.mode != RateMode::Speed
-            || tab.dirty
-            || tab.preview_audio_tool.is_some()
-            || tab.preview_overlay.is_some()
-            || self.is_virtual_path(&tab.path)
-            || self.sample_rate_override.contains_key(&tab.path)
-            || self.bit_depth_override.contains_key(&tab.path)
-        {
-            return None;
-        }
-        let ext = tab.path.extension().and_then(|s| s.to_str())?;
-        if !ext.eq_ignore_ascii_case("wav") {
-            return None;
-        }
-        self.meta_for_path(&tab.path)
+    fn cached_source_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
+        self.meta_for_path(path)
             .map(|meta| meta.sample_rate)
             .filter(|v| *v > 0)
-            .or_else(|| {
-                crate::audio_io::read_audio_info(&tab.path)
-                    .ok()
-                    .map(|info| info.sample_rate)
-                    .filter(|v| *v > 0)
-            })
+    }
+
+    fn exact_stream_path_eligible_cached(&self, path: &Path) -> bool {
+        if self.mode != RateMode::Speed {
+            return false;
+        }
+        if !path.is_file() {
+            return false;
+        }
+        let ext = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        if ext != "wav" {
+            return false;
+        }
+        if self.is_virtual_path(path) || self.has_pending_gain(path) {
+            return false;
+        }
+        if self.sample_rate_override.contains_key(path)
+            || self.bit_depth_override.contains_key(path)
+            || self.format_override.contains_key(path)
+        {
+            return false;
+        }
+        if self
+            .edited_cache
+            .get(path)
+            .map(|cached| cached.dirty)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if self
+            .tabs
+            .iter()
+            .any(|tab| tab.path.as_path() == path && tab.dirty)
+        {
+            return false;
+        }
+        if matches!(
+            self.item_for_path(path).map(|item| item.source),
+            Some(
+                crate::app::types::MediaSource::Virtual | crate::app::types::MediaSource::External
+            )
+        ) {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn editor_stream_transport_eligible(&self, tab: &EditorTab) -> bool {
+        !tab.dirty
+            && tab.preview_audio_tool.is_none()
+            && tab.preview_overlay.is_none()
+            && self.exact_stream_path_eligible_cached(&tab.path)
     }
 
     pub(super) fn try_activate_editor_stream_transport_for_tab(&mut self, tab_idx: usize) -> bool {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return false;
         };
-        let Some(source_sr) = self.editor_stream_transport_source_sr(tab) else {
+        if !self.editor_stream_transport_eligible(tab) {
             return false;
-        };
+        }
         let tab_path = tab.path.clone();
         let target = ProcessingTarget::EditorTab(tab_path.clone());
         if self.audio.is_streaming_wav_path(&tab_path) {
+            let source_sr = self
+                .audio
+                .streaming_wav_sample_rate()
+                .or_else(|| self.cached_source_sample_rate_for_path(&tab_path))
+                .unwrap_or(self.audio.shared.out_sample_rate.max(1));
             self.invalidate_processing_for_target(&target, "editor exact stream retained");
             self.playback_mark_source(
                 super::PlaybackSourceKind::EditorTab(tab_path),
+                super::PlaybackTransportKind::ExactStreamWav,
                 source_sr,
             );
             if let Some(tab) = self.tabs.get(tab_idx) {
@@ -188,9 +265,15 @@ impl super::WavesPreviewer {
         }
         match self.audio.set_streaming_wav_path(&tab_path) {
             Ok(()) => {
+                let source_sr = self
+                    .audio
+                    .streaming_wav_sample_rate()
+                    .or_else(|| self.cached_source_sample_rate_for_path(&tab_path))
+                    .unwrap_or(self.audio.shared.out_sample_rate.max(1));
                 self.invalidate_processing_for_target(&target, "editor exact stream activated");
                 self.playback_mark_source(
                     super::PlaybackSourceKind::EditorTab(tab_path),
+                    super::PlaybackTransportKind::ExactStreamWav,
                     source_sr,
                 );
                 if let Some(tab) = self.tabs.get(tab_idx) {
@@ -201,7 +284,7 @@ impl super::WavesPreviewer {
             }
             Err(err) => {
                 self.debug_log(format!(
-                    "editor stream transport unavailable, falling back to buffer: {} ({err})",
+                    "editor exact stream activation failed: {} ({err})",
                     tab_path.display()
                 ));
                 false
@@ -262,7 +345,10 @@ impl super::WavesPreviewer {
                 Self::format_processing_target(&res.target),
             ));
         }
-        if !matches!(res.mode, RateMode::PitchShift | RateMode::TimeStretch) {
+        if !matches!(
+            res.mode,
+            RateMode::Speed | RateMode::PitchShift | RateMode::TimeStretch
+        ) {
             return Some(format!("unsupported processing mode {:?}", res.mode));
         }
         if self.mode != res.mode {
@@ -291,7 +377,7 @@ impl super::WavesPreviewer {
                 }
                 if self.mode == RateMode::Speed
                     && self.audio.is_streaming_wav_path(path)
-                    && self.editor_stream_transport_source_sr(tab).is_some()
+                    && self.editor_stream_transport_eligible(tab)
                 {
                     return Some("editor exact stream active".to_string());
                 }
@@ -306,11 +392,14 @@ impl super::WavesPreviewer {
                     return Some(format!(
                         "list target mismatch selected={:?} playing={:?} result={}",
                         self.selected_path_buf().map(|p| p.display().to_string()),
-                        self.playing_path
-                            .as_ref()
-                            .map(|p| p.display().to_string()),
+                        self.playing_path.as_ref().map(|p| p.display().to_string()),
                         path.display()
                     ));
+                }
+                if self.audio.is_streaming_wav_path(path)
+                    && self.exact_stream_path_eligible_cached(path)
+                {
+                    return Some("list exact stream active".to_string());
                 }
             }
         }
@@ -323,15 +412,18 @@ impl super::WavesPreviewer {
         channels: Vec<Vec<f32>>,
         new_buffer_sr: u32,
     ) {
-        let previous_buffer_sr = self.playback_session.buffer_sr.max(1);
+        let previous_buffer_sr = self.playback_session.transport_sr.max(1);
         let new_buffer_sr = new_buffer_sr.max(1);
         let same_editor_source = matches!(
             &self.playback_session.source,
             super::PlaybackSourceKind::EditorTab(src) if src.as_path() == path
         );
         if same_editor_source {
-            self.audio
-                .set_samples_channels_keep_time_pos(channels, previous_buffer_sr, new_buffer_sr);
+            self.audio.set_samples_channels_keep_time_pos(
+                channels,
+                previous_buffer_sr,
+                new_buffer_sr,
+            );
         } else {
             self.audio.set_samples_channels(channels);
         }
@@ -397,18 +489,11 @@ impl super::WavesPreviewer {
             / source_sr) as usize
     }
 
-    fn estimate_editor_total_source_frames(&self, path: &Path) -> Option<usize> {
+    fn estimate_editor_total_source_frames_cached(&self, path: &Path) -> Option<usize> {
         self.meta_for_path(path)
             .and_then(|meta| meta.total_frames)
             .map(|v| v as usize)
             .filter(|v| *v > 0)
-            .or_else(|| {
-                crate::audio_io::read_audio_info(path)
-                    .ok()
-                    .and_then(|info| info.total_frames)
-                    .map(|v| v as usize)
-                    .filter(|v| *v > 0)
-            })
     }
 
     fn process_editor_decode_channels(
@@ -419,22 +504,34 @@ impl super::WavesPreviewer {
         bit_depth: Option<crate::wave::WavBitDepth>,
         resample_quality: crate::wave::ResampleQuality,
     ) -> Vec<Vec<f32>> {
-        if let Some(target) = target_sr {
-            let target = target.max(1);
-            if in_sr != target {
-                for c in chans.iter_mut() {
-                    *c = crate::wave::resample_quality(c, in_sr, target, resample_quality);
-                }
+        let target_sr = target_sr.filter(|v| *v > 0).map(|v| v.max(1));
+        let needs_resample = match target_sr {
+            Some(target_sr) => in_sr != target_sr || target_sr != out_sr,
+            None => in_sr != out_sr,
+        };
+        let needs_quantize = bit_depth.is_some();
+        if !needs_resample && !needs_quantize {
+            return chans;
+        }
+        if let Some(target_sr) = target_sr {
+            if in_sr != target_sr {
+                chans = crate::wave::resample_channels_quality(
+                    &chans,
+                    in_sr,
+                    target_sr,
+                    resample_quality,
+                );
             }
-            if target != out_sr {
-                for c in chans.iter_mut() {
-                    *c = crate::wave::resample_quality(c, target, out_sr, resample_quality);
-                }
+            if target_sr != out_sr {
+                chans = crate::wave::resample_channels_quality(
+                    &chans,
+                    target_sr,
+                    out_sr,
+                    resample_quality,
+                );
             }
         } else if in_sr != out_sr {
-            for c in chans.iter_mut() {
-                *c = crate::wave::resample_quality(c, in_sr, out_sr, resample_quality);
-            }
+            chans = crate::wave::resample_channels_quality(&chans, in_sr, out_sr, resample_quality);
         }
         if let Some(depth) = bit_depth {
             crate::wave::quantize_channels_in_place(&mut chans, depth);
@@ -442,7 +539,7 @@ impl super::WavesPreviewer {
         chans
     }
 
-    fn estimate_editor_total_frames(&self, path: &Path, out_sr: u32) -> Option<usize> {
+    fn estimate_editor_total_frames_cached(&self, path: &Path, out_sr: u32) -> Option<usize> {
         if let Some(meta) = self.meta_for_path(path) {
             if let Some(source_frames) = meta.total_frames.filter(|v| *v > 0) {
                 return Some(
@@ -455,21 +552,6 @@ impl super::WavesPreviewer {
                 );
             }
             if let Some(secs) = meta.duration_secs.filter(|v| v.is_finite() && *v > 0.0) {
-                return Some(((secs * out_sr.max(1) as f32).round() as usize).max(1));
-            }
-        }
-        if let Ok(info) = crate::audio_io::read_audio_info(path) {
-            if let Some(source_frames) = info.total_frames.filter(|v| *v > 0) {
-                return Some(
-                    Self::convert_source_frames_to_output_frames(
-                        source_frames as usize,
-                        info.sample_rate.max(1),
-                        out_sr,
-                    )
-                    .max(1),
-                );
-            }
-            if let Some(secs) = info.duration_secs.filter(|v| v.is_finite() && *v > 0.0) {
                 return Some(((secs * out_sr.max(1) as f32).round() as usize).max(1));
             }
         }
@@ -523,7 +605,8 @@ impl super::WavesPreviewer {
             }
             EditorDecodeStage::StreamingFull => {
                 if let Some(total) = state.total_source_frames.filter(|v| *v > 0) {
-                    0.15 + 0.77 * (state.decoded_source_frames as f32 / total as f32).clamp(0.0, 1.0)
+                    0.15 + 0.77
+                        * (state.decoded_source_frames as f32 / total as f32).clamp(0.0, 1.0)
                 } else if let Some(total) = state.estimated_total_frames.filter(|v| *v > 0) {
                     0.15 + 0.77 * (state.decoded_frames as f32 / total as f32).clamp(0.0, 1.0)
                 } else {
@@ -582,9 +665,8 @@ impl super::WavesPreviewer {
         let mut did_resample = false;
         let resample_started = std::time::Instant::now();
         if in_sr != out_sr {
-            for ch in channels.iter_mut() {
-                *ch = crate::wave::resample_quality(ch, in_sr, out_sr, resample_quality);
-            }
+            *channels =
+                crate::wave::resample_channels_quality(channels, in_sr, out_sr, resample_quality);
             did_resample = true;
         }
         if did_resample {
@@ -594,6 +676,101 @@ impl super::WavesPreviewer {
         if let Some(depth) = self.bit_depth_override.get(path).copied() {
             crate::wave::quantize_channels_in_place(channels, depth);
         }
+    }
+
+    pub(super) fn mode_requires_offline_processing(&self) -> bool {
+        match self.mode {
+            RateMode::Speed | RateMode::TimeStretch => (self.playback_rate - 1.0).abs() > 0.0001,
+            RateMode::PitchShift => self.pitch_semitones.abs() > 0.0001,
+        }
+    }
+
+    pub(super) fn offline_render_spec_for_path(&self, path: &Path) -> OfflineRenderSpec {
+        OfflineRenderSpec {
+            mode: self.mode,
+            speed_rate: self.playback_rate,
+            pitch_semitones: self.pitch_semitones,
+            stretch_rate: self.playback_rate,
+            master_gain_db: 0.0,
+            file_gain_db: self.pending_gain_db_for_path(path),
+            out_sr: self.audio.shared.out_sample_rate.max(1),
+            target_sr: self
+                .sample_rate_override
+                .get(path)
+                .copied()
+                .filter(|v| *v > 0),
+            bit_depth: self.bit_depth_override.get(path).copied(),
+            quality: self.src_quality,
+            source_variant: self.list_preview_source_variant(path),
+            loop_preview_enabled: false,
+            effect_state_version: 0,
+        }
+    }
+
+    pub(super) fn render_channels_offline_with_spec(
+        mut channels: Vec<Vec<f32>>,
+        in_sr: u32,
+        spec: OfflineRenderSpec,
+        apply_gain: bool,
+    ) -> Vec<Vec<f32>> {
+        let mut current_sr = in_sr.max(1);
+        let quality = Self::to_wave_resample_quality(spec.quality);
+        if let Some(target_sr) = spec.target_sr.filter(|v| *v > 0) {
+            let target_sr = target_sr.max(1);
+            if current_sr != target_sr {
+                channels = crate::wave::resample_channels_quality(
+                    &channels, current_sr, target_sr, quality,
+                );
+            }
+            current_sr = target_sr;
+        }
+        if current_sr != spec.out_sr {
+            channels =
+                crate::wave::resample_channels_quality(&channels, current_sr, spec.out_sr, quality);
+            current_sr = spec.out_sr;
+        }
+        match spec.mode {
+            RateMode::Speed if (spec.speed_rate - 1.0).abs() > 0.0001 => {
+                for channel in &mut channels {
+                    *channel = crate::wave::process_speed_offline(channel, spec.speed_rate);
+                }
+            }
+            RateMode::PitchShift if spec.pitch_semitones.abs() > 0.0001 => {
+                for channel in &mut channels {
+                    *channel = crate::wave::process_pitchshift_offline(
+                        channel,
+                        current_sr,
+                        spec.out_sr,
+                        spec.pitch_semitones,
+                    );
+                }
+            }
+            RateMode::TimeStretch if (spec.stretch_rate - 1.0).abs() > 0.0001 => {
+                for channel in &mut channels {
+                    *channel = crate::wave::process_timestretch_offline(
+                        channel,
+                        current_sr,
+                        spec.out_sr,
+                        spec.stretch_rate,
+                    );
+                }
+            }
+            _ => {}
+        }
+        if apply_gain {
+            let gain = super::helpers::db_to_amp(spec.file_gain_db);
+            if (gain - 1.0).abs() > 1.0e-6 {
+                for channel in &mut channels {
+                    for sample in channel {
+                        *sample = (*sample * gain).clamp(-1.0, 1.0);
+                    }
+                }
+            }
+        }
+        if let Some(depth) = spec.bit_depth {
+            crate::wave::quantize_channels_in_place(&mut channels, depth);
+        }
+        channels
     }
 
     pub(super) fn should_skip_path(&self, path: &Path) -> bool {
@@ -663,13 +840,17 @@ impl super::WavesPreviewer {
 
     pub(super) fn apply_dirty_tab_audio_with_mode(&mut self, path: &Path) -> bool {
         let decode_failed = self.is_decode_failed_path(path);
+        let mut render_spec = self.offline_render_spec_for_path(path);
+        render_spec.master_gain_db = 0.0;
+        render_spec.file_gain_db = 0.0;
+        let source_time_sec = self.playback_current_source_time_sec();
         // Prefer a live dirty tab when open; otherwise fall back to cached edits.
         let idx = match self.tabs.iter().position(|t| {
             (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
         }) {
             Some(i) => i,
             None => {
-                let (mut channels, buffer_sr) = {
+                let (channels, buffer_sr) = {
                     let cached = match self.edited_cache.get(path) {
                         Some(v) => v,
                         None => return false,
@@ -677,48 +858,35 @@ impl super::WavesPreviewer {
                     (cached.ch_samples.clone(), cached.buffer_sample_rate.max(1))
                 };
                 self.playing_path = Some(path.to_path_buf());
-                match self.mode {
-                    RateMode::Speed => {
-                        self.apply_sample_rate_preview_for_path(path, &mut channels, buffer_sr);
-                        self.set_editor_buffer_transport_preserving_time(
-                            path,
-                            channels,
-                            self.audio.shared.out_sample_rate.max(1),
-                        );
-                        self.playback_mark_source(
-                            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                            self.audio.shared.out_sample_rate.max(1),
-                        );
-                    }
-                    _ => {
-                        if decode_failed {
-                            self.apply_sample_rate_preview_for_path(path, &mut channels, buffer_sr);
-                            self.audio.set_samples_channels(channels);
-                            self.playback_mark_source(
-                                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                                self.audio.shared.out_sample_rate.max(1),
-                            );
-                        } else {
-                            // Prime with target tab audio so tab switch never keeps old-tab content.
-                            self.apply_sample_rate_preview_for_path(path, &mut channels, buffer_sr);
-                            self.audio.set_samples_channels(channels.clone());
-                            self.playback_mark_source(
-                                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                                self.audio.shared.out_sample_rate.max(1),
-                            );
-                            self.spawn_heavy_processing_from_channels(
-                                path.to_path_buf(),
-                                channels,
-                                ProcessingTarget::EditorTab(path.to_path_buf()),
-                            );
-                        }
+                if self.mode_requires_offline_processing() && !decode_failed {
+                    self.audio.stop();
+                    self.audio.set_samples_mono(Vec::new());
+                    self.spawn_heavy_processing_from_channels(
+                        path.to_path_buf(),
+                        channels,
+                        ProcessingTarget::EditorTab(path.to_path_buf()),
+                    );
+                } else {
+                    let rendered = Self::render_channels_offline_with_spec(
+                        channels,
+                        buffer_sr,
+                        render_spec,
+                        false,
+                    );
+                    self.audio.set_samples_channels(rendered);
+                    self.playback_mark_buffer_source(
+                        super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
+                    if let Some(source_time_sec) = source_time_sec {
+                        self.playback_seek_to_source_time(self.mode, source_time_sec);
                     }
                 }
                 self.apply_effective_volume();
                 return true;
             }
         };
-        let (mut channels, tab_path, buffer_sr) = {
+        let (channels, tab_path, buffer_sr) = {
             let tab = &self.tabs[idx];
             (
                 tab.ch_samples.clone(),
@@ -727,42 +895,24 @@ impl super::WavesPreviewer {
             )
         };
         self.playing_path = Some(tab_path.clone());
-        match self.mode {
-            RateMode::Speed => {
-                self.apply_sample_rate_preview_for_path(&tab_path, &mut channels, buffer_sr);
-                self.set_editor_buffer_transport_preserving_time(
-                    tab_path.as_path(),
-                    channels,
-                    self.audio.shared.out_sample_rate.max(1),
-                );
-                self.playback_mark_source(
-                    super::PlaybackSourceKind::EditorTab(tab_path.clone()),
-                    self.audio.shared.out_sample_rate.max(1),
-                );
-            }
-            _ => {
-                // Decode failures avoid heavy processing; we play cached samples directly.
-                if decode_failed {
-                    self.apply_sample_rate_preview_for_path(&tab_path, &mut channels, buffer_sr);
-                    self.audio.set_samples_channels(channels);
-                    self.playback_mark_source(
-                        super::PlaybackSourceKind::EditorTab(tab_path.clone()),
-                        self.audio.shared.out_sample_rate.max(1),
-                    );
-                } else {
-                    // Prime with target tab audio so tab switch never keeps old-tab content.
-                    self.apply_sample_rate_preview_for_path(&tab_path, &mut channels, buffer_sr);
-                    self.audio.set_samples_channels(channels.clone());
-                    self.playback_mark_source(
-                        super::PlaybackSourceKind::EditorTab(tab_path.clone()),
-                        self.audio.shared.out_sample_rate.max(1),
-                    );
-                    self.spawn_heavy_processing_from_channels(
-                        tab_path.clone(),
-                        channels,
-                        ProcessingTarget::EditorTab(tab_path.clone()),
-                    );
-                }
+        if self.mode_requires_offline_processing() && !decode_failed {
+            self.audio.stop();
+            self.audio.set_samples_mono(Vec::new());
+            self.spawn_heavy_processing_from_channels(
+                tab_path.clone(),
+                channels,
+                ProcessingTarget::EditorTab(tab_path.clone()),
+            );
+        } else {
+            let rendered =
+                Self::render_channels_offline_with_spec(channels, buffer_sr, render_spec, false);
+            self.audio.set_samples_channels(rendered);
+            self.playback_mark_buffer_source(
+                super::PlaybackSourceKind::EditorTab(tab_path.clone()),
+                self.audio.shared.out_sample_rate.max(1),
+            );
+            if let Some(source_time_sec) = source_time_sec {
+                self.playback_seek_to_source_time(self.mode, source_time_sec);
             }
         }
         if let Some(tab) = self.tabs.get(idx) {
@@ -807,24 +957,38 @@ impl super::WavesPreviewer {
             Self::reset_tab_defaults(tab);
         }
         if update_audio {
-            self.audio.set_samples_channels(editor_channels);
-            self.playback_mark_source(
-                super::PlaybackSourceKind::EditorTab(path.clone()),
-                self.audio.shared.out_sample_rate.max(1),
-            );
+            if self.mode_requires_offline_processing() {
+                self.audio.stop();
+                self.audio.set_samples_mono(Vec::new());
+                self.spawn_heavy_processing_from_channels(
+                    path.clone(),
+                    editor_channels,
+                    ProcessingTarget::EditorTab(path.clone()),
+                );
+            } else {
+                self.audio.set_samples_channels(editor_channels);
+                self.playback_mark_buffer_source(
+                    super::PlaybackSourceKind::EditorTab(path.clone()),
+                    self.audio.shared.out_sample_rate.max(1),
+                );
+            }
             self.apply_effective_volume();
         }
         true
     }
 
     fn apply_dirty_tab_preview_for_list(&mut self, path: &Path) -> bool {
+        let mut render_spec = self.offline_render_spec_for_path(path);
+        render_spec.master_gain_db = 0.0;
+        render_spec.file_gain_db = 0.0;
+        let source_time_sec = self.playback_current_source_time_sec();
         // List preview prioritizes dirty tab audio, then cached edits.
         let idx = match self.tabs.iter().position(|t| {
             (t.dirty || t.loop_markers_dirty || t.markers_dirty) && t.path.as_path() == path
         }) {
             Some(i) => i,
             None => {
-                let (mut channels, buffer_sr) = {
+                let (channels, buffer_sr) = {
                     let cached = match self.edited_cache.get(path) {
                         Some(v) => v,
                         None => return false,
@@ -835,15 +999,33 @@ impl super::WavesPreviewer {
                 self.audio.set_loop_enabled(false);
                 self.cancel_list_preview_job();
                 self.list_play_pending = false;
-                self.apply_sample_rate_preview_for_path(path, &mut channels, buffer_sr);
-                self.audio.set_samples_channels(channels);
-                self.mark_list_preview_source(path, self.audio.shared.out_sample_rate.max(1));
-                self.audio.stop();
+                if self.mode_requires_offline_processing() {
+                    self.audio.stop();
+                    self.audio.set_samples_mono(Vec::new());
+                    self.spawn_heavy_processing_from_channels(
+                        path.to_path_buf(),
+                        channels,
+                        ProcessingTarget::ListPreview(path.to_path_buf()),
+                    );
+                } else {
+                    let rendered = Self::render_channels_offline_with_spec(
+                        channels,
+                        buffer_sr,
+                        render_spec,
+                        false,
+                    );
+                    self.audio.set_samples_channels(rendered);
+                    self.mark_list_preview_source(path, self.audio.shared.out_sample_rate.max(1));
+                    self.audio.stop();
+                    if let Some(source_time_sec) = source_time_sec {
+                        self.playback_seek_to_source_time(self.mode, source_time_sec);
+                    }
+                }
                 self.apply_effective_volume();
                 return true;
             }
         };
-        let (mut channels, buffer_sr) = {
+        let (channels, buffer_sr) = {
             let tab = &self.tabs[idx];
             (tab.ch_samples.clone(), tab.buffer_sample_rate.max(1))
         };
@@ -851,10 +1033,24 @@ impl super::WavesPreviewer {
         self.audio.set_loop_enabled(false);
         self.cancel_list_preview_job();
         self.list_play_pending = false;
-        self.apply_sample_rate_preview_for_path(path, &mut channels, buffer_sr);
-        self.audio.set_samples_channels(channels);
-        self.mark_list_preview_source(path, self.audio.shared.out_sample_rate.max(1));
-        self.audio.stop();
+        if self.mode_requires_offline_processing() {
+            self.audio.stop();
+            self.audio.set_samples_mono(Vec::new());
+            self.spawn_heavy_processing_from_channels(
+                path.to_path_buf(),
+                channels,
+                ProcessingTarget::ListPreview(path.to_path_buf()),
+            );
+        } else {
+            let rendered =
+                Self::render_channels_offline_with_spec(channels, buffer_sr, render_spec, false);
+            self.audio.set_samples_channels(rendered);
+            self.mark_list_preview_source(path, self.audio.shared.out_sample_rate.max(1));
+            self.audio.stop();
+            if let Some(source_time_sec) = source_time_sec {
+                self.playback_seek_to_source_time(self.mode, source_time_sec);
+            }
+        }
         self.apply_effective_volume();
         true
     }
@@ -865,10 +1061,11 @@ impl super::WavesPreviewer {
         channels: Vec<Vec<f32>>,
         target: ProcessingTarget,
     ) {
-        if self.mode == RateMode::Speed {
+        if !self.mode_requires_offline_processing() {
             self.debug_log(format!(
-                "processing spawn skipped in Speed mode: target={}",
-                Self::format_processing_target(&target)
+                "processing spawn skipped: mode={:?} target={}",
+                self.mode,
+                Self::format_processing_target(&target),
             ));
             return;
         }
@@ -876,26 +1073,27 @@ impl super::WavesPreviewer {
         let (tx, rx) = mpsc::channel::<ProcessingResult>();
         let job_id = self.next_processing_job_id();
         let mode = self.mode;
-        let rate = self.playback_rate;
-        let sem = self.pitch_semitones;
-        let out_sr = self.audio.shared.out_sample_rate;
+        let mut render_spec = self.offline_render_spec_for_path(&path);
+        render_spec.master_gain_db = 0.0;
+        render_spec.file_gain_db = 0.0;
+        let source_time_sec = match &self.playback_session.source {
+            super::PlaybackSourceKind::EditorTab(src)
+            | super::PlaybackSourceKind::ListPreview(src)
+                if src == &path =>
+            {
+                self.playback_current_source_time_sec()
+            }
+            _ => None,
+        };
         let path_for_thread = path.clone();
         let target_for_thread = target.clone();
-        // Heavy pitch/stretch work runs off-thread; waveform is derived for UI reuse.
         std::thread::spawn(move || {
-            let mut processed: Vec<Vec<f32>> = Vec::with_capacity(channels.len());
-            for chan in channels.iter() {
-                let out = match mode {
-                    RateMode::PitchShift => {
-                        crate::wave::process_pitchshift_offline(chan, out_sr, out_sr, sem)
-                    }
-                    RateMode::TimeStretch => {
-                        crate::wave::process_timestretch_offline(chan, out_sr, out_sr, rate)
-                    }
-                    RateMode::Speed => chan.clone(),
-                };
-                processed.push(out);
-            }
+            let processed = Self::render_channels_offline_with_spec(
+                channels,
+                render_spec.out_sr,
+                render_spec,
+                false,
+            );
             let len = processed.get(0).map(|c| c.len()).unwrap_or(0);
             let samples = Self::mixdown_channels_mono(&processed, len);
             let mut waveform = Vec::new();
@@ -927,6 +1125,7 @@ impl super::WavesPreviewer {
             mode,
             target,
             autoplay_when_ready: false,
+            source_time_sec,
             started_at: std::time::Instant::now(),
             rx,
         });
@@ -1036,108 +1235,84 @@ impl super::WavesPreviewer {
             self.remove_missing_path(&path);
             return false;
         }
-        // Rebuild editor tab state from on-disk audio (speed vs other modes differ).
+        // Rebuild editor tab state from on-disk audio.
         let name = path
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("(invalid)")
             .to_string();
         let out_sr = self.audio.shared.out_sample_rate;
-        match self.mode {
-            RateMode::Speed => {
-                // Speed mode uses fast mono preview + prepare_for_speed for playback.
-                let mut waveform = Vec::new();
-                if let Ok((mono, _in_sr)) = crate::wave::decode_wav_mono(&path) {
-                    crate::wave::build_minmax(&mut waveform, &mono, 2048);
-                    if update_audio {
-                        let _ = crate::wave::prepare_for_speed_quality(
-                            &path,
-                            &self.audio,
-                            &mut Vec::new(),
-                            self.playback_rate,
-                            Self::to_wave_resample_quality(self.src_quality),
-                        );
-                    }
-                } else if update_audio {
-                    let _ = crate::wave::prepare_for_speed_quality(
-                        &path,
-                        &self.audio,
-                        &mut Vec::new(),
-                        self.playback_rate,
-                        Self::to_wave_resample_quality(self.src_quality),
-                    );
-                }
-                let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
-                    Ok(v) => v,
-                    Err(_) => (Vec::new(), out_sr),
-                };
-                if in_sr != out_sr {
-                    for c in chs.iter_mut() {
-                        *c = self.resample_mono_with_quality(c, in_sr, out_sr);
-                    }
-                }
-                let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                let file_sr = self.sample_rate_for_path(&path, in_sr);
-                let waveform_pyramid = if !chs.is_empty() && samples_len > 0 {
-                    Self::build_editor_waveform_cache(&chs, samples_len).1
-                } else {
-                    None
-                };
-                if let Some(tab) = self.tabs.get_mut(idx) {
-                    tab.display_name = name;
-                    tab.waveform_minmax = waveform;
-                    tab.waveform_pyramid = waveform_pyramid;
-                    tab.ch_samples = chs;
-                    tab.samples_len = samples_len;
-                    tab.buffer_sample_rate = out_sr.max(1);
-                    Self::reset_tab_defaults(tab);
-                    Self::set_loop_region_from_file_markers(tab, &path, in_sr, out_sr);
-                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
-                }
+        let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
+            Ok(v) => v,
+            Err(_) => (Vec::new(), out_sr),
+        };
+        if in_sr != out_sr {
+            for c in chs.iter_mut() {
+                *c = self.resample_mono_with_quality(c, in_sr, out_sr);
             }
-            _ => {
-                let (mut chs, in_sr) = match crate::wave::decode_wav_multi(&path) {
-                    Ok(v) => v,
-                    Err(_) => (Vec::new(), out_sr),
-                };
-                if in_sr != out_sr {
-                    for c in chs.iter_mut() {
-                        *c = self.resample_mono_with_quality(c, in_sr, out_sr);
-                    }
-                }
-                let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
-                let file_sr = self.sample_rate_for_path(&path, in_sr);
-                if let Some(tab) = self.tabs.get_mut(idx) {
-                    tab.display_name = name;
-                    tab.waveform_minmax.clear();
-                    tab.waveform_pyramid = None;
-                    tab.ch_samples = chs;
-                    tab.samples_len = samples_len;
-                    tab.buffer_sample_rate = out_sr.max(1);
-                    Self::reset_tab_defaults(tab);
-                    Self::set_loop_region_from_file_markers(tab, &path, in_sr, out_sr);
-                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
-                }
-                if update_audio {
-                    self.playback_mark_source(
-                        super::PlaybackSourceKind::EditorTab(path.clone()),
-                        self.audio.shared.out_sample_rate.max(1),
-                    );
-                    self.spawn_heavy_processing(
-                        &path,
-                        ProcessingTarget::EditorTab(path.clone()),
-                    );
-                }
+        }
+        let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
+        let file_sr = self.sample_rate_for_path(&path, in_sr);
+        let waveform_cache =
+            if !self.mode_requires_offline_processing() && !chs.is_empty() && samples_len > 0 {
+                Some(Self::build_editor_waveform_cache(&chs, samples_len))
+            } else {
+                None
+            };
+        if let Some(tab) = self.tabs.get_mut(idx) {
+            tab.display_name = name;
+            if let Some((waveform, waveform_pyramid)) = waveform_cache {
+                tab.waveform_minmax = waveform;
+                tab.waveform_pyramid = waveform_pyramid;
+            } else {
+                tab.waveform_minmax.clear();
+                tab.waveform_pyramid = None;
             }
+            tab.ch_samples = chs;
+            tab.samples_len = samples_len;
+            tab.buffer_sample_rate = out_sr.max(1);
+            Self::reset_tab_defaults(tab);
+            Self::set_loop_region_from_file_markers(tab, &path, in_sr, out_sr);
+            Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
         }
         if update_audio {
             self.playing_path = Some(path.clone());
-            self.playback_mark_source(
-                super::PlaybackSourceKind::EditorTab(path.clone()),
-                self.audio.shared.out_sample_rate.max(1),
-            );
-            if let Some(tab) = self.tabs.get(idx) {
-                self.apply_loop_mode_for_tab(tab);
+            let source_time_sec = self.playback_current_source_time_sec();
+            if self.try_activate_editor_stream_transport_for_tab(idx) {
+                if let Some(source_time_sec) = source_time_sec {
+                    self.playback_seek_to_source_time(self.mode, source_time_sec);
+                }
+                return true;
+            }
+            if self.mode_requires_offline_processing() {
+                self.audio.stop();
+                self.audio.set_samples_mono(Vec::new());
+                self.spawn_heavy_processing(&path, ProcessingTarget::EditorTab(path.clone()));
+            } else if let Some((channels, buffer_sr)) = self
+                .tabs
+                .get(idx)
+                .map(|tab| (tab.ch_samples.clone(), tab.buffer_sample_rate.max(1)))
+            {
+                let mut render_spec = self.offline_render_spec_for_path(&path);
+                render_spec.master_gain_db = 0.0;
+                render_spec.file_gain_db = 0.0;
+                let rendered = Self::render_channels_offline_with_spec(
+                    channels,
+                    buffer_sr,
+                    render_spec,
+                    false,
+                );
+                self.audio.set_samples_channels(rendered);
+                self.playback_mark_buffer_source(
+                    super::PlaybackSourceKind::EditorTab(path.clone()),
+                    self.audio.shared.out_sample_rate.max(1),
+                );
+                if let Some(source_time_sec) = source_time_sec {
+                    self.playback_seek_to_source_time(self.mode, source_time_sec);
+                }
+                if let Some(tab) = self.tabs.get(idx) {
+                    self.apply_loop_mode_for_tab(tab);
+                }
             }
             self.apply_effective_volume();
         }
@@ -1399,11 +1574,7 @@ impl super::WavesPreviewer {
         if self.apply_dirty_tab_preview_for_list(&p_owned) {
             return;
         }
-        let need_heavy = match self.mode {
-            RateMode::PitchShift => self.pitch_semitones.abs() > 0.0001,
-            RateMode::TimeStretch => (self.playback_rate - 1.0).abs() > 0.0001,
-            RateMode::Speed => false,
-        };
+        let need_heavy = self.mode_requires_offline_processing();
         let decode_failed = if is_virtual {
             false
         } else {
@@ -1420,7 +1591,7 @@ impl super::WavesPreviewer {
             let Some(audio) = item_snapshot.virtual_audio else {
                 return;
             };
-            let mut channels = audio.channels.clone();
+            let channels = audio.channels.clone();
             if need_heavy {
                 self.audio.stop();
                 self.audio.set_samples_mono(Vec::new());
@@ -1439,12 +1610,26 @@ impl super::WavesPreviewer {
                 .or_else(|| item_snapshot.meta.as_ref().map(|m| m.sample_rate))
                 .filter(|v| *v > 0)
                 .unwrap_or(self.audio.shared.out_sample_rate.max(1));
-            self.apply_sample_rate_preview_for_path(&p_owned, &mut channels, virtual_in_sr);
-            self.audio.set_samples_channels(channels);
+            let mut render_spec = self.offline_render_spec_for_path(&p_owned);
+            render_spec.master_gain_db = 0.0;
+            render_spec.file_gain_db = 0.0;
+            let rendered = Self::render_channels_offline_with_spec(
+                channels,
+                virtual_in_sr,
+                render_spec,
+                false,
+            );
+            self.audio.set_samples_channels(rendered);
             self.mark_list_preview_source(&p_owned, self.audio.shared.out_sample_rate.max(1));
             self.audio.stop();
             self.apply_effective_volume();
             self.debug_mark_list_preview_ready(&p_owned);
+            return;
+        }
+        if self.auto_play_list_nav && self.try_activate_list_stream_transport(&p_owned) {
+            self.audio.play();
+            self.debug_mark_list_preview_ready(&p_owned);
+            self.debug_mark_list_play_start(&p_owned);
             return;
         }
         if need_heavy && !decode_failed {
@@ -1452,10 +1637,7 @@ impl super::WavesPreviewer {
             self.list_preview_pending_path = None;
             self.audio.stop();
             self.audio.set_samples_mono(Vec::new());
-            self.spawn_heavy_processing(
-                &p_owned,
-                ProcessingTarget::ListPreview(p_owned.clone()),
-            );
+            self.spawn_heavy_processing(&p_owned, ProcessingTarget::ListPreview(p_owned.clone()));
             self.apply_effective_volume();
             return;
         }
@@ -1555,13 +1737,7 @@ impl super::WavesPreviewer {
             self.list_play_pending = false;
             return true;
         }
-        let need_heavy = matches!(
-            self.mode,
-            RateMode::PitchShift if self.pitch_semitones.abs() > 0.0001
-        ) || matches!(
-            self.mode,
-            RateMode::TimeStretch if (self.playback_rate - 1.0).abs() > 0.0001
-        );
+        let need_heavy = self.mode_requires_offline_processing();
         if matches!(source, Some(crate::app::types::MediaSource::Virtual)) {
             if let Some(row) = selected_row {
                 self.select_and_load(row, false);
@@ -1583,15 +1759,17 @@ impl super::WavesPreviewer {
         if !path.is_file() {
             return false;
         }
+        if self.try_activate_list_stream_transport(&path) {
+            self.debug_mark_list_preview_ready(&path);
+            self.list_play_pending = false;
+            return true;
+        }
         let decode_failed = self.is_decode_failed_path(&path);
         if need_heavy && !decode_failed {
             if let Some(row) = selected_row {
                 self.select_and_load(row, false);
             } else {
-                self.spawn_heavy_processing(
-                    &path,
-                    ProcessingTarget::ListPreview(path.clone()),
-                );
+                self.spawn_heavy_processing(&path, ProcessingTarget::ListPreview(path.clone()));
             }
             if let Some(state) = &mut self.processing {
                 if state.path == path {
@@ -1669,37 +1847,35 @@ impl super::WavesPreviewer {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::{mpsc, Arc};
         self.cancel_editor_decode();
-        self.editor_decode_job_id = self.editor_decode_job_id.wrapping_add(1);
-        let job_id = self.editor_decode_job_id;
-        let out_sr = self.audio.shared.out_sample_rate;
-        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         let target_sr = self
             .sample_rate_override
             .get(&path)
             .copied()
             .filter(|v| *v > 0);
-        let bit_depth = self.bit_depth_override.get(&path).copied();
-        let estimated_total_frames = self.estimate_editor_total_frames(&path, out_sr);
-        let total_source_frames_hint = self.estimate_editor_total_source_frames(&path);
         let source_sr_hint = self
             .meta_for_path(&path)
             .map(|meta| meta.sample_rate)
             .filter(|v| *v > 0);
-        let source_sr_hint = source_sr_hint.or_else(|| {
-            crate::audio_io::read_audio_info(&path)
-                .ok()
-                .map(|info| info.sample_rate)
-                .filter(|v| *v > 0)
-        });
+        let preferred_out_sr = target_sr.or(source_sr_hint);
+        let _ = self.ensure_output_sample_rate(preferred_out_sr);
+
+        self.editor_decode_job_id = self.editor_decode_job_id.wrapping_add(1);
+        let job_id = self.editor_decode_job_id;
+        let out_sr = self.audio.shared.out_sample_rate;
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        let bit_depth = self.bit_depth_override.get(&path).copied();
+        let estimated_total_frames = self.estimate_editor_total_frames_cached(&path, out_sr);
+        let total_source_frames_hint = self.estimate_editor_total_source_frames_cached(&path);
         let strategy = Self::editor_decode_strategy(&path);
         self.debug_log(format!(
-            "editor decode spawn: {} strategy={} out_sr={} target_sr={:?} bits={:?} est_frames={:?}",
+            "editor decode spawn: {} strategy={} out_sr={} preferred_out_sr={:?} target_sr={:?} bits={:?} est_frames={:?}",
             path.display(),
             match strategy {
                 EditorDecodeStrategy::CompressedProgressiveFull => "compressed-progressive-full",
                 EditorDecodeStrategy::StreamingOverviewFinalAudio => "streaming-overview-final-audio",
             },
             out_sr,
+            preferred_out_sr,
             target_sr,
             bit_depth,
             estimated_total_frames
@@ -1708,208 +1884,206 @@ impl super::WavesPreviewer {
         let cancel_thread = cancel.clone();
         let path_for_thread = path.clone();
         let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
-        std::thread::spawn(move || {
-            match strategy {
-                EditorDecodeStrategy::CompressedProgressiveFull => {
-                    let mut partial_emitted = false;
-                    let progressive = crate::audio_io::decode_audio_multi_progressive(
-                        &path_for_thread,
-                        EDITOR_PREVIEW_PREFIX_SECS_COMPRESSED,
-                        EDITOR_PROGRESSIVE_EMIT_SECS_COMPRESSED,
-                        || cancel_thread.load(Ordering::Relaxed),
-                        |chans, in_sr, is_final| {
-                            if cancel_thread.load(Ordering::Relaxed) {
-                                return false;
-                            }
-                            let decoded_source_frames = chans.first().map(|c| c.len()).unwrap_or(0);
-                            let visual_total_frames = estimated_total_frames.or_else(|| {
-                                Some(Self::convert_source_frames_to_output_frames(
-                                    decoded_source_frames,
-                                    in_sr.max(1),
-                                    out_sr.max(1),
-                                ))
-                            });
-                            if is_final {
-                                let chans = Self::process_editor_decode_channels(
-                                    chans,
-                                    in_sr,
-                                    out_sr,
-                                    target_sr,
-                                    bit_depth,
-                                    resample_quality,
-                                );
-                                let decoded_frames = chans.first().map(|c| c.len()).unwrap_or(0);
-                                let (waveform_minmax, waveform_pyramid) =
-                                    Self::build_editor_waveform_cache(&chans, decoded_frames);
-                                return tx
-                                    .send(EditorDecodeResult {
-                                        path: path_for_thread.clone(),
-                                        event: EditorDecodeEvent::FinalReady,
-                                        channels: chans,
-                                        waveform_minmax,
-                                        waveform_pyramid,
-                                        loading_waveform_minmax: Vec::new(),
-                                        buffer_sample_rate: out_sr.max(1),
-                                        job_id,
-                                        error: None,
-                                        stage: EditorDecodeStage::FinalizingWaveform,
-                                        decoded_frames,
-                                        decoded_source_frames,
-                                        total_source_frames: Some(decoded_source_frames),
-                                        visual_total_frames,
-                                        progress_emit_gap_ms: None,
-                                        finalize_audio_ms: None,
-                                        finalize_waveform_ms: None,
-                                    })
-                                    .is_ok();
-                            }
-                            let sent = tx
+        std::thread::spawn(move || match strategy {
+            EditorDecodeStrategy::CompressedProgressiveFull => {
+                let mut partial_emitted = false;
+                let progressive = crate::audio_io::decode_audio_multi_progressive(
+                    &path_for_thread,
+                    EDITOR_PREVIEW_PREFIX_SECS_COMPRESSED,
+                    EDITOR_PROGRESSIVE_EMIT_SECS_COMPRESSED,
+                    || cancel_thread.load(Ordering::Relaxed),
+                    |chans, in_sr, is_final| {
+                        if cancel_thread.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                        let decoded_source_frames = chans.first().map(|c| c.len()).unwrap_or(0);
+                        let visual_total_frames = estimated_total_frames.or_else(|| {
+                            Some(Self::convert_source_frames_to_output_frames(
+                                decoded_source_frames,
+                                in_sr.max(1),
+                                out_sr.max(1),
+                            ))
+                        });
+                        if is_final {
+                            let chans = Self::process_editor_decode_channels(
+                                chans,
+                                in_sr,
+                                out_sr,
+                                target_sr,
+                                bit_depth,
+                                resample_quality,
+                            );
+                            let decoded_frames = chans.first().map(|c| c.len()).unwrap_or(0);
+                            let (waveform_minmax, waveform_pyramid) =
+                                Self::build_editor_waveform_cache(&chans, decoded_frames);
+                            return tx
                                 .send(EditorDecodeResult {
                                     path: path_for_thread.clone(),
-                                    event: EditorDecodeEvent::Progress,
-                                    channels: Vec::new(),
-                                    waveform_minmax: Vec::new(),
-                                    waveform_pyramid: None,
-                                    loading_waveform_minmax: Self::build_loading_overview_from_channels(
-                                        &chans,
-                                    ),
+                                    event: EditorDecodeEvent::FinalReady,
+                                    channels: chans,
+                                    waveform_minmax,
+                                    waveform_pyramid,
+                                    loading_waveform_minmax: Vec::new(),
                                     buffer_sample_rate: out_sr.max(1),
                                     job_id,
                                     error: None,
-                                    stage: if partial_emitted {
-                                        EditorDecodeStage::StreamingFull
-                                    } else {
-                                        EditorDecodeStage::Preview
-                                    },
-                                    decoded_frames: Self::convert_source_frames_to_output_frames(
-                                        decoded_source_frames,
-                                        in_sr.max(1),
-                                        out_sr.max(1),
-                                    ),
+                                    stage: EditorDecodeStage::FinalizingWaveform,
+                                    decoded_frames,
                                     decoded_source_frames,
-                                    total_source_frames: None,
+                                    total_source_frames: Some(decoded_source_frames),
                                     visual_total_frames,
                                     progress_emit_gap_ms: None,
                                     finalize_audio_ms: None,
                                     finalize_waveform_ms: None,
                                 })
                                 .is_ok();
-                            partial_emitted = true;
-                            sent
-                        },
-                    );
-                    if let Err(err) = progressive {
-                        if !cancel_thread.load(Ordering::Relaxed) {
-                            let _ = tx.send(EditorDecodeResult {
-                                path: path_for_thread,
-                                event: EditorDecodeEvent::Failed,
-                                channels: Vec::new(),
-                                waveform_minmax: Vec::new(),
-                                waveform_pyramid: None,
-                                loading_waveform_minmax: Vec::new(),
-                                buffer_sample_rate: out_sr.max(1),
-                                job_id,
-                                error: Some(err.to_string()),
-                                stage: EditorDecodeStage::StreamingFull,
-                                decoded_frames: 0,
-                                decoded_source_frames: 0,
-                                total_source_frames: None,
-                                visual_total_frames: estimated_total_frames,
-                                progress_emit_gap_ms: None,
-                                finalize_audio_ms: None,
-                                finalize_waveform_ms: None,
-                            });
                         }
-                    }
-                }
-                EditorDecodeStrategy::StreamingOverviewFinalAudio => {
-                    let mut source_sr = source_sr_hint.unwrap_or(0).max(1);
-                    let mut total_source_frames = total_source_frames_hint.filter(|v| *v > 0);
-                    if total_source_frames.is_none() {
-                        if let (Some(estimated), Some(in_sr)) =
-                            (estimated_total_frames.filter(|v| *v > 0), source_sr_hint)
-                        {
-                            let out_sr_u128 = out_sr.max(1) as u128;
-                            let in_sr_u128 = in_sr.max(1) as u128;
-                            total_source_frames = Some(
-                                (((estimated as u128)
-                                    .saturating_mul(in_sr_u128)
-                                    .saturating_add(out_sr_u128 / 2))
-                                    / out_sr_u128) as usize,
-                            )
-                            .filter(|v| *v > 0);
-                        }
-                    }
-                    let mut overview = total_source_frames.map(|frames| {
-                        crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
-                            frames.max(1),
-                            crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,
-                        )
-                    });
-                    let mut full_source_channels: Vec<Vec<f32>> = Vec::new();
-                    let mut last_progress_emit_at: Option<std::time::Instant> = None;
-                    if let Ok(Some(overview_proxy)) = crate::audio_io::build_wav_proxy_preview(
-                        &path_for_thread,
-                        crate::audio_io::EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES,
-                    ) {
-                        source_sr = source_sr.max(overview_proxy.source_sample_rate.max(1));
-                        total_source_frames = Some(overview_proxy.total_source_frames);
-                        let visual_total_frames =
-                            Some(Self::convert_source_frames_to_output_frames(
-                                overview_proxy.total_source_frames,
-                                source_sr,
-                                out_sr.max(1),
-                            ));
-                        if overview.is_none() {
-                            overview = Some(
-                                crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
-                                    overview_proxy.total_source_frames.max(1),
-                                    crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,
-                                ),
-                            );
-                        }
-                        let loading_waveform_minmax =
-                            Self::build_loading_overview_from_channels(&overview_proxy.channels);
-                        if let Some(builder) = overview.as_mut() {
-                            builder.seed_from_minmax(&loading_waveform_minmax);
-                        }
-                        last_progress_emit_at = Some(std::time::Instant::now());
-                        if tx
+                        let sent = tx
                             .send(EditorDecodeResult {
                                 path: path_for_thread.clone(),
                                 event: EditorDecodeEvent::Progress,
                                 channels: Vec::new(),
                                 waveform_minmax: Vec::new(),
                                 waveform_pyramid: None,
-                                loading_waveform_minmax,
+                                loading_waveform_minmax: Self::build_loading_overview_from_channels(
+                                    &chans,
+                                ),
                                 buffer_sample_rate: out_sr.max(1),
                                 job_id,
                                 error: None,
-                                stage: EditorDecodeStage::Preview,
-                                decoded_frames: 0,
-                                decoded_source_frames: 0,
-                                total_source_frames,
+                                stage: if partial_emitted {
+                                    EditorDecodeStage::StreamingFull
+                                } else {
+                                    EditorDecodeStage::Preview
+                                },
+                                decoded_frames: Self::convert_source_frames_to_output_frames(
+                                    decoded_source_frames,
+                                    in_sr.max(1),
+                                    out_sr.max(1),
+                                ),
+                                decoded_source_frames,
+                                total_source_frames: None,
                                 visual_total_frames,
                                 progress_emit_gap_ms: None,
                                 finalize_audio_ms: None,
                                 finalize_waveform_ms: None,
                             })
-                            .is_err()
-                        {
-                            return;
-                        }
+                            .is_ok();
+                        partial_emitted = true;
+                        sent
+                    },
+                );
+                if let Err(err) = progressive {
+                    if !cancel_thread.load(Ordering::Relaxed) {
+                        let _ = tx.send(EditorDecodeResult {
+                            path: path_for_thread,
+                            event: EditorDecodeEvent::Failed,
+                            channels: Vec::new(),
+                            waveform_minmax: Vec::new(),
+                            waveform_pyramid: None,
+                            loading_waveform_minmax: Vec::new(),
+                            buffer_sample_rate: out_sr.max(1),
+                            job_id,
+                            error: Some(err.to_string()),
+                            stage: EditorDecodeStage::StreamingFull,
+                            decoded_frames: 0,
+                            decoded_source_frames: 0,
+                            total_source_frames: None,
+                            visual_total_frames: estimated_total_frames,
+                            progress_emit_gap_ms: None,
+                            finalize_audio_ms: None,
+                            finalize_waveform_ms: None,
+                        });
                     }
-                    let stream = crate::audio_io::decode_audio_multi_streaming_chunks(
-                        &path_for_thread,
-                        EDITOR_STREAMING_PROGRESS_EMIT_SECS,
-                        || cancel_thread.load(Ordering::Relaxed),
-                        |chunk, in_sr, decoded_source_frames, is_final| {
-                            if cancel_thread.load(Ordering::Relaxed) {
-                                return false;
-                            }
-                            source_sr = in_sr.max(1);
-                            if overview.is_none() {
-                                overview = Some(
+                }
+            }
+            EditorDecodeStrategy::StreamingOverviewFinalAudio => {
+                let mut source_sr = source_sr_hint.unwrap_or(0).max(1);
+                let mut total_source_frames = total_source_frames_hint.filter(|v| *v > 0);
+                if total_source_frames.is_none() {
+                    if let (Some(estimated), Some(in_sr)) =
+                        (estimated_total_frames.filter(|v| *v > 0), source_sr_hint)
+                    {
+                        let out_sr_u128 = out_sr.max(1) as u128;
+                        let in_sr_u128 = in_sr.max(1) as u128;
+                        total_source_frames = Some(
+                            (((estimated as u128)
+                                .saturating_mul(in_sr_u128)
+                                .saturating_add(out_sr_u128 / 2))
+                                / out_sr_u128) as usize,
+                        )
+                        .filter(|v| *v > 0);
+                    }
+                }
+                let mut overview = total_source_frames.map(|frames| {
+                    crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
+                        frames.max(1),
+                        crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,
+                    )
+                });
+                let mut full_source_channels: Vec<Vec<f32>> = Vec::new();
+                let mut last_progress_emit_at: Option<std::time::Instant> = None;
+                if let Ok(Some(overview_proxy)) = crate::audio_io::build_wav_proxy_preview(
+                    &path_for_thread,
+                    crate::audio_io::EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES,
+                ) {
+                    source_sr = source_sr.max(overview_proxy.source_sample_rate.max(1));
+                    total_source_frames = Some(overview_proxy.total_source_frames);
+                    let visual_total_frames = Some(Self::convert_source_frames_to_output_frames(
+                        overview_proxy.total_source_frames,
+                        source_sr,
+                        out_sr.max(1),
+                    ));
+                    if overview.is_none() {
+                        overview = Some(
+                            crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
+                                overview_proxy.total_source_frames.max(1),
+                                crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,
+                            ),
+                        );
+                    }
+                    let loading_waveform_minmax =
+                        Self::build_loading_overview_from_channels(&overview_proxy.channels);
+                    if let Some(builder) = overview.as_mut() {
+                        builder.seed_from_minmax(&loading_waveform_minmax);
+                    }
+                    last_progress_emit_at = Some(std::time::Instant::now());
+                    if tx
+                        .send(EditorDecodeResult {
+                            path: path_for_thread.clone(),
+                            event: EditorDecodeEvent::Progress,
+                            channels: Vec::new(),
+                            waveform_minmax: Vec::new(),
+                            waveform_pyramid: None,
+                            loading_waveform_minmax,
+                            buffer_sample_rate: out_sr.max(1),
+                            job_id,
+                            error: None,
+                            stage: EditorDecodeStage::Preview,
+                            decoded_frames: 0,
+                            decoded_source_frames: 0,
+                            total_source_frames,
+                            visual_total_frames,
+                            progress_emit_gap_ms: None,
+                            finalize_audio_ms: None,
+                            finalize_waveform_ms: None,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                let stream = crate::audio_io::decode_audio_multi_streaming_chunks(
+                    &path_for_thread,
+                    EDITOR_STREAMING_PROGRESS_EMIT_SECS,
+                    || cancel_thread.load(Ordering::Relaxed),
+                    |chunk, in_sr, decoded_source_frames, is_final| {
+                        if cancel_thread.load(Ordering::Relaxed) {
+                            return false;
+                        }
+                        source_sr = in_sr.max(1);
+                        if overview.is_none() {
+                            overview = Some(
                                     crate::app::render::waveform_pyramid::StreamingWaveformOverview::new(
                                         total_source_frames
                                             .unwrap_or(decoded_source_frames.max(1))
@@ -1917,201 +2091,192 @@ impl super::WavesPreviewer {
                                         crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS,
                                     ),
                                 );
-                            }
-                            if full_source_channels.is_empty() {
-                                full_source_channels = vec![Vec::new(); chunk.len().max(1)];
-                                if let Some(total) = total_source_frames {
-                                    for ch in &mut full_source_channels {
-                                        ch.reserve(total.min(1_000_000));
-                                    }
+                        }
+                        if full_source_channels.is_empty() {
+                            full_source_channels = vec![Vec::new(); chunk.len().max(1)];
+                            if let Some(total) = total_source_frames {
+                                for ch in &mut full_source_channels {
+                                    let _ = ch.try_reserve(total);
                                 }
                             }
-                            if full_source_channels.len() != chunk.len() {
-                                full_source_channels.resize_with(chunk.len(), Vec::new);
-                            }
-                            let start_frame_source =
-                                full_source_channels.first().map(|c| c.len()).unwrap_or(0);
-                            if let Some(builder) = overview.as_mut() {
-                                builder.append_mixdown_chunk(start_frame_source, &chunk);
-                            }
-                            for (dst, src) in full_source_channels.iter_mut().zip(chunk.iter()) {
-                                dst.extend_from_slice(src);
-                            }
-                            let visual_total_frames = total_source_frames.map(|frames| {
-                                Self::convert_source_frames_to_output_frames(
-                                    frames,
-                                    source_sr,
-                                    out_sr.max(1),
-                                )
-                            });
-                            let loading_waveform_minmax = overview
-                                .as_ref()
-                                .map(|builder| builder.snapshot_minmax())
-                                .unwrap_or_default();
-                            if !is_final {
-                                let now = std::time::Instant::now();
-                                let gap_ms = last_progress_emit_at
-                                    .map(|prev| now.duration_since(prev).as_secs_f32() * 1000.0);
-                                last_progress_emit_at = Some(now);
-                                return tx
-                                    .send(EditorDecodeResult {
-                                        path: path_for_thread.clone(),
-                                        event: EditorDecodeEvent::Progress,
-                                        channels: Vec::new(),
-                                        waveform_minmax: Vec::new(),
-                                        waveform_pyramid: None,
-                                        loading_waveform_minmax,
-                                        buffer_sample_rate: out_sr.max(1),
-                                        job_id,
-                                        error: None,
-                                        stage: if gap_ms.is_some() {
-                                            EditorDecodeStage::StreamingFull
-                                        } else {
-                                            EditorDecodeStage::Preview
-                                        },
-                                        decoded_frames: Self::convert_source_frames_to_output_frames(
-                                            decoded_source_frames,
-                                            source_sr,
-                                            out_sr.max(1),
-                                        ),
-                                        decoded_source_frames,
-                                        total_source_frames,
-                                        visual_total_frames,
-                                        progress_emit_gap_ms: gap_ms,
-                                        finalize_audio_ms: None,
-                                        finalize_waveform_ms: None,
-                                    })
-                                    .is_ok();
-                            }
-                            true
-                        },
-                    );
-                    if let Err(err) = stream {
-                        if !cancel_thread.load(Ordering::Relaxed) {
-                            let _ = tx.send(EditorDecodeResult {
-                                path: path_for_thread,
-                                event: EditorDecodeEvent::Failed,
-                                channels: Vec::new(),
-                                waveform_minmax: Vec::new(),
-                                waveform_pyramid: None,
-                                loading_waveform_minmax: Vec::new(),
-                                buffer_sample_rate: out_sr.max(1),
-                                job_id,
-                                error: Some(err.to_string()),
-                                stage: EditorDecodeStage::StreamingFull,
-                                decoded_frames: 0,
-                                decoded_source_frames: 0,
-                                total_source_frames,
-                                visual_total_frames: estimated_total_frames,
-                                progress_emit_gap_ms: None,
-                                finalize_audio_ms: None,
-                                finalize_waveform_ms: None,
-                            });
                         }
-                        return;
+                        if full_source_channels.len() != chunk.len() {
+                            full_source_channels.resize_with(chunk.len(), Vec::new);
+                        }
+                        let start_frame_source =
+                            full_source_channels.first().map(|c| c.len()).unwrap_or(0);
+                        if let Some(builder) = overview.as_mut() {
+                            builder.append_mixdown_chunk(start_frame_source, &chunk);
+                        }
+                        for (dst, src) in full_source_channels.iter_mut().zip(chunk.iter()) {
+                            dst.extend_from_slice(src);
+                        }
+                        let visual_total_frames = total_source_frames.map(|frames| {
+                            Self::convert_source_frames_to_output_frames(
+                                frames,
+                                source_sr,
+                                out_sr.max(1),
+                            )
+                        });
+                        let loading_waveform_minmax = overview
+                            .as_ref()
+                            .map(|builder| builder.snapshot_minmax())
+                            .unwrap_or_default();
+                        if !is_final {
+                            let now = std::time::Instant::now();
+                            let gap_ms = last_progress_emit_at
+                                .map(|prev| now.duration_since(prev).as_secs_f32() * 1000.0);
+                            last_progress_emit_at = Some(now);
+                            return tx
+                                .send(EditorDecodeResult {
+                                    path: path_for_thread.clone(),
+                                    event: EditorDecodeEvent::Progress,
+                                    channels: Vec::new(),
+                                    waveform_minmax: Vec::new(),
+                                    waveform_pyramid: None,
+                                    loading_waveform_minmax,
+                                    buffer_sample_rate: out_sr.max(1),
+                                    job_id,
+                                    error: None,
+                                    stage: if gap_ms.is_some() {
+                                        EditorDecodeStage::StreamingFull
+                                    } else {
+                                        EditorDecodeStage::Preview
+                                    },
+                                    decoded_frames: Self::convert_source_frames_to_output_frames(
+                                        decoded_source_frames,
+                                        source_sr,
+                                        out_sr.max(1),
+                                    ),
+                                    decoded_source_frames,
+                                    total_source_frames,
+                                    visual_total_frames,
+                                    progress_emit_gap_ms: gap_ms,
+                                    finalize_audio_ms: None,
+                                    finalize_waveform_ms: None,
+                                })
+                                .is_ok();
+                        }
+                        true
+                    },
+                );
+                if let Err(err) = stream {
+                    if !cancel_thread.load(Ordering::Relaxed) {
+                        let _ = tx.send(EditorDecodeResult {
+                            path: path_for_thread,
+                            event: EditorDecodeEvent::Failed,
+                            channels: Vec::new(),
+                            waveform_minmax: Vec::new(),
+                            waveform_pyramid: None,
+                            loading_waveform_minmax: Vec::new(),
+                            buffer_sample_rate: out_sr.max(1),
+                            job_id,
+                            error: Some(err.to_string()),
+                            stage: EditorDecodeStage::StreamingFull,
+                            decoded_frames: 0,
+                            decoded_source_frames: 0,
+                            total_source_frames,
+                            visual_total_frames: estimated_total_frames,
+                            progress_emit_gap_ms: None,
+                            finalize_audio_ms: None,
+                            finalize_waveform_ms: None,
+                        });
                     }
-                    if cancel_thread.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let loading_waveform_minmax = overview
-                        .as_ref()
-                        .map(|builder| builder.snapshot_minmax())
-                        .unwrap_or_default();
-                    let decoded_source_frames = full_source_channels
-                        .first()
-                        .map(|c| c.len())
-                        .unwrap_or(0);
-                    let visual_total_frames = total_source_frames.map(|frames| {
-                        Self::convert_source_frames_to_output_frames(
-                            frames,
-                            source_sr,
-                            out_sr.max(1),
-                        )
-                    });
-                    let _ = tx.send(EditorDecodeResult {
-                        path: path_for_thread.clone(),
-                        event: EditorDecodeEvent::Progress,
-                        channels: Vec::new(),
-                        waveform_minmax: Vec::new(),
-                        waveform_pyramid: None,
-                        loading_waveform_minmax: loading_waveform_minmax.clone(),
-                        buffer_sample_rate: out_sr.max(1),
-                        job_id,
-                        error: None,
-                        stage: EditorDecodeStage::FinalizingAudio,
-                        decoded_frames: Self::convert_source_frames_to_output_frames(
-                            decoded_source_frames,
-                            source_sr,
-                            out_sr.max(1),
-                        ),
-                        decoded_source_frames,
-                        total_source_frames,
-                        visual_total_frames,
-                        progress_emit_gap_ms: last_progress_emit_at.map(|prev| {
-                            prev.elapsed().as_secs_f32() * 1000.0
-                        }),
-                        finalize_audio_ms: None,
-                        finalize_waveform_ms: None,
-                    });
-                    let finalize_audio_started = std::time::Instant::now();
-                    let channels = Self::process_editor_decode_channels(
-                        full_source_channels,
-                        source_sr,
-                        out_sr,
-                        target_sr,
-                        bit_depth,
-                        resample_quality,
-                    );
-                    let finalize_audio_ms =
-                        finalize_audio_started.elapsed().as_secs_f32() * 1000.0;
-                    if cancel_thread.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let decoded_frames = channels.first().map(|c| c.len()).unwrap_or(0);
-                    let _ = tx.send(EditorDecodeResult {
-                        path: path_for_thread.clone(),
-                        event: EditorDecodeEvent::Progress,
-                        channels: Vec::new(),
-                        waveform_minmax: Vec::new(),
-                        waveform_pyramid: None,
-                        loading_waveform_minmax,
-                        buffer_sample_rate: out_sr.max(1),
-                        job_id,
-                        error: None,
-                        stage: EditorDecodeStage::FinalizingWaveform,
-                        decoded_frames,
-                        decoded_source_frames,
-                        total_source_frames,
-                        visual_total_frames,
-                        progress_emit_gap_ms: None,
-                        finalize_audio_ms: Some(finalize_audio_ms),
-                        finalize_waveform_ms: None,
-                    });
-                    let finalize_waveform_started = std::time::Instant::now();
-                    let (waveform_minmax, waveform_pyramid) =
-                        Self::build_editor_waveform_cache(&channels, decoded_frames);
-                    let finalize_waveform_ms =
-                        finalize_waveform_started.elapsed().as_secs_f32() * 1000.0;
-                    let _ = tx.send(EditorDecodeResult {
-                        path: path_for_thread,
-                        event: EditorDecodeEvent::FinalReady,
-                        channels,
-                        waveform_minmax,
-                        waveform_pyramid,
-                        loading_waveform_minmax: Vec::new(),
-                        buffer_sample_rate: out_sr.max(1),
-                        job_id,
-                        error: None,
-                        stage: EditorDecodeStage::FinalizingWaveform,
-                        decoded_frames,
-                        decoded_source_frames,
-                        total_source_frames,
-                        visual_total_frames,
-                        progress_emit_gap_ms: None,
-                        finalize_audio_ms: Some(finalize_audio_ms),
-                        finalize_waveform_ms: Some(finalize_waveform_ms),
-                    });
+                    return;
                 }
+                if cancel_thread.load(Ordering::Relaxed) {
+                    return;
+                }
+                let loading_waveform_minmax = overview
+                    .as_ref()
+                    .map(|builder| builder.snapshot_minmax())
+                    .unwrap_or_default();
+                let decoded_source_frames =
+                    full_source_channels.first().map(|c| c.len()).unwrap_or(0);
+                let visual_total_frames = total_source_frames.map(|frames| {
+                    Self::convert_source_frames_to_output_frames(frames, source_sr, out_sr.max(1))
+                });
+                let _ = tx.send(EditorDecodeResult {
+                    path: path_for_thread.clone(),
+                    event: EditorDecodeEvent::Progress,
+                    channels: Vec::new(),
+                    waveform_minmax: Vec::new(),
+                    waveform_pyramid: None,
+                    loading_waveform_minmax: loading_waveform_minmax.clone(),
+                    buffer_sample_rate: out_sr.max(1),
+                    job_id,
+                    error: None,
+                    stage: EditorDecodeStage::FinalizingAudio,
+                    decoded_frames: Self::convert_source_frames_to_output_frames(
+                        decoded_source_frames,
+                        source_sr,
+                        out_sr.max(1),
+                    ),
+                    decoded_source_frames,
+                    total_source_frames,
+                    visual_total_frames,
+                    progress_emit_gap_ms: last_progress_emit_at
+                        .map(|prev| prev.elapsed().as_secs_f32() * 1000.0),
+                    finalize_audio_ms: None,
+                    finalize_waveform_ms: None,
+                });
+                let finalize_audio_started = std::time::Instant::now();
+                let channels = Self::process_editor_decode_channels(
+                    full_source_channels,
+                    source_sr,
+                    out_sr,
+                    target_sr,
+                    bit_depth,
+                    resample_quality,
+                );
+                let finalize_audio_ms = finalize_audio_started.elapsed().as_secs_f32() * 1000.0;
+                if cancel_thread.load(Ordering::Relaxed) {
+                    return;
+                }
+                let decoded_frames = channels.first().map(|c| c.len()).unwrap_or(0);
+                let _ = tx.send(EditorDecodeResult {
+                    path: path_for_thread.clone(),
+                    event: EditorDecodeEvent::Progress,
+                    channels: Vec::new(),
+                    waveform_minmax: Vec::new(),
+                    waveform_pyramid: None,
+                    loading_waveform_minmax,
+                    buffer_sample_rate: out_sr.max(1),
+                    job_id,
+                    error: None,
+                    stage: EditorDecodeStage::FinalizingWaveform,
+                    decoded_frames,
+                    decoded_source_frames,
+                    total_source_frames,
+                    visual_total_frames,
+                    progress_emit_gap_ms: None,
+                    finalize_audio_ms: Some(finalize_audio_ms),
+                    finalize_waveform_ms: None,
+                });
+                let finalize_waveform_started = std::time::Instant::now();
+                let (waveform_minmax, waveform_pyramid) =
+                    Self::build_editor_waveform_cache(&channels, decoded_frames);
+                let finalize_waveform_ms =
+                    finalize_waveform_started.elapsed().as_secs_f32() * 1000.0;
+                let _ = tx.send(EditorDecodeResult {
+                    path: path_for_thread,
+                    event: EditorDecodeEvent::FinalReady,
+                    channels,
+                    waveform_minmax,
+                    waveform_pyramid,
+                    loading_waveform_minmax: Vec::new(),
+                    buffer_sample_rate: out_sr.max(1),
+                    job_id,
+                    error: None,
+                    stage: EditorDecodeStage::FinalizingWaveform,
+                    decoded_frames,
+                    decoded_source_frames,
+                    total_source_frames,
+                    visual_total_frames,
+                    progress_emit_gap_ms: None,
+                    finalize_audio_ms: Some(finalize_audio_ms),
+                    finalize_waveform_ms: Some(finalize_waveform_ms),
+                });
             }
         });
         self.editor_decode_state = Some(EditorDecodeState {
@@ -2266,7 +2431,8 @@ impl super::WavesPreviewer {
                                 if let Some(visual_total_frames) =
                                     res.visual_total_frames.filter(|v| *v > 0)
                                 {
-                                    tab.samples_len_visual = visual_total_frames.max(tab.samples_len);
+                                    tab.samples_len_visual =
+                                        visual_total_frames.max(tab.samples_len);
                                 } else if tab.samples_len_visual == 0 {
                                     tab.samples_len_visual = tab.samples_len;
                                 }
@@ -2296,8 +2462,11 @@ impl super::WavesPreviewer {
                     }
                     EditorDecodeEvent::Progress => {
                         if !state.partial_ready {
-                            decode_partial_events
-                                .push((res.path.clone(), res.decoded_frames, res.stage));
+                            decode_partial_events.push((
+                                res.path.clone(),
+                                res.decoded_frames,
+                                res.stage,
+                            ));
                         }
                         state.partial_ready = true;
                     }
@@ -2312,7 +2481,10 @@ impl super::WavesPreviewer {
             self.debug_mark_editor_open_final(&path, decoded_frames);
         }
         for value_ms in decode_progress_gap_ms {
-            Self::debug_push_latency_sample(&mut self.debug.editor_decode_progress_emit_ms, value_ms);
+            Self::debug_push_latency_sample(
+                &mut self.debug.editor_decode_progress_emit_ms,
+                value_ms,
+            );
         }
         for value_ms in decode_finalize_audio_ms {
             Self::debug_push_latency_sample(
@@ -2377,7 +2549,7 @@ impl super::WavesPreviewer {
                             channels,
                             buffer_sr,
                         );
-                        self.playback_mark_source(
+                        self.playback_mark_buffer_source(
                             super::PlaybackSourceKind::EditorTab(tab_path),
                             buffer_sr,
                         );
@@ -2757,12 +2929,12 @@ impl super::WavesPreviewer {
                 .and_then(|m| m.bpm)
                 .filter(|v| v.is_finite() && *v > 0.0)
                 .unwrap_or(0.0);
-            let wf = if self.mode == RateMode::Speed {
+            let wf = if !self.mode_requires_offline_processing() {
                 crate::wave::build_waveform_minmax_from_channels(&chs, samples_len, 2048)
             } else {
                 Vec::new()
             };
-            let waveform_pyramid = if self.mode == RateMode::Speed {
+            let waveform_pyramid = if !self.mode_requires_offline_processing() {
                 Self::build_editor_waveform_cache(&chs, samples_len).1
             } else {
                 None
@@ -2812,9 +2984,9 @@ impl super::WavesPreviewer {
                 bpm_offset_sec: 0.0,
                 seek_hold: None,
                 snap_zero_cross: true,
-                    drag_select_anchor: None,
-                    right_drag_mode: None,
-                    right_drag_anchor: None,
+                drag_select_anchor: None,
+                right_drag_mode: None,
+                right_drag_anchor: None,
                 active_tool: crate::app::types::ToolKind::LoopEdit,
                 tool_state: crate::app::types::ToolState {
                     fade_in_ms: 0.0,
@@ -2843,27 +3015,20 @@ impl super::WavesPreviewer {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
-            match self.mode {
-                RateMode::Speed => {
-                    self.audio.set_samples_channels(chs);
-                    self.playback_mark_source(
-                        super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                        self.audio.shared.out_sample_rate.max(1),
-                    );
-                }
-                _ => {
-                    // Prime with source audio to avoid replaying previous tab content.
-                    self.audio.set_samples_channels(chs.clone());
-                    self.playback_mark_source(
-                        super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                        self.audio.shared.out_sample_rate.max(1),
-                    );
-                    self.spawn_heavy_processing_from_channels(
-                        path.to_path_buf(),
-                        chs,
-                        ProcessingTarget::EditorTab(path.to_path_buf()),
-                    );
-                }
+            if self.mode_requires_offline_processing() {
+                self.audio.stop();
+                self.audio.set_samples_mono(Vec::new());
+                self.spawn_heavy_processing_from_channels(
+                    path.to_path_buf(),
+                    chs,
+                    ProcessingTarget::EditorTab(path.to_path_buf()),
+                );
+            } else {
+                self.audio.set_samples_channels(chs);
+                self.playback_mark_buffer_source(
+                    super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                    self.audio.shared.out_sample_rate.max(1),
+                );
             }
             self.apply_effective_volume();
             return;
@@ -2971,8 +3136,9 @@ impl super::WavesPreviewer {
             .unwrap_or("(invalid)")
             .to_string();
         let loading = !decode_failed;
-        let estimated_visual_frames =
-            self.estimate_editor_total_frames(path, self.audio.shared.out_sample_rate.max(1));
+        self.debug_mark_editor_open_start(path);
+        let estimated_visual_frames = self
+            .estimate_editor_total_frames_cached(path, self.audio.shared.out_sample_rate.max(1));
         let default_bpm = self
             .meta_for_path(path)
             .and_then(|m| m.bpm)
@@ -3059,20 +3225,17 @@ impl super::WavesPreviewer {
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);
         self.playing_path = Some(path.to_path_buf());
-        let activated_stream = self
-            .active_tab
-            .map(|tab_idx| self.try_activate_editor_stream_transport_for_tab(tab_idx))
-            .unwrap_or(false);
-        if !activated_stream {
-            self.audio.set_samples_channels(Vec::new());
-            self.playback_mark_source(
-                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                self.audio.shared.out_sample_rate.max(1),
-            );
-            self.apply_effective_volume();
-        }
+        self.audio.set_samples_channels(Vec::new());
+        self.playback_mark_buffer_source(
+            super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+            self.audio.shared.out_sample_rate.max(1),
+        );
+        self.apply_effective_volume();
+        self.queue_tab_activation_with_kind(
+            path.to_path_buf(),
+            super::PendingTabActivationKind::InitialOpen,
+        );
         if !decode_failed {
-            self.debug_mark_editor_open_start(path);
             self.spawn_editor_decode(path.to_path_buf());
         }
     }
@@ -3431,13 +3594,11 @@ impl super::WavesPreviewer {
 
     pub(super) fn rebuild_current_buffer_with_mode(&mut self) {
         if let Some(tab_idx) = self.active_tab {
-            if self.mode == RateMode::Speed {
-                if let Some(tab) = self.tabs.get(tab_idx) {
-                    self.invalidate_processing_for_target(
-                        &ProcessingTarget::EditorTab(tab.path.clone()),
-                        "speed mode rebuild",
-                    );
-                }
+            if let Some(tab) = self.tabs.get(tab_idx) {
+                self.invalidate_processing_for_target(
+                    &ProcessingTarget::EditorTab(tab.path.clone()),
+                    "editor rebuild",
+                );
             }
             if let Some(tab) = self.tabs.get(tab_idx) {
                 if tab.dirty {
@@ -3447,42 +3608,52 @@ impl super::WavesPreviewer {
                     }
                 }
             }
-            if self.try_activate_editor_stream_transport_for_tab(tab_idx) {
-                return;
-            }
-            if let Some(tab) = self.tabs.get(tab_idx) {
-                if tab.loading {
+            if let Some((tab_loading, channels, tab_path, buffer_sr)) =
+                self.tabs.get(tab_idx).map(|tab| {
+                    (
+                        tab.loading,
+                        tab.ch_samples.clone(),
+                        tab.path.clone(),
+                        tab.buffer_sample_rate.max(1),
+                    )
+                })
+            {
+                let source_time_sec = self.playback_current_source_time_sec();
+                if self.try_activate_editor_stream_transport_for_tab(tab_idx) {
+                    if let Some(source_time_sec) = source_time_sec {
+                        self.playback_seek_to_source_time(self.mode, source_time_sec);
+                    }
                     return;
                 }
-                if !tab.ch_samples.is_empty() {
-                    let tab_path = tab.path.clone();
-                    let mut channels = tab.ch_samples.clone();
-                    let buffer_sr = tab.buffer_sample_rate.max(1);
-                    match self.mode {
-                        RateMode::Speed => {
-                            self.apply_sample_rate_preview_for_path(&tab_path, &mut channels, buffer_sr);
-                            self.set_editor_buffer_transport_preserving_time(
-                                tab_path.as_path(),
-                                channels,
-                                self.audio.shared.out_sample_rate.max(1),
-                            );
-                            self.playback_mark_source(
-                                super::PlaybackSourceKind::EditorTab(tab_path),
-                                self.audio.shared.out_sample_rate.max(1),
-                            );
-                        }
-                        _ => {
-                            self.apply_sample_rate_preview_for_path(&tab_path, &mut channels, buffer_sr);
-                            self.audio.set_samples_channels(channels.clone());
-                            self.playback_mark_source(
-                                super::PlaybackSourceKind::EditorTab(tab_path.clone()),
-                                self.audio.shared.out_sample_rate.max(1),
-                            );
-                            self.spawn_heavy_processing_from_channels(
-                                tab_path.clone(),
-                                channels,
-                                ProcessingTarget::EditorTab(tab_path),
-                            );
+                if tab_loading {
+                    return;
+                }
+                if !channels.is_empty() {
+                    if self.mode_requires_offline_processing() {
+                        self.audio.stop();
+                        self.audio.set_samples_mono(Vec::new());
+                        self.spawn_heavy_processing_from_channels(
+                            tab_path.clone(),
+                            channels,
+                            ProcessingTarget::EditorTab(tab_path),
+                        );
+                    } else {
+                        let mut render_spec = self.offline_render_spec_for_path(&tab_path);
+                        render_spec.master_gain_db = 0.0;
+                        render_spec.file_gain_db = 0.0;
+                        let rendered = Self::render_channels_offline_with_spec(
+                            channels,
+                            buffer_sr,
+                            render_spec,
+                            false,
+                        );
+                        self.audio.set_samples_channels(rendered);
+                        self.playback_mark_buffer_source(
+                            super::PlaybackSourceKind::EditorTab(tab_path),
+                            self.audio.shared.out_sample_rate.max(1),
+                        );
+                        if let Some(source_time_sec) = source_time_sec {
+                            self.playback_seek_to_source_time(self.mode, source_time_sec);
                         }
                     }
                     self.apply_effective_volume();
@@ -3497,71 +3668,79 @@ impl super::WavesPreviewer {
             }
         }
         if let Some(p) = self.current_path_for_rebuild() {
-            if self.mode == RateMode::Speed && self.active_tab.is_none() {
+            if self.active_tab.is_none() {
                 self.invalidate_processing_for_target(
                     &ProcessingTarget::ListPreview(p.clone()),
-                    "speed mode rebuild",
+                    "list rebuild",
                 );
+                let source_time_sec = match &self.playback_session.source {
+                    super::PlaybackSourceKind::ListPreview(src) if src == &p => {
+                        self.playback_current_source_time_sec()
+                    }
+                    _ => None,
+                };
+                if self.try_activate_list_stream_transport(&p) {
+                    if let Some(source_time_sec) = source_time_sec {
+                        self.playback_seek_to_source_time(self.mode, source_time_sec);
+                    }
+                    return;
+                }
             }
             if self.is_virtual_path(&p) {
                 let Some(audio) = self.edited_audio_for_path(&p) else {
                     return;
                 };
-                let mut channels = audio.channels.clone();
+                let channels = audio.channels.clone();
                 let buffer_sr = self
                     .effective_sample_rate_for_path(&p)
                     .unwrap_or(self.audio.shared.out_sample_rate.max(1));
-                match self.mode {
-                    RateMode::Speed => {
-                        self.apply_sample_rate_preview_for_path(&p, &mut channels, buffer_sr);
-                        self.audio.set_samples_channels(channels);
-                        self.playback_mark_source(
-                            super::PlaybackSourceKind::EditorTab(p),
-                            self.audio.shared.out_sample_rate.max(1),
-                        );
-                    }
-                    _ => {
-                        self.apply_sample_rate_preview_for_path(&p, &mut channels, buffer_sr);
-                        self.audio.set_samples_channels(channels.clone());
-                        self.playback_mark_source(
-                            super::PlaybackSourceKind::EditorTab(p.clone()),
-                            self.audio.shared.out_sample_rate.max(1),
-                        );
-                        self.spawn_heavy_processing_from_channels(
-                            p.clone(),
-                            channels,
-                            ProcessingTarget::EditorTab(p),
-                        );
+                let source_time_sec = self.playback_current_source_time_sec();
+                if self.mode_requires_offline_processing() {
+                    self.audio.stop();
+                    self.audio.set_samples_mono(Vec::new());
+                    self.spawn_heavy_processing_from_channels(
+                        p.clone(),
+                        channels,
+                        ProcessingTarget::EditorTab(p),
+                    );
+                } else {
+                    let mut render_spec = self.offline_render_spec_for_path(&p);
+                    render_spec.master_gain_db = 0.0;
+                    render_spec.file_gain_db = 0.0;
+                    let rendered = Self::render_channels_offline_with_spec(
+                        channels,
+                        buffer_sr,
+                        render_spec,
+                        false,
+                    );
+                    self.audio.set_samples_channels(rendered);
+                    self.playback_mark_buffer_source(
+                        super::PlaybackSourceKind::EditorTab(p),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
+                    if let Some(source_time_sec) = source_time_sec {
+                        self.playback_seek_to_source_time(self.mode, source_time_sec);
                     }
                 }
                 self.apply_effective_volume();
                 return;
             }
-            match self.mode {
-                RateMode::Speed => {
-                    if let Some(tab_idx) = self.active_tab {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            if tab.path == p && !tab.loading {
-                                tab.loading = true;
-                                self.spawn_editor_decode(p.clone());
-                            }
-                        }
-                    } else if let Some(row_idx) = self.row_for_path(&p) {
-                        self.select_and_load(row_idx, false);
-                    }
-                    self.playback_refresh_rate_for_current_source();
-                }
-                _ => {
-                    if !self.is_decode_failed_path(&p) {
-                        self.playback_refresh_rate_for_current_source();
-                        let target = if self.active_tab.is_some() {
-                            ProcessingTarget::EditorTab(p.clone())
-                        } else {
-                            ProcessingTarget::ListPreview(p.clone())
-                        };
-                        self.spawn_heavy_processing(&p, target);
-                    } else {
-                        self.playback_refresh_rate_for_current_source();
+            if !self.is_decode_failed_path(&p) && self.mode_requires_offline_processing() {
+                let target = if self.active_tab.is_some() {
+                    ProcessingTarget::EditorTab(p.clone())
+                } else {
+                    ProcessingTarget::ListPreview(p.clone())
+                };
+                self.audio.stop();
+                self.audio.set_samples_mono(Vec::new());
+                self.spawn_heavy_processing(&p, target);
+            } else if let Some(row_idx) = self.row_for_path(&p) {
+                self.select_and_load(row_idx, false);
+            } else if let Some(tab_idx) = self.active_tab {
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    if tab.path == p && !tab.loading {
+                        tab.loading = true;
+                        self.spawn_editor_decode(p.clone());
                     }
                 }
             }
@@ -3569,10 +3748,11 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn spawn_heavy_processing(&mut self, path: &Path, target: ProcessingTarget) {
-        if self.mode == RateMode::Speed {
+        if !self.mode_requires_offline_processing() {
             self.debug_log(format!(
-                "processing spawn skipped in Speed mode: target={}",
-                Self::format_processing_target(&target)
+                "processing spawn skipped: mode={:?} target={}",
+                self.mode,
+                Self::format_processing_target(&target),
             ));
             return;
         }
@@ -3581,74 +3761,26 @@ impl super::WavesPreviewer {
         let path_buf = path.to_path_buf();
         let job_id = self.next_processing_job_id();
         let mode = self.mode;
-        let rate = self.playback_rate;
-        let sem = self.pitch_semitones;
-        let out_sr = self.audio.shared.out_sample_rate;
-        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
-        let bit_depth = self.bit_depth_override.get(path).copied();
+        let mut render_spec = self.offline_render_spec_for_path(path);
+        render_spec.master_gain_db = 0.0;
+        render_spec.file_gain_db = 0.0;
+        let source_time_sec = match &self.playback_session.source {
+            super::PlaybackSourceKind::EditorTab(src)
+            | super::PlaybackSourceKind::ListPreview(src)
+                if src == path =>
+            {
+                self.playback_current_source_time_sec()
+            }
+            _ => None,
+        };
         let path_for_thread = path_buf.clone();
         let target_for_thread = target.clone();
         std::thread::spawn(move || {
-            // heavy decode and process
-            if let Ok((mono, in_sr)) = crate::wave::decode_wav_mono(&path_for_thread) {
-                let mut mono = if in_sr != out_sr {
-                    crate::wave::resample_quality(&mono, in_sr, out_sr, resample_quality)
-                } else {
-                    mono
-                };
-                if let Some(depth) = bit_depth {
-                    crate::wave::quantize_mono_in_place(&mut mono, depth);
-                }
-                let samples = match mode {
-                    RateMode::PitchShift => {
-                        crate::wave::process_pitchshift_offline(&mono, out_sr, out_sr, sem)
-                    }
-                    RateMode::TimeStretch => {
-                        crate::wave::process_timestretch_offline(&mono, out_sr, out_sr, rate)
-                    }
-                    RateMode::Speed => mono, // not used
-                };
-                let channels = match mode {
-                    RateMode::PitchShift | RateMode::TimeStretch => {
-                        if let Ok((chs, multi_sr)) = crate::wave::decode_wav_multi(&path_for_thread)
-                        {
-                            let mut processed = Vec::with_capacity(chs.len());
-                            for ch in chs {
-                                let mut ch = if multi_sr != out_sr {
-                                    crate::wave::resample_quality(
-                                        &ch,
-                                        multi_sr,
-                                        out_sr,
-                                        resample_quality,
-                                    )
-                                } else {
-                                    ch
-                                };
-                                if let Some(depth) = bit_depth {
-                                    crate::wave::quantize_mono_in_place(&mut ch, depth);
-                                }
-                                let out = match mode {
-                                    RateMode::PitchShift => {
-                                        crate::wave::process_pitchshift_offline(
-                                            &ch, out_sr, out_sr, sem,
-                                        )
-                                    }
-                                    RateMode::TimeStretch => {
-                                        crate::wave::process_timestretch_offline(
-                                            &ch, out_sr, out_sr, rate,
-                                        )
-                                    }
-                                    RateMode::Speed => ch,
-                                };
-                                processed.push(out);
-                            }
-                            processed
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                    RateMode::Speed => Vec::new(),
-                };
+            if let Ok((channels, in_sr)) = crate::wave::decode_wav_multi(&path_for_thread) {
+                let channels =
+                    Self::render_channels_offline_with_spec(channels, in_sr, render_spec, false);
+                let len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
+                let samples = Self::mixdown_channels_mono(&channels, len);
                 let mut waveform = Vec::new();
                 crate::wave::build_minmax(&mut waveform, &samples, 2048);
                 let _ = tx.send(ProcessingResult {
@@ -3679,6 +3811,7 @@ impl super::WavesPreviewer {
             mode,
             target,
             autoplay_when_ready: false,
+            source_time_sec,
             started_at: std::time::Instant::now(),
             rx,
         });

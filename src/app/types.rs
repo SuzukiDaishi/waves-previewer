@@ -1,5 +1,5 @@
-use crate::audio::AudioBuffer;
 use crate::app::render::waveform_pyramid::WaveformPyramidSet;
+use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -296,7 +296,7 @@ pub struct SpectrogramConfig {
     pub fft_size: usize,
     pub window: WindowFunction,
     pub hop_size: usize, // hop size in samples
-    pub overlap: f32, // 0.0..0.95 (fraction)
+    pub overlap: f32,    // 0.0..0.95 (fraction)
     pub max_frames: usize,
     pub scale: SpectrogramScale,
     pub mel_scale: SpectrogramScale,
@@ -713,22 +713,22 @@ pub struct EditorTab {
     pub fade_out_range: Option<(usize, usize)>,
     pub fade_in_shape: FadeShape,
     pub fade_out_shape: FadeShape,
-    pub view_mode: ViewMode,                 // which visualization panel
-    pub show_waveform_overlay: bool,         // draw waveform overlay in Spec/Mel views
-    pub channel_view: ChannelView,           // Mixdown / All / Custom
-    pub bpm_enabled: bool,                   // grid toggle in editor
-    pub bpm_value: f32,                      // current BPM for grid
-    pub bpm_user_set: bool,                  // user-overridden BPM
-    pub bpm_offset_sec: f32,                 // grid offset in seconds
-    pub seek_hold: Option<SeekHoldState>,    // key repeat state for seek
-    pub snap_zero_cross: bool,               // enable zero-cross snapping
-    pub drag_select_anchor: Option<usize>,   // transient during drag
+    pub view_mode: ViewMode,                    // which visualization panel
+    pub show_waveform_overlay: bool,            // draw waveform overlay in Spec/Mel views
+    pub channel_view: ChannelView,              // Mixdown / All / Custom
+    pub bpm_enabled: bool,                      // grid toggle in editor
+    pub bpm_value: f32,                         // current BPM for grid
+    pub bpm_user_set: bool,                     // user-overridden BPM
+    pub bpm_offset_sec: f32,                    // grid offset in seconds
+    pub seek_hold: Option<SeekHoldState>,       // key repeat state for seek
+    pub snap_zero_cross: bool,                  // enable zero-cross snapping
+    pub drag_select_anchor: Option<usize>,      // transient during drag
     pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
-    pub right_drag_anchor: Option<usize>,    // anchor for Shift+right-drag selection
-    pub active_tool: ToolKind,               // current editing tool
-    pub tool_state: ToolState,               // simple per-tool parameters
-    pub loop_mode: LoopMode,                 // Off / On (whole) / Marker
-    pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
+    pub right_drag_anchor: Option<usize>,       // anchor for Shift+right-drag selection
+    pub active_tool: ToolKind,                  // current editing tool
+    pub tool_state: ToolState,                  // simple per-tool parameters
+    pub loop_mode: LoopMode,                    // Off / On (whole) / Marker
+    pub dragging_marker: Option<MarkerKind>,    // transient while dragging A/B
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     pub active_tool_last: Option<ToolKind>,
@@ -831,6 +831,7 @@ pub struct ProcessingState {
     pub mode: RateMode,
     pub target: ProcessingTarget,
     pub autoplay_when_ready: bool,
+    pub source_time_sec: Option<f64>,
     pub started_at: std::time::Instant,
     pub rx: std::sync::mpsc::Receiver<ProcessingResult>,
 }
@@ -1614,6 +1615,23 @@ pub struct ClipboardPayload {
     pub created_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OfflineRenderSpec {
+    pub mode: RateMode,
+    pub speed_rate: f32,
+    pub pitch_semitones: f32,
+    pub stretch_rate: f32,
+    pub master_gain_db: f32,
+    pub file_gain_db: f32,
+    pub out_sr: u32,
+    pub target_sr: Option<u32>,
+    pub bit_depth: Option<crate::wave::WavBitDepth>,
+    pub quality: SrcQuality,
+    pub source_variant: u64,
+    pub loop_preview_enabled: bool,
+    pub effect_state_version: u64,
+}
+
 pub struct ListPreviewResult {
     pub path: PathBuf,
     pub channels: Vec<Vec<f32>>,
@@ -1623,15 +1641,7 @@ pub struct ListPreviewResult {
     pub settings: ListPreviewSettings,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ListPreviewSettings {
-    pub out_sr: u32,
-    pub target_sr: Option<u32>,
-    pub bit_depth: Option<crate::wave::WavBitDepth>,
-    pub quality: SrcQuality,
-    pub mode: RateMode,
-    pub source_variant: u64,
-}
+pub type ListPreviewSettings = OfflineRenderSpec;
 
 #[derive(Clone)]
 pub struct ListPreviewCacheEntry {
@@ -2000,10 +2010,13 @@ pub struct DebugState {
     pub editor_open_started_at: Option<Instant>,
     pub editor_open_started_path: Option<PathBuf>,
     pub editor_open_partial_logged: bool,
+    pub editor_open_shell_paint_logged: bool,
     pub editor_open_first_paint_logged: bool,
+    pub editor_open_to_shell_paint_ms: VecDeque<f32>,
     pub editor_open_to_partial_ms: VecDeque<f32>,
     pub editor_open_to_final_ms: VecDeque<f32>,
     pub editor_open_to_first_paint_ms: VecDeque<f32>,
+    pub editor_stream_activation_ms: VecDeque<f32>,
     pub editor_mixdown_build_ms: VecDeque<f32>,
     pub editor_wave_render_ms: VecDeque<f32>,
     pub editor_decode_progress_emit_ms: VecDeque<f32>,
@@ -2100,10 +2113,13 @@ impl DebugState {
             editor_open_started_at: None,
             editor_open_started_path: None,
             editor_open_partial_logged: false,
+            editor_open_shell_paint_logged: false,
             editor_open_first_paint_logged: false,
+            editor_open_to_shell_paint_ms: VecDeque::new(),
             editor_open_to_partial_ms: VecDeque::new(),
             editor_open_to_final_ms: VecDeque::new(),
             editor_open_to_first_paint_ms: VecDeque::new(),
+            editor_stream_activation_ms: VecDeque::new(),
             editor_mixdown_build_ms: VecDeque::new(),
             editor_wave_render_ms: VecDeque::new(),
             editor_decode_progress_emit_ms: VecDeque::new(),

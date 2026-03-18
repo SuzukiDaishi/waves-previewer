@@ -273,7 +273,8 @@ pub fn build_editor_waveform_cache(
     base_bin_samples: usize,
 ) -> (Vec<(f32, f32)>, Arc<WaveformPyramidSet>) {
     let samples_len = samples_len.min(min_channel_len(channels));
-    let overview = crate::wave::build_waveform_minmax_from_channels(channels, samples_len, overview_bins);
+    let overview =
+        crate::wave::build_waveform_minmax_from_channels(channels, samples_len, overview_bins);
     let mixdown = Arc::new(PeakPyramid::from_mixdown_channels(
         channels,
         samples_len,
@@ -281,7 +282,12 @@ pub fn build_editor_waveform_cache(
     ));
     let channels = channels
         .iter()
-        .map(|channel| Arc::new(PeakPyramid::from_samples(&channel[..samples_len.min(channel.len())], base_bin_samples)))
+        .map(|channel| {
+            Arc::new(PeakPyramid::from_samples(
+                &channel[..samples_len.min(channel.len())],
+                base_bin_samples,
+            ))
+        })
         .collect();
     let set = WaveformPyramidSet {
         mixdown,
@@ -314,7 +320,9 @@ pub fn build_visible_minmax(samples: &[f32], bins: usize, out: &mut Vec<Peak>) {
 
 pub fn build_mixdown_visible(samples: &[Vec<f32>], start: usize, end: usize, out: &mut Vec<f32>) {
     out.clear();
-    let len = end.saturating_sub(start).min(min_channel_len(samples).saturating_sub(start));
+    let len = end
+        .saturating_sub(start)
+        .min(min_channel_len(samples).saturating_sub(start));
     if len == 0 || samples.is_empty() {
         return;
     }
@@ -378,7 +386,11 @@ pub fn build_mixdown_minmax_visible(
 }
 
 fn min_channel_len(channels: &[Vec<f32>]) -> usize {
-    channels.iter().map(|channel| channel.len()).min().unwrap_or(0)
+    channels
+        .iter()
+        .map(|channel| channel.len())
+        .min()
+        .unwrap_or(0)
 }
 
 fn build_fixed_bin_minmax_samples(samples: &[f32], bin_samples: usize) -> Vec<Peak> {
@@ -482,8 +494,7 @@ fn aggregate_peaks(peaks: &[Peak]) -> Peak {
 mod tests {
     use super::{
         build_mixdown_minmax_visible, build_visible_minmax, Peak, PeakPyramid,
-        StreamingWaveformOverview,
-        DEFAULT_BASE_BIN_SAMPLES,
+        StreamingWaveformOverview, DEFAULT_BASE_BIN_SAMPLES,
     };
 
     #[test]
@@ -514,9 +525,7 @@ mod tests {
 
     #[test]
     fn query_columns_matches_direct_visible_minmax_for_aligned_window() {
-        let samples: Vec<f32> = (0..512)
-            .map(|i| ((i as f32) * 0.05).sin())
-            .collect();
+        let samples: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.05).sin()).collect();
         let pyramid = PeakPyramid::from_samples(&samples, 64);
         let mut from_query = Vec::new();
         let mut direct = Vec::new();
@@ -524,24 +533,34 @@ mod tests {
         build_visible_minmax(&samples[64..320], 4, &mut direct);
         assert_eq!(from_query.len(), direct.len());
         for (a, b) in from_query.iter().zip(direct.iter()) {
-            assert!((a.min - b.min).abs() < 1.0e-6, "min mismatch: {:?} vs {:?}", a, b);
-            assert!((a.max - b.max).abs() < 1.0e-6, "max mismatch: {:?} vs {:?}", a, b);
+            assert!(
+                (a.min - b.min).abs() < 1.0e-6,
+                "min mismatch: {:?} vs {:?}",
+                a,
+                b
+            );
+            assert!(
+                (a.max - b.max).abs() < 1.0e-6,
+                "max mismatch: {:?} vs {:?}",
+                a,
+                b
+            );
         }
     }
 
     #[test]
     fn build_mixdown_minmax_visible_uses_actual_mixdown() {
-        let channels = vec![
-            vec![1.0, 1.0, -1.0, -1.0],
-            vec![-1.0, 1.0, 1.0, -1.0],
-        ];
+        let channels = vec![vec![1.0, 1.0, -1.0, -1.0], vec![-1.0, 1.0, 1.0, -1.0]];
         let mut peaks = Vec::new();
         build_mixdown_minmax_visible(&channels, 0, 4, 2, &mut peaks);
         assert_eq!(
             peaks,
             vec![
                 Peak { min: 0.0, max: 1.0 },
-                Peak { min: -1.0, max: 0.0 },
+                Peak {
+                    min: -1.0,
+                    max: 0.0
+                },
             ]
         );
     }

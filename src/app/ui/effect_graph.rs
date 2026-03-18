@@ -477,7 +477,7 @@ impl crate::app::WavesPreviewer {
             return;
         }
         self.audio.stop();
-        self.playback_mark_source(
+        self.playback_mark_buffer_source(
             crate::app::PlaybackSourceKind::EffectGraph,
             self.audio.shared.out_sample_rate.max(1),
         );

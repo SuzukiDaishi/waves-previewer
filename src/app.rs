@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::audio::AudioEngine;
+use crate::audio::{AudioBuffer, AudioEngine};
 use crate::ipc;
 use crate::mcp;
 use crate::wave::build_minmax;
@@ -12,6 +12,8 @@ use anyhow::Result;
 use egui::{Align, Color32, Key, RichText, Sense, TextStyle};
 use egui_extras::TableBuilder;
 // use walkdir::WalkDir; // unused here (used in logic.rs)
+
+type HeavyOverlayMessage = (std::path::PathBuf, Vec<Vec<f32>>, usize, u64);
 
 mod audio_ops;
 mod capture;
@@ -69,13 +71,12 @@ mod ui;
 mod zoo_ops;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
+use self::render::waveform_pyramid::WaveformScratch;
 use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
-use self::render::waveform_pyramid::WaveformScratch;
 pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
-    StartupConfig,
-    ToolKind, ViewMode, WorkspaceView,
+    StartupConfig, ToolKind, ViewMode, WorkspaceView,
 };
 use self::{helpers::*, types::*};
 
@@ -241,21 +242,41 @@ pub(super) enum PlaybackSourceKind {
     ToolPreview,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PlaybackTransportKind {
+    Buffer,
+    ExactStreamWav,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingTabActivationKind {
+    TabSwitch,
+    InitialOpen,
+}
+
 #[derive(Clone, Debug)]
 struct PlaybackSessionState {
     source: PlaybackSourceKind,
+    transport: PlaybackTransportKind,
     user_speed: f32,
-    buffer_sr: u32,
+    transport_sr: u32,
     is_playing: bool,
+    dry_audio: Option<Arc<AudioBuffer>>,
+    last_applied_master_gain_db: f32,
+    last_applied_file_gain_db: f32,
 }
 
 impl Default for PlaybackSessionState {
     fn default() -> Self {
         Self {
             source: PlaybackSourceKind::None,
+            transport: PlaybackTransportKind::Buffer,
             user_speed: 1.0,
-            buffer_sr: 48_000,
+            transport_sr: 48_000,
             is_playing: false,
+            dry_audio: None,
+            last_applied_master_gain_db: f32::NAN,
+            last_applied_file_gain_db: f32::NAN,
         }
     }
 }
@@ -522,13 +543,13 @@ pub struct WavesPreviewer {
     leave_intent: Option<LeaveIntent>,
     show_leave_prompt: bool,
     pending_activate_path: Option<PathBuf>,
+    pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
     // Heavy preview worker for Pitch/Stretch (mono)
     heavy_preview_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
     heavy_preview_tool: Option<ToolKind>,
     // Heavy overlay worker (per-channel preview for Pitch/Stretch) with generation guard
-    heavy_overlay_rx:
-        Option<std::sync::mpsc::Receiver<(std::path::PathBuf, Vec<Vec<f32>>, usize, u64)>>,
+    heavy_overlay_rx: Option<std::sync::mpsc::Receiver<HeavyOverlayMessage>>,
     overlay_gen_counter: u64,
     overlay_expected_gen: u64,
     overlay_expected_tool: Option<ToolKind>,
@@ -565,31 +586,136 @@ impl WavesPreviewer {
         }
     }
 
-    fn playback_rate_from_values(user_speed: f32, buffer_sr: u32, out_sr: u32) -> f32 {
-        let src = buffer_sr.max(1) as f32;
-        let out = out_sr.max(1) as f32;
-        let ratio = (src / out).clamp(0.25, 4.0);
-        (user_speed.clamp(0.25, 4.0) * ratio).clamp(0.25, 4.0)
+    fn playback_rate_from_values(
+        transport: PlaybackTransportKind,
+        user_speed: f32,
+        transport_sr: u32,
+        out_sr: u32,
+    ) -> f32 {
+        match transport {
+            PlaybackTransportKind::Buffer => 1.0,
+            PlaybackTransportKind::ExactStreamWav => {
+                let src = transport_sr.max(1) as f32;
+                let out = out_sr.max(1) as f32;
+                let ratio = (src / out).clamp(0.25, 4.0);
+                (user_speed.clamp(0.25, 4.0) * ratio).clamp(0.25, 4.0)
+            }
+        }
     }
 
-    pub(super) fn playback_mark_source(&mut self, source: PlaybackSourceKind, buffer_sr: u32) {
+    fn playback_source_time_for_output_pos(
+        mode: RateMode,
+        transport: PlaybackTransportKind,
+        output_pos_f: f64,
+        transport_sr: u32,
+        out_sr: u32,
+        playback_rate: f32,
+    ) -> f64 {
+        match transport {
+            PlaybackTransportKind::ExactStreamWav => output_pos_f / transport_sr.max(1) as f64,
+            PlaybackTransportKind::Buffer => {
+                let out_sr = out_sr.max(1) as f64;
+                let playback_rate = playback_rate.max(0.25) as f64;
+                match mode {
+                    RateMode::Speed | RateMode::TimeStretch => {
+                        (output_pos_f / out_sr) * playback_rate
+                    }
+                    RateMode::PitchShift => output_pos_f / out_sr,
+                }
+            }
+        }
+    }
+
+    fn playback_output_pos_for_source_time(
+        mode: RateMode,
+        transport: PlaybackTransportKind,
+        source_time_sec: f64,
+        transport_sr: u32,
+        out_sr: u32,
+        playback_rate: f32,
+    ) -> usize {
+        let frames = match transport {
+            PlaybackTransportKind::ExactStreamWav => source_time_sec * transport_sr.max(1) as f64,
+            PlaybackTransportKind::Buffer => {
+                let out_sr = out_sr.max(1) as f64;
+                let playback_rate = playback_rate.max(0.25) as f64;
+                match mode {
+                    RateMode::Speed | RateMode::TimeStretch => {
+                        source_time_sec / playback_rate * out_sr
+                    }
+                    RateMode::PitchShift => source_time_sec * out_sr,
+                }
+            }
+        };
+        frames.max(0.0).round() as usize
+    }
+
+    pub(super) fn playback_current_source_time_sec(&self) -> Option<f64> {
+        if matches!(self.playback_session.source, PlaybackSourceKind::None) {
+            return None;
+        }
+        let pos_f = self
+            .audio
+            .shared
+            .play_pos_f
+            .load(std::sync::atomic::Ordering::Relaxed);
+        Some(Self::playback_source_time_for_output_pos(
+            self.mode,
+            self.playback_session.transport,
+            pos_f as f64,
+            self.playback_session.transport_sr.max(1),
+            self.audio.shared.out_sample_rate.max(1),
+            self.playback_rate,
+        ))
+    }
+
+    pub(super) fn playback_seek_to_source_time(&self, mode: RateMode, source_time_sec: f64) {
+        let pos = Self::playback_output_pos_for_source_time(
+            mode,
+            self.playback_session.transport,
+            source_time_sec,
+            self.playback_session.transport_sr.max(1),
+            self.audio.shared.out_sample_rate.max(1),
+            self.playback_rate,
+        );
+        self.audio.seek_to_sample(pos);
+    }
+
+    pub(super) fn playback_mark_source(
+        &mut self,
+        source: PlaybackSourceKind,
+        transport: PlaybackTransportKind,
+        transport_sr: u32,
+    ) {
         self.playback_session.source = source;
-        self.playback_session.buffer_sr = buffer_sr.max(1);
+        self.playback_session.transport = transport;
+        self.playback_session.transport_sr = transport_sr.max(1);
         self.playback_session.user_speed = self.playback_user_speed_for_mode();
         self.playback_session.is_playing = self.playback_is_playing_now();
-        let rate = Self::playback_rate_from_values(
-            self.playback_session.user_speed,
-            self.playback_session.buffer_sr,
-            self.audio.shared.out_sample_rate.max(1),
-        );
-        self.audio.set_rate(rate);
+        self.playback_session.dry_audio = match transport {
+            PlaybackTransportKind::Buffer => self.audio.shared.samples.load_full(),
+            PlaybackTransportKind::ExactStreamWav => None,
+        };
+        self.playback_session.last_applied_master_gain_db = f32::NAN;
+        self.playback_session.last_applied_file_gain_db = f32::NAN;
+        self.playback_refresh_rate_for_current_source();
+    }
+
+    pub(super) fn playback_mark_buffer_source(
+        &mut self,
+        source: PlaybackSourceKind,
+        buffer_sr: u32,
+    ) {
+        self.playback_mark_source(source, PlaybackTransportKind::Buffer, buffer_sr);
     }
 
     pub(super) fn playback_refresh_rate_for_current_source(&mut self) {
         self.playback_session.user_speed = self.playback_user_speed_for_mode();
+        self.playback_session.is_playing = self.playback_is_playing_now();
         let rate = Self::playback_rate_from_values(
+            self.playback_session.transport,
             self.playback_session.user_speed,
-            self.playback_session.buffer_sr,
+            self.playback_session.transport_sr,
             self.audio.shared.out_sample_rate.max(1),
         );
         self.audio.set_rate(rate);
@@ -597,6 +723,39 @@ impl WavesPreviewer {
 
     pub(super) fn playback_sync_state_snapshot(&mut self) {
         self.playback_session.is_playing = self.playback_is_playing_now();
+    }
+
+    fn current_output_meter_db(&self) -> f32 {
+        let Some(buffer) = self.audio.shared.samples.load_full() else {
+            return -80.0;
+        };
+        let len = buffer.len();
+        if len == 0 {
+            return -80.0;
+        }
+        let pos = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(len.saturating_sub(1));
+        let window = 1024usize.min(len.saturating_sub(pos).max(1));
+        let channel_count = buffer.channel_count().max(1);
+        let mut sum_sq = 0.0f32;
+        for sample_idx in pos..pos.saturating_add(window) {
+            let mut mixed = 0.0f32;
+            for channel in &buffer.channels {
+                mixed += channel.get(sample_idx).copied().unwrap_or(0.0);
+            }
+            let mixed = mixed / channel_count as f32;
+            sum_sq += mixed * mixed;
+        }
+        let rms = (sum_sq / window.max(1) as f32).sqrt();
+        if rms > 0.0 {
+            (20.0 * rms.max(1.0e-8).log10()).clamp(-80.0, 6.0)
+        } else {
+            -80.0
+        }
     }
 
     fn playback_stop_if_editor_source_invalidated(&mut self, path: &Path) {
@@ -607,14 +766,23 @@ impl WavesPreviewer {
         if should_stop {
             self.audio.stop();
             self.playback_session.source = PlaybackSourceKind::None;
+            self.playback_session.transport = PlaybackTransportKind::Buffer;
             self.playback_session.is_playing = false;
-            self.playback_session.buffer_sr = self.audio.shared.out_sample_rate.max(1);
+            self.playback_session.transport_sr = self.audio.shared.out_sample_rate.max(1);
+            self.playback_session.dry_audio = None;
+            self.playback_session.last_applied_master_gain_db = f32::NAN;
+            self.playback_session.last_applied_file_gain_db = f32::NAN;
         }
     }
 
-    fn queue_tab_activation(&mut self, path: PathBuf) {
+    fn queue_tab_activation_with_kind(&mut self, path: PathBuf, kind: PendingTabActivationKind) {
         self.pending_activate_path = Some(path);
+        self.pending_activate_kind = Some(kind);
         self.pending_activate_ready = false;
+    }
+
+    fn queue_tab_activation(&mut self, path: PathBuf) {
+        self.queue_tab_activation_with_kind(path, PendingTabActivationKind::TabSwitch);
     }
 
     fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
@@ -664,9 +832,9 @@ impl WavesPreviewer {
         let chn = chs.len() as f32;
         let mut out = vec![0.0f32; len];
         for ch in chs {
-            for i in 0..len {
+            for (i, out_sample) in out.iter_mut().enumerate().take(len) {
                 if let Some(&v) = ch.get(i) {
-                    out[i] += v;
+                    *out_sample += v;
                 }
             }
         }
@@ -987,7 +1155,7 @@ impl WavesPreviewer {
         sample_rate: u32,
         bits_per_sample: u16,
     ) -> FileMeta {
-        let frames = channels.get(0).map(|c| c.len()).unwrap_or(0);
+        let frames = channels.first().map(|c| c.len()).unwrap_or(0);
         let mut mono = Vec::with_capacity(frames);
         if frames > 0 {
             for i in 0..frames {
@@ -1239,7 +1407,7 @@ impl WavesPreviewer {
             let meta = item.meta.as_ref();
             let mut row: Vec<String> = Vec::new();
             if cols.edited {
-                let edited = self.has_edits_for_paths(&[item.path.clone()]);
+                let edited = self.has_edits_for_paths(std::slice::from_ref(&item.path));
                 row.push(if edited {
                     "\u{25CF}".to_string()
                 } else {
@@ -1660,25 +1828,15 @@ impl WavesPreviewer {
                     _ => prev,
                 };
                 if self.mode != prev {
-                    match self.mode {
-                        RateMode::Speed => {
-                            self.playback_refresh_rate_for_current_source();
-                        }
-                        _ => {
-                            self.playback_refresh_rate_for_current_source();
-                            self.rebuild_current_buffer_with_mode();
-                        }
-                    }
+                    self.playback_refresh_rate_for_current_source();
+                    self.rebuild_current_buffer_with_mode();
                 }
                 ok(json!({"ok": true}))
             }
             mcp::UiCommand::SetSpeed(args) => {
                 self.playback_rate = args.rate;
                 match self.mode {
-                    RateMode::Speed => {
-                        self.playback_refresh_rate_for_current_source();
-                    }
-                    RateMode::TimeStretch => {
+                    RateMode::Speed | RateMode::TimeStretch => {
                         self.playback_refresh_rate_for_current_source();
                         self.rebuild_current_buffer_with_mode();
                     }
@@ -2221,6 +2379,7 @@ impl WavesPreviewer {
             leave_intent: None,
             show_leave_prompt: false,
             pending_activate_path: None,
+            pending_activate_kind: None,
             pending_activate_ready: false,
             heavy_preview_rx: None,
             heavy_preview_tool: None,
@@ -2404,10 +2563,7 @@ impl WavesPreviewer {
         };
         self.audio.stop();
         self.audio.set_samples_channels(channels);
-        self.playback_mark_source(
-            PlaybackSourceKind::EditorTab(path),
-            buffer_sample_rate,
-        );
+        self.playback_mark_buffer_source(PlaybackSourceKind::EditorTab(path), buffer_sample_rate);
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
         }
@@ -2489,21 +2645,8 @@ impl eframe::App for WavesPreviewer {
         }
         self.ensure_theme_visuals(ctx);
         self.tick_project_open();
-        // Update meter from audio RMS (approximate dBFS)
-        {
-            let rms = self
-                .audio
-                .shared
-                .meter_rms
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let db = if rms > 0.0 {
-                20.0 * rms.max(1e-8).log10()
-            } else {
-                -80.0
-            };
-            self.meter_db = db.clamp(-80.0, 6.0);
-            self.playback_sync_state_snapshot();
-        }
+        self.meter_db = self.current_output_meter_db();
+        self.playback_sync_state_snapshot();
         // Ensure effective volume (global vol x per-file gain) is always applied
         self.apply_effective_volume();
         // Drain scan results (background folder scan)
@@ -2588,6 +2731,7 @@ impl eframe::App for WavesPreviewer {
                     }
                     self.workspace_view = WorkspaceView::List;
                     self.pending_activate_path = None;
+                    self.pending_activate_kind = None;
                     self.pending_activate_ready = false;
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
@@ -3231,58 +3375,73 @@ impl eframe::App for WavesPreviewer {
                 ctx.request_repaint();
             } else {
                 let p = pending;
+                let activation_kind = self
+                    .pending_activate_kind
+                    .unwrap_or(PendingTabActivationKind::TabSwitch);
                 self.pending_activate_path = None;
+                self.pending_activate_kind = None;
                 self.pending_activate_ready = false;
                 self.playing_path = Some(p.clone());
                 if !self.apply_dirty_tab_audio_with_mode(&p) {
-                    // Reload the activated tab from stream or in-memory samples first.
+                    // Reload the activated tab from in-memory samples first.
                     let mut used_tab_transport = false;
+                    let source_time_sec = self.playback_current_source_time_sec();
                     if let Some(idx) = self.active_tab {
-                        let same_tab = self
-                            .tabs
-                            .get(idx)
-                            .map(|tab| tab.path == p)
-                            .unwrap_or(false);
-                        if same_tab && self.try_activate_editor_stream_transport_for_tab(idx) {
+                        let measure_stream_activation =
+                            matches!(activation_kind, PendingTabActivationKind::InitialOpen)
+                                && self
+                                    .tabs
+                                    .get(idx)
+                                    .map(|tab| {
+                                        tab.path == p && self.editor_stream_transport_eligible(tab)
+                                    })
+                                    .unwrap_or(false);
+                        let activation_started =
+                            measure_stream_activation.then(std::time::Instant::now);
+                        let activated_stream =
+                            self.try_activate_editor_stream_transport_for_tab(idx);
+                        if let Some(started_at) = activation_started {
+                            self.debug_push_editor_stream_activation_sample(
+                                started_at.elapsed().as_secs_f32() * 1000.0,
+                            );
+                        }
+                        if activated_stream {
                             used_tab_transport = true;
+                            if let Some(source_time_sec) = source_time_sec {
+                                self.playback_seek_to_source_time(self.mode, source_time_sec);
+                            }
                         } else if let Some(tab) = self.tabs.get(idx) {
                             if tab.path == p && !tab.ch_samples.is_empty() {
                                 used_tab_transport = true;
-                                let mut channels = tab.ch_samples.clone();
+                                let channels = tab.ch_samples.clone();
                                 let in_sr = tab.buffer_sample_rate.max(1);
-                                match self.mode {
-                                    RateMode::Speed => {
-                                        self.apply_sample_rate_preview_for_path(
-                                            &p,
-                                            &mut channels,
-                                            in_sr,
-                                        );
-                                        self.set_editor_buffer_transport_preserving_time(
-                                            p.as_path(),
-                                            channels,
-                                            self.audio.shared.out_sample_rate.max(1),
-                                        );
-                                        self.playback_mark_source(
-                                            PlaybackSourceKind::EditorTab(p.clone()),
-                                            self.audio.shared.out_sample_rate.max(1),
-                                        );
-                                    }
-                                    _ => {
-                                        // Prime with selected tab source before heavy processing result arrives.
-                                        self.apply_sample_rate_preview_for_path(
-                                            &p,
-                                            &mut channels,
-                                            in_sr,
-                                        );
-                                        self.audio.set_samples_channels(channels.clone());
-                                        self.playback_mark_source(
-                                            PlaybackSourceKind::EditorTab(p.clone()),
-                                            self.audio.shared.out_sample_rate.max(1),
-                                        );
-                                        self.spawn_heavy_processing_from_channels(
-                                            p.clone(),
-                                            channels,
-                                            ProcessingTarget::EditorTab(p.clone()),
+                                if self.mode_requires_offline_processing() {
+                                    self.audio.stop();
+                                    self.audio.set_samples_mono(Vec::new());
+                                    self.spawn_heavy_processing_from_channels(
+                                        p.clone(),
+                                        channels,
+                                        ProcessingTarget::EditorTab(p.clone()),
+                                    );
+                                } else {
+                                    let mut render_spec = self.offline_render_spec_for_path(&p);
+                                    render_spec.master_gain_db = 0.0;
+                                    render_spec.file_gain_db = 0.0;
+                                    let rendered = Self::render_channels_offline_with_spec(
+                                        channels,
+                                        in_sr,
+                                        render_spec,
+                                        false,
+                                    );
+                                    self.audio.set_samples_channels(rendered);
+                                    self.playback_mark_buffer_source(
+                                        PlaybackSourceKind::EditorTab(p.clone()),
+                                        self.audio.shared.out_sample_rate.max(1),
+                                    );
+                                    if let Some(source_time_sec) = source_time_sec {
+                                        self.playback_seek_to_source_time(
+                                            self.mode,
+                                            source_time_sec,
                                         );
                                     }
                                 }
@@ -3301,7 +3460,7 @@ impl eframe::App for WavesPreviewer {
                         }
                         match self.mode {
                             RateMode::Speed | RateMode::PitchShift | RateMode::TimeStretch => {
-                                self.playback_mark_source(
+                                self.playback_mark_buffer_source(
                                     PlaybackSourceKind::EditorTab(p.clone()),
                                     self.audio.shared.out_sample_rate.max(1),
                                 );
@@ -3316,7 +3475,9 @@ impl eframe::App for WavesPreviewer {
                     // Update effective volume to include per-file gain for the activated tab
                     self.apply_effective_volume();
                 }
-                self.debug_mark_tab_switch_interactive(&p);
+                if matches!(activation_kind, PendingTabActivationKind::TabSwitch) {
+                    self.debug_mark_tab_switch_interactive(&p);
+                }
                 activated_tab_idx = self.active_tab;
             }
         }

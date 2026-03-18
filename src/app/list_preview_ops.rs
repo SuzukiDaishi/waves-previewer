@@ -7,7 +7,7 @@ use super::types::{
 };
 
 impl super::WavesPreviewer {
-    fn list_preview_source_variant(&self, path: &Path) -> u64 {
+    pub(super) fn list_preview_source_variant(&self, path: &Path) -> u64 {
         let mut variant = 0u64;
         if let Some(item) = self.item_for_path(path) {
             variant ^= item.id;
@@ -58,6 +58,7 @@ impl super::WavesPreviewer {
             .store(self.list_preview_job_id, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     fn remap_preview_channels(
         channels: &mut Vec<Vec<f32>>,
         in_sr: u32,
@@ -100,18 +101,11 @@ impl super::WavesPreviewer {
     }
 
     fn preview_settings_for_path(&self, path: &Path) -> ListPreviewSettings {
-        ListPreviewSettings {
-            out_sr: self.audio.shared.out_sample_rate.max(1),
-            target_sr: self
-                .sample_rate_override
-                .get(path)
-                .copied()
-                .filter(|v| *v > 0),
-            bit_depth: self.bit_depth_override.get(path).copied(),
-            quality: self.list_preview_quality_for_path(path),
-            mode: self.mode,
-            source_variant: self.list_preview_source_variant(path),
-        }
+        let mut spec = self.offline_render_spec_for_path(path);
+        spec.master_gain_db = 0.0;
+        spec.file_gain_db = 0.0;
+        spec.quality = self.list_preview_quality_for_path(path);
+        spec
     }
 
     fn touch_list_preview_cache_path(&mut self, path: &Path) {
@@ -203,40 +197,24 @@ impl super::WavesPreviewer {
         self.list_preview_partial_ready = false;
         let job_epoch = self.list_preview_job_epoch.clone();
         let settings = self.preview_settings_for_path(&path);
-        let out_sr = settings.out_sr;
-        let target_sr = settings.target_sr;
-        let bit_depth = settings.bit_depth;
-        let resample_quality = Self::to_wave_resample_quality(settings.quality);
+        let _ = (max_secs, emit_every_secs);
         let (tx, rx) = mpsc::channel::<ListPreviewResult>();
         std::thread::spawn(move || {
-            let _ = crate::audio_io::decode_audio_multi_progressive(
-                &path,
-                max_secs,
-                emit_every_secs,
-                || job_epoch.load(Ordering::Relaxed) != job_id,
-                |mut channels, in_sr, is_final| {
-                    if job_epoch.load(Ordering::Relaxed) != job_id {
-                        return false;
-                    }
-                    let play_sr = Self::remap_preview_channels(
-                        &mut channels,
-                        in_sr,
-                        out_sr,
-                        target_sr,
-                        bit_depth,
-                        resample_quality,
-                    );
-                    tx.send(ListPreviewResult {
-                        path: path.clone(),
-                        channels,
-                        play_sr,
-                        job_id,
-                        is_final,
-                        settings,
-                    })
-                    .is_ok()
-                },
-            );
+            if job_epoch.load(Ordering::Relaxed) != job_id {
+                return;
+            }
+            if let Ok((channels, in_sr)) = crate::wave::decode_wav_multi(&path) {
+                let channels =
+                    Self::render_channels_offline_with_spec(channels, in_sr, settings, false);
+                let _ = tx.send(ListPreviewResult {
+                    path,
+                    channels,
+                    play_sr: settings.out_sr.max(1),
+                    job_id,
+                    is_final: true,
+                    settings,
+                });
+            }
         });
         self.list_preview_rx = Some(rx);
     }
@@ -252,28 +230,19 @@ impl super::WavesPreviewer {
             return;
         };
         let settings = self.preview_settings_for_path(&path);
-        let out_sr = settings.out_sr;
-        let target_sr = settings.target_sr;
-        let bit_depth = settings.bit_depth;
-        let resample_quality = Self::to_wave_resample_quality(settings.quality);
         self.list_preview_prefetch_inflight.insert(path.clone());
         std::thread::spawn(move || {
-            let entry = match crate::wave::decode_wav_multi_prefix(&path, max_secs) {
-                Ok((mut channels, in_sr, truncated)) => {
-                    let play_sr = Self::remap_preview_channels(
-                        &mut channels,
-                        in_sr,
-                        out_sr,
-                        target_sr,
-                        bit_depth,
-                        resample_quality,
-                    );
+            let _ = max_secs;
+            let entry = match crate::wave::decode_wav_multi(&path) {
+                Ok((channels, in_sr)) => {
+                    let channels =
+                        Self::render_channels_offline_with_spec(channels, in_sr, settings, false);
                     Some(ListPreviewCacheEntry {
                         audio: std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
                             channels,
                         )),
-                        play_sr,
-                        truncated,
+                        play_sr: settings.out_sr.max(1),
+                        truncated: false,
                         settings,
                     })
                 }
@@ -393,15 +362,11 @@ impl super::WavesPreviewer {
                 Ok(res) => {
                     let latest_job = res.job_id == self.list_preview_job_id;
                     if latest_job {
-                        if res.is_final {
-                            self.list_preview_partial_ready = false;
-                        } else {
-                            self.list_preview_partial_ready = true;
-                        }
+                        self.list_preview_partial_ready = false;
                         let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
                             res.channels,
                         ));
-                        let truncated = !res.is_final;
+                        let truncated = false;
                         self.insert_list_preview_cache_entry(
                             res.path.clone(),
                             ListPreviewCacheEntry {
@@ -415,7 +380,7 @@ impl super::WavesPreviewer {
                         if self.is_list_workspace_active()
                             && self.playing_path.as_ref() == Some(&res.path)
                         {
-                            self.audio.replace_samples_keep_pos(audio);
+                            self.audio.set_samples_buffer(audio);
                             self.mark_list_preview_source(&res.path, res.play_sr.max(1));
                             if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                                 self.audio.set_loop_region(0, buf.len());

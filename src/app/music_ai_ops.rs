@@ -587,7 +587,7 @@ impl crate::app::WavesPreviewer {
             .get(tab_idx)
             .map(|tab| (tab.path.clone(), tab.buffer_sample_rate.max(1)))
         {
-            self.playback_mark_source(
+            self.playback_mark_buffer_source(
                 crate::app::PlaybackSourceKind::EditorTab(path),
                 buffer_sr,
             );

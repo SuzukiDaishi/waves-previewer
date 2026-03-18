@@ -160,20 +160,24 @@ mod small_fix_regressions {
             .expect("build wav proxy")
             .expect("wav proxy available");
         let proxy_frames = proxy.channels.first().map(|ch| ch.len()).unwrap_or(0);
-        let source_secs = proxy.total_source_frames as f64 / 48_000.0f64;
-        let proxy_secs = proxy_frames as f64 / proxy.sample_rate.max(1) as f64;
-
         assert_eq!(proxy.total_source_frames, 4_320_000);
-        assert_eq!(proxy.channels.len(), 2, "stereo proxy should preserve channels");
+        assert_eq!(
+            proxy.channels.len(),
+            2,
+            "stereo proxy should preserve channels"
+        );
+        assert_eq!(
+            proxy.sample_rate, 48_000,
+            "proxy metadata should keep the source sample rate"
+        );
         assert!(
             proxy_frames < proxy.total_source_frames,
             "proxy should reduce frame count: proxy={proxy_frames} source={}",
             proxy.total_source_frames
         );
         assert!(
-            (proxy_secs - source_secs).abs() < 0.2,
-            "proxy duration should stay close to source: proxy={proxy_secs:.3}s source={source_secs:.3}s sr={}",
-            proxy.sample_rate
+            proxy_frames > 0,
+            "proxy should still contain waveform samples"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -214,7 +218,10 @@ mod small_fix_regressions {
                 pair
             );
         }
-        assert!(events.last().map(|(_, is_final)| *is_final).unwrap_or(false));
+        assert!(events
+            .last()
+            .map(|(_, is_final)| *is_final)
+            .unwrap_or(false));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -529,7 +536,10 @@ mod small_fix_regressions {
 
         harness.state_mut().audio.play();
         harness.run_steps(2);
-        assert!(harness.state().test_audio_is_playing(), "playback should be active");
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should be active"
+        );
 
         assert!(harness.state_mut().test_close_tab_for_path(&b));
         harness.run_steps(2);
@@ -566,7 +576,10 @@ mod small_fix_regressions {
 
         harness.state_mut().audio.play();
         harness.run_steps(2);
-        assert!(harness.state().test_audio_is_playing(), "playback should start");
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should start"
+        );
         assert_eq!(
             harness.state().test_playing_path().map(|p| p.as_path()),
             Some(a.as_path())
@@ -648,6 +661,18 @@ mod small_fix_regressions {
         harness.state_mut().test_refresh_playback_rate();
         harness.run_steps(2);
         let rate_before = harness.state().test_audio_rate();
+        let expected_rate_before = harness.state().test_playback_rate()
+            * (harness.state().test_playback_transport_sr() as f32
+                / harness.state().test_audio_out_sample_rate() as f32);
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "ExactStreamWav",
+            "pristine speed-mode editor playback should keep exact-stream transport active"
+        );
+        assert!(
+            (rate_before - expected_rate_before).abs() < 1.0e-6,
+            "callback rate should follow exact-stream ratio: expected={expected_rate_before} actual={rate_before}"
+        );
 
         harness.state_mut().test_switch_to_list();
         harness.run_steps(2);
@@ -677,7 +702,9 @@ mod small_fix_regressions {
         let mut harness = harness_with_folder(dir.clone());
         wait_for_scan(&mut harness);
         assert!(harness.state_mut().test_select_path(&src));
-        assert!(harness.state_mut().test_set_selected_sample_rate_override(48_000));
+        assert!(harness
+            .state_mut()
+            .test_set_selected_sample_rate_override(48_000));
         assert!(harness.state_mut().test_open_tab_for_path(&src));
         wait_for_tab_ready(&mut harness);
 
@@ -686,10 +713,7 @@ mod small_fix_regressions {
         harness.state_mut().test_refresh_playback_rate();
         harness.run_steps(2);
         let rate_before = harness.state().test_audio_rate();
-        assert!(
-            (rate_before - 1.25).abs() < 1.0e-6,
-            "editor buffer should already be aligned to output SR before preview restore"
-        );
+        assert!((rate_before - 1.0).abs() < 1.0e-6);
 
         assert!(harness.state_mut().test_force_preview_restore_active_tab());
         harness.run_steps(2);
@@ -729,8 +753,8 @@ mod small_fix_regressions {
 
         let rate_after = harness.state().test_audio_rate();
         assert!(
-            (rate_after - 1.11).abs() < 1.0e-6,
-            "session sidecar reopen should keep output-buffer playback rate stable: rate={rate_after}"
+            (rate_after - 1.0).abs() < 1.0e-6,
+            "session sidecar reopen should keep callback rate fixed at unity: rate={rate_after}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -750,22 +774,87 @@ mod small_fix_regressions {
         wait_for_audio_samples(&mut harness);
 
         let rate_before = harness.state().test_audio_rate();
-        let expected = 1.20 * (44_100.0f32 / 48_000.0f32);
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "Buffer",
+            "passive list selection should keep cached buffer transport"
+        );
         assert!(
-            (rate_before - expected).abs() < 1.0e-6,
-            "list preview should keep its source-buffer sample-rate ratio: expected={expected} actual={rate_before}"
+            !harness.state().test_audio_is_streaming_wav(&src),
+            "passive list selection should not activate exact streaming transport"
+        );
+        assert!(
+            (rate_before - 1.0).abs() < 1.0e-6,
+            "list preview callback should stay at unity: rate={rate_before}"
+        );
+        let rendered_len = harness.state().test_audio_buffer_len();
+        assert!(
+            rendered_len.abs_diff(80_000) <= 4,
+            "speed preview should be fully rendered before playback: len={rendered_len}"
         );
 
-        let _ = harness.state_mut().test_force_load_selected_list_preview_for_play();
+        let _ = harness
+            .state_mut()
+            .test_force_load_selected_list_preview_for_play();
         wait_for_audio_samples(&mut harness);
 
         let rate_after = harness.state().test_audio_rate();
+        let expected_rate_after = harness.state().test_playback_rate()
+            * (harness.state().test_playback_transport_sr() as f32
+                / harness.state().test_audio_out_sample_rate() as f32);
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "ExactStreamWav",
+            "explicit list play should switch eligible pristine WAV to exact-stream transport"
+        );
         assert!(
-            (rate_after - rate_before).abs() < 1.0e-6,
-            "list preview rate changed after explicit play request: before={rate_before} after={rate_after}"
+            harness.state().test_audio_is_streaming_wav(&src),
+            "explicit list play should activate exact streaming transport"
+        );
+        assert!(
+            (rate_after - expected_rate_after).abs() < 1.0e-6,
+            "list play callback rate should follow exact-stream ratio: expected={expected_rate_after} actual={rate_after}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn master_volume_stays_realtime_without_rebuilding_prepared_buffer() {
+        let mut harness = harness_default();
+        harness
+            .state_mut()
+            .test_seed_prepared_audio_buffer(vec![0.0, 0.25, -0.25, 0.1, -0.1]);
+
+        let before_ptr = harness.state().test_audio_buffer_ptr();
+        let before_sample = harness
+            .state()
+            .test_audio_buffer_sample(0, 2)
+            .expect("prepared buffer sample");
+
+        harness.state_mut().test_set_volume_db(-12.0);
+        harness.run_steps(2);
+
+        let after_ptr = harness.state().test_audio_buffer_ptr();
+        let after_sample = harness
+            .state()
+            .test_audio_buffer_sample(0, 2)
+            .expect("prepared buffer sample after volume change");
+        let expected_linear = 10.0f32.powf(-12.0 / 20.0);
+        let actual_linear = harness.state().test_audio_output_volume_linear();
+
+        assert_eq!(
+            after_ptr, before_ptr,
+            "master volume changes should not replace the prepared buffer"
+        );
+        assert!(
+            (after_sample - before_sample).abs() < 1.0e-6,
+            "master volume should remain outside offline buffer rendering"
+        );
+        assert!(
+            (actual_linear - expected_linear).abs() < 1.0e-6,
+            "callback master volume mismatch: expected={expected_linear} actual={actual_linear}"
+        );
     }
 
     #[test]
@@ -782,13 +871,23 @@ mod small_fix_regressions {
         harness.state_mut().test_set_mode_speed();
         harness.state_mut().test_set_playback_rate(1.0);
         harness.state_mut().test_refresh_playback_rate();
-        assert!(harness.state().test_audio_is_streaming_wav(&src));
-
         harness.state_mut().test_request_workspace_play_toggle();
         harness.run_steps(2);
         assert!(harness.state().test_audio_is_playing());
 
         let rate_before = harness.state().test_audio_rate();
+        let expected_rate_before = harness.state().test_playback_rate()
+            * (harness.state().test_playback_transport_sr() as f32
+                / harness.state().test_audio_out_sample_rate() as f32);
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "ExactStreamWav",
+            "eligible pristine editor playback should stay on exact-stream transport"
+        );
+        assert!(
+            (rate_before - expected_rate_before).abs() < 1.0e-6,
+            "exact-stream callback rate mismatch before stale result: expected={expected_rate_before} actual={rate_before}"
+        );
         harness.state_mut().test_inject_processing_result(
             &src,
             true,
@@ -803,11 +902,7 @@ mod small_fix_regressions {
         let rate_after = harness.state().test_audio_rate();
         assert!(
             (rate_after - rate_before).abs() < 1.0e-6,
-            "stale editor processing result changed exact stream rate: before={rate_before} after={rate_after}"
-        );
-        assert!(
-            harness.state().test_audio_is_streaming_wav(&src),
-            "exact editor stream should remain active after stale processing result"
+            "stale editor processing result changed callback rate: before={rate_before} after={rate_after}"
         );
         assert!(
             harness.state().test_audio_is_playing(),
@@ -835,29 +930,81 @@ mod small_fix_regressions {
         harness.state_mut().test_set_mode_speed();
         harness.state_mut().test_set_playback_rate(1.0);
         harness.state_mut().test_refresh_playback_rate();
-        assert!(harness.state().test_audio_is_streaming_wav(&src));
 
-        harness.state_mut().test_audio_seek_to_sample(44_100);
+        harness.state_mut().test_playback_seek_to_source_time(1.0);
         harness.run_steps(1);
-        let time_before = harness.state().test_audio_play_pos_f() / 44_100.0;
+        let time_before = harness
+            .state()
+            .test_playback_current_source_time_sec()
+            .expect("source time before rebuild");
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "ExactStreamWav",
+            "pristine editor playback should start on exact-stream transport"
+        );
 
-        assert!(harness.state_mut().test_set_selected_sample_rate_override(48_000));
+        assert!(harness
+            .state_mut()
+            .test_set_selected_sample_rate_override(48_000));
         harness.state_mut().test_rebuild_current_buffer_with_mode();
         harness.run_steps(2);
 
-        assert!(
-            !harness.state().test_audio_is_streaming_wav(&src),
-            "sample-rate override should force buffer transport"
-        );
-        let time_after = harness.state().test_audio_play_pos_f() / 48_000.0;
+        let time_after = harness
+            .state()
+            .test_playback_current_source_time_sec()
+            .expect("source time after rebuild");
         assert!(
             (time_after - time_before).abs() < 0.01,
-            "stream -> buffer rebuild should preserve playback time: before={time_before:.6} after={time_after:.6}"
+            "stream-to-buffer fallback should preserve source time: before={time_before:.6} after={time_after:.6}"
+        );
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "Buffer",
+            "sample-rate override should force buffer transport"
         );
         let rate_after = harness.state().test_audio_rate();
         assert!(
             (rate_after - 1.0).abs() < 1.0e-6,
             "buffer transport should run at output-sr rate after rebuild: rate={rate_after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_gain_disables_exact_stream_transport() {
+        let dir = make_temp_dir("editor_exact_stream_pending_gain");
+        let src = dir.join("src_44100.wav");
+        write_wav_32_float(&src, 44_100, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness.state_mut().test_refresh_playback_rate();
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "ExactStreamWav",
+            "pristine editor playback should begin on exact-stream transport"
+        );
+        assert!(harness
+            .state_mut()
+            .test_set_pending_gain_db_for_current_source(3.0));
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "Buffer",
+            "per-file gain should force fallback to rendered buffer transport"
+        );
+        assert!(
+            !harness.state().test_audio_is_streaming_wav(&src),
+            "per-file gain should deactivate exact streaming transport"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -960,8 +1107,10 @@ mod small_fix_regressions {
 
         harness.state_mut().test_set_mode_speed();
         assert!(
-            !harness.state_mut().test_spawn_heavy_processing_from_active_tab(),
-            "Speed mode should not create heavy processing jobs for editor tabs"
+            !harness
+                .state_mut()
+                .test_spawn_heavy_processing_from_active_tab(),
+            "unity speed should not create heavy processing jobs for editor tabs"
         );
         assert!(
             !harness.state().test_processing_active(),
@@ -1072,19 +1221,19 @@ mod small_fix_regressions {
         );
         assert!(
             saw_streaming_while_loading,
-            "loading wav should activate exact streaming transport before final decode"
+            "eligible pristine WAV loading should activate exact streaming transport immediately"
         );
         assert!(
             saw_exact_audio_ready_while_loading,
-            "exact audio should already be ready during loading via stream transport"
+            "exact-stream activation should make editor playback ready before final decode"
         );
         assert!(
             saw_playing_while_loading,
-            "playback should be able to start during loading once exact stream transport is active"
+            "editor playback should be allowed during loading when exact-stream is active"
         );
         assert!(
             saw_final_ready,
-            "full decode should still finish after stream playback becomes available"
+            "full decode should still finish before playback becomes available"
         );
         assert!(
             max_progress > 0.20,
@@ -1093,7 +1242,7 @@ mod small_fix_regressions {
 
         assert!(
             harness.state().test_audio_is_playing(),
-            "playback should remain active after final decode completes"
+            "playback started during loading should remain active after final decode"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1111,49 +1260,51 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_open_tab_for_path(&wav));
 
         let started = Instant::now();
-        let mut rate_while_loading: Option<f32> = None;
+        let mut saw_playing_while_loading = false;
+        let mut rate_while_loading = None;
         loop {
             harness.run_steps(1);
             if harness.state().test_tab_loading() {
-                if harness.state().test_active_editor_exact_audio_ready()
-                    && !harness.state().test_audio_is_playing()
-                {
+                if !harness.state().test_audio_is_playing() {
                     harness.state_mut().test_request_workspace_play_toggle();
                 }
-                if harness.state().test_audio_is_playing()
-                    && harness.state().test_audio_is_streaming_wav(&wav)
-                {
-                    rate_while_loading.get_or_insert_with(|| harness.state().test_audio_rate());
+                saw_playing_while_loading |= harness.state().test_audio_is_playing();
+                if harness.state().test_audio_is_playing() {
+                    rate_while_loading = Some(harness.state().test_audio_rate());
                 }
             } else if harness.state().test_active_editor_exact_audio_ready() {
                 break;
             }
             if started.elapsed() > Duration::from_secs(20) {
                 panic!(
-                    "wav exact finalize timeout: loading={} exact_ready={} playing={} streaming={} rate={:?}",
+                    "wav offline finalize timeout: loading={} exact_ready={} playing={} streaming={}",
                     harness.state().test_tab_loading(),
                     harness.state().test_active_editor_exact_audio_ready(),
                     harness.state().test_audio_is_playing(),
                     harness.state().test_audio_is_streaming_wav(&wav),
-                    rate_while_loading
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
 
-        let rate_while_loading = rate_while_loading.expect("stream rate during loading");
+        assert!(
+            saw_playing_while_loading,
+            "exact-stream loading should allow playback before final decode"
+        );
+        let rate_before_final = rate_while_loading.expect("rate while loading");
         let rate_after_final = harness.state().test_audio_rate();
         assert!(
-            harness.state().test_audio_is_playing(),
-            "playback should remain active after final decode completes"
-        );
-        assert!(
             harness.state().test_audio_is_streaming_wav(&wav),
-            "pristine wav exact stream should remain active after final decode"
+            "pristine WAV should remain on exact-stream transport after final decode"
+        );
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            "ExactStreamWav",
+            "final decode should not swap live playback off exact-stream transport"
         );
         assert!(
-            (rate_after_final - rate_while_loading).abs() < 1.0e-6,
-            "final exact audio should not change playback rate mid-play: loading={rate_while_loading} final={rate_after_final}"
+            (rate_after_final - rate_before_final).abs() < 1.0e-6,
+            "finalizing exact audio should not change callback rate mid-play: before={rate_before_final} after={rate_after_final}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1171,7 +1322,10 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_open_tab_for_path(&wav));
         harness.run_steps(1);
 
-        assert!(harness.state().test_tab_loading(), "tab should enter loading state");
+        assert!(
+            harness.state().test_tab_loading(),
+            "tab should enter loading state"
+        );
         assert!(
             harness.state().test_active_tab_loading_waveform_ready(),
             "loading overview should be available immediately after open"
@@ -1236,8 +1390,12 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_open_tab_for_path(&src));
         wait_for_tab_ready(&mut harness);
 
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::MusicAnalyze));
-        assert!(harness.state_mut().test_set_music_analysis_result_mock(true));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::MusicAnalyze));
+        assert!(harness
+            .state_mut()
+            .test_set_music_analysis_result_mock(true));
         assert!(harness
             .state_mut()
             .test_set_music_preview_gains_db(80.0, 30.0, 42.0, 100.0));

@@ -75,3 +75,12 @@
 - `process_timestretch_offline` は rate に応じて波形長を `1/rate` 倍に伸縮します。例: rate=0.5 なら約 2 倍、rate=2.0 なら約 1/2 の長さになります。
 - 生成された波形が元の描画領域を超えるケース（rate < 1.0）でも、そのまま UI/再生に反映されます。
 
+## Hybrid Playback Principle
+
+This repository now uses a hybrid playback policy.
+
+- Dry pristine physical WAV may use exact-stream transport for immediate playback.
+- Exact-stream is allowed only when the source has no edits, no preview overlay, no SR/bit-depth override, no per-file gain, and no other sample-changing processing.
+- In exact-stream mode, the callback may do only master output volume and transport rate correction derived from `source_sr / out_sr`.
+- Sample-rate conversion, PitchShift, TimeStretch, VST/CLAP preview/apply, per-file gain, edited audio, and any other sample-changing path must be rendered offline before playback.
+- Passive list selection and loading UI may stay progressive, but processed audio must not depend on callback DSP or prefix/full audible handoff.

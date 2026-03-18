@@ -11,6 +11,10 @@ impl super::WavesPreviewer {
         self.playing_path.as_ref()
     }
 
+    pub fn test_is_editor_workspace_active(&self) -> bool {
+        self.is_editor_workspace_active()
+    }
+
     pub fn test_selected_path(&self) -> Option<&PathBuf> {
         self.selected.and_then(|row| self.path_for_row(row))
     }
@@ -118,6 +122,41 @@ impl super::WavesPreviewer {
         self.volume_db
     }
 
+    pub fn test_set_volume_db(&mut self, db: f32) {
+        self.volume_db = db;
+        self.apply_effective_volume();
+    }
+
+    pub fn test_audio_output_volume_linear(&self) -> f32 {
+        self.audio
+            .shared
+            .vol
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_audio_buffer_ptr(&self) -> usize {
+        self.audio
+            .shared
+            .samples
+            .load_full()
+            .map(|buffer| std::sync::Arc::as_ptr(&buffer) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn test_audio_buffer_sample(&self, channel: usize, index: usize) -> Option<f32> {
+        let buffer = self.audio.shared.samples.load_full()?;
+        let channel = buffer.channels.get(channel)?;
+        channel.get(index).copied()
+    }
+
+    pub fn test_seed_prepared_audio_buffer(&mut self, mono: Vec<f32>) {
+        let buffer = std::sync::Arc::new(crate::audio::AudioBuffer::from_mono(mono));
+        self.audio.set_samples_buffer(buffer.clone());
+        self.playback_session.dry_audio = Some(buffer);
+        self.playback_session.last_applied_master_gain_db = self.volume_db;
+        self.playback_session.last_applied_file_gain_db = 0.0;
+    }
+
     pub fn test_set_list_gain_column_visible(&mut self, visible: bool) {
         self.list_columns.gain = visible;
     }
@@ -131,7 +170,14 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_force_load_selected_list_preview_for_play(&mut self) -> bool {
-        self.force_load_selected_list_preview_for_play()
+        let ready = self.force_load_selected_list_preview_for_play();
+        if ready {
+            self.audio.play();
+            if let Some(path) = self.selected_path_buf() {
+                self.debug_mark_list_play_start(&path);
+            }
+        }
+        ready
     }
 
     pub fn test_set_rate_mode(&mut self, mode: RateMode) {
@@ -170,6 +216,10 @@ impl super::WavesPreviewer {
         self.audio.seek_to_sample(pos);
     }
 
+    pub fn test_playback_seek_to_source_time(&self, source_time_sec: f64) {
+        self.playback_seek_to_source_time(self.mode, source_time_sec);
+    }
+
     pub fn test_force_preview_restore_active_tab(&mut self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -189,9 +239,41 @@ impl super::WavesPreviewer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn test_audio_out_sample_rate(&self) -> u32 {
+        self.audio.shared.out_sample_rate.max(1)
+    }
+
+    pub fn test_playback_transport_name(&self) -> &'static str {
+        match self.playback_session.transport {
+            super::PlaybackTransportKind::Buffer => "Buffer",
+            super::PlaybackTransportKind::ExactStreamWav => "ExactStreamWav",
+        }
+    }
+
+    pub fn test_playback_transport_sr(&self) -> u32 {
+        self.playback_session.transport_sr.max(1)
+    }
+
+    pub fn test_playback_current_source_time_sec(&self) -> Option<f64> {
+        self.playback_current_source_time_sec()
+    }
+
     pub fn test_selected_pending_gain_db(&self) -> Option<f32> {
         let path = self.test_selected_path()?;
         Some(self.pending_gain_db_for_path(path))
+    }
+
+    pub fn test_set_pending_gain_db_for_current_source(&mut self, db: f32) -> bool {
+        let path = self.selected_path_buf().or_else(|| {
+            self.active_tab
+                .and_then(|idx| self.tabs.get(idx).map(|tab| tab.path.clone()))
+        });
+        let Some(path) = path else {
+            return false;
+        };
+        self.set_pending_gain_db_for_path(&path, db);
+        self.apply_effective_volume();
+        true
     }
 
     pub fn test_processing_autoplay_when_ready(&self) -> bool {
@@ -243,6 +325,7 @@ impl super::WavesPreviewer {
             mode: state_mode,
             target: state_target,
             autoplay_when_ready: false,
+            source_time_sec: None,
             started_at: std::time::Instant::now(),
             rx,
         });
@@ -400,6 +483,11 @@ impl super::WavesPreviewer {
         }
         self.open_or_activate_tab(path);
         true
+    }
+
+    pub fn test_clear_meta_for_path(&mut self, path: &Path) {
+        self.clear_meta_for_path(path);
+        self.meta_inflight.remove(path);
     }
 
     pub fn test_set_active_tool(&mut self, tool: ToolKind) -> bool {
@@ -715,7 +803,8 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_editor_decode_progress(&self) -> Option<f32> {
-        self.editor_decode_ui_status(None).map(|status| status.progress)
+        self.editor_decode_ui_status(None)
+            .map(|status| status.progress)
     }
 
     pub fn test_editor_decode_message(&self) -> Option<String> {
@@ -740,9 +829,9 @@ impl super::WavesPreviewer {
         self.tabs
             .get(tab_idx)
             .map(|tab| {
-                tab.loading_waveform_minmax
-                    .iter()
-                    .any(|(mn, mx)| mn.abs() > 1.0e-5 || mx.abs() > 1.0e-5 || (mx - mn).abs() > 1.0e-5)
+                tab.loading_waveform_minmax.iter().any(|(mn, mx)| {
+                    mn.abs() > 1.0e-5 || mx.abs() > 1.0e-5 || (mx - mn).abs() > 1.0e-5
+                })
             })
             .unwrap_or(false)
     }
@@ -804,9 +893,10 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_set_selected_sample_rate_override(&mut self, sample_rate: u32) -> bool {
-        let path = self
-            .selected_path_buf()
-            .or_else(|| self.active_tab.and_then(|idx| self.tabs.get(idx).map(|tab| tab.path.clone())));
+        let path = self.selected_path_buf().or_else(|| {
+            self.active_tab
+                .and_then(|idx| self.tabs.get(idx).map(|tab| tab.path.clone()))
+        });
         let Some(path) = path else {
             return false;
         };
@@ -967,7 +1057,7 @@ impl super::WavesPreviewer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn test_audio_play_pos_f(&self) -> f32 {
+    pub fn test_audio_play_pos_f(&self) -> f64 {
         self.audio
             .shared
             .play_pos_f
