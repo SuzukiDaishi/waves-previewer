@@ -120,37 +120,22 @@ pub(super) struct MusicAnalyzeOutput {
     pub source_len_samples: usize,
 }
 
-pub(super) fn music_model_snapshots_root() -> PathBuf {
-    hf_cache_root()
-        .join("models--zukky--allinone-DLL-ONNX")
-        .join("snapshots")
-}
-
 pub(super) fn music_model_repo_root() -> PathBuf {
-    hf_cache_root().join("models--zukky--allinone-DLL-ONNX")
+    super::hf_cache::preferred_repo_root(MUSIC_MODEL_ID)
 }
 
 pub(super) fn resolve_music_model_dir() -> Option<PathBuf> {
-    let snapshots = music_model_snapshots_root();
-    if !snapshots.is_dir() {
-        return None;
-    }
-    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    let entries = std::fs::read_dir(&snapshots).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !has_required_music_model_files(&path) {
-            continue;
-        }
-        let ts = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((ts, path));
-    }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    candidates.into_iter().next().map(|(_, p)| p)
+    let hint = std::env::var_os("NEOWAVES_MUSIC_MODEL_DIR").map(PathBuf::from);
+    resolve_music_model_dir_with_hint(hint.as_deref())
+}
+
+fn resolve_music_model_dir_with_hint(hint: Option<&Path>) -> Option<PathBuf> {
+    super::hf_cache::resolve_model_dir(
+        MUSIC_MODEL_ID,
+        MUSIC_MODEL_REVISION,
+        hint,
+        has_required_music_model_files,
+    )
 }
 
 pub(super) fn has_required_music_model_files(dir: &Path) -> bool {
@@ -2668,65 +2653,11 @@ mod dbn {
     }
 }
 
-fn hf_cache_root() -> PathBuf {
-    if let Some(path) = std::env::var_os("HF_HUB_CACHE") {
-        return PathBuf::from(path);
-    }
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let mut push_unique = |path: PathBuf| {
-        if !candidates.iter().any(|p| p == &path) {
-            candidates.push(path);
-        }
-    };
-
-    if let Some(path) = std::env::var_os("HF_HOME") {
-        push_unique(PathBuf::from(path).join("hub"));
-    }
-    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-        push_unique(PathBuf::from(path).join("huggingface").join("hub"));
-    }
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        push_unique(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("huggingface")
-                .join("hub"),
-        );
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        push_unique(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("huggingface")
-                .join("hub"),
-        );
-    }
-    if let (Some(drive), Some(path)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
-    {
-        let mut home = std::ffi::OsString::from(drive);
-        home.push(path);
-        push_unique(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("huggingface")
-                .join("hub"),
-        );
-    }
-
-    if let Some(existing) = candidates.iter().find(|p| p.is_dir()) {
-        return existing.clone();
-    }
-    candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         estimate_bpm_from_beats_samples, has_required_music_model_files, normalize_to_stereo_sr,
-        resolve_demucs_model_path, resolve_stem_paths,
+        resolve_demucs_model_path, resolve_music_model_dir_with_hint, resolve_stem_paths,
     };
 
     #[test]
@@ -2799,6 +2730,29 @@ mod tests {
         std::fs::write(dir.join("htdemucs.onnx"), b"b").expect("root demucs");
         let path = resolve_demucs_model_path(&dir).expect("demucs path");
         assert_eq!(path, dir.join("htdemucs.onnx"));
+    }
+
+    #[test]
+    fn resolve_music_model_dir_accepts_hub_root_hint() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_music_model_hint_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let repo_root = dir.join("hub").join("models--zukky--allinone-DLL-ONNX");
+        let snapshot = repo_root.join("snapshots").join("abc123");
+        std::fs::create_dir_all(snapshot.join("onnx")).expect("snapshot onnx dir");
+        std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+        std::fs::write(repo_root.join("refs").join("main"), "abc123").expect("write ref");
+        std::fs::write(snapshot.join("onnx").join("ensemble_manifest.json"), b"{}")
+            .expect("write manifest");
+
+        let resolved = resolve_music_model_dir_with_hint(Some(dir.join("hub").as_path()))
+            .expect("resolved music model");
+        assert_eq!(resolved, snapshot);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1277,6 +1277,22 @@ impl super::WavesPreviewer {
         self.effect_graph.tester.target_path.clone()
     }
 
+    pub fn test_open_effect_graph_workspace(&mut self) {
+        self.open_effect_graph_workspace();
+    }
+
+    pub fn test_add_effect_graph_plugin_node(&mut self) -> bool {
+        let Some(node_id) = self.effect_graph_add_node(
+            crate::app::types::EffectGraphNodeKind::PluginFx,
+            [180.0, 180.0],
+        ) else {
+            return false;
+        };
+        self.effect_graph.canvas.selected_nodes.clear();
+        self.effect_graph.canvas.selected_nodes.insert(node_id);
+        true
+    }
+
     pub fn test_set_spectro_hop_size(&mut self, hop_size: usize) {
         let mut next = self.spectro_cfg.clone();
         next.hop_size = hop_size.max(1);

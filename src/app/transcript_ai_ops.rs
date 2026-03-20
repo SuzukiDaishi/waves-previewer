@@ -30,79 +30,12 @@ fn canonical_transcript_languages() -> Vec<String> {
         .collect()
 }
 
-fn hf_cache_root() -> PathBuf {
-    if let Some(path) = std::env::var_os("HF_HUB_CACHE") {
-        return PathBuf::from(path);
-    }
-
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    let mut push_unique = |path: PathBuf| {
-        if !candidates.iter().any(|p| p == &path) {
-            candidates.push(path);
-        }
-    };
-
-    if let Some(path) = std::env::var_os("HF_HOME") {
-        push_unique(PathBuf::from(path).join("hub"));
-    }
-    if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-        push_unique(PathBuf::from(path).join("huggingface").join("hub"));
-    }
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        push_unique(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("huggingface")
-                .join("hub"),
-        );
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        push_unique(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("huggingface")
-                .join("hub"),
-        );
-    }
-    if let (Some(drive), Some(path)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
-    {
-        let mut home = std::ffi::OsString::from(drive);
-        home.push(path);
-        push_unique(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("huggingface")
-                .join("hub"),
-        );
-    }
-
-    if let Some(existing) = candidates.iter().find(|p| p.is_dir()) {
-        return existing.clone();
-    }
-    candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn model_snapshots_root() -> PathBuf {
-    hf_cache_root()
-        .join("models--onnx-community--whisper-large-v3-turbo")
-        .join("snapshots")
-}
-
 fn model_repo_root() -> PathBuf {
-    hf_cache_root().join("models--onnx-community--whisper-large-v3-turbo")
-}
-
-fn vad_snapshots_root() -> PathBuf {
-    hf_cache_root()
-        .join("models--deepghs--silero-vad-onnx")
-        .join("snapshots")
+    super::hf_cache::preferred_repo_root(TRANSCRIPT_MODEL_ID)
 }
 
 fn vad_repo_root() -> PathBuf {
-    hf_cache_root().join("models--deepghs--silero-vad-onnx")
+    super::hf_cache::preferred_repo_root(VAD_MODEL_ID)
 }
 
 fn has_required_model_files(dir: &Path) -> bool {
@@ -159,42 +92,21 @@ fn has_required_model_files_for_variant(dir: &Path, variant: TranscriptModelVari
     }
 }
 
-fn find_latest_snapshot<F>(root: &Path, mut predicate: F) -> Option<PathBuf>
-where
-    F: FnMut(&Path) -> bool,
-{
-    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    let entries = std::fs::read_dir(root).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !predicate(&path) {
-            continue;
-        }
-        let ts = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((ts, path));
-    }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    candidates.into_iter().next().map(|(_, p)| p)
+fn resolve_model_dir_for_variant(variant: TranscriptModelVariant) -> Option<PathBuf> {
+    let hint = std::env::var_os("NEOWAVES_TRANSCRIPT_MODEL_DIR").map(PathBuf::from);
+    resolve_model_dir_for_variant_with_hint(variant, hint.as_deref())
 }
 
-fn resolve_model_dir_for_variant(variant: TranscriptModelVariant) -> Option<PathBuf> {
-    if let Some(override_dir) = std::env::var_os("NEOWAVES_TRANSCRIPT_MODEL_DIR") {
-        let path = PathBuf::from(override_dir);
-        if has_required_model_files_for_variant(&path, variant) {
-            return Some(path);
-        }
-    }
-    let snapshots = model_snapshots_root();
-    if !snapshots.is_dir() {
-        return None;
-    }
-    find_latest_snapshot(&snapshots, |path| {
-        has_required_model_files_for_variant(path, variant)
-    })
+fn resolve_model_dir_for_variant_with_hint(
+    variant: TranscriptModelVariant,
+    hint: Option<&Path>,
+) -> Option<PathBuf> {
+    super::hf_cache::resolve_model_dir(
+        TRANSCRIPT_MODEL_ID,
+        TRANSCRIPT_MODEL_REVISION,
+        hint,
+        |path| has_required_model_files_for_variant(path, variant),
+    )
 }
 
 fn normalize_special_token_code(token: &str) -> Option<String> {
@@ -408,30 +320,14 @@ fn has_vad_model_file(path: &Path) -> bool {
             .unwrap_or(false)
 }
 
-fn find_latest_vad_model(root: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(root).ok()?;
-    let mut candidates = Vec::<(std::time::SystemTime, PathBuf)>::new();
-    for entry in entries.flatten() {
-        let snapshot = entry.path();
-        if !snapshot.is_dir() {
-            continue;
-        }
-        for rel in ["silero_vad.onnx", "silero_vad_half.onnx"] {
-            let candidate = snapshot.join(rel);
-            if !has_vad_model_file(&candidate) {
-                continue;
-            }
-            let ts = std::fs::metadata(&candidate)
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            candidates.push((ts, candidate));
-        }
-    }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    candidates.into_iter().next().map(|(_, p)| p)
+fn resolve_vad_model_path(cfg: &super::types::TranscriptAiConfig) -> Option<PathBuf> {
+    resolve_vad_model_path_with_hint(cfg, None)
 }
 
-fn resolve_vad_model_path(cfg: &super::types::TranscriptAiConfig) -> Option<PathBuf> {
+fn resolve_vad_model_path_with_hint(
+    cfg: &super::types::TranscriptAiConfig,
+    hint: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(path) = cfg.vad_model_path.as_ref() {
         if has_vad_model_file(path) {
             return Some(path.clone());
@@ -443,7 +339,16 @@ fn resolve_vad_model_path(cfg: &super::types::TranscriptAiConfig) -> Option<Path
             return Some(path);
         }
     }
-    find_latest_vad_model(&vad_snapshots_root())
+    let dir = super::hf_cache::resolve_model_dir(VAD_MODEL_ID, VAD_MODEL_REVISION, hint, |dir| {
+        dir.join("silero_vad.onnx").is_file() || dir.join("silero_vad_half.onnx").is_file()
+    })?;
+    for rel in ["silero_vad.onnx", "silero_vad_half.onnx"] {
+        let path = dir.join(rel);
+        if has_vad_model_file(&path) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn transcribable_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -1312,10 +1217,11 @@ impl super::WavesPreviewer {
 mod tests {
     use super::{
         canonical_transcript_languages, fold_download_progress,
-        has_required_model_files_for_variant, sanitize_transcript_language_task,
+        has_required_model_files_for_variant, resolve_model_dir_for_variant_with_hint,
+        resolve_vad_model_path_with_hint, sanitize_transcript_language_task,
         transcript_catalog_from_generation_config, transcript_catalog_from_tokenizer,
     };
-    use crate::app::types::TranscriptModelVariant;
+    use crate::app::types::{TranscriptAiConfig, TranscriptModelVariant};
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let nonce = std::time::SystemTime::now()
@@ -1427,5 +1333,59 @@ mod tests {
         }
         assert_eq!(total, 3);
         assert_eq!(done, 3);
+    }
+
+    #[test]
+    fn resolve_transcript_model_dir_accepts_hf_home_hint() {
+        let dir = temp_dir("model_hint");
+        let repo_root = dir
+            .join("huggingface")
+            .join("hub")
+            .join("models--onnx-community--whisper-large-v3-turbo");
+        let snapshot = repo_root.join("snapshots").join("rev123");
+        std::fs::create_dir_all(snapshot.join("onnx")).expect("mkdir onnx");
+        std::fs::create_dir_all(repo_root.join("refs")).expect("mkdir refs");
+        std::fs::write(repo_root.join("refs").join("main"), "rev123").expect("write ref");
+        for rel in [
+            "config.json",
+            "tokenizer.json",
+            "preprocessor_config.json",
+            "onnx/encoder_model_fp16.onnx",
+            "onnx/decoder_model_fp16.onnx",
+            "onnx/decoder_with_past_model_fp16.onnx",
+        ] {
+            std::fs::write(snapshot.join(rel), "{}").expect("touch");
+        }
+
+        let resolved = resolve_model_dir_for_variant_with_hint(
+            TranscriptModelVariant::Fp16,
+            Some(dir.join("huggingface").as_path()),
+        )
+        .expect("resolved transcript model");
+        assert_eq!(resolved, snapshot);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_vad_model_prefers_cached_snapshot() {
+        let dir = temp_dir("vad_hint");
+        let repo_root = dir
+            .join("huggingface")
+            .join("hub")
+            .join("models--deepghs--silero-vad-onnx");
+        let snapshot = repo_root.join("snapshots").join("vadrev");
+        std::fs::create_dir_all(&snapshot).expect("mkdir snapshot");
+        std::fs::create_dir_all(repo_root.join("refs")).expect("mkdir refs");
+        std::fs::write(repo_root.join("refs").join("main"), "vadrev").expect("write ref");
+        let vad_path = snapshot.join("silero_vad.onnx");
+        std::fs::write(&vad_path, "onnx").expect("write vad");
+
+        let resolved = resolve_vad_model_path_with_hint(
+            &TranscriptAiConfig::default(),
+            Some(dir.join("huggingface").as_path()),
+        )
+        .expect("resolved vad");
+        assert_eq!(resolved, vad_path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -456,6 +456,81 @@ pub struct PluginParamUiState {
     pub unit: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct EffectGraphPluginParamState {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub normalized: f32,
+    #[serde(default)]
+    pub default_normalized: f32,
+    #[serde(default)]
+    pub min: f32,
+    #[serde(default)]
+    pub max: f32,
+    #[serde(default)]
+    pub unit: String,
+}
+
+impl EffectGraphPluginParamState {
+    pub fn from_ui(param: &PluginParamUiState) -> Self {
+        Self {
+            id: param.id.clone(),
+            name: param.name.clone(),
+            normalized: param.normalized.clamp(0.0, 1.0),
+            default_normalized: param.default_normalized.clamp(0.0, 1.0),
+            min: param.min,
+            max: param.max,
+            unit: param.unit.clone(),
+        }
+    }
+
+    pub fn to_worker_value(&self) -> crate::plugin::PluginParamValue {
+        crate::plugin::PluginParamValue {
+            id: self.id.clone(),
+            normalized: self.normalized.clamp(0.0, 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EffectGraphPluginNodeConfig {
+    #[serde(default)]
+    pub plugin_key: Option<String>,
+    #[serde(default)]
+    pub plugin_name: String,
+    #[serde(default = "default_effect_graph_plugin_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bypass: bool,
+    #[serde(default)]
+    pub filter: String,
+    #[serde(default)]
+    pub params: Vec<EffectGraphPluginParamState>,
+    #[serde(default)]
+    pub state_blob_b64: Option<String>,
+}
+
+impl Default for EffectGraphPluginNodeConfig {
+    fn default() -> Self {
+        Self {
+            plugin_key: None,
+            plugin_name: String::new(),
+            enabled: true,
+            bypass: false,
+            filter: String::new(),
+            params: Vec::new(),
+            state_blob_b64: None,
+        }
+    }
+}
+
+fn default_effect_graph_plugin_enabled() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PluginFxDraft {
     pub plugin_key: Option<String>,
@@ -1023,6 +1098,7 @@ pub enum EffectGraphNodeKind {
     PitchShift,
     TimeStretch,
     Speed,
+    PluginFx,
     Duplicate,
     SplitChannels,
     CombineChannels,
@@ -1050,6 +1126,10 @@ pub enum EffectGraphNodeData {
     Speed {
         rate: f32,
     },
+    PluginFx {
+        #[serde(default)]
+        config: EffectGraphPluginNodeConfig,
+    },
     Duplicate,
     SplitChannels,
     CombineChannels,
@@ -1072,6 +1152,7 @@ impl EffectGraphNodeData {
             Self::PitchShift { .. } => EffectGraphNodeKind::PitchShift,
             Self::TimeStretch { .. } => EffectGraphNodeKind::TimeStretch,
             Self::Speed { .. } => EffectGraphNodeKind::Speed,
+            Self::PluginFx { .. } => EffectGraphNodeKind::PluginFx,
             Self::Duplicate => EffectGraphNodeKind::Duplicate,
             Self::SplitChannels => EffectGraphNodeKind::SplitChannels,
             Self::CombineChannels => EffectGraphNodeKind::CombineChannels,
@@ -1089,6 +1170,7 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::PitchShift => "PitchShift",
             EffectGraphNodeKind::TimeStretch => "TimeStretch",
             EffectGraphNodeKind::Speed => "Speed",
+            EffectGraphNodeKind::PluginFx => "Plugin FX",
             EffectGraphNodeKind::Duplicate => "Duplicate",
             EffectGraphNodeKind::SplitChannels => "Split Channels",
             EffectGraphNodeKind::CombineChannels => "Combine Channels",
@@ -1108,6 +1190,9 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::PitchShift => Self::PitchShift { semitones: 0.0 },
             EffectGraphNodeKind::TimeStretch => Self::TimeStretch { rate: 1.0 },
             EffectGraphNodeKind::Speed => Self::Speed { rate: 1.0 },
+            EffectGraphNodeKind::PluginFx => Self::PluginFx {
+                config: EffectGraphPluginNodeConfig::default(),
+            },
             EffectGraphNodeKind::Duplicate => Self::Duplicate,
             EffectGraphNodeKind::SplitChannels => Self::SplitChannels,
             EffectGraphNodeKind::CombineChannels => Self::CombineChannels,
@@ -1128,6 +1213,7 @@ impl EffectGraphNodeData {
             | Self::PitchShift { .. }
             | Self::TimeStretch { .. }
             | Self::Speed { .. }
+            | Self::PluginFx { .. }
             | Self::Duplicate
             | Self::DebugWaveform { .. }
             | Self::DebugSpectrum { .. }
@@ -1145,6 +1231,7 @@ impl EffectGraphNodeData {
             | Self::PitchShift { .. }
             | Self::TimeStretch { .. }
             | Self::Speed { .. }
+            | Self::PluginFx { .. }
             | Self::DebugWaveform { .. }
             | Self::DebugSpectrum { .. }
             | Self::CombineChannels => &["out"],
@@ -1218,7 +1305,7 @@ pub struct EffectGraphDocument {
 impl Default for EffectGraphDocument {
     fn default() -> Self {
         Self {
-            schema_version: 2,
+            schema_version: 3,
             name: "New Effect Graph".to_string(),
             nodes: vec![
                 EffectGraphNode {
@@ -1297,6 +1384,15 @@ pub struct EffectGraphCanvasState {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EffectGraphDebugViewState {
     pub scroll_x: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EffectGraphPluginNodeRuntimeState {
+    pub backend: Option<crate::plugin::PluginHostBackend>,
+    pub gui_capabilities: crate::plugin::GuiCapabilities,
+    pub gui_status: crate::plugin::GuiSessionStatus,
+    pub last_error: Option<String>,
+    pub last_backend_log: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1537,6 +1633,23 @@ pub enum EffectGraphPendingAction {
 }
 
 #[derive(Debug)]
+pub struct EffectGraphPluginProbeState {
+    pub job_id: u64,
+    pub node_id: String,
+    pub started_at: Instant,
+    pub rx: std::sync::mpsc::Receiver<PluginProbeResult>,
+}
+
+#[derive(Debug)]
+pub struct EffectGraphPluginGuiSessionState {
+    pub node_id: String,
+    pub session_id: u64,
+    pub started_at: Instant,
+    pub cmd_tx: std::sync::mpsc::Sender<PluginGuiCommand>,
+    pub rx: std::sync::mpsc::Receiver<PluginGuiEvent>,
+}
+
+#[derive(Debug)]
 pub struct EffectGraphState {
     pub workspace_open: bool,
     pub active_template_id: Option<String>,
@@ -1548,6 +1661,9 @@ pub struct EffectGraphState {
     pub runner: EffectGraphRunnerState,
     pub debug_previews: HashMap<String, Arc<EffectGraphDebugPreview>>,
     pub debug_view_state: HashMap<String, EffectGraphDebugViewState>,
+    pub plugin_runtime: HashMap<String, EffectGraphPluginNodeRuntimeState>,
+    pub plugin_probe_state: Option<EffectGraphPluginProbeState>,
+    pub plugin_gui_state: Option<EffectGraphPluginGuiSessionState>,
     pub undo_stack: Vec<EffectGraphUndoState>,
     pub redo_stack: Vec<EffectGraphUndoState>,
     pub console: EffectGraphConsoleState,
@@ -1579,6 +1695,9 @@ impl Default for EffectGraphState {
             runner: EffectGraphRunnerState::default(),
             debug_previews: HashMap::new(),
             debug_view_state: HashMap::new(),
+            plugin_runtime: HashMap::new(),
+            plugin_probe_state: None,
+            plugin_gui_state: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             console: EffectGraphConsoleState::default(),

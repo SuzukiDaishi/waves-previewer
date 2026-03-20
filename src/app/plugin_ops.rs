@@ -4,9 +4,10 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::app::types::{
-    PluginCatalogEntry, PluginGuiCommand, PluginGuiEvent, PluginGuiSessionState,
-    PluginParamUiState, PluginProbeResult, PluginProbeState, PluginProcessResult,
-    PluginProcessState, PluginScanResult, PluginScanState, ToolKind,
+    EffectGraphPluginGuiSessionState, EffectGraphPluginNodeConfig, EffectGraphPluginParamState,
+    EffectGraphPluginProbeState, PluginCatalogEntry, PluginGuiCommand, PluginGuiEvent,
+    PluginGuiSessionState, PluginParamUiState, PluginProbeResult, PluginProbeState,
+    PluginProcessResult, PluginProcessState, PluginScanResult, PluginScanState, ToolKind,
 };
 use crate::plugin::{PluginParamValue, WorkerRequest, WorkerResponse};
 use base64::Engine;
@@ -464,6 +465,471 @@ impl crate::app::WavesPreviewer {
                 normalized: p.normalized.clamp(0.0, 1.0),
             })
             .collect()
+    }
+
+    fn effect_graph_plugin_runtime_mut(
+        &mut self,
+        node_id: &str,
+    ) -> &mut super::types::EffectGraphPluginNodeRuntimeState {
+        self.effect_graph
+            .plugin_runtime
+            .entry(node_id.to_string())
+            .or_default()
+    }
+
+    fn effect_graph_plugin_config(&self, node_id: &str) -> Option<EffectGraphPluginNodeConfig> {
+        self.effect_graph
+            .draft
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .and_then(|node| match &node.data {
+                super::types::EffectGraphNodeData::PluginFx { config } => Some(config.clone()),
+                _ => None,
+            })
+    }
+
+    fn close_effect_graph_plugin_gui_session(&mut self) {
+        if let Some(state) = self.effect_graph.plugin_gui_state.take() {
+            let _ = state.cmd_tx.send(PluginGuiCommand::Close);
+        }
+    }
+
+    pub(super) fn effect_graph_select_plugin(
+        &mut self,
+        node_id: &str,
+        plugin_key: String,
+        plugin_name: String,
+    ) {
+        if self
+            .effect_graph
+            .plugin_gui_state
+            .as_ref()
+            .map(|state| state.node_id == node_id)
+            .unwrap_or(false)
+        {
+            self.close_effect_graph_plugin_gui_session();
+        }
+        if self
+            .effect_graph
+            .plugin_probe_state
+            .as_ref()
+            .map(|state| state.node_id == node_id)
+            .unwrap_or(false)
+        {
+            self.effect_graph.plugin_probe_state = None;
+        }
+        if let Some(node) = self
+            .effect_graph
+            .draft
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == node_id)
+        {
+            if let super::types::EffectGraphNodeData::PluginFx { config } = &mut node.data {
+                config.plugin_key = Some(plugin_key.clone());
+                config.plugin_name = plugin_name;
+                config.enabled = true;
+                config.bypass = false;
+                config.params.clear();
+                config.state_blob_b64 = None;
+            }
+        }
+        *self.effect_graph_plugin_runtime_mut(node_id) =
+            super::types::EffectGraphPluginNodeRuntimeState::default();
+        self.effect_graph.draft_dirty = true;
+        self.revalidate_effect_graph_draft();
+        self.spawn_plugin_probe_for_effect_graph_node(node_id.to_string(), plugin_key);
+    }
+
+    pub(super) fn spawn_plugin_probe_for_effect_graph_node(
+        &mut self,
+        node_id: String,
+        plugin_key: String,
+    ) {
+        let plugin_path = self.plugin_key_to_path(&plugin_key);
+        if !plugin_path.exists() {
+            let runtime = self.effect_graph_plugin_runtime_mut(&node_id);
+            runtime.last_error = Some(format!("plugin not found: {}", plugin_path.display()));
+            runtime.last_backend_log =
+                Self::join_backend_log_lines(vec!["Probe aborted".to_string()]);
+            return;
+        }
+        let runtime = self.effect_graph_plugin_runtime_mut(&node_id);
+        runtime.last_error = None;
+        runtime.last_backend_log = Self::join_backend_log_lines(vec!["Probe: running".to_string()]);
+        runtime.gui_status = crate::plugin::GuiSessionStatus::Closed;
+
+        let job_id = self.plugin_next_job_id();
+        let (tx, rx) = mpsc::channel::<PluginProbeResult>();
+        let plugin_path_text = plugin_path.to_string_lossy().to_string();
+        std::thread::spawn(move || {
+            let req = WorkerRequest::Probe {
+                plugin_path: plugin_path_text,
+            };
+            let result = match crate::plugin::client::run_request(&req) {
+                Ok(WorkerResponse::ProbeResult {
+                    plugin,
+                    params,
+                    state_blob_b64,
+                    backend,
+                    capabilities,
+                    backend_note,
+                }) => {
+                    let ui_params: Vec<PluginParamUiState> = params
+                        .into_iter()
+                        .map(|p| PluginParamUiState {
+                            id: p.id,
+                            name: p.name,
+                            normalized: p.normalized.clamp(0.0, 1.0),
+                            default_normalized: p.default_normalized.clamp(0.0, 1.0),
+                            min: p.min,
+                            max: p.max,
+                            unit: p.unit,
+                        })
+                        .collect();
+                    PluginProbeResult {
+                        job_id,
+                        plugin_key: plugin.key,
+                        plugin_name: plugin.name,
+                        params: ui_params,
+                        state_blob: state_blob_b64.and_then(|raw| {
+                            base64::engine::general_purpose::STANDARD_NO_PAD
+                                .decode(raw.as_bytes())
+                                .ok()
+                        }),
+                        backend,
+                        capabilities,
+                        backend_note,
+                        error: None,
+                    }
+                }
+                Ok(WorkerResponse::Error { message }) => PluginProbeResult {
+                    job_id,
+                    plugin_key,
+                    plugin_name: String::new(),
+                    params: Vec::new(),
+                    state_blob: None,
+                    backend: crate::plugin::PluginHostBackend::Generic,
+                    capabilities: crate::plugin::GuiCapabilities::default(),
+                    backend_note: None,
+                    error: Some(message),
+                },
+                Ok(_) => PluginProbeResult {
+                    job_id,
+                    plugin_key,
+                    plugin_name: String::new(),
+                    params: Vec::new(),
+                    state_blob: None,
+                    backend: crate::plugin::PluginHostBackend::Generic,
+                    capabilities: crate::plugin::GuiCapabilities::default(),
+                    backend_note: None,
+                    error: Some("plugin probe: unexpected worker response".to_string()),
+                },
+                Err(err) => PluginProbeResult {
+                    job_id,
+                    plugin_key,
+                    plugin_name: String::new(),
+                    params: Vec::new(),
+                    state_blob: None,
+                    backend: crate::plugin::PluginHostBackend::Generic,
+                    capabilities: crate::plugin::GuiCapabilities::default(),
+                    backend_note: None,
+                    error: Some(err),
+                },
+            };
+            let _ = tx.send(result);
+        });
+        self.effect_graph.plugin_probe_state = Some(EffectGraphPluginProbeState {
+            job_id,
+            node_id,
+            started_at: Instant::now(),
+            rx,
+        });
+    }
+
+    pub(super) fn open_plugin_gui_for_effect_graph_node(&mut self, node_id: &str) {
+        self.close_effect_graph_plugin_gui_session();
+        let Some(config) = self.effect_graph_plugin_config(node_id) else {
+            return;
+        };
+        let Some(plugin_key) = config.plugin_key.clone() else {
+            self.effect_graph_plugin_runtime_mut(node_id).last_error =
+                Some("plugin not selected".to_string());
+            return;
+        };
+        let plugin_path = self.plugin_key_to_path(&plugin_key);
+        if !plugin_path.exists() {
+            self.effect_graph_plugin_runtime_mut(node_id).last_error =
+                Some(format!("plugin not found: {}", plugin_path.display()));
+            return;
+        }
+        let session_id = self.plugin_next_job_id();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<PluginGuiCommand>();
+        let (evt_tx, evt_rx) = mpsc::channel::<PluginGuiEvent>();
+        let plugin_path_text = plugin_path.to_string_lossy().to_string();
+        let params: Vec<PluginParamValue> = config
+            .params
+            .iter()
+            .map(|param| param.to_worker_value())
+            .collect();
+        let state_blob_b64 = config.state_blob_b64.clone();
+        std::thread::spawn(move || {
+            let mut client = match crate::plugin::client::GuiWorkerClient::spawn() {
+                Ok(client) => client,
+                Err(err) => {
+                    let _ = evt_tx.send(PluginGuiEvent::Error {
+                        session_id,
+                        message: err,
+                    });
+                    return;
+                }
+            };
+            let open_req = WorkerRequest::GuiSessionOpen {
+                session_id,
+                plugin_path: plugin_path_text,
+                state_blob_b64,
+                params,
+            };
+            match client.request(&open_req) {
+                Ok(WorkerResponse::GuiOpened {
+                    session_id,
+                    backend,
+                    params,
+                    state_blob_b64,
+                    capabilities,
+                    backend_note,
+                }) => {
+                    let ui_params: Vec<PluginParamUiState> = params
+                        .into_iter()
+                        .map(|p| PluginParamUiState {
+                            id: p.id,
+                            name: p.name,
+                            normalized: p.normalized.clamp(0.0, 1.0),
+                            default_normalized: p.default_normalized.clamp(0.0, 1.0),
+                            min: p.min,
+                            max: p.max,
+                            unit: p.unit,
+                        })
+                        .collect();
+                    let state_blob = state_blob_b64.and_then(|raw| {
+                        base64::engine::general_purpose::STANDARD_NO_PAD
+                            .decode(raw.as_bytes())
+                            .ok()
+                    });
+                    let _ = evt_tx.send(PluginGuiEvent::Opened {
+                        session_id,
+                        backend,
+                        capabilities,
+                        params: ui_params,
+                        state_blob,
+                        backend_note,
+                    });
+                }
+                Ok(WorkerResponse::GuiError {
+                    session_id,
+                    message,
+                }) => {
+                    let _ = evt_tx.send(PluginGuiEvent::Error {
+                        session_id,
+                        message,
+                    });
+                    client.close();
+                    return;
+                }
+                Ok(WorkerResponse::Error { message }) => {
+                    let _ = evt_tx.send(PluginGuiEvent::Error {
+                        session_id,
+                        message,
+                    });
+                    client.close();
+                    return;
+                }
+                Ok(other) => {
+                    let _ = evt_tx.send(PluginGuiEvent::Error {
+                        session_id,
+                        message: format!("gui open: unexpected response: {other:?}"),
+                    });
+                    client.close();
+                    return;
+                }
+                Err(err) => {
+                    let _ = evt_tx.send(PluginGuiEvent::Error {
+                        session_id,
+                        message: err,
+                    });
+                    client.close();
+                    return;
+                }
+            }
+
+            let mut running = true;
+            while running {
+                let mut should_poll = true;
+                match cmd_rx.recv_timeout(std::time::Duration::from_millis(PLUGIN_GUI_POLL_MS)) {
+                    Ok(PluginGuiCommand::Close) => {
+                        should_poll = false;
+                        let close_req = WorkerRequest::GuiSessionClose { session_id };
+                        match client.request(&close_req) {
+                            Ok(WorkerResponse::GuiClosed {
+                                session_id,
+                                state_blob_b64,
+                                backend,
+                                backend_note,
+                            }) => {
+                                let state_blob = state_blob_b64.and_then(|raw| {
+                                    base64::engine::general_purpose::STANDARD_NO_PAD
+                                        .decode(raw.as_bytes())
+                                        .ok()
+                                });
+                                let _ = evt_tx.send(PluginGuiEvent::Closed {
+                                    session_id,
+                                    state_blob,
+                                    backend,
+                                    backend_note,
+                                });
+                            }
+                            Ok(WorkerResponse::GuiError {
+                                session_id,
+                                message,
+                            }) => {
+                                let _ = evt_tx.send(PluginGuiEvent::Error {
+                                    session_id,
+                                    message,
+                                });
+                            }
+                            Ok(WorkerResponse::Error { message }) => {
+                                let _ = evt_tx.send(PluginGuiEvent::Error {
+                                    session_id,
+                                    message,
+                                });
+                            }
+                            Ok(other) => {
+                                let _ = evt_tx.send(PluginGuiEvent::Error {
+                                    session_id,
+                                    message: format!("gui close: unexpected response: {other:?}"),
+                                });
+                            }
+                            Err(err) => {
+                                let _ = evt_tx.send(PluginGuiEvent::Error {
+                                    session_id,
+                                    message: err,
+                                });
+                            }
+                        }
+                        running = false;
+                    }
+                    Ok(PluginGuiCommand::SyncNow) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        running = false;
+                        should_poll = false;
+                    }
+                }
+                if !running || !should_poll {
+                    continue;
+                }
+                let poll_req = WorkerRequest::GuiSessionPoll { session_id };
+                match client.request(&poll_req) {
+                    Ok(WorkerResponse::GuiSnapshot {
+                        session_id,
+                        params,
+                        state_blob_b64,
+                        backend,
+                        closed,
+                        backend_note,
+                    }) => {
+                        let state_blob = state_blob_b64.and_then(|raw| {
+                            base64::engine::general_purpose::STANDARD_NO_PAD
+                                .decode(raw.as_bytes())
+                                .ok()
+                        });
+                        let _ = evt_tx.send(PluginGuiEvent::Snapshot {
+                            session_id,
+                            params,
+                            state_blob,
+                            backend,
+                            closed,
+                            backend_note,
+                        });
+                        if closed {
+                            running = false;
+                        }
+                    }
+                    Ok(WorkerResponse::GuiError {
+                        session_id,
+                        message,
+                    }) => {
+                        let _ = evt_tx.send(PluginGuiEvent::Error {
+                            session_id,
+                            message,
+                        });
+                        running = false;
+                    }
+                    Ok(WorkerResponse::Error { message }) => {
+                        let _ = evt_tx.send(PluginGuiEvent::Error {
+                            session_id,
+                            message,
+                        });
+                        running = false;
+                    }
+                    Ok(other) => {
+                        let _ = evt_tx.send(PluginGuiEvent::Error {
+                            session_id,
+                            message: format!("gui poll: unexpected response: {other:?}"),
+                        });
+                        running = false;
+                    }
+                    Err(err) => {
+                        let _ = evt_tx.send(PluginGuiEvent::Error {
+                            session_id,
+                            message: err,
+                        });
+                        running = false;
+                    }
+                }
+            }
+            client.close();
+        });
+
+        let runtime = self.effect_graph_plugin_runtime_mut(node_id);
+        runtime.gui_status = crate::plugin::GuiSessionStatus::Opening;
+        runtime.last_error = None;
+        runtime.last_backend_log = Self::join_backend_log_lines(vec![
+            "Native GUI: opening".to_string(),
+            format!("Session: {session_id}"),
+        ]);
+
+        self.effect_graph.plugin_gui_state = Some(EffectGraphPluginGuiSessionState {
+            node_id: node_id.to_string(),
+            session_id,
+            started_at: Instant::now(),
+            cmd_tx,
+            rx: evt_rx,
+        });
+    }
+
+    pub(super) fn sync_plugin_gui_for_effect_graph_node(&mut self, node_id: &str) {
+        let Some(state) = self.effect_graph.plugin_gui_state.as_ref() else {
+            return;
+        };
+        if state.node_id != node_id {
+            return;
+        }
+        let _ = state.cmd_tx.send(PluginGuiCommand::SyncNow);
+    }
+
+    pub(super) fn close_plugin_gui_for_effect_graph_node(&mut self, node_id: &str) {
+        let Some(state) = self.effect_graph.plugin_gui_state.as_ref() else {
+            return;
+        };
+        if state.node_id != node_id {
+            return;
+        }
+        let _ = state.cmd_tx.send(PluginGuiCommand::Close);
+        self.effect_graph_plugin_runtime_mut(node_id).gui_status =
+            crate::plugin::GuiSessionStatus::Closed;
+        self.effect_graph.plugin_gui_state = None;
     }
 
     pub(super) fn open_plugin_gui_for_tab(&mut self, tab_idx: usize) {
@@ -949,6 +1415,20 @@ impl crate::app::WavesPreviewer {
         applied
     }
 
+    fn apply_effect_graph_gui_param_delta(
+        config: &mut EffectGraphPluginNodeConfig,
+        values: &[PluginParamValue],
+    ) -> usize {
+        let mut applied = 0usize;
+        for value in values.iter().take(256) {
+            if let Some(param) = config.params.iter_mut().find(|p| p.id == value.id) {
+                param.normalized = value.normalized.clamp(0.0, 1.0);
+                applied += 1;
+            }
+        }
+        applied
+    }
+
     fn drain_plugin_gui_events(&mut self, ctx: &egui::Context) {
         let Some(gui_state) = self.plugin_gui_state.take() else {
             return;
@@ -1092,6 +1572,195 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    fn drain_effect_graph_plugin_gui_events(&mut self, ctx: &egui::Context) {
+        let Some(gui_state) = self.effect_graph.plugin_gui_state.take() else {
+            return;
+        };
+        let mut keep_state = true;
+        let mut repaint = false;
+        let node_exists = self
+            .effect_graph
+            .draft
+            .nodes
+            .iter()
+            .any(|node| node.id == gui_state.node_id);
+        if !node_exists {
+            let _ = gui_state.cmd_tx.send(PluginGuiCommand::Close);
+            return;
+        }
+        while let Ok(event) = gui_state.rx.try_recv() {
+            repaint = true;
+            match event {
+                PluginGuiEvent::Opened {
+                    session_id,
+                    backend,
+                    capabilities,
+                    params,
+                    state_blob,
+                    backend_note,
+                } => {
+                    if session_id != gui_state.session_id {
+                        self.debug.plugin_stale_drop_count =
+                            self.debug.plugin_stale_drop_count.saturating_add(1);
+                        continue;
+                    }
+                    if let Some(node) = self
+                        .effect_graph
+                        .draft
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.id == gui_state.node_id)
+                    {
+                        if let super::types::EffectGraphNodeData::PluginFx { config } =
+                            &mut node.data
+                        {
+                            if !params.is_empty() {
+                                config.params = params
+                                    .iter()
+                                    .map(EffectGraphPluginParamState::from_ui)
+                                    .collect();
+                            }
+                            if state_blob.is_some() {
+                                config.state_blob_b64 = state_blob.map(|bytes| {
+                                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+                                });
+                            }
+                        }
+                    }
+                    let runtime = self.effect_graph_plugin_runtime_mut(&gui_state.node_id);
+                    runtime.backend = Some(backend);
+                    runtime.gui_capabilities = capabilities;
+                    runtime.gui_status = crate::plugin::GuiSessionStatus::Live;
+                    runtime.last_error = None;
+                    let mut lines = vec![format!(
+                        "Native GUI opened: {:?} ({:.1} ms)",
+                        backend,
+                        gui_state.started_at.elapsed().as_secs_f32() * 1000.0
+                    )];
+                    if let Some(note) = backend_note {
+                        lines.push(format!("Backend note: {}", note.trim()));
+                    }
+                    runtime.last_backend_log = Self::join_backend_log_lines(lines);
+                }
+                PluginGuiEvent::Snapshot {
+                    session_id,
+                    params,
+                    state_blob,
+                    backend,
+                    closed,
+                    backend_note,
+                } => {
+                    if session_id != gui_state.session_id {
+                        self.debug.plugin_stale_drop_count =
+                            self.debug.plugin_stale_drop_count.saturating_add(1);
+                        continue;
+                    }
+                    let mut applied = 0usize;
+                    if let Some(node) = self
+                        .effect_graph
+                        .draft
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.id == gui_state.node_id)
+                    {
+                        if let super::types::EffectGraphNodeData::PluginFx { config } =
+                            &mut node.data
+                        {
+                            applied = Self::apply_effect_graph_gui_param_delta(config, &params);
+                            if state_blob.is_some() {
+                                config.state_blob_b64 = state_blob.map(|bytes| {
+                                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+                                });
+                            }
+                            self.effect_graph.draft_dirty = true;
+                        }
+                    }
+                    let runtime = self.effect_graph_plugin_runtime_mut(&gui_state.node_id);
+                    runtime.backend = Some(backend);
+                    runtime.last_error = None;
+                    runtime.gui_status = if closed {
+                        crate::plugin::GuiSessionStatus::Closed
+                    } else {
+                        crate::plugin::GuiSessionStatus::Live
+                    };
+                    let mut lines = vec![format!(
+                        "Native GUI sync: {:?}, params_applied={applied}",
+                        backend
+                    )];
+                    if let Some(note) = backend_note {
+                        lines.push(format!("Backend note: {}", note.trim()));
+                    }
+                    runtime.last_backend_log = Self::join_backend_log_lines(lines);
+                    if closed {
+                        keep_state = false;
+                    }
+                }
+                PluginGuiEvent::Closed {
+                    session_id,
+                    state_blob,
+                    backend,
+                    backend_note,
+                } => {
+                    if session_id != gui_state.session_id {
+                        self.debug.plugin_stale_drop_count =
+                            self.debug.plugin_stale_drop_count.saturating_add(1);
+                        continue;
+                    }
+                    if let Some(node) = self
+                        .effect_graph
+                        .draft
+                        .nodes
+                        .iter_mut()
+                        .find(|node| node.id == gui_state.node_id)
+                    {
+                        if let super::types::EffectGraphNodeData::PluginFx { config } =
+                            &mut node.data
+                        {
+                            if state_blob.is_some() {
+                                config.state_blob_b64 = state_blob.map(|bytes| {
+                                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+                                });
+                            }
+                            self.effect_graph.draft_dirty = true;
+                        }
+                    }
+                    let runtime = self.effect_graph_plugin_runtime_mut(&gui_state.node_id);
+                    runtime.backend = Some(backend);
+                    runtime.gui_status = crate::plugin::GuiSessionStatus::Closed;
+                    runtime.last_error = None;
+                    let mut lines = vec![format!("Native GUI closed: {:?}", backend)];
+                    if let Some(note) = backend_note {
+                        lines.push(format!("Backend note: {}", note.trim()));
+                    }
+                    runtime.last_backend_log = Self::join_backend_log_lines(lines);
+                    keep_state = false;
+                }
+                PluginGuiEvent::Error {
+                    session_id,
+                    message,
+                } => {
+                    if session_id != gui_state.session_id {
+                        self.debug.plugin_stale_drop_count =
+                            self.debug.plugin_stale_drop_count.saturating_add(1);
+                        continue;
+                    }
+                    let runtime = self.effect_graph_plugin_runtime_mut(&gui_state.node_id);
+                    runtime.gui_status = crate::plugin::GuiSessionStatus::Error;
+                    runtime.last_error = Some(message.clone());
+                    runtime.last_backend_log =
+                        Self::join_backend_log_lines(vec!["Native GUI error".to_string(), message]);
+                    keep_state = false;
+                }
+            }
+        }
+        if keep_state {
+            self.effect_graph.plugin_gui_state = Some(gui_state);
+        }
+        if repaint {
+            ctx.request_repaint();
+        }
+    }
+
     pub(super) fn drain_plugin_jobs(&mut self, ctx: &egui::Context) {
         self.debug.plugin_worker_timeout_count = crate::plugin::client::worker_timeout_count();
 
@@ -1185,6 +1854,110 @@ impl crate::app::WavesPreviewer {
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     self.plugin_probe_state = Some(state);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+
+        if let Some(state) = self.effect_graph.plugin_probe_state.take() {
+            match state.rx.try_recv() {
+                Ok(result) => {
+                    let elapsed_ms = state.started_at.elapsed().as_secs_f32() * 1000.0;
+                    Self::plugin_push_metric(&mut self.debug.plugin_probe_ms, elapsed_ms);
+                    if result.job_id != state.job_id {
+                        self.debug.plugin_stale_drop_count =
+                            self.debug.plugin_stale_drop_count.saturating_add(1);
+                    } else {
+                        let mut node_found = false;
+                        let mut draft_dirty = false;
+                        let mut runtime_backend = Some(result.backend);
+                        let runtime_capabilities = result.capabilities;
+                        let runtime_gui_status = crate::plugin::GuiSessionStatus::Closed;
+                        let mut runtime_error: Option<String> = None;
+                        let mut runtime_log: Option<String> = None;
+                        if let Some(node) = self
+                            .effect_graph
+                            .draft
+                            .nodes
+                            .iter_mut()
+                            .find(|node| node.id == state.node_id)
+                        {
+                            if let super::types::EffectGraphNodeData::PluginFx { config } =
+                                &mut node.data
+                            {
+                                node_found = true;
+                                if let Some(err) = result.error.clone() {
+                                    runtime_log = Self::join_backend_log_lines(vec![
+                                        format!("Probe failed in {:.1} ms", elapsed_ms),
+                                        err.clone(),
+                                    ]);
+                                    runtime_error = Some(err);
+                                } else {
+                                    let fallback_hint = if result.backend
+                                        == crate::plugin::PluginHostBackend::Generic
+                                        && Self::is_native_plugin_key(&result.plugin_key)
+                                    {
+                                        Self::native_probe_fallback_hint(
+                                            &result.plugin_key,
+                                            result.params.is_empty(),
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    if result.backend == crate::plugin::PluginHostBackend::Generic
+                                        && Self::is_native_plugin_key(&result.plugin_key)
+                                    {
+                                        self.debug.plugin_native_fallback_count = self
+                                            .debug
+                                            .plugin_native_fallback_count
+                                            .saturating_add(1);
+                                    }
+                                    config.plugin_key = Some(result.plugin_key.clone());
+                                    config.plugin_name = result.plugin_name.clone();
+                                    config.params = result
+                                        .params
+                                        .iter()
+                                        .map(EffectGraphPluginParamState::from_ui)
+                                        .collect();
+                                    config.state_blob_b64 =
+                                        result.state_blob.as_ref().map(|bytes| {
+                                            base64::engine::general_purpose::STANDARD_NO_PAD
+                                                .encode(bytes)
+                                        });
+                                    runtime_error = fallback_hint;
+                                    let mut lines = vec![format!(
+                                        "Probe: {:?}, params={}, {:.1} ms",
+                                        result.backend,
+                                        config.params.len(),
+                                        elapsed_ms
+                                    )];
+                                    if let Some(note) = result.backend_note.as_deref() {
+                                        lines.push(format!("Backend note: {}", note.trim()));
+                                    }
+                                    runtime_log = Self::join_backend_log_lines(lines);
+                                    draft_dirty = true;
+                                }
+                            }
+                        }
+                        if !node_found {
+                            self.debug.plugin_stale_drop_count =
+                                self.debug.plugin_stale_drop_count.saturating_add(1);
+                        } else {
+                            let runtime = self.effect_graph_plugin_runtime_mut(&state.node_id);
+                            runtime.backend = runtime_backend.take();
+                            runtime.gui_capabilities = runtime_capabilities;
+                            runtime.gui_status = runtime_gui_status;
+                            runtime.last_error = runtime_error;
+                            runtime.last_backend_log = runtime_log;
+                            if draft_dirty {
+                                self.effect_graph.draft_dirty = true;
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.effect_graph.plugin_probe_state = Some(state);
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {}
             }
@@ -1421,6 +2194,7 @@ impl crate::app::WavesPreviewer {
             }
         }
         self.drain_plugin_gui_events(ctx);
+        self.drain_effect_graph_plugin_gui_events(ctx);
     }
 
     pub(super) fn plugin_path_label(path: &Path) -> String {

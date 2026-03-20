@@ -1,5 +1,6 @@
 use egui::{Color32, RichText, Sense, Stroke, StrokeKind};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::helpers::db_to_color;
@@ -396,6 +397,7 @@ impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_effect_graph_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use egui::{SidePanel, TopBottomPanel};
 
+        self.request_plugin_scan_if_needed();
         self.handle_effect_graph_shortcuts(ctx);
         self.ui_effect_graph_unsaved_prompt(ctx);
 
@@ -595,6 +597,7 @@ impl crate::app::WavesPreviewer {
             EffectGraphNodeKind::PitchShift,
             EffectGraphNodeKind::TimeStretch,
             EffectGraphNodeKind::Speed,
+            EffectGraphNodeKind::PluginFx,
         ];
         let debug_kinds = [
             EffectGraphNodeKind::DebugWaveform,
@@ -1190,6 +1193,7 @@ impl crate::app::WavesPreviewer {
             let accent = match &node.data {
                 EffectGraphNodeData::Input => Color32::from_rgb(56, 184, 168),
                 EffectGraphNodeData::Output => Color32::from_rgb(240, 184, 82),
+                EffectGraphNodeData::PluginFx { .. } => Color32::from_rgb(214, 156, 98),
                 EffectGraphNodeData::DebugWaveform { .. } => Color32::from_rgb(144, 206, 130),
                 EffectGraphNodeData::DebugSpectrum { .. } => Color32::from_rgb(188, 142, 232),
                 EffectGraphNodeData::Duplicate
@@ -1360,6 +1364,13 @@ impl crate::app::WavesPreviewer {
             let mut waveform_zoom = None;
             let mut spectrum_mode = None;
             let mut spectrum_zoom = None;
+            let mut plugin_config = None;
+            let plugin_runtime = self
+                .effect_graph
+                .plugin_runtime
+                .get(&node.id)
+                .cloned()
+                .unwrap_or_default();
             match &node.data {
                 EffectGraphNodeData::Gain { gain_db: value } => gain_db = Some(*value),
                 EffectGraphNodeData::MonoMix { ignored_channels } => {
@@ -1368,6 +1379,7 @@ impl crate::app::WavesPreviewer {
                 EffectGraphNodeData::PitchShift { semitones: value } => semitones = Some(*value),
                 EffectGraphNodeData::TimeStretch { rate: value }
                 | EffectGraphNodeData::Speed { rate: value } => rate = Some(*value),
+                EffectGraphNodeData::PluginFx { config } => plugin_config = Some(config.clone()),
                 EffectGraphNodeData::DebugWaveform { zoom: value } => waveform_zoom = Some(*value),
                 EffectGraphNodeData::DebugSpectrum { mode, zoom: value } => {
                     spectrum_mode = Some(*mode);
@@ -1459,6 +1471,292 @@ impl crate::app::WavesPreviewer {
                                         audio,
                                     );
                                 }
+                            }
+                        }
+                        EffectGraphNodeData::PluginFx { .. } => {
+                            if let Some(config) = plugin_config.clone() {
+                                let selected_plugin_key = config.plugin_key.clone();
+                                let selected_plugin_name = if config.plugin_name.trim().is_empty() {
+                                    selected_plugin_key
+                                        .as_deref()
+                                        .and_then(|key| {
+                                            Path::new(key)
+                                                .file_name()
+                                                .and_then(|name| name.to_str())
+                                        })
+                                        .unwrap_or("Select plugin")
+                                        .to_string()
+                                } else {
+                                    config.plugin_name.clone()
+                                };
+                                let backend_label = plugin_runtime
+                                    .backend
+                                    .map(|backend| match backend {
+                                        crate::plugin::PluginHostBackend::Generic => "Generic",
+                                        crate::plugin::PluginHostBackend::NativeVst3 => {
+                                            "NativeVst3"
+                                        }
+                                        crate::plugin::PluginHostBackend::NativeClap => {
+                                            "NativeClap"
+                                        }
+                                    })
+                                    .unwrap_or("Not probed");
+                                let gui_live = self
+                                    .effect_graph
+                                    .plugin_gui_state
+                                    .as_ref()
+                                    .map(|state| state.node_id == node.id)
+                                    .unwrap_or(false);
+                                let filter_lower = config.filter.trim().to_ascii_lowercase();
+                                let matching_plugins = self
+                                    .plugin_catalog
+                                    .iter()
+                                    .filter(|entry| {
+                                        if filter_lower.is_empty() {
+                                            true
+                                        } else {
+                                            entry.name.to_ascii_lowercase().contains(&filter_lower)
+                                                || entry
+                                                    .path
+                                                    .to_string_lossy()
+                                                    .to_ascii_lowercase()
+                                                    .contains(&filter_lower)
+                                        }
+                                    })
+                                    .map(|entry| {
+                                        (entry.key.clone(), entry.name.clone(), entry.path.clone())
+                                    })
+                                    .collect::<Vec<_>>();
+
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Rescan").clicked() {
+                                        self.spawn_plugin_scan();
+                                    }
+                                    if ui.button("Reload Params").clicked() {
+                                        if let Some(plugin_key) = selected_plugin_key.clone() {
+                                            self.spawn_plugin_probe_for_effect_graph_node(
+                                                node.id.clone(),
+                                                plugin_key,
+                                            );
+                                        } else {
+                                            self.effect_graph
+                                                .plugin_runtime
+                                                .entry(node.id.clone())
+                                                .or_default()
+                                                .last_error =
+                                                Some("plugin not selected".to_string());
+                                        }
+                                    }
+                                });
+
+                                let mut filter_text = config.filter.clone();
+                                let filter_resp = ui.add(
+                                    egui::TextEdit::singleline(&mut filter_text)
+                                        .hint_text("Filter plugins"),
+                                );
+                                if filter_resp.changed() {
+                                    self.effect_graph_push_undo_snapshot();
+                                    if let Some(node_mut) =
+                                        self.effect_graph.draft.nodes.get_mut(idx)
+                                    {
+                                        if let EffectGraphNodeData::PluginFx { config } =
+                                            &mut node_mut.data
+                                        {
+                                            config.filter = filter_text;
+                                        }
+                                    }
+                                    self.effect_graph.draft_dirty = true;
+                                    self.revalidate_effect_graph_draft();
+                                }
+
+                                egui::ComboBox::from_id_salt(format!(
+                                    "effect_graph_plugin_picker_{idx}"
+                                ))
+                                .width(ui.available_width())
+                                .selected_text(selected_plugin_name)
+                                .show_ui(ui, |ui| {
+                                    if matching_plugins.is_empty() {
+                                        ui.label(
+                                            RichText::new("No scanned plugins match the filter")
+                                                .small()
+                                                .color(Color32::from_rgb(118, 132, 148)),
+                                        );
+                                    }
+                                    for (plugin_key, plugin_name, plugin_path) in
+                                        matching_plugins.iter()
+                                    {
+                                        let selected = selected_plugin_key.as_deref()
+                                            == Some(plugin_key.as_str());
+                                        let label = format!(
+                                            "{} ({})",
+                                            plugin_name,
+                                            Self::plugin_path_label(plugin_path),
+                                        );
+                                        if ui.selectable_label(selected, label).clicked() {
+                                            self.effect_graph_push_undo_snapshot();
+                                            self.effect_graph_select_plugin(
+                                                &node.id,
+                                                plugin_key.clone(),
+                                                plugin_name.clone(),
+                                            );
+                                        }
+                                    }
+                                });
+
+                                if let Some(plugin_key) = selected_plugin_key.as_deref() {
+                                    ui.label(
+                                        RichText::new(plugin_key)
+                                            .small()
+                                            .color(Color32::from_rgb(118, 132, 148)),
+                                    );
+                                }
+
+                                ui.horizontal_wrapped(|ui| {
+                                    let mut enabled = config.enabled;
+                                    if ui.checkbox(&mut enabled, "Enable").changed() {
+                                        self.effect_graph_push_undo_snapshot();
+                                        if let Some(node_mut) =
+                                            self.effect_graph.draft.nodes.get_mut(idx)
+                                        {
+                                            if let EffectGraphNodeData::PluginFx { config } =
+                                                &mut node_mut.data
+                                            {
+                                                config.enabled = enabled;
+                                            }
+                                        }
+                                        self.effect_graph.draft_dirty = true;
+                                        self.revalidate_effect_graph_draft();
+                                    }
+                                    let mut bypass = config.bypass;
+                                    if ui.checkbox(&mut bypass, "Bypass").changed() {
+                                        self.effect_graph_push_undo_snapshot();
+                                        if let Some(node_mut) =
+                                            self.effect_graph.draft.nodes.get_mut(idx)
+                                        {
+                                            if let EffectGraphNodeData::PluginFx { config } =
+                                                &mut node_mut.data
+                                            {
+                                                config.bypass = bypass;
+                                            }
+                                        }
+                                        self.effect_graph.draft_dirty = true;
+                                        self.revalidate_effect_graph_draft();
+                                    }
+                                });
+
+                                ui.label(
+                                    RichText::new(format!("Backend: {backend_label}"))
+                                        .small()
+                                        .color(Color32::from_rgb(150, 190, 255)),
+                                );
+                                ui.label(
+                                    RichText::new(format!("GUI: {:?}", plugin_runtime.gui_status))
+                                        .small()
+                                        .color(Color32::from_rgb(118, 132, 148)),
+                                );
+
+                                ui.horizontal_wrapped(|ui| {
+                                    let can_open_gui = config.plugin_key.is_some()
+                                        && plugin_runtime.gui_capabilities.supports_native_gui;
+                                    if ui
+                                        .add_enabled(
+                                            can_open_gui,
+                                            egui::Button::new("Open Native GUI"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.open_plugin_gui_for_effect_graph_node(&node.id);
+                                    }
+                                    if ui
+                                        .add_enabled(gui_live, egui::Button::new("Sync GUI"))
+                                        .clicked()
+                                    {
+                                        self.sync_plugin_gui_for_effect_graph_node(&node.id);
+                                    }
+                                    if ui
+                                        .add_enabled(gui_live, egui::Button::new("Close GUI"))
+                                        .clicked()
+                                    {
+                                        self.close_plugin_gui_for_effect_graph_node(&node.id);
+                                    }
+                                });
+                                if !plugin_runtime.gui_capabilities.supports_native_gui {
+                                    ui.label(
+                                        RichText::new(
+                                            "Probe the plugin to detect native GUI support",
+                                        )
+                                        .small()
+                                        .color(Color32::from_rgb(118, 132, 148)),
+                                    );
+                                }
+                                if let Some(err) = plugin_runtime.last_error.as_deref() {
+                                    ui.label(
+                                        RichText::new(err)
+                                            .small()
+                                            .color(Color32::from_rgb(240, 120, 120)),
+                                    );
+                                }
+                                if let Some(log) = plugin_runtime.last_backend_log.as_deref() {
+                                    ui.collapsing("Backend Log", |ui| {
+                                        ui.label(
+                                            RichText::new(log)
+                                                .small()
+                                                .monospace()
+                                                .color(Color32::from_rgb(160, 176, 192)),
+                                        );
+                                    });
+                                }
+                                egui::CollapsingHeader::new(format!(
+                                    "Parameters ({})",
+                                    config.params.len()
+                                ))
+                                .default_open(!config.params.is_empty() && config.params.len() <= 8)
+                                .show(ui, |ui| {
+                                    if config.params.is_empty() {
+                                        ui.label(
+                                            RichText::new(
+                                                "Reload Params to fetch plugin parameters",
+                                            )
+                                            .small()
+                                            .color(Color32::from_rgb(118, 132, 148)),
+                                        );
+                                    }
+                                    for (param_index, param) in config.params.iter().enumerate() {
+                                        let mut normalized = param.normalized.clamp(0.0, 1.0);
+                                        let label = if param.unit.trim().is_empty() {
+                                            param.name.clone()
+                                        } else {
+                                            format!("{} ({})", param.name, param.unit)
+                                        };
+                                        let response = ui.add(
+                                            egui::Slider::new(&mut normalized, 0.0..=1.0)
+                                                .text(label),
+                                        );
+                                        let mut changed = response.changed();
+                                        if ui.small_button("Default").clicked() {
+                                            normalized = param.default_normalized.clamp(0.0, 1.0);
+                                            changed = true;
+                                        }
+                                        if changed {
+                                            self.effect_graph_push_undo_snapshot();
+                                            if let Some(node_mut) =
+                                                self.effect_graph.draft.nodes.get_mut(idx)
+                                            {
+                                                if let EffectGraphNodeData::PluginFx { config } =
+                                                    &mut node_mut.data
+                                                {
+                                                    if let Some(param_mut) =
+                                                        config.params.get_mut(param_index)
+                                                    {
+                                                        param_mut.normalized = normalized;
+                                                    }
+                                                }
+                                            }
+                                            self.effect_graph.draft_dirty = true;
+                                            self.revalidate_effect_graph_draft();
+                                        }
+                                    }
+                                });
                             }
                         }
                         EffectGraphNodeData::DebugWaveform { .. } => {

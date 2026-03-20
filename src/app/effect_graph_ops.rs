@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,16 +14,17 @@ use super::types::{
     EffectGraphDebugPreview, EffectGraphDebugViewState, EffectGraphDocument, EffectGraphEdge,
     EffectGraphLibraryEntry, EffectGraphNode, EffectGraphNodeData, EffectGraphNodeKind,
     EffectGraphNodeRunPhase, EffectGraphNodeRunStatus, EffectGraphPendingAction,
-    EffectGraphPortKey, EffectGraphPredictedFormat, EffectGraphRunMode, EffectGraphSeverity,
-    EffectGraphSpectrumMode, EffectGraphTemplateFile, EffectGraphUndoState,
-    EffectGraphValidationIssue, EffectGraphWorkerEvent, MediaSource, SpectrogramConfig,
-    SpectrogramScale, ToolKind, ToolState, UndoScope, WorkspaceView,
+    EffectGraphPluginNodeRuntimeState, EffectGraphPortKey, EffectGraphPredictedFormat,
+    EffectGraphRunMode, EffectGraphSeverity, EffectGraphSpectrumMode, EffectGraphTemplateFile,
+    EffectGraphUndoState, EffectGraphValidationIssue, EffectGraphWorkerEvent, MediaSource,
+    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, UndoScope, WorkspaceView,
 };
 use super::WavesPreviewer;
 use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
+use crate::plugin::{PluginHostBackend, WorkerRequest, WorkerResponse};
 
-const EFFECT_GRAPH_SCHEMA_VERSION: u32 = 2;
+const EFFECT_GRAPH_SCHEMA_VERSION: u32 = 3;
 const EFFECT_GRAPH_CLIPBOARD_VERSION: u32 = 1;
 const EFFECT_GRAPH_CLIPBOARD_MARKER: &str = "neowaves://effect-graph";
 const EFFECT_GRAPH_EMBEDDED_SAMPLE_LABEL: &str = "Embedded sample (10s chirp + white noise)";
@@ -33,6 +34,7 @@ const EFFECT_GRAPH_EMBEDDED_SAMPLE_WAV: &[u8] =
 
 static EFFECT_GRAPH_EMBEDDED_SAMPLE_DECODED: OnceLock<Result<(Vec<Vec<f32>>, u32), String>> =
     OnceLock::new();
+static EFFECT_GRAPH_PLUGIN_TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct EffectGraphClipboardPayload {
@@ -116,6 +118,7 @@ fn effect_graph_default_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
         EffectGraphNodeKind::Input | EffectGraphNodeKind::Output => [260.0, 136.0],
         EffectGraphNodeKind::Duplicate => [250.0, 152.0],
         EffectGraphNodeKind::MonoMix => [320.0, 226.0],
+        EffectGraphNodeKind::PluginFx => [360.0, 320.0],
         EffectGraphNodeKind::SplitChannels => [260.0, 220.0],
         EffectGraphNodeKind::CombineChannels => [300.0, 250.0],
         EffectGraphNodeKind::DebugWaveform => [340.0, 250.0],
@@ -479,10 +482,247 @@ enum EffectGraphRuntimeEvent {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EffectGraphExecutionFlavor {
+    AudioRender,
+    FormatOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EffectGraphRuntimeFailure {
+    node_id: Option<String>,
+    message: String,
+}
+
+fn effect_graph_runtime_error(message: impl Into<String>) -> EffectGraphRuntimeFailure {
+    EffectGraphRuntimeFailure {
+        node_id: None,
+        message: message.into(),
+    }
+}
+
+fn effect_graph_node_runtime_error(
+    node_id: &str,
+    message: impl Into<String>,
+) -> EffectGraphRuntimeFailure {
+    EffectGraphRuntimeFailure {
+        node_id: Some(node_id.to_string()),
+        message: message.into(),
+    }
+}
+
+fn effect_graph_plugin_temp_paths(node_id: &str) -> Result<(PathBuf, PathBuf), String> {
+    let dir = std::env::temp_dir().join("neowaves_effect_graph_pluginfx");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("plugin temp dir failed: {err}"))?;
+    let seq = EFFECT_GRAPH_PLUGIN_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tag = sanitize_filename_component(node_id);
+    let input = dir.join(format!("pluginfx_in_{tag}_{seq}.wav"));
+    let output = dir.join(format!("pluginfx_out_{tag}_{seq}.wav"));
+    Ok((input, output))
+}
+
+fn export_effect_graph_plugin_input(bus: &EffectGraphAudioBus, path: &Path) -> Result<(), String> {
+    crate::wave::export_channels_audio_with_depth(
+        &bus.channels,
+        bus.sample_rate.max(1),
+        path,
+        Some(crate::wave::WavBitDepth::Float32),
+    )
+    .map_err(|err| format!("plugin input export failed: {err}"))
+}
+
+fn plugin_backend_label(backend: PluginHostBackend) -> &'static str {
+    match backend {
+        PluginHostBackend::Generic => "Generic",
+        PluginHostBackend::NativeVst3 => "NativeVst3",
+        PluginHostBackend::NativeClap => "NativeClap",
+    }
+}
+
+fn finalize_plugin_fx_output_bus<F>(
+    node_id: &str,
+    input_bus: &EffectGraphAudioBus,
+    output_channels: Vec<Vec<f32>>,
+    output_sample_rate: u32,
+    mut on_event: F,
+) -> Result<EffectGraphAudioBus, EffectGraphRuntimeFailure>
+where
+    F: FnMut(EffectGraphRuntimeEvent),
+{
+    if output_channels.is_empty() {
+        on_event(EffectGraphRuntimeEvent::NodeLog {
+            node_id: node_id.to_string(),
+            severity: EffectGraphSeverity::Error,
+            message: "Plugin FX returned empty audio".to_string(),
+        });
+        return Err(effect_graph_node_runtime_error(
+            node_id,
+            "Plugin FX returned empty audio",
+        ));
+    }
+    let output_sample_rate = output_sample_rate.max(1);
+    if input_bus.sample_rate != output_sample_rate {
+        on_event(EffectGraphRuntimeEvent::NodeLog {
+            node_id: node_id.to_string(),
+            severity: EffectGraphSeverity::Info,
+            message: format!(
+                "Plugin FX sample rate changed {} -> {} Hz",
+                input_bus.sample_rate.max(1),
+                output_sample_rate
+            ),
+        });
+    }
+    let channel_layout = if output_channels.len() == input_bus.channels.len() {
+        input_bus.channel_layout.clone()
+    } else {
+        on_event(EffectGraphRuntimeEvent::NodeLog {
+            node_id: node_id.to_string(),
+            severity: EffectGraphSeverity::Warning,
+            message: format!(
+                "Plugin FX channel count changed {} -> {}; using dense layout",
+                input_bus.channels.len(),
+                output_channels.len()
+            ),
+        });
+        make_dense_layout(output_channels.len())
+    };
+    Ok(EffectGraphAudioBus {
+        channels: output_channels,
+        sample_rate: output_sample_rate,
+        channel_layout,
+    })
+}
+
+fn run_plugin_fx_node<F>(
+    node_id: &str,
+    config: &super::types::EffectGraphPluginNodeConfig,
+    input_bus: EffectGraphAudioBus,
+    mut on_event: F,
+) -> Result<EffectGraphAudioBus, EffectGraphRuntimeFailure>
+where
+    F: FnMut(EffectGraphRuntimeEvent),
+{
+    let plugin_key = config
+        .plugin_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            effect_graph_node_runtime_error(node_id, "Plugin FX requires a selected plugin")
+        })?;
+    let plugin_path = PathBuf::from(plugin_key);
+    if !plugin_path.exists() {
+        on_event(EffectGraphRuntimeEvent::NodeLog {
+            node_id: node_id.to_string(),
+            severity: EffectGraphSeverity::Error,
+            message: format!("Plugin FX plugin not found: {}", plugin_path.display()),
+        });
+        return Err(effect_graph_node_runtime_error(
+            node_id,
+            format!("Plugin FX plugin not found: {}", plugin_path.display()),
+        ));
+    }
+    if input_bus.channels.len() > 2 {
+        on_event(EffectGraphRuntimeEvent::NodeLog {
+            node_id: node_id.to_string(),
+            severity: EffectGraphSeverity::Warning,
+            message: format!(
+                "Plugin FX is processing {} channels; backend may collapse or rewrite the layout",
+                input_bus.channels.len()
+            ),
+        });
+    }
+
+    let (input_path, output_path) = effect_graph_plugin_temp_paths(node_id)
+        .map_err(|message| effect_graph_node_runtime_error(node_id, message))?;
+    export_effect_graph_plugin_input(&input_bus, &input_path)
+        .map_err(|message| effect_graph_node_runtime_error(node_id, message))?;
+
+    let request = WorkerRequest::ProcessFx {
+        plugin_path: plugin_path.to_string_lossy().to_string(),
+        input_audio_path: input_path.to_string_lossy().to_string(),
+        output_audio_path: output_path.to_string_lossy().to_string(),
+        sample_rate: input_bus.sample_rate.max(1),
+        max_block_size: 1024,
+        enabled: config.enabled,
+        bypass: config.bypass,
+        state_blob_b64: config.state_blob_b64.clone(),
+        params: config
+            .params
+            .iter()
+            .map(|param| param.to_worker_value())
+            .collect(),
+    };
+
+    let response = crate::plugin::client::run_request(&request);
+    let result = match response {
+        Ok(WorkerResponse::ProcessResult {
+            output_audio_path,
+            backend,
+            backend_note,
+            ..
+        }) => {
+            on_event(EffectGraphRuntimeEvent::NodeLog {
+                node_id: node_id.to_string(),
+                severity: EffectGraphSeverity::Info,
+                message: format!("Plugin FX backend: {}", plugin_backend_label(backend)),
+            });
+            if let Some(note) = backend_note
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                on_event(EffectGraphRuntimeEvent::NodeLog {
+                    node_id: node_id.to_string(),
+                    severity: if backend == PluginHostBackend::Generic {
+                        EffectGraphSeverity::Warning
+                    } else {
+                        EffectGraphSeverity::Info
+                    },
+                    message: format!("Plugin FX backend note: {note}"),
+                });
+            }
+            let decoded_path = PathBuf::from(output_audio_path);
+            match crate::audio_io::decode_audio_multi(&decoded_path) {
+                Ok((output_channels, output_sample_rate)) => finalize_plugin_fx_output_bus(
+                    node_id,
+                    &input_bus,
+                    output_channels,
+                    output_sample_rate,
+                    &mut on_event,
+                ),
+                Err(err) => Err(effect_graph_node_runtime_error(
+                    node_id,
+                    format!("Plugin FX output decode failed: {err}"),
+                )),
+            }
+        }
+        Ok(WorkerResponse::Error { message }) => {
+            Err(effect_graph_node_runtime_error(node_id, message))
+        }
+        Ok(other) => Err(effect_graph_node_runtime_error(
+            node_id,
+            format!("plugin process: unexpected worker response: {other:?}"),
+        )),
+        Err(err) => Err(effect_graph_node_runtime_error(node_id, err)),
+    };
+
+    let _ = std::fs::remove_file(&input_path);
+    let _ = std::fs::remove_file(&output_path);
+    result
+}
+
 fn clamp_node_data(data: &mut EffectGraphNodeData) {
     match data {
         EffectGraphNodeData::Gain { gain_db } => {
             *gain_db = gain_db.clamp(-24.0, 24.0);
+        }
+        EffectGraphNodeData::PluginFx { config } => {
+            config.params.truncate(256);
+            for param in config.params.iter_mut() {
+                param.normalized = param.normalized.clamp(0.0, 1.0);
+                param.default_normalized = param.default_normalized.clamp(0.0, 1.0);
+            }
         }
         EffectGraphNodeData::MonoMix { ignored_channels } => {
             ignored_channels.truncate(8);
@@ -615,6 +855,7 @@ fn node_label(kind: EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::PitchShift => "PitchShift",
         EffectGraphNodeKind::TimeStretch => "TimeStretch",
         EffectGraphNodeKind::Speed => "Speed",
+        EffectGraphNodeKind::PluginFx => "Plugin FX",
         EffectGraphNodeKind::Duplicate => "Duplicate",
         EffectGraphNodeKind::SplitChannels => "Split Channels",
         EffectGraphNodeKind::CombineChannels => "Combine Channels",
@@ -643,6 +884,27 @@ fn node_parameter_summary(data: &EffectGraphNodeData) -> String {
         EffectGraphNodeData::PitchShift { semitones } => format!("{semitones:+.1} st"),
         EffectGraphNodeData::TimeStretch { rate } => format!("{rate:.2}x"),
         EffectGraphNodeData::Speed { rate } => format!("{rate:.2}x"),
+        EffectGraphNodeData::PluginFx { config } => {
+            let selected_name = config.plugin_name.trim();
+            let name = if selected_name.is_empty() {
+                config
+                    .plugin_key
+                    .as_deref()
+                    .and_then(|key| Path::new(key).file_name().and_then(|name| name.to_str()))
+                    .unwrap_or("No plugin selected")
+                    .to_string()
+            } else {
+                selected_name.to_string()
+            };
+            let status = if !config.enabled {
+                "disabled"
+            } else if config.bypass {
+                "bypass"
+            } else {
+                "active"
+            };
+            format!("{name} / {status} / {} params", config.params.len())
+        }
         EffectGraphNodeData::Duplicate => "1 in / 2 auto branches".to_string(),
         EffectGraphNodeData::SplitChannels => "1 in / 8 routed mono outs".to_string(),
         EffectGraphNodeData::CombineChannels => "Auto format combine".to_string(),
@@ -1270,6 +1532,7 @@ fn effect_graph_layout_priority(data: &EffectGraphNodeData) -> i32 {
         EffectGraphNodeData::PitchShift { .. } => 20,
         EffectGraphNodeData::TimeStretch { .. } => 30,
         EffectGraphNodeData::Speed { .. } => 40,
+        EffectGraphNodeData::PluginFx { .. } => 45,
         EffectGraphNodeData::Duplicate => 45,
         EffectGraphNodeData::SplitChannels => 50,
         EffectGraphNodeData::CombineChannels => 60,
@@ -1459,6 +1722,7 @@ fn validate_effect_graph_document(
             }
             EffectGraphNodeData::Input
             | EffectGraphNodeData::Output
+            | EffectGraphNodeData::PluginFx { .. }
             | EffectGraphNodeData::MonoMix { .. }
             | EffectGraphNodeData::Duplicate
             | EffectGraphNodeData::SplitChannels
@@ -1771,6 +2035,49 @@ fn validate_effect_graph_document(
                             code: "restore_declared_width_mismatch".to_string(),
                             message: "Combine Channels restore inputs disagree on declared width"
                                 .to_string(),
+                            node_id: Some(node.id.clone()),
+                        });
+                    }
+                }
+            }
+            EffectGraphNodeData::PluginFx { config } => {
+                if active && input_count_for("in") != 1 {
+                    issues.push(EffectGraphValidationIssue {
+                        severity: EffectGraphSeverity::Error,
+                        code: "node_incoming".to_string(),
+                        message: "Plugin FX requires exactly one input connection".to_string(),
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+                if active && output_count_for("out") != 1 {
+                    issues.push(EffectGraphValidationIssue {
+                        severity: EffectGraphSeverity::Error,
+                        code: "node_outgoing".to_string(),
+                        message: "Plugin FX requires exactly one output connection".to_string(),
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+                if active {
+                    let plugin_key = config
+                        .plugin_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    if plugin_key.is_none() {
+                        issues.push(EffectGraphValidationIssue {
+                            severity: EffectGraphSeverity::Error,
+                            code: "plugin_unselected".to_string(),
+                            message: "Plugin FX requires a selected plugin".to_string(),
+                            node_id: Some(node.id.clone()),
+                        });
+                    } else if !Path::new(plugin_key.unwrap_or_default()).exists() {
+                        issues.push(EffectGraphValidationIssue {
+                            severity: EffectGraphSeverity::Error,
+                            code: "plugin_missing_path".to_string(),
+                            message: format!(
+                                "Plugin FX plugin not found: {}",
+                                plugin_key.unwrap_or_default()
+                            ),
                             node_id: Some(node.id.clone()),
                         });
                     }
@@ -2089,17 +2396,19 @@ fn adaptive_combine_channels_by_layout(
     ))
 }
 
-fn run_effect_graph_document<F>(
+fn run_effect_graph_document_internal<F>(
     document: &EffectGraphDocument,
     input_bus: EffectGraphAudioBus,
     run_mode: EffectGraphRunMode,
     resample_quality: crate::wave::ResampleQuality,
+    execution_flavor: EffectGraphExecutionFlavor,
     mut on_event: F,
-) -> Result<EffectGraphAudioBus, String>
+) -> Result<EffectGraphAudioBus, EffectGraphRuntimeFailure>
 where
     F: FnMut(EffectGraphRuntimeEvent),
 {
-    let order = effect_graph_topological_order_strict(document)?;
+    let order =
+        effect_graph_topological_order_strict(document).map_err(effect_graph_runtime_error)?;
     let active_nodes = effect_graph_active_nodes(document);
     let node_map = document
         .nodes
@@ -2115,7 +2424,9 @@ where
             continue;
         }
         let Some(node) = node_map.get(&node_id) else {
-            return Err(format!("missing node: {node_id}"));
+            return Err(effect_graph_runtime_error(format!(
+                "missing node: {node_id}"
+            )));
         };
         on_event(EffectGraphRuntimeEvent::NodeStarted(node_id.clone()));
         let started = Instant::now();
@@ -2126,13 +2437,23 @@ where
             EffectGraphNodeData::Output => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| "Output node did not receive audio".to_string())?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                "Output node did not receive audio",
+                            )
+                        })?;
                 final_output = Some(bus);
             }
             EffectGraphNodeData::Duplicate => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let out1 = EffectGraphAudioBus {
                     channels: bus.channels.clone(),
                     sample_rate: bus.sample_rate,
@@ -2155,7 +2476,12 @@ where
             EffectGraphNodeData::MonoMix { ignored_channels } => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let (mono, included_count) =
                     mono_mix_channels_with_ignored(&bus.channels, ignored_channels);
                 if included_count == 0 {
@@ -2173,7 +2499,12 @@ where
             EffectGraphNodeData::Gain { gain_db } => {
                 let mut bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let gain = 10.0f32.powf(*gain_db / 20.0);
                 for channel in bus.channels.iter_mut() {
                     for sample in channel.iter_mut() {
@@ -2185,7 +2516,12 @@ where
             EffectGraphNodeData::PitchShift { semitones } => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let mut channels = bus
                     .channels
                     .iter()
@@ -2211,7 +2547,12 @@ where
             EffectGraphNodeData::TimeStretch { rate } => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let mut channels = bus
                     .channels
                     .iter()
@@ -2237,7 +2578,12 @@ where
             EffectGraphNodeData::Speed { rate } => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let mut channels = process_speed_offline_channels(&bus.channels, *rate);
                 sync_channel_lengths(&mut channels);
                 output_buses.insert(
@@ -2249,10 +2595,35 @@ where
                     },
                 );
             }
+            EffectGraphNodeData::PluginFx { config } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let processed_bus = if execution_flavor == EffectGraphExecutionFlavor::FormatOnly {
+                    EffectGraphAudioBus {
+                        channels: bus.channels.clone(),
+                        sample_rate: bus.sample_rate,
+                        channel_layout: bus.channel_layout.clone(),
+                    }
+                } else {
+                    run_plugin_fx_node(&node.id, config, bus, &mut on_event)?
+                };
+                output_buses.insert(make_port_key(&node.id, "out"), processed_bus);
+            }
             EffectGraphNodeData::SplitChannels => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 let max_len = channels_frame_len(&bus.channels);
                 for (index, port_id) in node.data.output_ports().iter().enumerate() {
                     let output_bus = if let Some(channel) = bus.channels.get(index) {
@@ -2287,16 +2658,22 @@ where
                     })
                     .collect::<Vec<_>>();
                 if buses.is_empty() {
-                    return Err(
-                        "Combine Channels requires at least one connected input".to_string()
-                    );
+                    return Err(effect_graph_node_runtime_error(
+                        &node.id,
+                        "Combine Channels requires at least one connected input",
+                    ));
                 }
-                let combine_mode = combine_mode_from_buses(&buses)
-                    .ok_or_else(|| "Combine Channels could not infer channel layout".to_string())?;
+                let combine_mode = combine_mode_from_buses(&buses).ok_or_else(|| {
+                    effect_graph_node_runtime_error(
+                        &node.id,
+                        "Combine Channels could not infer channel layout",
+                    )
+                })?;
                 if combine_mode == EffectGraphCombineMode::Mixed {
-                    return Err(
-                        "Combine Channels received an unsupported channel layout mix".to_string(),
-                    );
+                    return Err(effect_graph_node_runtime_error(
+                        &node.id,
+                        "Combine Channels received an unsupported channel layout mix",
+                    ));
                 }
                 let target_sample_rate = buses
                     .iter()
@@ -2325,7 +2702,9 @@ where
                     }
                     EffectGraphCombineMode::Restore => {
                         let (restored_bus, warnings) =
-                            restore_channels_by_layout(buses, target_sample_rate)?;
+                            restore_channels_by_layout(buses, target_sample_rate).map_err(
+                                |message| effect_graph_node_runtime_error(&node.id, message),
+                            )?;
                         for warning in warnings {
                             on_event(EffectGraphRuntimeEvent::NodeLog {
                                 node_id: node.id.clone(),
@@ -2337,7 +2716,10 @@ where
                     }
                     EffectGraphCombineMode::Adaptive => {
                         let (adaptive_bus, warnings) =
-                            adaptive_combine_channels_by_layout(buses, target_sample_rate)?;
+                            adaptive_combine_channels_by_layout(buses, target_sample_rate)
+                                .map_err(|message| {
+                                    effect_graph_node_runtime_error(&node.id, message)
+                                })?;
                         for warning in warnings {
                             on_event(EffectGraphRuntimeEvent::NodeLog {
                                 node_id: node.id.clone(),
@@ -2353,7 +2735,12 @@ where
             EffectGraphNodeData::DebugWaveform { .. } => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 if run_mode == EffectGraphRunMode::TestPreview {
                     on_event(EffectGraphRuntimeEvent::NodeDebugPreview {
                         node_id: node.id.clone(),
@@ -2368,7 +2755,12 @@ where
             EffectGraphNodeData::DebugSpectrum { mode, .. } => {
                 let bus =
                     effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
-                        .ok_or_else(|| format!("{} input is missing", node.id))?;
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
                 if run_mode == EffectGraphRunMode::TestPreview {
                     let mono = mixdown_channels_local(&bus.channels);
                     let cfg = effect_graph_debug_spectrogram_config(*mode);
@@ -2402,7 +2794,29 @@ where
             elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
         });
     }
-    final_output.ok_or_else(|| "Output node did not receive audio".to_string())
+    final_output.ok_or_else(|| effect_graph_runtime_error("Output node did not receive audio"))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn run_effect_graph_document<F>(
+    document: &EffectGraphDocument,
+    input_bus: EffectGraphAudioBus,
+    run_mode: EffectGraphRunMode,
+    resample_quality: crate::wave::ResampleQuality,
+    on_event: F,
+) -> Result<EffectGraphAudioBus, String>
+where
+    F: FnMut(EffectGraphRuntimeEvent),
+{
+    run_effect_graph_document_internal(
+        document,
+        input_bus,
+        run_mode,
+        resample_quality,
+        EffectGraphExecutionFlavor::AudioRender,
+        on_event,
+    )
+    .map_err(|err| err.message)
 }
 
 fn combine_mode_label(mode: EffectGraphCombineMode) -> &'static str {
@@ -2419,13 +2833,15 @@ fn predict_effect_graph_output_format(
     input_bus: &EffectGraphAudioBus,
     resample_quality: crate::wave::ResampleQuality,
 ) -> Result<EffectGraphPredictedFormat, String> {
-    let output_bus = run_effect_graph_document(
+    let output_bus = run_effect_graph_document_internal(
         document,
         format_only_audio_bus(input_bus.channels.len(), input_bus.sample_rate),
         EffectGraphRunMode::ApplyToListSelection,
         resample_quality,
+        EffectGraphExecutionFlavor::FormatOnly,
         |_| {},
-    )?;
+    )
+    .map_err(|err| err.message)?;
     let input_sources = build_port_edge_maps(document).0;
     let flow_hints = effect_graph_infer_flow_hints(document);
     let active_nodes = effect_graph_active_nodes(document);
@@ -2513,6 +2929,11 @@ impl WavesPreviewer {
         self.effect_graph.canvas.selected_nodes.clear();
         self.effect_graph.canvas.selected_edge_id = None;
         self.effect_graph.debug_previews.clear();
+        self.effect_graph.plugin_runtime.clear();
+        self.effect_graph.plugin_probe_state = None;
+        if let Some(state) = self.effect_graph.plugin_gui_state.take() {
+            let _ = state.cmd_tx.send(super::types::PluginGuiCommand::Close);
+        }
         self.revalidate_effect_graph_draft();
     }
 
@@ -2551,12 +2972,43 @@ impl WavesPreviewer {
             .iter()
             .map(|node| node.id.clone())
             .collect::<HashSet<_>>();
+        let plugin_node_ids = self
+            .effect_graph
+            .draft
+            .nodes
+            .iter()
+            .filter(|node| matches!(node.data, EffectGraphNodeData::PluginFx { .. }))
+            .map(|node| node.id.clone())
+            .collect::<HashSet<_>>();
         self.effect_graph
             .debug_previews
             .retain(|node_id, _| valid_node_ids.contains(node_id));
         self.effect_graph
             .debug_view_state
             .retain(|node_id, _| valid_node_ids.contains(node_id));
+        self.effect_graph
+            .plugin_runtime
+            .retain(|node_id, _| plugin_node_ids.contains(node_id));
+        if self
+            .effect_graph
+            .plugin_probe_state
+            .as_ref()
+            .map(|state| !plugin_node_ids.contains(&state.node_id))
+            .unwrap_or(false)
+        {
+            self.effect_graph.plugin_probe_state = None;
+        }
+        if self
+            .effect_graph
+            .plugin_gui_state
+            .as_ref()
+            .map(|state| !plugin_node_ids.contains(&state.node_id))
+            .unwrap_or(false)
+        {
+            if let Some(state) = self.effect_graph.plugin_gui_state.take() {
+                let _ = state.cmd_tx.send(super::types::PluginGuiCommand::Close);
+            }
+        }
         for node in self.effect_graph.draft.nodes.iter() {
             if matches!(
                 node.data,
@@ -2567,6 +3019,11 @@ impl WavesPreviewer {
                     .debug_view_state
                     .entry(node.id.clone())
                     .or_insert_with(EffectGraphDebugViewState::default);
+            } else if matches!(node.data, EffectGraphNodeData::PluginFx { .. }) {
+                self.effect_graph
+                    .plugin_runtime
+                    .entry(node.id.clone())
+                    .or_insert_with(EffectGraphPluginNodeRuntimeState::default);
             }
         }
     }
@@ -3104,11 +3561,12 @@ impl WavesPreviewer {
                     dense_audio_bus(channels, in_sr.max(1))
                 };
                 let started = Instant::now();
-                let result = run_effect_graph_document(
+                let result = run_effect_graph_document_internal(
                     &document,
                     input_bus,
                     mode,
                     input.resample_quality,
+                    EffectGraphExecutionFlavor::AudioRender,
                     |event| {
                         let _ = match event {
                             EffectGraphRuntimeEvent::NodeStarted(node_id) => {
@@ -3152,11 +3610,11 @@ impl WavesPreviewer {
                             total_elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
                         });
                     }
-                    Err(message) => {
+                    Err(err) => {
                         let _ = tx.send(EffectGraphWorkerEvent::Failed {
                             path: Some(input.path),
-                            node_id: None,
-                            message,
+                            node_id: err.node_id,
+                            message: err.message,
                         });
                     }
                 }
@@ -4302,6 +4760,8 @@ impl WavesPreviewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn doc_with_nodes(
         nodes: Vec<EffectGraphNode>,
@@ -4334,6 +4794,245 @@ mod tests {
 
     fn test_bus(channels: Vec<Vec<f32>>, sample_rate: u32) -> EffectGraphAudioBus {
         dense_audio_bus(channels, sample_rate)
+    }
+
+    fn temp_plugin_stub(ext: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let seq = NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join("neowaves_effect_graph_tests");
+        std::fs::create_dir_all(&dir).expect("create effect graph temp dir");
+        let path = dir.join(format!("plugin_fx_stub_{now_ms}_{seq}.{ext}"));
+        std::fs::write(&path, b"stub").expect("write plugin stub");
+        path
+    }
+
+    fn plugin_fx_doc_with_path(path: &Path) -> EffectGraphDocument {
+        doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "plugin".to_string(),
+                    ui_pos: [120.0, 0.0],
+                    ui_size: [360.0, 320.0],
+                    data: EffectGraphNodeData::PluginFx {
+                        config: super::super::types::EffectGraphPluginNodeConfig {
+                            plugin_key: Some(path.to_string_lossy().to_string()),
+                            plugin_name: "Stub Plugin".to_string(),
+                            enabled: true,
+                            bypass: false,
+                            filter: "stub".to_string(),
+                            params: vec![super::super::types::EffectGraphPluginParamState {
+                                id: "mix".to_string(),
+                                name: "Mix".to_string(),
+                                normalized: 1.0,
+                                default_normalized: 1.0,
+                                min: 0.0,
+                                max: 1.0,
+                                unit: String::new(),
+                            }],
+                            state_blob_b64: Some("AQID".to_string()),
+                        },
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [260.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "plugin", "in"),
+                edge("b", "plugin", "out", "output", "in"),
+            ],
+        )
+    }
+
+    #[test]
+    fn effect_graph_plugin_fx_node_defaults_and_ports() {
+        let data = EffectGraphNodeData::default_for_kind(EffectGraphNodeKind::PluginFx);
+        assert_eq!(data.display_name(), "Plugin FX");
+        assert_eq!(data.input_ports(), &["in"]);
+        assert_eq!(data.output_ports(), &["out"]);
+        let summary = node_parameter_summary(&data);
+        assert!(summary.contains("No plugin selected"));
+        assert!(summary.contains("0 params"));
+    }
+
+    #[test]
+    fn effect_graph_plugin_fx_roundtrips_in_clipboard_and_template() {
+        let stub = temp_plugin_stub("vst3");
+        let payload = EffectGraphClipboardPayload {
+            version: EFFECT_GRAPH_CLIPBOARD_VERSION,
+            origin: [12.0, 24.0],
+            nodes: vec![EffectGraphNode {
+                id: "plugin".to_string(),
+                ui_pos: [0.0, 0.0],
+                ui_size: [360.0, 320.0],
+                data: EffectGraphNodeData::PluginFx {
+                    config: super::super::types::EffectGraphPluginNodeConfig {
+                        plugin_key: Some(stub.to_string_lossy().to_string()),
+                        plugin_name: "Clipboard FX".to_string(),
+                        enabled: true,
+                        bypass: false,
+                        filter: "clip".to_string(),
+                        params: vec![super::super::types::EffectGraphPluginParamState {
+                            id: "mix".to_string(),
+                            name: "Mix".to_string(),
+                            normalized: 0.75,
+                            default_normalized: 1.0,
+                            min: 0.0,
+                            max: 1.0,
+                            unit: "%".to_string(),
+                        }],
+                        state_blob_b64: Some("AQIDBA".to_string()),
+                    },
+                },
+            }],
+            edges: Vec::new(),
+        };
+        let text = effect_graph_clipboard_payload_to_text(&payload).expect("serialize payload");
+        let parsed = effect_graph_clipboard_payload_from_text(&text).expect("parse payload");
+        assert_eq!(parsed, payload);
+
+        let file = EffectGraphTemplateFile {
+            schema_version: EFFECT_GRAPH_SCHEMA_VERSION,
+            template_id: "plugin_fx".to_string(),
+            name: "Plugin FX".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            graph: doc_with_nodes(payload.nodes.clone(), Vec::new()),
+        };
+        let json = serde_json::to_string(&file).expect("serialize template");
+        let restored =
+            serde_json::from_str::<EffectGraphTemplateFile>(&json).expect("parse template");
+        assert_eq!(restored.graph.nodes, file.graph.nodes);
+    }
+
+    #[test]
+    fn effect_graph_plugin_fx_validation_rejects_selection_and_path_issues() {
+        let missing_path = plugin_fx_doc_with_path(
+            &std::env::temp_dir().join("neowaves_missing_plugin_fx_validation.vst3"),
+        );
+        let missing_path_issues = validate_effect_graph_document(&missing_path);
+        assert!(missing_path_issues
+            .iter()
+            .any(|issue| issue.code == "plugin_missing_path"));
+
+        let unselected = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "plugin".to_string(),
+                    ui_pos: [120.0, 0.0],
+                    ui_size: [360.0, 320.0],
+                    data: EffectGraphNodeData::PluginFx {
+                        config: Default::default(),
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [260.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "plugin", "in"),
+                edge("b", "plugin", "out", "output", "in"),
+            ],
+        );
+        let unselected_issues = validate_effect_graph_document(&unselected);
+        assert!(unselected_issues
+            .iter()
+            .any(|issue| issue.code == "plugin_unselected"));
+    }
+
+    #[test]
+    fn effect_graph_prediction_keeps_plugin_fx_format() {
+        let doc = plugin_fx_doc_with_path(Path::new("C:/missing/plugin.vst3"));
+        let predicted = predict_effect_graph_output_format(
+            &doc,
+            &test_bus(vec![vec![0.1, 0.2], vec![0.3, 0.4], vec![0.5, 0.6]], 96_000),
+            crate::wave::ResampleQuality::Good,
+        )
+        .expect("prediction ok");
+        assert_eq!(predicted.channel_count, 3);
+        assert_eq!(predicted.sample_rate, 96_000);
+    }
+
+    #[test]
+    fn effect_graph_plugin_fx_runtime_supports_generic_vst3_and_clap_fallbacks() {
+        for ext in ["vst3", "clap"] {
+            let stub = temp_plugin_stub(ext);
+            let doc = plugin_fx_doc_with_path(&stub);
+            let mut logs = Vec::new();
+            let out = run_effect_graph_document(
+                &doc,
+                test_bus(vec![vec![0.1, -0.2, 0.3], vec![0.4, -0.5, 0.6]], 48_000),
+                EffectGraphRunMode::TestPreview,
+                crate::wave::ResampleQuality::Good,
+                |event| {
+                    if let EffectGraphRuntimeEvent::NodeLog { message, .. } = event {
+                        logs.push(message);
+                    }
+                },
+            )
+            .expect("plugin runtime ok");
+            assert_eq!(out.channels.len(), 2);
+            assert_eq!(out.channels[0], vec![0.1, -0.2, 0.3]);
+            assert_eq!(out.channels[1], vec![0.4, -0.5, 0.6]);
+            assert!(logs
+                .iter()
+                .any(|message| message.contains("Plugin FX backend:")));
+            let _ = std::fs::remove_file(stub);
+        }
+    }
+
+    #[test]
+    fn effect_graph_plugin_fx_channel_mismatch_falls_back_to_dense_layout() {
+        let mut events = Vec::new();
+        let out = finalize_plugin_fx_output_bus(
+            "plugin",
+            &EffectGraphAudioBus {
+                channels: vec![vec![0.1, 0.2], vec![0.3, 0.4]],
+                sample_rate: 48_000,
+                channel_layout: EffectGraphChannelLayout {
+                    declared_width: 2,
+                    entries: vec![
+                        EffectGraphChannelLayoutEntry::Slotted { slot_index: 0 },
+                        EffectGraphChannelLayoutEntry::Slotted { slot_index: 1 },
+                    ],
+                },
+            },
+            vec![vec![0.5, 0.6]],
+            48_000,
+            |event| events.push(event),
+        )
+        .expect("finalize output ok");
+        assert_eq!(out.channel_layout, make_dense_layout(1));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EffectGraphRuntimeEvent::NodeLog {
+                severity: EffectGraphSeverity::Warning,
+                message,
+                ..
+            } if message.contains("channel count changed")
+        )));
     }
 
     #[test]

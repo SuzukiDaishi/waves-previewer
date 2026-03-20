@@ -29,6 +29,7 @@ mod external_load_ops;
 mod external_ops;
 mod gain_ops;
 mod helpers;
+mod hf_cache;
 mod input_ops;
 #[cfg(feature = "kittest")]
 mod kittest_ops;

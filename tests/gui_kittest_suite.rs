@@ -1629,6 +1629,22 @@ mod kittest_suite {
     }
 
     #[test]
+    fn effect_graph_plugin_node_controls_visible() {
+        let mut harness = harness_empty();
+        harness.state_mut().test_open_effect_graph_workspace();
+        harness.run_steps(3);
+
+        harness.get_by_label("Plugin FX");
+        assert!(harness.state_mut().test_add_effect_graph_plugin_node());
+        harness.run_steps(3);
+
+        harness.get_by_label("Rescan");
+        harness.get_by_label("Reload Params");
+        harness.get_by_label("Enable");
+        harness.get_by_label("Bypass");
+    }
+
+    #[test]
     fn spectrogram_hop_ui_shows_derived_overlap() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
