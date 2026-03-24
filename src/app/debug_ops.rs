@@ -1415,7 +1415,7 @@ impl WavesPreviewer {
                             Ok(idx) => tab.markers[idx] = entry,
                             Err(idx) => tab.markers.insert(idx, entry),
                         }
-                        tab.markers_dirty = true;
+                        Self::update_markers_dirty(tab);
                         self.debug_log(format!("auto: add marker @{}", pos));
                     }
                 }
@@ -1424,7 +1424,7 @@ impl WavesPreviewer {
                 if let Some(tab_idx) = self.active_tab {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.markers.clear();
-                        tab.markers_dirty = true;
+                        Self::update_markers_dirty(tab);
                         self.debug_log("auto: clear markers");
                     }
                 }
@@ -1548,7 +1548,7 @@ impl WavesPreviewer {
             DebugAction::SetViewMode(mode) => {
                 if let Some(tab_idx) = self.active_tab {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.view_mode = mode;
+                        tab.set_leaf_view_mode(mode);
                         self.debug_log(format!("auto: view mode {:?}", mode));
                     }
                 }

@@ -228,6 +228,8 @@ impl crate::app::WavesPreviewer {
                             let mut next_cols = self.list_columns;
                             ui.horizontal_wrapped(|ui| {
                                 ui.checkbox(&mut next_cols.edited, "Edited");
+                                ui.checkbox(&mut next_cols.cover_art, "Art");
+                                ui.checkbox(&mut next_cols.type_badge, "Type");
                                 ui.checkbox(&mut next_cols.file, "File");
                                 ui.checkbox(&mut next_cols.folder, "Folder");
                                 ui.checkbox(&mut next_cols.transcript, "Transcript");
@@ -255,6 +257,8 @@ impl crate::app::WavesPreviewer {
                             });
                             let external_available = !self.external_visible_columns.is_empty();
                             let any_visible = next_cols.edited
+                                || next_cols.cover_art
+                                || next_cols.type_badge
                                 || next_cols.file
                                 || next_cols.folder
                                 || next_cols.transcript
@@ -300,17 +304,20 @@ impl crate::app::WavesPreviewer {
                                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label("Active View:");
-                                        let prev = tab.view_mode;
+                                        let prev = tab.leaf_view_mode();
                                         for (vm, label) in [
                                             (ViewMode::Waveform, "Wave"),
                                             (ViewMode::Spectrogram, "Spec"),
+                                            (ViewMode::Log, "Freq Log"),
                                             (ViewMode::Mel, "Mel"),
+                                            (ViewMode::Tempogram, "Tempogram"),
+                                            (ViewMode::Chromagram, "Chromagram"),
                                         ] {
                                             if ui
-                                                .selectable_label(tab.view_mode == vm, label)
+                                                .selectable_label(tab.leaf_view_mode() == vm, label)
                                                 .clicked()
                                             {
-                                                tab.view_mode = vm;
+                                                tab.set_leaf_view_mode(vm);
                                                 view_change = Some((tab_idx, prev, vm));
                                             }
                                         }
@@ -415,25 +422,15 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                             ui.horizontal_wrapped(|ui| {
-                                ui.label("Scale:");
-                                egui::ComboBox::from_id_salt("spectro_scale")
-                                    .selected_text(match next_cfg.scale {
-                                        SpectrogramScale::Linear => "Linear",
-                                        SpectrogramScale::Log => "Log",
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut next_cfg.scale,
-                                            SpectrogramScale::Linear,
-                                            "Linear",
-                                        );
-                                        ui.selectable_value(
-                                            &mut next_cfg.scale,
-                                            SpectrogramScale::Log,
-                                            "Log",
-                                        );
-                                    });
+                                ui.label("Spectrogram Values:");
+                                ui.label(RichText::new("dB (log magnitude)").monospace());
                             });
+                            ui.label(
+                                RichText::new(
+                                    "Use Active View = Freq Log when you want a logarithmic frequency axis.",
+                                )
+                                .weak(),
+                            );
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Mel Scale:");
                                 egui::ComboBox::from_id_salt("spectro_mel_scale")

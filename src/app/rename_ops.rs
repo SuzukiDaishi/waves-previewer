@@ -75,6 +75,7 @@ impl WavesPreviewer {
         if let Some(v) = self.spectro_cancel.remove(from) {
             self.spectro_cancel.insert(new_path.clone(), v);
         }
+        self.cancel_feature_analysis_for_path(from);
         if let Some(v) = self.lufs_override.remove(from) {
             self.lufs_override.insert(new_path.clone(), v);
         }

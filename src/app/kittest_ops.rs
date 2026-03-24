@@ -383,6 +383,7 @@ impl super::WavesPreviewer {
             SortKey::File => "File",
             SortKey::Folder => "Folder",
             SortKey::Transcript => "Transcript",
+            SortKey::Type => "Type",
             SortKey::Length => "Length",
             SortKey::Channels => "Channels",
             SortKey::SampleRate => "SampleRate",
@@ -488,6 +489,13 @@ impl super::WavesPreviewer {
     pub fn test_clear_meta_for_path(&mut self, path: &Path) {
         self.clear_meta_for_path(path);
         self.meta_inflight.remove(path);
+    }
+
+    pub fn test_show_list_art_window_placeholder(&mut self, path: &Path) {
+        self.show_list_art_window = true;
+        self.list_art_window_path = Some(path.to_path_buf());
+        self.list_art_window_texture = None;
+        self.list_art_window_error = None;
     }
 
     pub fn test_set_active_tool(&mut self, tool: ToolKind) -> bool {
@@ -664,16 +672,22 @@ impl super::WavesPreviewer {
         if tab.samples_len == 0 {
             return false;
         }
-        let pos = ((tab.samples_len as f32) * frac)
+        let mut pos = ((tab.samples_len as f32) * frac)
             .round()
             .clamp(0.0, (tab.samples_len - 1) as f32) as usize;
+        while pos < tab.samples_len && tab.markers.iter().any(|m| m.sample == pos) {
+            pos = pos.saturating_add(1);
+        }
+        if pos >= tab.samples_len {
+            return false;
+        }
         let label = Self::next_marker_label(&tab.markers);
         let entry = crate::markers::MarkerEntry { label, sample: pos };
         match tab.markers.binary_search_by_key(&pos, |m| m.sample) {
             Ok(idx) => tab.markers[idx] = entry,
             Err(idx) => tab.markers.insert(idx, entry),
         }
-        tab.markers_dirty = true;
+        Self::update_markers_dirty(tab);
         true
     }
 
@@ -683,7 +697,7 @@ impl super::WavesPreviewer {
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.markers.clear();
-            tab.markers_dirty = true;
+            Self::update_markers_dirty(tab);
             true
         } else {
             false
@@ -723,7 +737,7 @@ impl super::WavesPreviewer {
             return false;
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.view_mode = mode;
+            tab.set_leaf_view_mode(mode);
             true
         } else {
             false
@@ -866,6 +880,53 @@ impl super::WavesPreviewer {
             return false;
         };
         self.tabs.get(tab_idx).map(|t| t.dirty).unwrap_or(false)
+    }
+
+    pub fn test_marker_dirty(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.markers_dirty)
+            .unwrap_or(false)
+    }
+
+    pub fn test_loop_marker_dirty(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.loop_markers_dirty)
+            .unwrap_or(false)
+    }
+
+    pub fn test_marker_preview_pending(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.markers != t.markers_committed)
+            .unwrap_or(false)
+    }
+
+    pub fn test_loop_preview_pending(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.loop_region != t.loop_region_committed)
+            .unwrap_or(false)
+    }
+
+    pub fn test_audio_loop_xfade_samples(&self) -> usize {
+        self.audio
+            .shared
+            .loop_xfade_samples
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn test_add_trim_virtual_frac(&mut self, start: f32, end: f32) -> bool {

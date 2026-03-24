@@ -8,14 +8,14 @@ use super::external_ops;
 use super::project::{
     describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
-    project_channel_view_to_channel_view, project_marker_to_entry,
+    primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
     project_plugin_fx_draft_from_draft, project_plugin_fx_draft_to_draft,
     project_spectrogram_from_cfg, project_tab_from_tab, project_tool_state_to_tool_state, rel_path,
     resolve_path, save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio,
-    serialize_project, spectro_config_from_project, tool_kind_from_str, view_mode_from_str,
-    ProjectApp, ProjectAppliedEffectGraph, ProjectBitDepthOverride, ProjectEdit,
-    ProjectEffectGraphUi, ProjectExportPolicy, ProjectExternalSource, ProjectExternalState,
-    ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns, ProjectListItem,
+    serialize_project, spectro_config_from_project, tool_kind_from_str, ProjectApp,
+    ProjectAppliedEffectGraph, ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi,
+    ProjectExportPolicy, ProjectExternalSource, ProjectExternalState, ProjectFile,
+    ProjectFormatOverride, ProjectList, ProjectListColumns, ProjectListItem,
     ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage, ProjectVirtualItem,
     ProjectVirtualOp, ProjectVirtualSource,
 };
@@ -441,6 +441,7 @@ impl super::WavesPreviewer {
                 super::types::SortKey::File => "File",
                 super::types::SortKey::Folder => "Folder",
                 super::types::SortKey::Transcript => "Transcript",
+                super::types::SortKey::Type => "Type",
                 super::types::SortKey::Length => "Length",
                 super::types::SortKey::Channels => "Channels",
                 super::types::SortKey::SampleRate => "SampleRate",
@@ -468,6 +469,8 @@ impl super::WavesPreviewer {
                 .map(|path| rel_path(path, base_dir)),
             list_columns: ProjectListColumns {
                 edited: self.list_columns.edited,
+                cover_art: self.list_columns.cover_art,
+                type_badge: self.list_columns.type_badge,
                 file: self.list_columns.file,
                 folder: self.list_columns.folder,
                 transcript: self.list_columns.transcript,
@@ -588,6 +591,8 @@ impl super::WavesPreviewer {
                 loop_xfade_shape: match cached.loop_xfade_shape {
                     LoopXfadeShape::Linear => "linear",
                     LoopXfadeShape::EqualPower => "equal",
+                    LoopXfadeShape::LinearDip => "linear_dip",
+                    LoopXfadeShape::EqualPowerDip => "equal_dip",
                 }
                 .to_string(),
                 fade_in_range: cached.fade_in_range.map(|v| [v.0, v.1]),
@@ -703,6 +708,8 @@ impl super::WavesPreviewer {
         }
         self.list_columns = super::types::ListColumnConfig {
             edited: project.app.list_columns.edited,
+            cover_art: project.app.list_columns.cover_art,
+            type_badge: project.app.list_columns.type_badge,
             file: project.app.list_columns.file,
             folder: project.app.list_columns.folder,
             transcript: project.app.list_columns.transcript,
@@ -724,6 +731,7 @@ impl super::WavesPreviewer {
         self.sort_key = match project.app.sort_key.as_str() {
             "Folder" => super::types::SortKey::Folder,
             "Transcript" => super::types::SortKey::Transcript,
+            "Type" => super::types::SortKey::Type,
             "Length" => super::types::SortKey::Length,
             "Channels" => super::types::SortKey::Channels,
             "SampleRate" => super::types::SortKey::SampleRate,
@@ -1241,7 +1249,15 @@ impl super::WavesPreviewer {
                     }
                 }
                 if let Some(t) = self.tabs.get_mut(idx) {
-                    t.view_mode = view_mode_from_str(&tab.view_mode);
+                    let (primary_view, spec_sub_view, other_sub_view) = primary_view_from_project(
+                        tab.primary_view.as_deref(),
+                        tab.spec_sub_view.as_deref(),
+                        tab.other_sub_view.as_deref(),
+                        &tab.view_mode,
+                    );
+                    t.primary_view = primary_view;
+                    t.spec_sub_view = spec_sub_view;
+                    t.other_sub_view = other_sub_view;
                     t.show_waveform_overlay = tab.show_waveform_overlay;
                     t.channel_view = project_channel_view_to_channel_view(&tab.channel_view);
                     t.active_tool = tool_kind_from_str(&tab.active_tool);

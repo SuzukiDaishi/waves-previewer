@@ -38,6 +38,7 @@ impl super::WavesPreviewer {
             .cloned()
             .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
         std::thread::spawn(move || {
+            super::threading::lower_current_thread_priority();
             let channel_count = channels.len().max(1);
             let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
             let params = crate::app::render::spectrogram::spectrogram_params(len, &cfg);
@@ -86,12 +87,12 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn queue_spectrogram_for_tab(&mut self, tab_idx: usize) {
-        let (path, view_mode, channels) = {
+        let (path, view_mode, channels, buffer_sample_rate) = {
             let Some(tab) = self.tabs.get(tab_idx) else {
                 return;
             };
             let path = tab.path.clone();
-            let view_mode = tab.view_mode;
+            let view_mode = tab.leaf_view_mode();
             let channel_view = tab.channel_view.clone();
             let channel_count = tab.ch_samples.len().max(1);
             let requested = channel_view.visible_indices(channel_count);
@@ -109,7 +110,7 @@ impl super::WavesPreviewer {
                     .filter_map(|&idx| tab.ch_samples.get(idx).cloned())
                     .collect()
             };
-            (path, view_mode, channels)
+            (path, view_mode, channels, tab.buffer_sample_rate.max(1))
         };
         if view_mode == ViewMode::Waveform {
             return;
@@ -129,7 +130,7 @@ impl super::WavesPreviewer {
         if self.spectro_inflight.contains(&path) {
             return;
         }
-        let sr = self.audio.shared.out_sample_rate;
+        let sr = buffer_sample_rate;
         let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
         let params = crate::app::render::spectrogram::spectrogram_params(len, &self.spectro_cfg);
         if params.frames == 0 {

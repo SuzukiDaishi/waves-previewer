@@ -593,6 +593,7 @@ impl crate::app::WavesPreviewer {
             EffectGraphNodeKind::Input,
             EffectGraphNodeKind::Output,
             EffectGraphNodeKind::Gain,
+            EffectGraphNodeKind::Loudness,
             EffectGraphNodeKind::MonoMix,
             EffectGraphNodeKind::PitchShift,
             EffectGraphNodeKind::TimeStretch,
@@ -1358,6 +1359,7 @@ impl crate::app::WavesPreviewer {
             }
 
             let mut gain_db = None;
+            let mut target_lufs = None;
             let mut mono_mix_ignored_channels = None;
             let mut semitones = None;
             let mut rate = None;
@@ -1373,6 +1375,7 @@ impl crate::app::WavesPreviewer {
                 .unwrap_or_default();
             match &node.data {
                 EffectGraphNodeData::Gain { gain_db: value } => gain_db = Some(*value),
+                EffectGraphNodeData::Loudness { target_lufs: value } => target_lufs = Some(*value),
                 EffectGraphNodeData::MonoMix { ignored_channels } => {
                     mono_mix_ignored_channels = Some(ignored_channels.clone());
                 }
@@ -1965,6 +1968,20 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                         }
+                        EffectGraphNodeData::Loudness { .. } => {
+                            ui.label(
+                                RichText::new(
+                                    "Measures integrated LUFS and applies matching gain",
+                                )
+                                .small()
+                                .color(Color32::from_rgb(160, 176, 192)),
+                            );
+                            ui.label(
+                                RichText::new("Format and duration stay unchanged")
+                                    .small()
+                                    .color(Color32::from_rgb(118, 132, 148)),
+                            );
+                        }
                         EffectGraphNodeData::SplitChannels => {
                             ui.label(
                                 RichText::new("Splits incoming audio into 8 routed mono outputs")
@@ -2102,6 +2119,21 @@ impl crate::app::WavesPreviewer {
                             self.effect_graph_push_undo_snapshot();
                             if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
                                 node_mut.data = EffectGraphNodeData::Gain { gain_db: value };
+                            }
+                            self.effect_graph.draft_dirty = true;
+                            self.revalidate_effect_graph_draft();
+                        }
+                    }
+                    if let Some(mut value) = target_lufs {
+                        let response = ui.add(
+                            egui::Slider::new(&mut value, -36.0..=0.0).text("Target LUFS"),
+                        );
+                        if response.changed() {
+                            self.effect_graph_push_undo_snapshot();
+                            if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                node_mut.data = EffectGraphNodeData::Loudness {
+                                    target_lufs: value,
+                                };
                             }
                             self.effect_graph.draft_dirty = true;
                             self.revalidate_effect_graph_draft();

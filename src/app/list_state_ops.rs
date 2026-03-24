@@ -151,7 +151,7 @@ impl WavesPreviewer {
     pub(super) fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
-        if let Some(item) = self.item_for_path_mut(path) {
+        let updated = if let Some(item) = self.item_for_path_mut(path) {
             item.meta = Some(meta);
             if let Some(sr) = sr_hint {
                 self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
@@ -163,9 +163,14 @@ impl WavesPreviewer {
                     }
                 }
             }
-            return true;
+            true
+        } else {
+            false
+        };
+        if updated {
+            self.list_art_textures.remove(path);
         }
-        false
+        updated
     }
 
     pub(super) fn clear_meta_for_path(&mut self, path: &Path) {
@@ -173,6 +178,7 @@ impl WavesPreviewer {
             item.meta = None;
         }
         self.sample_rate_probe_cache.remove(path);
+        self.list_art_textures.remove(path);
     }
 
     pub(super) fn transcript_for_path(&self, path: &Path) -> Option<&Transcript> {
@@ -327,6 +333,7 @@ impl WavesPreviewer {
             SortKey::File => cols.file,
             SortKey::Folder => cols.folder,
             SortKey::Transcript => cols.transcript,
+            SortKey::Type => cols.type_badge,
             SortKey::Length => cols.length,
             SortKey::Channels => cols.channels,
             SortKey::SampleRate => cols.sample_rate,
@@ -348,6 +355,8 @@ impl WavesPreviewer {
             SortKey::Folder
         } else if cols.transcript {
             SortKey::Transcript
+        } else if cols.type_badge {
+            SortKey::Type
         } else if external_visible {
             SortKey::External(0)
         } else if cols.length {

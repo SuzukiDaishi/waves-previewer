@@ -13,6 +13,7 @@ struct LoopSeamPreview {
     blended_right: Option<Vec<f32>>,
     sample_rate: u32,
     effective_xfade_samples: usize,
+    uses_through_zero: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,18 +67,18 @@ impl crate::app::WavesPreviewer {
             let mut right = raw_right.clone();
             let denom = (xfade.saturating_sub(1)).max(1) as f32;
             let left_base = left.len().saturating_sub(xfade);
+            let uses_dip = Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
             for i in 0..xfade {
                 let t = (i as f32) / denom;
-                let (w_out, w_in) = match tab.loop_xfade_shape {
-                    LoopXfadeShape::EqualPower => {
-                        let ang = core::f32::consts::FRAC_PI_2 * t;
-                        (ang.cos(), ang.sin())
-                    }
-                    LoopXfadeShape::Linear => (1.0 - t, t),
-                };
-                let mixed = left[left_base + i] * w_out + right[i] * w_in;
-                left[left_base + i] = mixed;
-                right[i] = mixed;
+                let (w_out, w_in) = Self::loop_xfade_weights(tab.loop_xfade_shape, t);
+                if uses_dip {
+                    left[left_base + i] *= w_out;
+                    right[i] *= w_in;
+                } else {
+                    let mixed = left[left_base + i] * w_out + right[i] * w_in;
+                    left[left_base + i] = mixed;
+                    right[i] = mixed;
+                }
             }
             (Some(left), Some(right))
         } else {
@@ -90,7 +91,260 @@ impl crate::app::WavesPreviewer {
             blended_right,
             sample_rate: sr,
             effective_xfade_samples,
+            uses_through_zero: Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape),
         })
+    }
+
+    fn draw_tempogram(
+        painter: &egui::Painter,
+        area: egui::Rect,
+        tab: &EditorTab,
+        data: &TempogramData,
+    ) {
+        if data.frames == 0 || data.tempo_bins == 0 || data.values.is_empty() {
+            return;
+        }
+        let width_px = area.width().max(1.0);
+        let height_px = area.height().max(1.0);
+        let spp = tab.samples_per_px.max(0.0001);
+        let vis = (width_px * spp).ceil() as usize;
+        let start = tab.view_offset.min(tab.samples_len);
+        let end = (start + vis).min(tab.samples_len);
+        let frame_step = data.frame_step.max(1);
+        let f0 = (start / frame_step).min(data.frames.saturating_sub(1));
+        let mut f1 = (end / frame_step).min(data.frames);
+        if f1 <= f0 {
+            f1 = (f0 + 1).min(data.frames);
+        }
+        let frame_count = f1.saturating_sub(f0).max(1);
+        let target_w = (width_px / 3.0).clamp(64.0, 256.0) as usize;
+        let target_h = (height_px / 3.0).clamp(48.0, 160.0) as usize;
+        let cell_w = width_px / target_w as f32;
+        let cell_h = height_px / target_h as f32;
+        let max_value = data
+            .values
+            .iter()
+            .copied()
+            .fold(0.0f32, |acc, value| acc.max(value))
+            .max(1.0e-9);
+        for x in 0..target_w {
+            let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+            let base = frame_idx * data.tempo_bins;
+            for y in 0..target_h {
+                let frac = y as f32 / (target_h.saturating_sub(1)).max(1) as f32;
+                let bin = (frac * data.tempo_bins.saturating_sub(1) as f32).round() as usize;
+                let idx = base + bin.min(data.tempo_bins.saturating_sub(1));
+                let norm =
+                    (data.values.get(idx).copied().unwrap_or(0.0) / max_value).clamp(0.0, 1.0);
+                let col = db_to_color(-80.0 + norm * 80.0);
+                let x0 = area.left() + x as f32 * cell_w;
+                let y0 = area.bottom() - (y as f32 + 1.0) * cell_h;
+                let r = egui::Rect::from_min_size(
+                    egui::pos2(x0, y0),
+                    egui::vec2(cell_w + 0.5, cell_h + 0.5),
+                );
+                painter.rect_filled(r, 0.0, col);
+            }
+        }
+    }
+
+    fn draw_chromagram(
+        painter: &egui::Painter,
+        area: egui::Rect,
+        tab: &EditorTab,
+        data: &ChromagramData,
+    ) {
+        if data.frames == 0 || data.bins == 0 || data.values.is_empty() {
+            return;
+        }
+        let width_px = area.width().max(1.0);
+        let height_px = area.height().max(1.0);
+        let spp = tab.samples_per_px.max(0.0001);
+        let vis = (width_px * spp).ceil() as usize;
+        let start = tab.view_offset.min(tab.samples_len);
+        let end = (start + vis).min(tab.samples_len);
+        let frame_step = data.frame_step.max(1);
+        let f0 = (start / frame_step).min(data.frames.saturating_sub(1));
+        let mut f1 = (end / frame_step).min(data.frames);
+        if f1 <= f0 {
+            f1 = (f0 + 1).min(data.frames);
+        }
+        let frame_count = f1.saturating_sub(f0).max(1);
+        let target_w = (width_px / 3.0).clamp(64.0, 256.0) as usize;
+        let cell_w = width_px / target_w as f32;
+        let cell_h = height_px / data.bins.max(1) as f32;
+        for x in 0..target_w {
+            let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+            let base = frame_idx * data.bins;
+            for bin in 0..data.bins {
+                let norm = data
+                    .values
+                    .get(base + bin)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let col = db_to_color(-80.0 + norm * 80.0);
+                let y0 = area.bottom() - (bin as f32 + 1.0) * cell_h;
+                let r = egui::Rect::from_min_size(
+                    egui::pos2(area.left() + x as f32 * cell_w, y0),
+                    egui::vec2(cell_w + 0.5, cell_h + 0.5),
+                );
+                painter.rect_filled(r, 0.0, col);
+            }
+        }
+    }
+
+    fn tempogram_axis_position(data: &TempogramData, bpm: f32) -> Option<f32> {
+        if data.bpm_values.is_empty() {
+            return None;
+        }
+        let mut best_idx = 0usize;
+        let mut best_delta = f32::INFINITY;
+        for (idx, candidate) in data.bpm_values.iter().copied().enumerate() {
+            let delta = (candidate - bpm).abs();
+            if delta < best_delta {
+                best_delta = delta;
+                best_idx = idx;
+            }
+        }
+        Some(best_idx as f32 / data.bpm_values.len().saturating_sub(1).max(1) as f32)
+    }
+
+    fn chroma_label_for_bin(bin: usize) -> &'static str {
+        const LABELS: [&str; 12] = [
+            "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        ];
+        LABELS[bin.min(LABELS.len() - 1)]
+    }
+
+    fn editor_view_label(view: ViewMode) -> &'static str {
+        match view {
+            ViewMode::Waveform => "Wave",
+            ViewMode::Spectrogram => "Spec",
+            ViewMode::Log => "Freq Log",
+            ViewMode::Mel => "Mel",
+            ViewMode::Tempogram => "Tempogram",
+            ViewMode::Chromagram => "Chromagram",
+        }
+    }
+
+    fn draw_editor_overview_navigator(
+        ui: &mut egui::Ui,
+        overview: &[(f32, f32)],
+        display_samples_len: usize,
+        sample_rate: u32,
+        view_offset: usize,
+        visible_samples: usize,
+        left_pad: f32,
+        desired_width: f32,
+    ) -> Option<usize> {
+        if display_samples_len == 0 {
+            return None;
+        }
+        let mut next_view = None;
+        let mut rect = egui::Rect::NOTHING;
+        let mut resp = None;
+        ui.horizontal(|ui| {
+            if left_pad > 0.0 {
+                ui.add_space(left_pad);
+            }
+            let desired = egui::vec2(desired_width.max(120.0), 54.0);
+            let (navigator_resp, painter) = ui.allocate_painter(desired, Sense::click_and_drag());
+            rect = navigator_resp.rect;
+            resp = Some(navigator_resp);
+
+            painter.rect_filled(rect, 6.0, Color32::from_rgb(14, 16, 20));
+            painter.rect_stroke(
+                rect,
+                6.0,
+                Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+                egui::StrokeKind::Outside,
+            );
+            let wave_rect = rect.shrink2(egui::vec2(8.0, 8.0));
+            let wave_rect = egui::Rect::from_min_max(
+                wave_rect.min,
+                egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
+            );
+            let center_y = wave_rect.center().y;
+            let amp = wave_rect.height() * 0.46;
+            if !overview.is_empty() {
+                let step = overview.len().max(1) as f32;
+                for (idx, &(lo, hi)) in overview.iter().enumerate() {
+                    let x = wave_rect.left() + (idx as f32 / step) * wave_rect.width();
+                    let y0 = center_y - hi.clamp(-1.0, 1.0) * amp;
+                    let y1 = center_y - lo.clamp(-1.0, 1.0) * amp;
+                    painter.line_segment(
+                        [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
+                        Stroke::new(1.0, Color32::from_rgb(120, 138, 162)),
+                    );
+                }
+            } else {
+                painter.line_segment(
+                    [
+                        egui::pos2(wave_rect.left(), center_y),
+                        egui::pos2(wave_rect.right(), center_y),
+                    ],
+                    Stroke::new(1.0, Color32::from_rgb(84, 94, 110)),
+                );
+            }
+
+            let total = display_samples_len.max(1);
+            let visible = visible_samples.clamp(1, total);
+            let max_left = total.saturating_sub(visible);
+            let start_frac = (view_offset.min(max_left) as f32 / total as f32).clamp(0.0, 1.0);
+            let end_frac =
+                ((view_offset.min(max_left) + visible) as f32 / total as f32).clamp(0.0, 1.0);
+            let viewport_rect = egui::Rect::from_min_max(
+                egui::pos2(
+                    wave_rect.left() + start_frac * wave_rect.width(),
+                    wave_rect.top(),
+                ),
+                egui::pos2(
+                    wave_rect.left() + end_frac * wave_rect.width(),
+                    wave_rect.bottom(),
+                ),
+            );
+            painter.rect_filled(
+                viewport_rect,
+                4.0,
+                Color32::from_rgba_unmultiplied(72, 160, 255, 34),
+            );
+            painter.rect_stroke(
+                viewport_rect,
+                4.0,
+                Stroke::new(1.5, Color32::from_rgb(92, 188, 255)),
+                egui::StrokeKind::Outside,
+            );
+
+            let zoom = total as f32 / visible.max(1) as f32;
+            let visible_sec = visible as f32 / sample_rate.max(1) as f32;
+            let total_sec = total as f32 / sample_rate.max(1) as f32;
+            painter.text(
+                egui::pos2(rect.left() + 8.0, rect.bottom() - 5.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!(
+                    "Zoom x{zoom:.1}  |  Visible {} / {}",
+                    crate::app::helpers::format_time_s(visible_sec),
+                    crate::app::helpers::format_time_s(total_sec)
+                ),
+                TextStyle::Small.resolve(ui.style()),
+                Color32::from_rgb(176, 188, 205),
+            );
+
+            if max_left == 0 {
+                return;
+            }
+            let navigator_resp = resp.as_ref().expect("navigator response");
+            if (navigator_resp.clicked() || navigator_resp.dragged())
+                && navigator_resp.interact_pointer_pos().is_some()
+            {
+                let pos = navigator_resp.interact_pointer_pos().unwrap();
+                let ratio = ((pos.x - wave_rect.left()) / wave_rect.width()).clamp(0.0, 1.0);
+                let center = (ratio * total as f32).round() as usize;
+                next_view = Some(center.saturating_sub(visible / 2).min(max_left));
+            }
+        });
+        next_view
     }
 
     fn draw_loop_seam_preview(ui: &mut egui::Ui, preview: &LoopSeamPreview) {
@@ -196,10 +450,15 @@ impl crate::app::WavesPreviewer {
             * 1000.0;
         let xfade_ms =
             (preview.effective_xfade_samples as f32 / preview.sample_rate as f32) * 1000.0;
+        let mode_label = if preview.uses_through_zero {
+            "fade to 0"
+        } else {
+            "crossfade"
+        };
         painter.text(
             egui::pos2(rect.center().x, footer_y),
             egui::Align2::CENTER_CENTER,
-            format!("window {window_ms:.1} ms / xfade {xfade_ms:.1} ms"),
+            format!("{mode_label} / window {window_ms:.1} ms / xfade {xfade_ms:.1} ms"),
             label_font,
             Color32::from_rgb(150, 162, 184),
         );
@@ -704,8 +963,37 @@ impl crate::app::WavesPreviewer {
         let playhead_display_now = map_audio_to_display(pos_audio_now);
         let mut request_seek: Option<usize> = None;
         let spec_path = self.tabs[tab_idx].path.clone();
+        let current_view = self.tabs[tab_idx].leaf_view_mode();
         let spec_cache = self.spectro_cache.get(&spec_path).cloned();
         let spec_loading = self.spectro_inflight.contains(&spec_path);
+        let feature_kind = match current_view {
+            ViewMode::Tempogram => Some(EditorAnalysisKind::Tempogram),
+            ViewMode::Chromagram => Some(EditorAnalysisKind::Chromagram),
+            _ => None,
+        };
+        let feature_key = feature_kind.map(|kind| EditorAnalysisKey {
+            path: spec_path.clone(),
+            kind,
+        });
+        let feature_cache = feature_key
+            .as_ref()
+            .and_then(|key| self.editor_feature_cache.get(key).cloned());
+        let feature_loading = feature_key
+            .as_ref()
+            .map(|key| self.editor_feature_inflight.contains(key))
+            .unwrap_or(false);
+        let feature_progress = feature_key
+            .as_ref()
+            .and_then(|key| self.editor_feature_progress.get(key))
+            .map(|p| (p.done_units, p.total_units, p.started_at));
+        let tempogram_data = match feature_cache.as_deref() {
+            Some(EditorFeatureAnalysisData::Tempogram(data)) => Some(data.clone()),
+            _ => None,
+        };
+        let chromagram_data = match feature_cache.as_deref() {
+            Some(EditorFeatureAnalysisData::Chromagram(data)) => Some(data.clone()),
+            _ => None,
+        };
         let mut touch_spectro_cache = false;
         ui.horizontal(|ui| {
             let tab = &self.tabs[tab_idx];
@@ -738,21 +1026,30 @@ impl crate::app::WavesPreviewer {
                 }
             }
             ui.separator();
-            // View mode toggles
-            let prev_view = tab.view_mode;
-            for (vm, label) in [
-                (ViewMode::Waveform, "Wave"),
-                (ViewMode::Spectrogram, "Spec"),
-                (ViewMode::Mel, "Mel"),
-            ] {
-                if ui.selectable_label(tab.view_mode == vm, label).clicked() {
-                    tab.view_mode = vm;
-                    if prev_view == ViewMode::Waveform && vm != ViewMode::Waveform {
-                        tab.show_waveform_overlay = false;
-                    }
-                    if prev_view == ViewMode::Waveform && vm != ViewMode::Waveform {
-                        discard_preview_for_view_change = true;
-                    }
+            let prev_view = tab.leaf_view_mode();
+            let mut selected_view = prev_view;
+            ui.horizontal_wrapped(|ui| {
+                ui.label("View:");
+                egui::ComboBox::from_id_salt(("editor_view_select", tab_idx))
+                    .selected_text(Self::editor_view_label(selected_view))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected_view, ViewMode::Waveform, "Wave");
+                        ui.separator();
+                        ui.label(RichText::new("Spectral").weak());
+                        ui.selectable_value(&mut selected_view, ViewMode::Spectrogram, "Spec");
+                        ui.selectable_value(&mut selected_view, ViewMode::Log, "Freq Log");
+                        ui.selectable_value(&mut selected_view, ViewMode::Mel, "Mel");
+                        ui.separator();
+                        ui.label(RichText::new("Other").weak());
+                        ui.selectable_value(&mut selected_view, ViewMode::Tempogram, "Tempogram");
+                        ui.selectable_value(&mut selected_view, ViewMode::Chromagram, "Chromagram");
+                    });
+            });
+            if selected_view != prev_view {
+                tab.set_leaf_view_mode(selected_view);
+                if prev_view == ViewMode::Waveform && selected_view != ViewMode::Waveform {
+                    tab.show_waveform_overlay = false;
+                    discard_preview_for_view_change = true;
                 }
             }
             ui.separator();
@@ -1195,11 +1492,31 @@ impl crate::app::WavesPreviewer {
             .spectro_progress
             .get(&tab_path)
             .map(|p| (p.done_tiles, p.total_tiles, p.started_at));
+        let analysis_loading = match current_view {
+            ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => spectro_loading,
+            ViewMode::Tempogram | ViewMode::Chromagram => feature_loading,
+            ViewMode::Waveform => false,
+        };
+        let analysis_progress = match current_view {
+            ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => spectro_progress,
+            ViewMode::Tempogram | ViewMode::Chromagram => feature_progress,
+            ViewMode::Waveform => None,
+        };
+        let analysis_label = match current_view {
+            ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => "Spectrogram",
+            ViewMode::Tempogram => "Tempogram",
+            ViewMode::Chromagram => "Chromagram",
+            ViewMode::Waveform => "",
+        };
         let mut cancel_apply = false;
         let mut cancel_decode = false;
         let mut cancel_processing = false;
         let mut cancel_preview = false;
         let mut cancel_spectro = false;
+        let mut cancel_feature_analysis = false;
+        let mut pending_tempogram_refresh = false;
+        let mut pending_chromagram_refresh = false;
+        let mut apply_estimated_bpm: Option<f32> = None;
         let mut perf_mixdown_ms: Option<f32> = None;
         let mut perf_wave_render_ms: Option<f32> = None;
         let mut waveform_render_started: Option<std::time::Instant> = None;
@@ -1210,14 +1527,16 @@ impl crate::app::WavesPreviewer {
         let min_canvas_w = 160.0f32;
         let min_inspector_w = 220.0f32;
         let max_inspector_w = 360.0f32;
-        let inspector_w = if avail.x <= min_inspector_w {
-            avail.x
+        let split_spacing = ui.spacing().item_spacing.x;
+        let split_avail_w = (avail.x - split_spacing).max(0.0);
+        let inspector_w = if split_avail_w <= min_inspector_w {
+            split_avail_w
         } else {
-            let available = (avail.x - min_canvas_w).max(min_inspector_w);
-            available.min(max_inspector_w).min(avail.x)
+            let available = (split_avail_w - min_canvas_w).max(min_inspector_w);
+            available.min(max_inspector_w).min(split_avail_w)
         };
-        let canvas_w = (avail.x - inspector_w).max(0.0);
-        ui.horizontal(|ui| {
+        let canvas_w = (split_avail_w - inspector_w).max(0.0);
+        ui.horizontal_top(|ui| {
                 let tab = &mut self.tabs[tab_idx];
                 let preview_ok = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
                 // Canvas area
@@ -1243,9 +1562,11 @@ impl crate::app::WavesPreviewer {
                 let mut pending_plugin_pick_folder = false;
                 if discard_preview_for_view_change {
                     need_restore_preview = true;
-                    stop_playback = true;
                 }
-                ui.vertical(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(canvas_w, avail.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
                     let canvas_h = (canvas_w * 0.35).clamp(180.0, avail.y);
                     let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
                     let rect = resp.rect;
@@ -1256,14 +1577,18 @@ impl crate::app::WavesPreviewer {
                     let gutter_w = 44.0;
                     let wave_left = rect.left() + gutter_w;
                     let wave_w = (w - gutter_w).max(1.0);
+                        let view_mode = tab.leaf_view_mode();
                         let channel_count = tab.ch_samples.len().max(1);
                         let mut visible_channels = tab.channel_view.visible_indices(channel_count);
-                        let use_mixdown = tab.channel_view.mode == ChannelViewMode::Mixdown
+                        let force_feature_mixdown =
+                            matches!(view_mode, ViewMode::Tempogram | ViewMode::Chromagram);
+                        let use_mixdown = force_feature_mixdown
+                            || tab.channel_view.mode == ChannelViewMode::Mixdown
                             || visible_channels.is_empty();
                         if use_mixdown {
                             visible_channels.clear();
                         }
-                        let lane_count = if use_mixdown {
+                        let lane_count = if force_feature_mixdown || use_mixdown {
                             1
                         } else {
                             visible_channels.len().max(1)
@@ -1395,163 +1720,277 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
-            if tab.view_mode != ViewMode::Waveform {
-                    if let Some(specs) = spec_cache.as_ref() {
-                        touch_spectro_cache = true;
-                        for ci in 0..lane_count {
-                            let lane_top = rect.top() + lane_h * ci as f32;
-                            let lane_rect = egui::Rect::from_min_size(
-                                egui::pos2(wave_left, lane_top),
-                                egui::vec2(wave_w, lane_h),
-                            );
-                            let spec = if use_mixdown {
-                                specs.get(0)
-                            } else if tab.channel_view.mode == ChannelViewMode::Custom {
-                                specs.get(ci)
+            if view_mode != ViewMode::Waveform {
+                match view_mode {
+                    ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
+                        if let Some(specs) = spec_cache.as_ref() {
+                            touch_spectro_cache = true;
+                            for ci in 0..lane_count {
+                                let lane_top = rect.top() + lane_h * ci as f32;
+                                let lane_rect = egui::Rect::from_min_size(
+                                    egui::pos2(wave_left, lane_top),
+                                    egui::vec2(wave_w, lane_h),
+                                );
+                                let spec = if use_mixdown {
+                                    specs.get(0)
+                                } else if tab.channel_view.mode == ChannelViewMode::Custom {
+                                    specs.get(ci)
+                                } else {
+                                    visible_channels
+                                        .get(ci)
+                                        .and_then(|idx| specs.get(*idx))
+                                        .or_else(|| specs.get(ci))
+                                };
+                                if let Some(spec) = spec {
+                                    Self::draw_spectrogram(
+                                        &painter,
+                                        lane_rect,
+                                        tab,
+                                        spec,
+                                        view_mode,
+                                        &self.spectro_cfg,
+                                    );
+                                }
+                            }
+                        } else {
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let msg = if spec_loading {
+                                "Building spectrogram..."
                             } else {
-                                visible_channels
-                                    .get(ci)
-                                    .and_then(|idx| specs.get(*idx))
-                                    .or_else(|| specs.get(ci))
+                                "Spectrogram not ready"
                             };
-                            if let Some(spec) = spec {
-                                Self::draw_spectrogram(
-                                    &painter,
-                                    lane_rect,
-                                    tab,
-                                    spec,
-                                    tab.view_mode,
-                                    &self.spectro_cfg,
+                            painter.text(
+                                egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                                egui::Align2::LEFT_TOP,
+                                msg,
+                                fid,
+                                Color32::GRAY,
+                            );
+                        }
+                        if !tab.show_waveform_overlay {
+                            let sr = spec_cache
+                                .as_ref()
+                                .and_then(|specs| specs.first())
+                                .map(|spec| spec.sample_rate)
+                                .unwrap_or(self.audio.shared.out_sample_rate);
+                            let mut max_freq = (sr.max(1) as f32) * 0.5;
+                            if self.spectro_cfg.max_freq_hz > 0.0 {
+                                max_freq = self.spectro_cfg.max_freq_hz.min(max_freq).max(1.0);
+                            }
+                            let log_min = 20.0_f32.min(max_freq).max(1.0);
+                            let ticks_hz: [f32; 10] = [
+                                0.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0,
+                                20000.0,
+                            ];
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let tick_col = Color32::from_rgb(140, 150, 165);
+                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let freq_to_note_label = |freq: f32| -> String {
+                                if freq <= 0.0 {
+                                    return String::new();
+                                }
+                                let note_f = 69.0 + 12.0 * (freq / 440.0).log2();
+                                let note = note_f.round() as i32;
+                                if !(0..=127).contains(&note) {
+                                    return String::new();
+                                }
+                                let names = [
+                                    "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#",
+                                    "B",
+                                ];
+                                let idx = ((note % 12) + 12) % 12;
+                                let octave = (note / 12) - 1;
+                                format!("{}{}", names[idx as usize], octave)
+                            };
+                            let format_freq = |freq: f32| -> String {
+                                if freq >= 1000.0 {
+                                    let k = freq / 1000.0;
+                                    if (k - k.round()).abs() < 0.05 {
+                                        format!("{:.0}k", k)
+                                    } else {
+                                        format!("{:.1}k", k)
+                                    }
+                                } else {
+                                    format!("{:.0}", freq)
+                                }
+                            };
+                            let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
+                            let mel_min = 1.0_f32;
+                            for ci in 0..lane_count {
+                                let lane_top = rect.top() + lane_h * ci as f32;
+                                let lane_rect = egui::Rect::from_min_size(
+                                    egui::pos2(wave_left, lane_top),
+                                    egui::vec2(wave_w, lane_h),
+                                );
+                                let mut last_y = f32::INFINITY;
+                                for &freq in &ticks_hz {
+                                    if freq <= 0.0 || freq > max_freq {
+                                        if freq != 0.0 {
+                                            continue;
+                                        }
+                                    }
+                                    let frac = match view_mode {
+                                        ViewMode::Spectrogram => (freq / max_freq).clamp(0.0, 1.0),
+                                        ViewMode::Log => {
+                                            if freq <= 0.0 || max_freq <= log_min {
+                                                0.0
+                                            } else {
+                                                let f = freq.clamp(log_min, max_freq);
+                                                (f / log_min).ln() / (max_freq / log_min).ln()
+                                            }
+                                        }
+                                        ViewMode::Mel => match self.spectro_cfg.mel_scale {
+                                            SpectrogramScale::Linear => {
+                                                let mel = 2595.0 * (1.0 + (freq / 700.0)).log10();
+                                                (mel / mel_max).clamp(0.0, 1.0)
+                                            }
+                                            SpectrogramScale::Log => {
+                                                let mel = 2595.0 * (1.0 + (freq / 700.0)).log10();
+                                                if mel_max <= mel_min {
+                                                    (mel / mel_max.max(1.0)).clamp(0.0, 1.0)
+                                                } else {
+                                                    (mel / mel_min)
+                                                        .ln()
+                                                        .clamp(0.0, (mel_max / mel_min).ln())
+                                                        / (mel_max / mel_min).ln()
+                                                }
+                                            }
+                                        },
+                                        _ => 0.0,
+                                    };
+                                    let y = lane_rect.bottom() - frac * lane_rect.height();
+                                    if last_y.is_finite() && (last_y - y) < 12.0 {
+                                        continue;
+                                    }
+                                    let label = if self.spectro_cfg.show_note_labels {
+                                        let note = freq_to_note_label(freq);
+                                        if note.is_empty() {
+                                            format_freq(freq)
+                                        } else {
+                                            format!("{} {}", format_freq(freq), note)
+                                        }
+                                    } else {
+                                        format_freq(freq)
+                                    };
+                                    painter.line_segment(
+                                        [
+                                            egui::pos2(wave_left - 6.0, y),
+                                            egui::pos2(wave_left - 2.0, y),
+                                        ],
+                                        tick_stroke,
+                                    );
+                                    painter.text(
+                                        egui::pos2(rect.left() + 2.0, y),
+                                        egui::Align2::LEFT_CENTER,
+                                        label,
+                                        fid.clone(),
+                                        tick_col,
+                                    );
+                                    last_y = y;
+                                }
+                            }
+                        }
+                    }
+                    ViewMode::Tempogram => {
+                        if let Some(data) = tempogram_data.as_ref() {
+                            let lane_rect = egui::Rect::from_min_size(
+                                egui::pos2(wave_left, rect.top()),
+                                egui::vec2(wave_w, h),
+                            );
+                            Self::draw_tempogram(&painter, lane_rect, tab, data);
+                        } else {
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let msg = if feature_loading {
+                                "Building tempogram..."
+                            } else {
+                                "Tempogram not ready"
+                            };
+                            painter.text(
+                                egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                                egui::Align2::LEFT_TOP,
+                                msg,
+                                fid,
+                                Color32::GRAY,
+                            );
+                        }
+                        if !tab.show_waveform_overlay {
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let tick_col = Color32::from_rgb(140, 150, 165);
+                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            for bpm in [30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 240.0, 300.0] {
+                                let frac = tempogram_data
+                                    .as_ref()
+                                    .and_then(|data| Self::tempogram_axis_position(data, bpm))
+                                    .unwrap_or(((bpm - 30.0) / 270.0).clamp(0.0, 1.0));
+                                let y = rect.bottom() - frac * rect.height();
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(wave_left - 6.0, y),
+                                        egui::pos2(wave_left - 2.0, y),
+                                    ],
+                                    tick_stroke,
+                                );
+                                painter.text(
+                                    egui::pos2(rect.left() + 2.0, y),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("{bpm:.0}"),
+                                    fid.clone(),
+                                    tick_col,
                                 );
                             }
                         }
-                    } else {
-                    let fid = TextStyle::Monospace.resolve(ui.style());
-                    let msg = if spec_loading { "Building spectrogram..." } else { "Spectrogram not ready" };
-                    painter.text(
-                        egui::pos2(wave_left + 6.0, rect.top() + 6.0),
-                        egui::Align2::LEFT_TOP,
-                        msg,
-                        fid,
-                        Color32::GRAY,
-                    );
-                }
-                if !tab.show_waveform_overlay {
-                    let sr = spec_cache
-                        .as_ref()
-                        .and_then(|specs| specs.get(0))
-                        .map(|spec| spec.sample_rate)
-                        .unwrap_or(self.audio.shared.out_sample_rate);
-                    let mut max_freq = (sr.max(1) as f32) * 0.5;
-                    if self.spectro_cfg.max_freq_hz > 0.0 {
-                        max_freq = self.spectro_cfg.max_freq_hz.min(max_freq).max(1.0);
                     }
-                    let log_min = 20.0_f32.min(max_freq).max(1.0);
-                    let ticks_hz: [f32; 10] = [0.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0];
-                    let fid = TextStyle::Monospace.resolve(ui.style());
-                    let tick_col = Color32::from_rgb(140, 150, 165);
-                    let tick_stroke = egui::Stroke::new(1.0, tick_col);
-                    let freq_to_note_label = |freq: f32| -> String {
-                        if freq <= 0.0 {
-                            return String::new();
-                        }
-                        let note_f = 69.0 + 12.0 * (freq / 440.0).log2();
-                        let note = note_f.round() as i32;
-                        if note < 0 || note > 127 {
-                            return String::new();
-                        }
-                        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-                        let idx = ((note % 12) + 12) % 12;
-                        let octave = (note / 12) - 1;
-                        format!("{}{}", names[idx as usize], octave)
-                    };
-                    let format_freq = |freq: f32| -> String {
-                        if freq >= 1000.0 {
-                            let k = freq / 1000.0;
-                            if (k - k.round()).abs() < 0.05 {
-                                format!("{:.0}k", k)
-                            } else {
-                                format!("{:.1}k", k)
-                            }
+                    ViewMode::Chromagram => {
+                        if let Some(data) = chromagram_data.as_ref() {
+                            let lane_rect = egui::Rect::from_min_size(
+                                egui::pos2(wave_left, rect.top()),
+                                egui::vec2(wave_w, h),
+                            );
+                            Self::draw_chromagram(&painter, lane_rect, tab, data);
                         } else {
-                            format!("{:.0}", freq)
-                        }
-                    };
-                    let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
-                    let mel_min = 1.0_f32;
-                    for ci in 0..lane_count {
-                        let lane_top = rect.top() + lane_h * ci as f32;
-                        let lane_rect = egui::Rect::from_min_size(
-                            egui::pos2(wave_left, lane_top),
-                            egui::vec2(wave_w, lane_h),
-                        );
-                        let mut last_y = f32::INFINITY;
-                        for &freq in &ticks_hz {
-                            if freq <= 0.0 || freq > max_freq {
-                                if freq == 0.0 {
-                                    // Keep 0 Hz label for context
-                                } else {
-                                    continue;
-                                }
-                            }
-                            let frac = match tab.view_mode {
-                                ViewMode::Spectrogram | ViewMode::Waveform => match self.spectro_cfg.scale {
-                                    SpectrogramScale::Linear => (freq / max_freq).clamp(0.0, 1.0),
-                                    SpectrogramScale::Log => {
-                                        if freq <= 0.0 || max_freq <= log_min {
-                                            0.0
-                                        } else {
-                                            let f = freq.clamp(log_min, max_freq);
-                                            (f / log_min).ln() / (max_freq / log_min).ln()
-                                        }
-                                    }
-                                },
-                                ViewMode::Mel => match self.spectro_cfg.mel_scale {
-                                    SpectrogramScale::Linear => {
-                                        let mel = 2595.0 * (1.0 + (freq / 700.0)).log10();
-                                        (mel / mel_max).clamp(0.0, 1.0)
-                                    }
-                                    SpectrogramScale::Log => {
-                                        let mel = 2595.0 * (1.0 + (freq / 700.0)).log10();
-                                        if mel_max <= mel_min {
-                                            (mel / mel_max.max(1.0)).clamp(0.0, 1.0)
-                                        } else {
-                                            (mel / mel_min)
-                                                .ln()
-                                                .clamp(0.0, (mel_max / mel_min).ln())
-                                                / (mel_max / mel_min).ln()
-                                        }
-                                    }
-                                },
-                            };
-                            let y = lane_rect.bottom() - frac * lane_rect.height();
-                            if last_y.is_finite() && (last_y - y) < 12.0 {
-                                continue;
-                            }
-                            let label = if self.spectro_cfg.show_note_labels {
-                                let note = freq_to_note_label(freq);
-                                if note.is_empty() {
-                                    format_freq(freq)
-                                } else {
-                                    format!("{} {}", format_freq(freq), note)
-                                }
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let msg = if feature_loading {
+                                "Building chromagram..."
                             } else {
-                                format_freq(freq)
+                                "Chromagram not ready"
                             };
-                            painter.line_segment(
-                                [egui::pos2(wave_left - 6.0, y), egui::pos2(wave_left - 2.0, y)],
-                                tick_stroke,
-                            );
                             painter.text(
-                                egui::pos2(rect.left() + 2.0, y),
-                                egui::Align2::LEFT_CENTER,
-                                label,
-                                fid.clone(),
-                                tick_col,
+                                egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                                egui::Align2::LEFT_TOP,
+                                msg,
+                                fid,
+                                Color32::GRAY,
                             );
-                            last_y = y;
+                        }
+                        if !tab.show_waveform_overlay {
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let tick_col = Color32::from_rgb(140, 150, 165);
+                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            for bin in 0..12 {
+                                let frac = if 11 == 0 {
+                                    0.0
+                                } else {
+                                    bin as f32 / 11.0
+                                };
+                                let y = rect.bottom() - frac * rect.height();
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(wave_left - 6.0, y),
+                                        egui::pos2(wave_left - 2.0, y),
+                                    ],
+                                    tick_stroke,
+                                );
+                                painter.text(
+                                    egui::pos2(rect.left() + 2.0, y),
+                                    egui::Align2::LEFT_CENTER,
+                                    Self::chroma_label_for_bin(bin),
+                                    fid.clone(),
+                                    tick_col,
+                                );
+                            }
                         }
                     }
+                    ViewMode::Waveform => {}
                 }
             }
 
@@ -1560,7 +1999,7 @@ impl crate::app::WavesPreviewer {
             }
 
             // Handle interactions (seek, zoom, pan, selection)
-            if tab.view_mode == ViewMode::Waveform
+            if view_mode == ViewMode::Waveform
                 && display_samples_len > 0
                 && !ctx.wants_keyboard_input()
             {
@@ -1949,7 +2388,7 @@ impl crate::app::WavesPreviewer {
             waveform_query_ms_total = 0.0;
             waveform_draw_ms_total = 0.0;
 
-            let show_waveform = tab.view_mode == ViewMode::Waveform || tab.show_waveform_overlay;
+            let show_waveform = view_mode == ViewMode::Waveform || tab.show_waveform_overlay;
 
             // Draw per-channel lanes with dB grid and playhead
             waveform_render_started = Some(std::time::Instant::now());
@@ -2092,14 +2531,14 @@ impl crate::app::WavesPreviewer {
                                                 if cf > 0 {
                                                     // Map required pre/post segments into overlay domain using ratio
                                                     let ratio = if base_total > 0 { (overlay_total as f32) / (base_total as f32) } else { 1.0 };
-                                                    let pre0 = a.saturating_sub(cf);
-                                                    let pre1 = (a + cf).min(tab.samples_len);
-                                                    let post0 = b.saturating_sub(cf);
-                                                    let post1 = (b + cf).min(tab.samples_len);
-                                                    let a0 = (((pre0 as f32) * ratio).round() as usize).min(buf.len());
-                                                    let a1 = (((pre1 as f32) * ratio).round() as usize).min(buf.len());
-                                                    let b0 = (((post0 as f32) * ratio).round() as usize).min(buf.len());
-                                                    let b1 = (((post1 as f32) * ratio).round() as usize).min(buf.len());
+                                                    let head0 = a;
+                                                    let head1 = (a + cf).min(b);
+                                                    let tail0 = b.saturating_sub(cf);
+                                                    let tail1 = b;
+                                                    let a0 = (((head0 as f32) * ratio).round() as usize).min(buf.len());
+                                                    let a1 = (((head1 as f32) * ratio).round() as usize).min(buf.len());
+                                                    let b0 = (((tail0 as f32) * ratio).round() as usize).min(buf.len());
+                                                    let b1 = (((tail1 as f32) * ratio).round() as usize).min(buf.len());
                                                     let segs = [(a0, a1), (b0, b1)];
                                                     for (s, e) in segs {
                                                         if let Some((p0, p1)) = ov::overlay_px_range_for_segment(startb, over_vis, bins, s, e) {
@@ -2223,14 +2662,14 @@ impl crate::app::WavesPreviewer {
                                             tab.loop_xfade_samples,
                                         );
                                         if cf > 0 {
-                                            let pre0 = a.saturating_sub(cf);
-                                            let pre1 = (a + cf).min(tab.samples_len);
-                                            let post0 = b.saturating_sub(cf);
-                                            let post1 = (b + cf).min(tab.samples_len);
-                                            let a0 = (((pre0 as f32) * ratio).round() as usize).min(lenb);
-                                            let a1 = (((pre1 as f32) * ratio).round() as usize).min(lenb);
-                                            let b0 = (((post0 as f32) * ratio).round() as usize).min(lenb);
-                                            let b1 = (((post1 as f32) * ratio).round() as usize).min(lenb);
+                                            let head0 = a;
+                                            let head1 = (a + cf).min(b);
+                                            let tail0 = b.saturating_sub(cf);
+                                            let tail1 = b;
+                                            let a0 = (((head0 as f32) * ratio).round() as usize).min(lenb);
+                                            let a1 = (((head1 as f32) * ratio).round() as usize).min(lenb);
+                                            let b0 = (((tail0 as f32) * ratio).round() as usize).min(lenb);
+                                            let b1 = (((tail1 as f32) * ratio).round() as usize).min(lenb);
                                             let s1 = a0.max(startb); let e1 = a1.min(endb);
                                             let s2 = b0.max(startb); let e2 = b1.min(endb);
                                             (if s1 < e1 { Some((s1,e1)) } else { None }, if s2 < e2 { Some((s2,e2)) } else { None })
@@ -2612,14 +3051,14 @@ impl crate::app::WavesPreviewer {
                             tab.loop_xfade_samples,
                         );
                         if cf > 0 {
-                            let pre0 = a.saturating_sub(cf);
-                            let pre1 = (a + cf).min(tab.samples_len);
-                            let post0 = b.saturating_sub(cf);
-                            let post1 = (b + cf).min(tab.samples_len);
-                            let xs0 = to_x(pre0);
-                            let xs1 = to_x(pre1);
-                            let xe0 = to_x(post0);
-                            let xe1 = to_x(post1);
+                            let head0 = a;
+                            let head1 = (a + cf).min(b);
+                            let tail0 = b.saturating_sub(cf);
+                            let tail1 = b;
+                            let xs0 = to_x(head0);
+                            let xs1 = to_x(head1);
+                            let xe0 = to_x(tail0);
+                            let xe1 = to_x(tail1);
                             let band_alpha = if active { 50 } else { 28 };
                             let col_in = Color32::from_rgba_unmultiplied(255, 180, 60, band_alpha);
                             let col_out = Color32::from_rgba_unmultiplied(60, 180, 255, band_alpha);
@@ -2637,6 +3076,7 @@ impl crate::app::WavesPreviewer {
                             let curve_alpha = if active { 220 } else { 140 };
                             let curve_col = Color32::from_rgba_unmultiplied(255, 170, 60, curve_alpha);
                             let steps = 36;
+                            let uses_dip = Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
                             let mut last_in_up: Option<egui::Pos2> = None;
                             let mut last_in_down: Option<egui::Pos2> = None;
                             let mut last_out_up: Option<egui::Pos2> = None;
@@ -2645,13 +3085,7 @@ impl crate::app::WavesPreviewer {
                             let y_of = |w: f32| rect.bottom() - w * h;
                             for i in 0..=steps {
                                 let t = (i as f32) / (steps as f32);
-                                let (w_out, w_in) = match tab.loop_xfade_shape {
-                                    crate::app::types::LoopXfadeShape::EqualPower => {
-                                        let a = core::f32::consts::FRAC_PI_2 * t;
-                                        (a.cos(), a.sin())
-                                    }
-                                    crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
-                                };
+                                let (w_out, w_in) = Self::loop_xfade_weights(tab.loop_xfade_shape, t);
                                 let x_in = egui::lerp(xs0..=xs1, t);
                                 let p_in_up = egui::pos2(x_in, y_of(w_in));
                                 let p_in_down = egui::pos2(x_in, y_of(w_out));
@@ -2661,31 +3095,35 @@ impl crate::app::WavesPreviewer {
                                         egui::Stroke::new(2.0, curve_col),
                                     );
                                 }
-                                if let Some(lp) = last_in_down {
-                                    painter.line_segment(
-                                        [lp, p_in_down],
-                                        egui::Stroke::new(2.0, curve_col),
-                                    );
+                                if !uses_dip {
+                                    if let Some(lp) = last_in_down {
+                                        painter.line_segment(
+                                            [lp, p_in_down],
+                                            egui::Stroke::new(2.0, curve_col),
+                                        );
+                                    }
                                 }
                                 last_in_up = Some(p_in_up);
-                                last_in_down = Some(p_in_down);
+                                last_in_down = if uses_dip { None } else { Some(p_in_down) };
 
                                 let x_out = egui::lerp(xe0..=xe1, t);
                                 let p_out_up = egui::pos2(x_out, y_of(w_in));
                                 let p_out_down = egui::pos2(x_out, y_of(w_out));
-                                if let Some(lp) = last_out_up {
-                                    painter.line_segment(
-                                        [lp, p_out_up],
-                                        egui::Stroke::new(2.0, curve_col),
-                                    );
-                                }
                                 if let Some(lp) = last_out_down {
                                     painter.line_segment(
                                         [lp, p_out_down],
                                         egui::Stroke::new(2.0, curve_col),
                                     );
                                 }
-                                last_out_up = Some(p_out_up);
+                                if !uses_dip {
+                                    if let Some(lp) = last_out_up {
+                                        painter.line_segment(
+                                            [lp, p_out_up],
+                                            egui::Stroke::new(2.0, curve_col),
+                                        );
+                                    }
+                                }
+                                last_out_up = if uses_dip { None } else { Some(p_out_up) };
                                 last_out_down = Some(p_out_down);
                             }
                         }
@@ -2862,7 +3300,6 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
-            // Horizontal scrollbar when zoomed in
             if tab_samples_len > 0 {
                 let spp = tab.samples_per_px.max(0.0001);
                 let vis = (wave_w * spp).ceil() as usize;
@@ -2870,16 +3307,22 @@ impl crate::app::WavesPreviewer {
                 if tab.view_offset > max_left {
                     tab.view_offset = max_left;
                 }
-                if max_left > 0 {
-                    let mut off = tab.view_offset as f32;
-                    let resp = ui.add(
-                        egui::Slider::new(&mut off, 0.0..=max_left as f32)
-                            .show_value(false)
-                            .clamping(egui::SliderClamping::Always),
-                    );
-                    if resp.changed() {
-                        tab.view_offset = off.round().clamp(0.0, max_left as f32) as usize;
-                    }
+                let overview = if tab.loading && !tab.loading_waveform_minmax.is_empty() {
+                    tab.loading_waveform_minmax.as_slice()
+                } else {
+                    tab.waveform_minmax.as_slice()
+                };
+                if let Some(next_view) = Self::draw_editor_overview_navigator(
+                    ui,
+                    overview,
+                    tab_samples_len,
+                    sr_ctx.max(1.0) as u32,
+                    tab.view_offset,
+                    vis,
+                    gutter_w,
+                    wave_w,
+                ) {
+                    tab.view_offset = next_view;
                 }
             }
 
@@ -2927,10 +3370,14 @@ impl crate::app::WavesPreviewer {
                 );
                 painter.rect_filled(fill_rect, 3.0, Color32::from_rgb(90, 160, 240));
             }
-                }); // end canvas UI
+                },
+                ); // end canvas UI
 
                 // Inspector area (right)
-                ui.vertical(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(inspector_w, avail.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
                     ui.set_width(inspector_w);
                     ui.heading("Inspector");
                     ui.separator();
@@ -2989,8 +3436,9 @@ impl crate::app::WavesPreviewer {
                         });
                         ui.separator();
                     }
-                    if spectro_loading {
-                        let (done, total, started_at) = spectro_progress.unwrap_or((0, 0, std::time::Instant::now()));
+                    if analysis_loading {
+                        let (done, total, started_at) =
+                            analysis_progress.unwrap_or((0, 0, std::time::Instant::now()));
                         let pct = if total > 0 {
                             (done as f32 / total as f32).clamp(0.0, 1.0)
                         } else {
@@ -3000,7 +3448,8 @@ impl crate::app::WavesPreviewer {
                         ui.horizontal_wrapped(|ui| {
                             ui.add(egui::Spinner::new());
                             ui.label(RichText::new(format!(
-                                "Spectrogram... ({:.1}s)",
+                                "{}... ({:.1}s)",
+                                analysis_label,
                                 elapsed
                             )).weak());
                             if total > 0 {
@@ -3011,7 +3460,15 @@ impl crate::app::WavesPreviewer {
                                 );
                             }
                             if ui.button("Cancel").clicked() {
-                                cancel_spectro = true;
+                                match current_view {
+                                    ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
+                                        cancel_spectro = true;
+                                    }
+                                    ViewMode::Tempogram | ViewMode::Chromagram => {
+                                        cancel_feature_analysis = true;
+                                    }
+                                    ViewMode::Waveform => {}
+                                }
                             }
                         });
                         ui.separator();
@@ -3057,7 +3514,8 @@ impl crate::app::WavesPreviewer {
                         ui.label(RichText::new("Range: -").monospace().weak());
                     }
                     ui.separator();
-                    match tab.view_mode {
+                    let leaf_view = tab.leaf_view_mode();
+                    match leaf_view {
                         ViewMode::Waveform => {
                             // Tool selector
                             let mut tool = tab.active_tool;
@@ -3087,7 +3545,7 @@ impl crate::app::WavesPreviewer {
                                 if matches!(tab.active_tool, ToolKind::Markers) {
                                     if tab.markers != tab.markers_committed {
                                         tab.markers = tab.markers_committed.clone();
-                                        tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                                        Self::update_markers_dirty(tab);
                                     }
                                 }
                                 if matches!(tab.active_tool, ToolKind::LoopEdit) {
@@ -3097,7 +3555,7 @@ impl crate::app::WavesPreviewer {
                                     tab.pending_loop_unwrap = None;
                                     if tab.markers != tab.markers_committed {
                                         tab.markers = tab.markers_committed.clone();
-                                        tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                                        Self::update_markers_dirty(tab);
                                     }
                                     Self::update_loop_markers_dirty(tab);
                                 }
@@ -3108,7 +3566,7 @@ impl crate::app::WavesPreviewer {
                                 if matches!(tab.active_tool, ToolKind::MusicAnalyze) {
                                     tab.music_analysis_draft.provisional_markers.clear();
                                     tab.markers = tab.markers_committed.clone();
-                                    tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                                    Self::update_markers_dirty(tab);
                                     tab.music_analysis_draft.stems_audio = None;
                                     tab.music_analysis_draft.preview_inflight = false;
                                     tab.music_analysis_draft.preview_active = false;
@@ -3153,6 +3611,50 @@ impl crate::app::WavesPreviewer {
                                         } else {
                                             ui.label(RichText::new("Range: -").monospace().weak());
                                         }
+                                        let effective_cf = tab
+                                            .loop_region
+                                            .map(|(a, b)| {
+                                                Self::effective_loop_xfade_samples(
+                                                    a,
+                                                    b,
+                                                    tab.samples_len,
+                                                    tab.loop_xfade_samples,
+                                                )
+                                            })
+                                            .unwrap_or(0);
+                                        let loop_preview_pending = tab.loop_region != tab.loop_region_committed
+                                            || tab.pending_loop_unwrap.is_some()
+                                            || effective_cf > 0;
+                                        let loop_saved_pending = tab.loop_region != tab.loop_markers_saved;
+                                        let (loop_status_color, loop_status_text, loop_status_hint) =
+                                            if !loop_preview_pending && !loop_saved_pending {
+                                                (
+                                                    Color32::from_rgb(160, 200, 160),
+                                                    "Saved",
+                                                    "Loop markers match the file/session baseline",
+                                                )
+                                            } else if !loop_preview_pending {
+                                                (
+                                                    Color32::from_rgb(255, 180, 60),
+                                                    "Applied (pending save)",
+                                                    "Loop markers are applied in the editor but not saved yet",
+                                                )
+                                            } else {
+                                                (
+                                                    Color32::from_rgb(120, 220, 120),
+                                                    "Preview (not applied)",
+                                                    "Loop markers or seam fade are staged but not applied yet",
+                                                )
+                                            };
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new("\u{25CF}")
+                                                    .color(loop_status_color)
+                                                    .strong(),
+                                            )
+                                            .on_hover_text(loop_status_hint);
+                                            ui.label(loop_status_text);
+                                        });
                                         // Crossfade controls (duration in ms + shape)
                                         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                         let mut x_ms = (tab.loop_xfade_samples as f32 / sr) * 1000.0;
@@ -3167,12 +3669,33 @@ impl crate::app::WavesPreviewer {
                                                 tab.loop_xfade_samples = samp;
                                                 apply_pending_loop = true;
                                             }
+                                            let mut use_dip = Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
+                                            ui.label("Mode:");
+                                            egui::ComboBox::from_id_salt("xfade_mode")
+                                                .selected_text(if use_dip { "Fade to 0" } else { "Crossfade" })
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut use_dip, false, "Crossfade");
+                                                    ui.selectable_value(&mut use_dip, true, "Fade to 0");
+                                                });
                                             ui.label("Shape:");
                                             let mut shp = tab.loop_xfade_shape;
-                                            egui::ComboBox::from_id_salt("xfade_shape").selected_text(match shp { crate::app::types::LoopXfadeShape::Linear => "Linear", crate::app::types::LoopXfadeShape::EqualPower => "Equal" }).show_ui(ui, |ui| {
-                                                ui.selectable_value(&mut shp, crate::app::types::LoopXfadeShape::Linear, "Linear");
-                                                ui.selectable_value(&mut shp, crate::app::types::LoopXfadeShape::EqualPower, "Equal");
-                                            });
+                                            let mut use_equal = matches!(
+                                                shp,
+                                                crate::app::types::LoopXfadeShape::EqualPower
+                                                    | crate::app::types::LoopXfadeShape::EqualPowerDip
+                                            );
+                                            egui::ComboBox::from_id_salt("xfade_shape")
+                                                .selected_text(if use_equal { "Equal" } else { "Linear" })
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(&mut use_equal, false, "Linear");
+                                                    ui.selectable_value(&mut use_equal, true, "Equal");
+                                                });
+                                            shp = match (use_dip, use_equal) {
+                                                (false, false) => crate::app::types::LoopXfadeShape::Linear,
+                                                (false, true) => crate::app::types::LoopXfadeShape::EqualPower,
+                                                (true, false) => crate::app::types::LoopXfadeShape::LinearDip,
+                                                (true, true) => crate::app::types::LoopXfadeShape::EqualPowerDip,
+                                            };
                                             if shp != tab.loop_xfade_shape {
                                                 if pending_edit_undo.is_none() {
                                                     pending_edit_undo = Some(Self::capture_undo_state(tab));
@@ -3326,33 +3849,14 @@ impl crate::app::WavesPreviewer {
                                                 tab.loop_xfade_samples,
                                             );
                                             if cf > 0 {
-                                                // Build per-channel overlay applying crossfade across centered windows
                                                 let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                let win_len = cf.saturating_mul(2);
-                                                let denom = (win_len.saturating_sub(1)).max(1) as f32;
-                                                let s_start = a.saturating_sub(cf);
-                                                let e_start = b.saturating_sub(cf);
-                                                for ch in overlay.iter_mut() {
-                                                    for i in 0..win_len {
-                                                        let s_idx = s_start.saturating_add(i);
-                                                        let e_idx = e_start.saturating_add(i);
-                                                        if s_idx >= ch.len() || e_idx >= ch.len() {
-                                                            break;
-                                                        }
-                                                        let t = (i as f32) / denom;
-                                                        let (w_out, w_in) = match tab.loop_xfade_shape {
-                                                            crate::app::types::LoopXfadeShape::EqualPower => {
-                                                                let ang = core::f32::consts::FRAC_PI_2 * t; (ang.cos(), ang.sin())
-                                                            }
-                                                            crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
-                                                        };
-                                                        let s = ch[s_idx];
-                                                        let e = ch[e_idx];
-                                                        let mixed = e * w_out + s * w_in;
-                                                        ch[s_idx] = mixed;
-                                                        ch[e_idx] = mixed;
-                                                    }
-                                                }
+                                                Self::apply_loop_xfade_to_channels(
+                                                    &mut overlay,
+                                                    a,
+                                                    b,
+                                                    cf,
+                                                    tab.loop_xfade_shape,
+                                                );
                                                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
                                                 tab.preview_overlay = Some(Self::preview_overlay_from_channels(
                                                     overlay,
@@ -3390,6 +3894,7 @@ impl crate::app::WavesPreviewer {
                                                         tab.markers.insert(idx, entry);
                                                     }
                                                 }
+                                                Self::update_markers_dirty(tab);
                                             }
                                             if ui
                                                 .add_enabled(
@@ -3402,6 +3907,7 @@ impl crate::app::WavesPreviewer {
                                                     pending_edit_undo = Some(Self::capture_undo_state(tab));
                                                 }
                                                 tab.markers.clear();
+                                                Self::update_markers_dirty(tab);
                                             }
                                         });
                                         ui.horizontal_wrapped(|ui| {
@@ -3414,24 +3920,39 @@ impl crate::app::WavesPreviewer {
                                                 do_commit_markers = true;
                                             }
                                         });
-                                        ui.label(format!("Count: {}", tab.markers.len()));
-                                        if !tab.markers.is_empty() {
-                                            let (dot_color, dot_hint) = if tab.markers == tab.markers_saved {
+                                        let markers_preview_pending = tab.markers != tab.markers_committed;
+                                        let markers_saved_pending = tab.markers != tab.markers_saved;
+                                        let (dot_color, dot_hint, marker_status) =
+                                            if !markers_preview_pending && !markers_saved_pending {
                                                 (
                                                     Color32::from_rgb(160, 200, 160),
-                                                    "Saved (written to file)",
+                                                    "Markers match the file/session baseline",
+                                                    "Saved",
                                                 )
-                                            } else if tab.markers == tab.markers_committed {
+                                            } else if !markers_preview_pending {
                                                 (
                                                     Color32::from_rgb(255, 180, 60),
+                                                    "Markers are applied in the editor but not saved yet",
                                                     "Applied (pending save)",
                                                 )
                                             } else {
                                                 (
                                                     Color32::from_rgb(120, 220, 120),
+                                                    "Marker edits are staged but not applied yet",
                                                     "Preview (not applied)",
                                                 )
                                             };
+                                        ui.label(format!("Count: {}", tab.markers.len()));
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new("\u{25CF}")
+                                                    .color(dot_color)
+                                                    .strong(),
+                                            )
+                                            .on_hover_text(dot_hint);
+                                            ui.label(marker_status);
+                                        });
+                                        if !tab.markers.is_empty() {
                                             ui.horizontal(|ui| {
                                                 ui.label(
                                                     RichText::new("\u{25CF}")
@@ -3505,6 +4026,7 @@ impl crate::app::WavesPreviewer {
                                                     pending_edit_undo = Some(Self::capture_undo_state(tab));
                                                 }
                                                 tab.markers = markers_local;
+                                                Self::update_markers_dirty(tab);
                                             }
                                         }
                                     });
@@ -4730,13 +5252,85 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                         }
-                        ViewMode::Spectrogram | ViewMode::Mel => {
+                        ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                             ui.label(RichText::new("Display").strong());
+                            ui.label(
+                                RichText::new("Values: dB (log magnitude)").monospace().weak(),
+                            );
                             ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
+                        }
+                        ViewMode::Tempogram => {
+                            ui.label(RichText::new("Tempogram").strong());
+                            ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Analyze BPM").clicked() {
+                                    pending_tempogram_refresh = true;
+                                }
+                                if analysis_loading && ui.button("Cancel").clicked() {
+                                    cancel_feature_analysis = true;
+                                }
+                                if let Some(data) = tempogram_data.as_ref() {
+                                    if let Some(bpm) = data.estimated_bpm {
+                                        if ui.button("Apply BPM").clicked() {
+                                            apply_estimated_bpm = Some(bpm);
+                                        }
+                                    }
+                                }
+                            });
+                            if let Some(data) = tempogram_data.as_ref() {
+                                let bpm_text = data
+                                    .estimated_bpm
+                                    .map(|bpm| format!("{bpm:.2}"))
+                                    .unwrap_or_else(|| "-".to_string());
+                                ui.label(
+                                    RichText::new(format!("Estimated BPM: {bpm_text}")).monospace(),
+                                );
+                                ui.label(
+                                    RichText::new(format!("Confidence: {:.2}", data.confidence))
+                                        .monospace(),
+                                );
+                            } else if analysis_loading {
+                                ui.label(RichText::new("Analyzing mono mixdown...").weak());
+                            } else {
+                                ui.label(RichText::new("Tempogram not ready").weak());
+                            }
+                        }
+                        ViewMode::Chromagram => {
+                            ui.label(RichText::new("Chromagram").strong());
+                            ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Analyze Key").clicked() {
+                                    pending_chromagram_refresh = true;
+                                }
+                                if analysis_loading && ui.button("Cancel").clicked() {
+                                    cancel_feature_analysis = true;
+                                }
+                            });
+                            if let Some(data) = chromagram_data.as_ref() {
+                                let key = data
+                                    .estimated_key
+                                    .clone()
+                                    .unwrap_or_else(|| "-".to_string());
+                                let mode = data
+                                    .estimated_mode
+                                    .clone()
+                                    .unwrap_or_else(|| "-".to_string());
+                                ui.label(RichText::new(format!("Key: {key}")).monospace());
+                                ui.label(RichText::new(format!("Mode: {mode}")).monospace());
+                                ui.label(
+                                    RichText::new(format!("Confidence: {:.2}", data.confidence))
+                                        .monospace(),
+                                );
+                            } else if analysis_loading {
+                                ui.label(RichText::new("Analyzing mono mixdown...").weak());
+                            } else {
+                                ui.label(RichText::new("Chromagram not ready").weak());
+                            }
                         }
                     }
                 });
-                }); // end inspector
+                },
+                ); // end inspector
                 if need_restore_preview {
                     pending_preview = None;
                     pending_heavy_preview = None;
@@ -4908,6 +5502,34 @@ impl crate::app::WavesPreviewer {
         if cancel_spectro {
             self.cancel_spectrogram_for_path(&tab_path);
         }
+        if cancel_feature_analysis {
+            if let Some(kind) = feature_kind {
+                self.cancel_feature_analysis_for_key(&EditorAnalysisKey {
+                    path: tab_path.clone(),
+                    kind,
+                });
+            }
+        }
+        if pending_tempogram_refresh {
+            let key = EditorAnalysisKey {
+                path: tab_path.clone(),
+                kind: EditorAnalysisKind::Tempogram,
+            };
+            self.cancel_feature_analysis_for_key(&key);
+        }
+        if pending_chromagram_refresh {
+            let key = EditorAnalysisKey {
+                path: tab_path.clone(),
+                kind: EditorAnalysisKind::Chromagram,
+            };
+            self.cancel_feature_analysis_for_key(&key);
+        }
+        if let Some(bpm) = apply_estimated_bpm {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.bpm_value = bpm;
+                tab.bpm_user_set = true;
+            }
+        }
 
         // perform pending actions after borrows end
         // Defer starting heavy overlay until after UI to avoid nested &mut self borrow (E0499)
@@ -5051,6 +5673,7 @@ impl crate::app::WavesPreviewer {
                         );
                         if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
                             tab_mut.markers = markers;
+                            Self::update_markers_dirty(tab_mut);
                             tab_mut.preview_overlay = Some(Self::preview_overlay_from_channels(
                                 chans,
                                 ToolKind::LoopEdit,
@@ -5072,7 +5695,7 @@ impl crate::app::WavesPreviewer {
                 }
                 tab.markers_committed = tab.markers.clone();
                 tab.markers_applied = tab.markers_committed.clone();
-                tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+                Self::update_markers_dirty(tab);
             }
             if let Some(state) = undo_state {
                 self.push_editor_undo_state(tab_idx, state, true);

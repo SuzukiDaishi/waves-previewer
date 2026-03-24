@@ -198,6 +198,7 @@ impl WavesPreviewer {
         self.spectro_inflight.clear();
         self.spectro_progress.clear();
         self.spectro_cancel.clear();
+        self.reset_all_feature_analysis_state();
     }
 
     pub(super) fn load_prefs(&mut self) {

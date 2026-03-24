@@ -221,15 +221,52 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             for ch in tab.ch_samples.iter_mut() {
-                let mut seg = ch[s..e].to_vec();
-                std::mem::swap(ch, &mut seg);
-                ch.truncate(e - s);
+                *ch = ch[s..e].to_vec();
             }
             tab.samples_len = e - s;
+            tab.samples_len_visual = tab.samples_len;
+            tab.loading = false;
+            tab.loading_waveform_minmax.clear();
+            let (waveform_minmax, waveform_pyramid) =
+                Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
+            tab.waveform_minmax = waveform_minmax;
+            tab.waveform_pyramid = waveform_pyramid;
+            let remap_trim_markers = |markers: &[crate::markers::MarkerEntry]| {
+                let mut out: Vec<crate::markers::MarkerEntry> = markers
+                    .iter()
+                    .filter_map(|marker| {
+                        if marker.sample < s || marker.sample >= e {
+                            return None;
+                        }
+                        Some(crate::markers::MarkerEntry {
+                            sample: marker.sample.saturating_sub(s),
+                            label: marker.label.clone(),
+                        })
+                    })
+                    .collect();
+                out.sort_by_key(|marker| marker.sample);
+                out.dedup_by(|a, b| a.sample == b.sample && a.label == b.label);
+                out
+            };
+            tab.markers = remap_trim_markers(&tab.markers);
+            tab.markers_committed = remap_trim_markers(&tab.markers_committed);
+            tab.markers_applied = remap_trim_markers(&tab.markers_applied);
             tab.view_offset = 0;
             tab.selection = None;
+            tab.ab_loop = None;
             tab.loop_region = None;
+            tab.loop_region_committed = None;
+            tab.loop_region_applied = None;
+            tab.trim_range = None;
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+            tab.preview_offset_samples = None;
+            tab.drag_select_anchor = None;
+            tab.right_drag_anchor = None;
+            tab.right_drag_mode = None;
             tab.dirty = true;
+            Self::update_markers_dirty(tab);
+            Self::update_loop_markers_dirty(tab);
             Self::editor_clamp_ranges(tab);
             (tab.ch_samples.clone(), undo_state)
         };
@@ -552,6 +589,41 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    pub(super) fn apply_loop_xfade_to_channels(
+        channels: &mut [Vec<f32>],
+        loop_start: usize,
+        loop_end: usize,
+        xfade: usize,
+        shape: crate::app::types::LoopXfadeShape,
+    ) {
+        if loop_end <= loop_start || xfade == 0 {
+            return;
+        }
+        let uses_dip = Self::loop_xfade_uses_through_zero(shape);
+        let denom = (xfade.saturating_sub(1)).max(1) as f32;
+        for ch in channels.iter_mut() {
+            for i in 0..xfade {
+                let head_idx = loop_start.saturating_add(i);
+                let tail_idx = loop_end.saturating_sub(xfade).saturating_add(i);
+                if head_idx >= ch.len() || tail_idx >= ch.len() {
+                    break;
+                }
+                let t = (i as f32) / denom;
+                let (w_out, w_in) = Self::loop_xfade_weights(shape, t);
+                let head = ch[head_idx];
+                let tail = ch[tail_idx];
+                if uses_dip {
+                    ch[tail_idx] = tail * w_out;
+                    ch[head_idx] = head * w_in;
+                } else {
+                    let mixed = tail * w_out + head * w_in;
+                    ch[tail_idx] = mixed;
+                    ch[head_idx] = mixed;
+                }
+            }
+        }
+    }
+
     pub(super) fn editor_apply_loop_xfade(&mut self, tab_idx: usize) {
         let (channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
@@ -569,32 +641,13 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state(tab);
-            let win_len = half.saturating_mul(2);
-            let denom = (win_len.saturating_sub(1)).max(1) as f32;
-            let s_start = s.saturating_sub(half);
-            let e_start = e.saturating_sub(half);
-            for ch in tab.ch_samples.iter_mut() {
-                for i in 0..win_len {
-                    let t = (i as f32) / denom;
-                    let (w_out, w_in) = match tab.loop_xfade_shape {
-                        crate::app::types::LoopXfadeShape::EqualPower => {
-                            let a = core::f32::consts::FRAC_PI_2 * t;
-                            (a.cos(), a.sin())
-                        }
-                        crate::app::types::LoopXfadeShape::Linear => (1.0 - t, t),
-                    };
-                    let s_idx = s_start + i;
-                    let e_idx = e_start + i;
-                    if s_idx >= ch.len() || e_idx >= ch.len() {
-                        break;
-                    }
-                    let s = ch[s_idx];
-                    let e = ch[e_idx];
-                    let mixed = e * w_out + s * w_in;
-                    ch[s_idx] = mixed;
-                    ch[e_idx] = mixed;
-                }
-            }
+            Self::apply_loop_xfade_to_channels(
+                &mut tab.ch_samples,
+                s,
+                e,
+                half,
+                tab.loop_xfade_shape,
+            );
             tab.loop_xfade_samples = 0;
             tab.dirty = true;
             (tab.ch_samples.clone(), undo_state)
@@ -722,7 +775,7 @@ impl crate::app::WavesPreviewer {
             tab.markers = markers.clone();
             tab.markers_committed = markers.clone();
             tab.markers_applied = markers;
-            tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+            Self::update_markers_dirty(tab);
             tab.samples_len = tab.samples_len.saturating_add(shift);
             if tab.view_offset >= e {
                 tab.view_offset = tab.view_offset.saturating_add(shift);
@@ -761,6 +814,7 @@ impl crate::app::WavesPreviewer {
             tab.preview_overlay = None;
             tab.pending_loop_unwrap = None;
             tab.dirty = true;
+            Self::update_loop_markers_dirty(tab);
             Self::editor_clamp_ranges(tab);
             (tab.ch_samples.clone(), undo_state)
         };
@@ -973,6 +1027,7 @@ impl crate::app::WavesPreviewer {
             }
             if let Some(path) = spectro_reset_path {
                 self.cancel_spectrogram_for_path(&path);
+                self.cancel_feature_analysis_for_path(&path);
             }
             self.editor_apply_state = None;
             ctx.request_repaint();

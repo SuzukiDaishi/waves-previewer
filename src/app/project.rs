@@ -5,8 +5,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ChannelView, ChannelViewMode, FadeShape, FileMeta, LoopMode, LoopXfadeShape, PluginFxDraft,
-    PluginParamUiState, SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, ViewMode,
+    ChannelView, ChannelViewMode, EditorOtherSubView, EditorPrimaryView, EditorSpecSubView,
+    FadeShape, FileMeta, LoopMode, LoopXfadeShape, PluginFxDraft, PluginParamUiState,
+    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, ViewMode,
 };
 use crate::markers::MarkerEntry;
 
@@ -242,6 +243,10 @@ pub struct ProjectExternalSource {
 pub struct ProjectListColumns {
     #[serde(default)]
     pub edited: bool,
+    #[serde(default)]
+    pub cover_art: bool,
+    #[serde(default)]
+    pub type_badge: bool,
     pub file: bool,
     pub folder: bool,
     pub transcript: bool,
@@ -284,6 +289,12 @@ pub struct ProjectSpectrogram {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectTab {
     pub path: String,
+    #[serde(default)]
+    pub primary_view: Option<String>,
+    #[serde(default)]
+    pub spec_sub_view: Option<String>,
+    #[serde(default)]
+    pub other_sub_view: Option<String>,
     pub view_mode: String,
     pub show_waveform_overlay: bool,
     pub channel_view: ProjectChannelView,
@@ -654,7 +665,10 @@ pub fn project_tab_from_tab(
 ) -> ProjectTab {
     ProjectTab {
         path: rel_path(&tab.path, base),
-        view_mode: format!("{:?}", tab.view_mode),
+        primary_view: Some(project_primary_view_string(tab.primary_view)),
+        spec_sub_view: Some(project_spec_sub_view_string(tab.spec_sub_view)),
+        other_sub_view: Some(project_other_sub_view_string(tab.other_sub_view)),
+        view_mode: format!("{:?}", tab.leaf_view_mode()),
         show_waveform_overlay: tab.show_waveform_overlay,
         channel_view: ProjectChannelView {
             mode: match tab.channel_view.mode {
@@ -688,6 +702,8 @@ pub fn project_tab_from_tab(
         loop_xfade_shape: match tab.loop_xfade_shape {
             LoopXfadeShape::Linear => "linear",
             LoopXfadeShape::EqualPower => "equal",
+            LoopXfadeShape::LinearDip => "linear_dip",
+            LoopXfadeShape::EqualPowerDip => "equal_dip",
         }
         .to_string(),
         trim_range: tab.trim_range.map(|(a, b)| [a, b]),
@@ -847,10 +863,68 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
 
 pub fn view_mode_from_str(s: &str) -> ViewMode {
     match s {
+        "Log" => ViewMode::Log,
         "Spectrogram" => ViewMode::Spectrogram,
         "Mel" => ViewMode::Mel,
+        "Tempogram" => ViewMode::Tempogram,
+        "Chromagram" => ViewMode::Chromagram,
         _ => ViewMode::Waveform,
     }
+}
+
+pub fn project_primary_view_string(view: EditorPrimaryView) -> String {
+    match view {
+        EditorPrimaryView::Wave => "wave",
+        EditorPrimaryView::Spec => "spec",
+        EditorPrimaryView::Other => "other",
+    }
+    .to_string()
+}
+
+pub fn project_spec_sub_view_string(view: EditorSpecSubView) -> String {
+    match view {
+        EditorSpecSubView::Spec => "spec",
+        EditorSpecSubView::Log => "log",
+        EditorSpecSubView::Mel => "mel",
+    }
+    .to_string()
+}
+
+pub fn project_other_sub_view_string(view: EditorOtherSubView) -> String {
+    match view {
+        EditorOtherSubView::F0 => "f0",
+        EditorOtherSubView::Tempogram => "tempogram",
+        EditorOtherSubView::Chromagram => "chromagram",
+    }
+    .to_string()
+}
+
+pub fn primary_view_from_project(
+    primary: Option<&str>,
+    spec_sub_view: Option<&str>,
+    other_sub_view: Option<&str>,
+    legacy_view_mode: &str,
+) -> (EditorPrimaryView, EditorSpecSubView, EditorOtherSubView) {
+    let legacy_mode = view_mode_from_str(legacy_view_mode);
+    let primary_view = match primary.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if v == "spec" => EditorPrimaryView::Spec,
+        Some(v) if v == "other" => EditorPrimaryView::Other,
+        Some(v) if v == "wave" => EditorPrimaryView::Wave,
+        _ => EditorPrimaryView::from_mode(legacy_mode),
+    };
+    let spec_view = match spec_sub_view.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if v == "log" => EditorSpecSubView::Log,
+        Some(v) if v == "mel" => EditorSpecSubView::Mel,
+        Some(v) if v == "spec" => EditorSpecSubView::Spec,
+        _ => EditorSpecSubView::from_mode(legacy_mode),
+    };
+    let other_view = match other_sub_view.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if v == "chromagram" => EditorOtherSubView::Chromagram,
+        Some(v) if v == "f0" => EditorOtherSubView::F0,
+        Some(v) if v == "tempogram" => EditorOtherSubView::Tempogram,
+        _ => EditorOtherSubView::from_mode(legacy_mode),
+    };
+    (primary_view, spec_view, other_view)
 }
 
 pub fn loop_mode_from_str(s: &str) -> LoopMode {
@@ -863,6 +937,8 @@ pub fn loop_mode_from_str(s: &str) -> LoopMode {
 
 pub fn loop_shape_from_str(s: &str) -> LoopXfadeShape {
     match s {
+        "linear_dip" => LoopXfadeShape::LinearDip,
+        "equal_dip" => LoopXfadeShape::EqualPowerDip,
         "equal" => LoopXfadeShape::EqualPower,
         _ => LoopXfadeShape::Linear,
     }
@@ -894,6 +970,7 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         bpm: None,
         created_at: None,
         modified_at: None,
+        cover_art: None,
         thumb: Vec::new(),
         decode_error: Some(format!("Missing: {}", path.display())),
     }
@@ -1007,6 +1084,7 @@ impl super::WavesPreviewer {
         self.spectro_cache_order.clear();
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
+        self.reset_all_feature_analysis_state();
         self.scan_rx = None;
         self.scan_in_progress = false;
         for raw in raw_paths {
@@ -1139,6 +1217,28 @@ files = []
     }
 
     #[test]
+    fn project_list_columns_optional_flags_default_false_when_missing() {
+        let raw = r#"
+edited = true
+file = true
+folder = true
+transcript = false
+external = true
+length = true
+ch = true
+sr = true
+bits = true
+peak = true
+lufs = true
+gain = true
+wave = true
+"#;
+        let cols: ProjectListColumns = toml::from_str(raw).expect("deserialize ProjectListColumns");
+        assert!(!cols.cover_art);
+        assert!(!cols.type_badge);
+    }
+
+    #[test]
     fn plugin_fx_draft_roundtrip() {
         let src = PluginFxDraft {
             plugin_key: Some("C:\\Plugins\\Demo.vst3".to_string()),
@@ -1235,5 +1335,47 @@ files = []
         let cfg_modern = spectro_config_from_project(&modern);
         assert_eq!(cfg_modern.hop_size, 128);
         assert!((cfg_modern.overlap - 0.9375).abs() < 1e-4);
+    }
+
+    #[test]
+    fn primary_view_from_project_migrates_legacy_leaf_modes() {
+        assert_eq!(
+            primary_view_from_project(None, None, None, "Waveform"),
+            (
+                EditorPrimaryView::Wave,
+                EditorSpecSubView::Spec,
+                EditorOtherSubView::Tempogram,
+            )
+        );
+        assert_eq!(
+            primary_view_from_project(None, None, None, "Log"),
+            (
+                EditorPrimaryView::Spec,
+                EditorSpecSubView::Log,
+                EditorOtherSubView::Tempogram,
+            )
+        );
+        assert_eq!(
+            primary_view_from_project(None, None, None, "Chromagram"),
+            (
+                EditorPrimaryView::Other,
+                EditorSpecSubView::Spec,
+                EditorOtherSubView::Chromagram,
+            )
+        );
+    }
+
+    #[test]
+    fn primary_view_from_project_prefers_new_fields() {
+        let restored =
+            primary_view_from_project(Some("other"), Some("mel"), Some("chromagram"), "Waveform");
+        assert_eq!(
+            restored,
+            (
+                EditorPrimaryView::Other,
+                EditorSpecSubView::Mel,
+                EditorOtherSubView::Chromagram,
+            )
+        );
     }
 }

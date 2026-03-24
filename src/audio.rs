@@ -64,7 +64,7 @@ pub struct SharedAudio {
     pub loop_start: std::sync::atomic::AtomicUsize,
     pub loop_end: std::sync::atomic::AtomicUsize,
     pub loop_xfade_samples: std::sync::atomic::AtomicUsize,
-    pub loop_xfade_shape: std::sync::atomic::AtomicU8, // 0=Linear,1=EqualPower
+    pub loop_xfade_shape: std::sync::atomic::AtomicU8, // 0=Linear,1=EqualPower,2=LinearDip,3=EqualPowerDip
     pub rate: AtomicF32,                               // playback rate (0.25..4.0)
     pub ramp_gain: AtomicF32,                          // short de-click output ramp 0.0..1.0
     pub ramp_target: AtomicF32,
@@ -270,6 +270,78 @@ fn read_mapped_wav_header(file: &mut File, path: &Path) -> Result<Option<MappedW
 impl AudioEngine {
     #[allow(dead_code)]
     const SWAP_XFADE_FRAMES: usize = 96;
+
+    fn loop_xfade_uses_through_zero(style: u8) -> bool {
+        style >= 2
+    }
+
+    fn loop_xfade_weights(style: u8, t: f32) -> (f32, f32) {
+        let x = t.clamp(0.0, 1.0);
+        match style {
+            1 | 3 => {
+                let ang = core::f32::consts::FRAC_PI_2 * x;
+                (ang.cos(), ang.sin())
+            }
+            _ => (1.0 - x, x),
+        }
+    }
+
+    fn wrap_loop_position(mut pos_f: f64, loop_start: usize, loop_end: usize) -> f64 {
+        let start = loop_start as f64;
+        let end = loop_end as f64;
+        let loop_len = (end - start).max(1.0);
+        while pos_f >= end {
+            pos_f = start + (pos_f - end);
+        }
+        while pos_f < start {
+            pos_f += loop_len;
+        }
+        pos_f
+    }
+
+    fn sample_loop_with_xfade<F>(
+        pos_f: f64,
+        loop_start: usize,
+        loop_end: usize,
+        xfade: usize,
+        style: u8,
+        sample_at: F,
+    ) -> f32
+    where
+        F: Fn(f64) -> f32,
+    {
+        if xfade == 0 || loop_end <= loop_start {
+            return sample_at(pos_f);
+        }
+        let start = loop_start as f64;
+        let end = loop_end as f64;
+        let xfade_f = xfade as f64;
+        let denom = (xfade.saturating_sub(1)).max(1) as f64;
+        let uses_dip = Self::loop_xfade_uses_through_zero(style);
+        if pos_f >= end - xfade_f && pos_f < end {
+            let rel = (pos_f - (end - xfade_f)).clamp(0.0, xfade_f);
+            let t = (rel / denom).clamp(0.0, 1.0) as f32;
+            let (w_out, w_in) = Self::loop_xfade_weights(style, t);
+            let tail = sample_at(pos_f);
+            if uses_dip {
+                return tail * w_out;
+            }
+            let head = sample_at(start + rel);
+            return tail * w_out + head * w_in;
+        }
+        if pos_f >= start && pos_f < start + xfade_f {
+            let rel = (pos_f - start).clamp(0.0, xfade_f);
+            let t = (rel / denom).clamp(0.0, 1.0) as f32;
+            let (w_out, w_in) = Self::loop_xfade_weights(style, t);
+            let head = sample_at(pos_f);
+            if uses_dip {
+                return head * w_in;
+            }
+            let tail = sample_at(end - xfade_f + rel);
+            return tail * w_out + head * w_in;
+        }
+        sample_at(pos_f)
+    }
 
     fn device_display_name(device: &cpal::Device) -> Option<String> {
         let description = device.description().ok()?;
@@ -477,6 +549,12 @@ impl AudioEngine {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let loop_start = shared.loop_start.load(std::sync::atomic::Ordering::Relaxed);
                 let loop_end = shared.loop_end.load(std::sync::atomic::Ordering::Relaxed);
+                let loop_xfade_samples = shared
+                    .loop_xfade_samples
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let loop_xfade_shape = shared
+                    .loop_xfade_shape
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let mut pos_f = shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
                 if !pos_f.is_finite() || pos_f < 0.0 {
                     pos_f = 0.0;
@@ -501,11 +579,16 @@ impl AudioEngine {
                     }
                     let src_channels = samples.channel_count();
                     let valid_loop = looping && loop_end > loop_start && loop_end <= len;
+                    let xfade = if valid_loop {
+                        loop_xfade_samples.min((loop_end - loop_start) / 2)
+                    } else {
+                        0
+                    };
                     let mut pos = pos_f.floor() as usize;
                     for frame in data.chunks_mut(channels) {
                         if pos >= len {
                             if valid_loop {
-                                pos_f = loop_start as f64;
+                                pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
                                 pos = loop_start;
                             } else {
                                 shared
@@ -518,7 +601,7 @@ impl AudioEngine {
                             }
                         }
                         if valid_loop && pos >= loop_end {
-                            pos_f = loop_start as f64;
+                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
                         }
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
                             let src_ch = if src_channels == 1 {
@@ -528,10 +611,26 @@ impl AudioEngine {
                             } else {
                                 src_channels - 1
                             };
-                            let sample = Self::sample_at_interp(samples, src_ch, pos_f);
+                            let sample = if valid_loop && xfade > 0 {
+                                Self::sample_loop_with_xfade(
+                                    pos_f,
+                                    loop_start,
+                                    loop_end,
+                                    xfade,
+                                    loop_xfade_shape,
+                                    |sample_pos| {
+                                        Self::sample_at_interp(samples, src_ch, sample_pos)
+                                    },
+                                )
+                            } else {
+                                Self::sample_at_interp(samples, src_ch, pos_f)
+                            };
                             *out_sample = T::from_sample((sample * vol).clamp(-1.0, 1.0));
                         }
                         pos_f += rate;
+                        if valid_loop && pos_f >= loop_end as f64 {
+                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
+                        }
                         pos = pos_f.floor() as usize;
                     }
                     shared
@@ -564,11 +663,16 @@ impl AudioEngine {
                     }
                     let src_channels = stream.channel_count();
                     let valid_loop = looping && loop_end > loop_start && loop_end <= len;
+                    let xfade = if valid_loop {
+                        loop_xfade_samples.min((loop_end - loop_start) / 2)
+                    } else {
+                        0
+                    };
                     let mut pos = pos_f.floor() as usize;
                     for frame in data.chunks_mut(channels) {
                         if pos >= len {
                             if valid_loop {
-                                pos_f = loop_start as f64;
+                                pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
                                 pos = loop_start;
                             } else {
                                 shared
@@ -581,7 +685,7 @@ impl AudioEngine {
                             }
                         }
                         if valid_loop && pos >= loop_end {
-                            pos_f = loop_start as f64;
+                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
                         }
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
                             let src_ch = if src_channels == 1 {
@@ -591,10 +695,24 @@ impl AudioEngine {
                             } else {
                                 src_channels - 1
                             };
-                            let sample = stream.sample_at_interp(src_ch, pos_f);
+                            let sample = if valid_loop && xfade > 0 {
+                                Self::sample_loop_with_xfade(
+                                    pos_f,
+                                    loop_start,
+                                    loop_end,
+                                    xfade,
+                                    loop_xfade_shape,
+                                    |sample_pos| stream.sample_at_interp(src_ch, sample_pos),
+                                )
+                            } else {
+                                stream.sample_at_interp(src_ch, pos_f)
+                            };
                             *out_sample = T::from_sample((sample * vol).clamp(-1.0, 1.0));
                         }
                         pos_f += rate;
+                        if valid_loop && pos_f >= loop_end as f64 {
+                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
+                        }
                         pos = pos_f.floor() as usize;
                     }
                     shared
@@ -940,18 +1058,13 @@ impl AudioEngine {
             .store(end, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub fn set_loop_crossfade(&self, samples: usize, shape_linear_or_equal_power: u8) {
+    pub fn set_loop_crossfade(&self, samples: usize, style: u8) {
         self.shared
             .loop_xfade_samples
             .store(samples, std::sync::atomic::Ordering::Relaxed);
-        self.shared.loop_xfade_shape.store(
-            if shape_linear_or_equal_power > 0 {
-                1
-            } else {
-                0
-            },
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.shared
+            .loop_xfade_shape
+            .store(style.min(3), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_rate(&self, rate: f32) {

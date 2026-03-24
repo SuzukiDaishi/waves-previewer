@@ -229,25 +229,23 @@ impl super::WavesPreviewer {
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
-                    let prev = self.tabs[tab_idx].view_mode;
+                    let prev = self.tabs[tab_idx].leaf_view_mode();
                     let next = match prev {
                         ViewMode::Waveform => ViewMode::Spectrogram,
-                        ViewMode::Spectrogram => ViewMode::Mel,
-                        ViewMode::Mel => ViewMode::Waveform,
+                        ViewMode::Spectrogram => ViewMode::Log,
+                        ViewMode::Log => ViewMode::Mel,
+                        ViewMode::Mel => ViewMode::Tempogram,
+                        ViewMode::Tempogram => ViewMode::Chromagram,
+                        ViewMode::Chromagram => ViewMode::Waveform,
                     };
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.view_mode = next;
+                        tab.set_leaf_view_mode(next);
                         if prev == ViewMode::Waveform && next != ViewMode::Waveform {
                             tab.show_waveform_overlay = false;
                         }
                     }
                     if prev == ViewMode::Waveform && next != ViewMode::Waveform {
                         self.clear_preview_if_any(tab_idx);
-                        self.audio.stop();
-                    }
-                    if next != ViewMode::Waveform {
-                        let path = self.tabs[tab_idx].path.clone();
-                        self.cancel_spectrogram_for_path(&path);
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::B)) {
@@ -351,9 +349,7 @@ impl super::WavesPreviewer {
             match tab.markers.binary_search_by_key(&pos, |m| m.sample) {
                 Ok(idx) | Err(idx) => tab.markers.insert(idx, marker),
             }
-            tab.markers_committed = tab.markers.clone();
-            tab.markers_applied = tab.markers_committed.clone();
-            tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+            Self::update_markers_dirty(tab);
         }
         if let Some(state) = undo_state {
             self.push_editor_undo_state(tab_idx, state, true);
@@ -366,14 +362,11 @@ impl super::WavesPreviewer {
         };
         let mut undo_state = None;
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            let will_change = tab.loop_region_committed != Some((s, e))
-                || tab.loop_region_applied != Some((s, e));
+            let will_change = tab.loop_region != Some((s, e)) || tab.loop_mode != LoopMode::Marker;
             if will_change {
                 undo_state = Some(Self::capture_undo_state(tab));
             }
             tab.loop_region = Some((s, e));
-            tab.loop_region_committed = Some((s, e));
-            tab.loop_region_applied = Some((s, e));
             tab.loop_mode = LoopMode::Marker;
             Self::update_loop_markers_dirty(tab);
         }

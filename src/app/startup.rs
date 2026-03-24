@@ -141,7 +141,7 @@ impl WavesPreviewer {
                     if let Some(mode) = self.startup.cfg.open_view_mode {
                         if let Some(idx) = self.active_tab {
                             if let Some(tab) = self.tabs.get_mut(idx) {
-                                tab.view_mode = mode;
+                                tab.set_leaf_view_mode(mode);
                                 if mode != super::types::ViewMode::Waveform {
                                     tab.show_waveform_overlay = false;
                                 }

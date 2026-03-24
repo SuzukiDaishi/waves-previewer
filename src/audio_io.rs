@@ -1451,6 +1451,15 @@ pub fn read_audio_bpm(path: &Path) -> Option<f32> {
     }
 }
 
+pub fn read_embedded_artwork(path: &Path) -> Option<Vec<u8>> {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    match ext.to_ascii_lowercase().as_str() {
+        "m4a" => read_artwork_m4a(path),
+        "mp3" | "wav" => read_artwork_id3(path),
+        _ => None,
+    }
+}
+
 fn parse_bpm_text(text: &str) -> Option<f32> {
     let mut buf = String::new();
     let mut started = false;
@@ -1482,9 +1491,20 @@ fn read_bpm_id3(path: &Path) -> Option<f32> {
     text.and_then(parse_bpm_text)
 }
 
+fn read_artwork_id3(path: &Path) -> Option<Vec<u8>> {
+    let tag = id3::Tag::read_from_path(path).ok()?;
+    let artwork = tag.pictures().next().map(|picture| picture.data.clone());
+    artwork
+}
+
 fn read_bpm_m4a(path: &Path) -> Option<f32> {
     let tag = mp4ameta::Tag::read_from_path(path).ok()?;
     tag.bpm().map(|v| v as f32)
+}
+
+fn read_artwork_m4a(path: &Path) -> Option<Vec<u8>> {
+    let tag = mp4ameta::Tag::read_from_path(path).ok()?;
+    tag.artwork().map(|art| art.data.to_vec())
 }
 
 fn read_bpm_wav(path: &Path) -> Option<f32> {
@@ -2552,7 +2572,12 @@ pub fn decode_audio_multi_with_errors(path: &Path) -> Result<(Vec<Vec<f32>>, u32
 mod tests {
     use super::{
         enforce_stable_channel_count, enforce_stable_sample_rate, proxy_output_sample_rate,
+        read_embedded_artwork,
     };
+    use id3::frame::{Picture, PictureType};
+    use id3::TagLike;
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba};
+    use std::io::Cursor;
     use std::path::Path;
 
     #[test]
@@ -2626,5 +2651,44 @@ mod tests {
         let path = Path::new("dummy.wav");
         let res = enforce_stable_channel_count(path, "test", 0, 1);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn read_embedded_artwork_extracts_id3_cover_image() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "neowaves_artwork_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let path = temp_dir.join("cover.mp3");
+
+        let image =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(4, 4, Rgba([40, 160, 220, 255])));
+        let mut png = Cursor::new(Vec::new());
+        image
+            .write_to(&mut png, ImageFormat::Png)
+            .expect("write png");
+        let png = png.into_inner();
+
+        std::fs::write(&path, []).expect("create empty mp3");
+        let mut tag = id3::Tag::new();
+        tag.add_frame(Picture {
+            mime_type: "image/png".to_string(),
+            picture_type: PictureType::CoverFront,
+            description: String::new(),
+            data: png.clone(),
+        });
+        tag.write_to_path(&path, id3::Version::Id3v24)
+            .expect("write id3 tag");
+
+        let extracted = read_embedded_artwork(&path).expect("extract artwork");
+        assert_eq!(extracted, png);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&temp_dir);
     }
 }

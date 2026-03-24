@@ -42,7 +42,11 @@ fn parse_startup_config() -> app::StartupConfig {
                     let mode = match v.to_lowercase().as_str() {
                         "wave" | "waveform" => Some(app::ViewMode::Waveform),
                         "spec" | "spectrogram" => Some(app::ViewMode::Spectrogram),
+                        "log" => Some(app::ViewMode::Log),
                         "mel" => Some(app::ViewMode::Mel),
+                        "tempogram" => Some(app::ViewMode::Tempogram),
+                        "chromagram" => Some(app::ViewMode::Chromagram),
+                        "other" => Some(app::ViewMode::Tempogram),
                         _ => None,
                     };
                     if let Some(mode) = mode {

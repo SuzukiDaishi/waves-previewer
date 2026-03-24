@@ -77,7 +77,7 @@ impl WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
-        if tab.view_mode != ViewMode::Waveform {
+        if tab.leaf_view_mode() != ViewMode::Waveform {
             return;
         }
         if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {

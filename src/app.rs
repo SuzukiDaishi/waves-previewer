@@ -20,6 +20,7 @@ mod capture;
 mod clipboard_ops;
 mod debug_ops;
 mod dialogs;
+mod editor_features;
 mod editor_ops;
 mod effect_graph_ops;
 mod export_ops;
@@ -391,6 +392,15 @@ pub struct WavesPreviewer {
     pub spectro_cfg: SpectrogramConfig,
     pub spectro_tx: Option<std::sync::mpsc::Sender<SpectrogramJobMsg>>,
     pub spectro_rx: Option<std::sync::mpsc::Receiver<SpectrogramJobMsg>>,
+    pub editor_feature_cache: HashMap<EditorAnalysisKey, std::sync::Arc<EditorFeatureAnalysisData>>,
+    pub editor_feature_inflight: HashSet<EditorAnalysisKey>,
+    pub editor_feature_progress: HashMap<EditorAnalysisKey, AnalysisProgress>,
+    pub editor_feature_cancel:
+        HashMap<EditorAnalysisKey, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub editor_feature_generation: HashMap<EditorAnalysisKey, u64>,
+    editor_feature_generation_counter: u64,
+    pub editor_feature_tx: Option<std::sync::mpsc::Sender<EditorFeatureAnalysisJobMsg>>,
+    pub editor_feature_rx: Option<std::sync::mpsc::Receiver<EditorFeatureAnalysisJobMsg>>,
     pub scan_rx: Option<std::sync::mpsc::Receiver<ScanMessage>>,
     pub scan_in_progress: bool,
     pub scan_started_at: Option<std::time::Instant>,
@@ -398,6 +408,11 @@ pub struct WavesPreviewer {
     // dynamic row height for wave thumbnails (list view)
     pub wave_row_h: f32,
     pub list_columns: ListColumnConfig,
+    list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
+    show_list_art_window: bool,
+    list_art_window_path: Option<PathBuf>,
+    list_art_window_texture: Option<egui::TextureHandle>,
+    list_art_window_error: Option<String>,
     // multi-selection (list view)
     pub selected_multi: std::collections::BTreeSet<usize>,
     pub select_anchor: Option<usize>,
@@ -914,16 +929,16 @@ impl WavesPreviewer {
                 let frac = y as f32 / (target_h.saturating_sub(1)) as f32;
                 let bin = match view_mode {
                     ViewMode::Spectrogram | ViewMode::Waveform => {
-                        let freq = match cfg.scale {
-                            SpectrogramScale::Linear => frac * max_freq,
-                            SpectrogramScale::Log => {
-                                if max_freq <= log_min {
-                                    frac * max_freq
-                                } else {
-                                    let ratio = max_freq / log_min;
-                                    log_min * ratio.powf(frac)
-                                }
-                            }
+                        let freq = frac * max_freq;
+                        let pos = (freq / max_freq).clamp(0.0, 1.0);
+                        (pos * max_bin as f32).round() as usize
+                    }
+                    ViewMode::Log => {
+                        let freq = if max_freq <= log_min {
+                            frac * max_freq
+                        } else {
+                            let ratio = max_freq / log_min;
+                            log_min * ratio.powf(frac)
                         };
                         let pos = (freq / max_freq).clamp(0.0, 1.0);
                         (pos * max_bin as f32).round() as usize
@@ -944,6 +959,7 @@ impl WavesPreviewer {
                         let pos = (freq / max_freq).clamp(0.0, 1.0);
                         (pos * max_bin as f32).round() as usize
                     }
+                    ViewMode::Tempogram | ViewMode::Chromagram => 0,
                 };
                 let idx = base + bin.min(max_bin);
                 let db_raw = spec
@@ -980,10 +996,34 @@ impl WavesPreviewer {
             return 0;
         }
         let loop_len = loop_end - loop_start;
-        let mut cf = requested.min(loop_len / 2);
-        cf = cf.min(loop_start);
-        cf = cf.min(total_len.saturating_sub(loop_end));
-        cf
+        requested.min(loop_len / 2)
+    }
+
+    fn loop_xfade_uses_through_zero(shape: LoopXfadeShape) -> bool {
+        matches!(
+            shape,
+            LoopXfadeShape::LinearDip | LoopXfadeShape::EqualPowerDip
+        )
+    }
+
+    fn loop_xfade_weights(shape: LoopXfadeShape, t: f32) -> (f32, f32) {
+        let x = t.clamp(0.0, 1.0);
+        match shape {
+            LoopXfadeShape::Linear | LoopXfadeShape::LinearDip => (1.0 - x, x),
+            LoopXfadeShape::EqualPower | LoopXfadeShape::EqualPowerDip => {
+                let ang = core::f32::consts::FRAC_PI_2 * x;
+                (ang.cos(), ang.sin())
+            }
+        }
+    }
+
+    fn loop_xfade_style_code(shape: LoopXfadeShape) -> u8 {
+        match shape {
+            LoopXfadeShape::Linear => 0,
+            LoopXfadeShape::EqualPower => 1,
+            LoopXfadeShape::LinearDip => 2,
+            LoopXfadeShape::EqualPowerDip => 3,
+        }
     }
     fn apply_loop_mode_for_tab(&self, tab: &EditorTab) {
         let audio_len = self.audio.current_source_len();
@@ -1007,13 +1047,8 @@ impl WavesPreviewer {
                     self.audio.set_loop_region(0, audio_len);
                     let requested = map_display_count_to_audio(tab.loop_xfade_samples);
                     let cf = Self::effective_loop_xfade_samples(0, audio_len, audio_len, requested);
-                    self.audio.set_loop_crossfade(
-                        cf,
-                        match tab.loop_xfade_shape {
-                            crate::app::types::LoopXfadeShape::Linear => 0,
-                            crate::app::types::LoopXfadeShape::EqualPower => 1,
-                        },
-                    );
+                    self.audio
+                        .set_loop_crossfade(cf, Self::loop_xfade_style_code(tab.loop_xfade_shape));
                 }
             }
             LoopMode::Marker => {
@@ -1041,10 +1076,7 @@ impl WavesPreviewer {
                         );
                         self.audio.set_loop_crossfade(
                             cf,
-                            match tab.loop_xfade_shape {
-                                crate::app::types::LoopXfadeShape::Linear => 0,
-                                crate::app::types::LoopXfadeShape::EqualPower => 1,
-                            },
+                            Self::loop_xfade_style_code(tab.loop_xfade_shape),
                         );
                         if self.debug.cfg.enabled {
                             eprintln!(
@@ -1087,7 +1119,11 @@ impl WavesPreviewer {
     }
 
     fn update_loop_markers_dirty(tab: &mut EditorTab) {
-        tab.loop_markers_dirty = tab.loop_region_committed != tab.loop_markers_saved;
+        tab.loop_markers_dirty = tab.loop_region != tab.loop_markers_saved;
+    }
+
+    fn update_markers_dirty(tab: &mut EditorTab) {
+        tab.markers_dirty = tab.markers != tab.markers_saved;
     }
 
     fn next_marker_label(markers: &[crate::markers::MarkerEntry]) -> String {
@@ -1224,6 +1260,7 @@ impl WavesPreviewer {
             bpm,
             created_at: None,
             modified_at: None,
+            cover_art: None,
             thumb,
             decode_error: None,
         }
@@ -2014,6 +2051,12 @@ impl WavesPreviewer {
         self.spectro_cache_bytes = 0;
         self.spectro_generation.clear();
         self.spectro_generation_counter = 0;
+        self.editor_feature_cache.clear();
+        self.editor_feature_inflight.clear();
+        self.editor_feature_progress.clear();
+        self.editor_feature_cancel.clear();
+        self.editor_feature_generation.clear();
+        self.editor_feature_generation_counter = 0;
         self.lufs_override.clear();
         self.lufs_recalc_deadline.clear();
         self.selected = None;
@@ -2239,12 +2282,25 @@ impl WavesPreviewer {
             spectro_cfg: SpectrogramConfig::default(),
             spectro_tx: None,
             spectro_rx: None,
+            editor_feature_cache: HashMap::new(),
+            editor_feature_inflight: HashSet::new(),
+            editor_feature_progress: HashMap::new(),
+            editor_feature_cancel: HashMap::new(),
+            editor_feature_generation: HashMap::new(),
+            editor_feature_generation_counter: 0,
+            editor_feature_tx: None,
+            editor_feature_rx: None,
             scan_rx: None,
             scan_in_progress: false,
             scan_started_at: None,
             scan_found_count: 0,
             wave_row_h: 26.0,
             list_columns: ListColumnConfig::default(),
+            list_art_textures: HashMap::new(),
+            show_list_art_window: false,
+            list_art_window_path: None,
+            list_art_window_texture: None,
+            list_art_window_error: None,
             selected_multi: std::collections::BTreeSet::new(),
             select_anchor: None,
             clipboard_payload: None,
@@ -2551,6 +2607,7 @@ impl WavesPreviewer {
             tab.dragging_marker = None;
             tab.preview_offset_samples = None;
             tab.dirty = state.dirty;
+            Self::update_markers_dirty(tab);
             Self::update_loop_markers_dirty(tab);
         }
         let Some((path, buffer_sample_rate, channels)) = self.tabs.get(tab_idx).map(|tab| {
@@ -2698,6 +2755,7 @@ impl eframe::App for WavesPreviewer {
         }
         // Drain spectrogram jobs (tiled)
         self.apply_spectrogram_updates(ctx);
+        self.apply_feature_analysis_updates(ctx);
 
         // Drain export results
         self.drain_export_results(ctx);
@@ -2985,6 +3043,7 @@ impl eframe::App for WavesPreviewer {
                                                     ),
                                                     created_at: info.created_at,
                                                     modified_at: info.modified_at,
+                                                    cover_art: None,
                                                     thumb: Vec::new(),
                                                     decode_error: None,
                                                 },
@@ -3488,7 +3547,7 @@ impl eframe::App for WavesPreviewer {
         // List auto-scroll flag is cleared by list view when consumed.
 
         if let Some(tab_idx) = self.active_tab {
-            self.queue_spectrogram_for_tab(tab_idx);
+            self.queue_editor_analysis_for_tab(tab_idx);
         } else {
             self.ui_editor_zoo_overlay(ctx, None, ctx.content_rect());
         }
@@ -3514,7 +3573,8 @@ impl eframe::App for WavesPreviewer {
             || self.plugin_process_state.is_some()
             || self.export_state.is_some()
             || self.csv_export_state.is_some()
-            || self.bulk_resample_state.is_some();
+            || self.bulk_resample_state.is_some()
+            || !self.editor_feature_inflight.is_empty();
         let repaint_ms = if fast_repaint {
             16
         } else if self.zoo_enabled && self.is_list_workspace_active() {
@@ -3616,6 +3676,7 @@ impl eframe::App for WavesPreviewer {
         self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);
+        self.ui_list_art_window(ctx);
         self.ui_tool_palette_window(ctx);
         self.ui_tool_confirm_dialog(ctx);
         // Rename dialog

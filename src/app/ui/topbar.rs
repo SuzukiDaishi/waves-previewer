@@ -392,7 +392,7 @@ impl crate::app::WavesPreviewer {
                         || self.music_model_download_state.is_some()
                         || self.export_state.is_some()
                         || self.csv_export_state.is_some()
-                        || !self.spectro_inflight.is_empty()
+                        || self.total_editor_analysis_inflight() > 0
                         || self.project_open_state.is_some()
                         || self.bulk_resample_state.is_some()
                         || list_loading_visible
@@ -686,27 +686,22 @@ impl crate::app::WavesPreviewer {
                                         .color(Color32::from_rgb(255, 120, 120)),
                                 );
                             }
-                            if !self.spectro_inflight.is_empty() {
+                            if self.total_editor_analysis_inflight() > 0 {
                                 ui.add(egui::Spinner::new());
-                                let mut done = 0usize;
-                                let mut total = 0usize;
-                                for progress in self.spectro_progress.values() {
-                                    done = done.saturating_add(progress.done_tiles);
-                                    total = total.saturating_add(progress.total_tiles);
-                                }
+                                let (done, total) = self.total_editor_analysis_progress();
                                 let label = if total > 0 {
                                     let pct =
                                         ((done as f32 / total as f32) * 100.0).clamp(0.0, 100.0);
                                     format!(
-                                        "Spectrogram: {} ({pct:.0}%)",
-                                        self.spectro_inflight.len()
+                                        "Analysis: {} ({pct:.0}%)",
+                                        self.total_editor_analysis_inflight()
                                     )
                                 } else {
-                                    format!("Spectrogram: {}", self.spectro_inflight.len())
+                                    format!("Analysis: {}", self.total_editor_analysis_inflight())
                                 };
                                 ui.label(RichText::new(label).weak());
                                 if ui.button("Cancel").clicked() {
-                                    self.cancel_all_spectrograms();
+                                    self.cancel_all_editor_analyses();
                                 }
                             }
                             if let Some(state) = &self.project_open_state {

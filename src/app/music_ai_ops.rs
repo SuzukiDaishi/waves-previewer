@@ -505,14 +505,14 @@ impl crate::app::WavesPreviewer {
         merged.dedup_by(|a, b| a.sample == b.sample && a.label == b.label);
 
         tab.markers = merged;
-        tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+        Self::update_markers_dirty(tab);
     }
 
     pub(super) fn discard_music_provisional_markers(&mut self, tab_idx: usize) {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.music_analysis_draft.provisional_markers.clear();
             tab.markers = tab.markers_committed.clone();
-            tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+            Self::update_markers_dirty(tab);
         }
     }
 
@@ -535,7 +535,7 @@ impl crate::app::WavesPreviewer {
         tab.markers = merged.clone();
         tab.markers_committed = merged.clone();
         tab.markers_applied = merged;
-        tab.markers_dirty = tab.markers_committed != tab.markers_saved;
+        Self::update_markers_dirty(tab);
     }
 
     pub(super) fn apply_music_preview_to_tab(&mut self, tab_idx: usize) {

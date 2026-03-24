@@ -99,6 +99,7 @@ pub enum SortKey {
     File,
     Folder,
     Transcript,
+    Type,
     Length,
     Channels,
     SampleRate,
@@ -170,6 +171,8 @@ pub struct ListUndoAction {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListColumnConfig {
     pub edited: bool,
+    pub cover_art: bool,
+    pub type_badge: bool,
     pub file: bool,
     pub folder: bool,
     pub transcript: bool,
@@ -193,6 +196,8 @@ impl Default for ListColumnConfig {
     fn default() -> Self {
         Self {
             edited: true,
+            cover_art: false,
+            type_badge: false,
             file: true,
             folder: true,
             transcript: false,
@@ -268,7 +273,88 @@ pub enum SrcQuality {
 pub enum ViewMode {
     Waveform,
     Spectrogram,
+    Log,
     Mel,
+    Tempogram,
+    Chromagram,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditorPrimaryView {
+    #[default]
+    Wave,
+    Spec,
+    Other,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditorSpecSubView {
+    #[default]
+    Spec,
+    Log,
+    Mel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EditorOtherSubView {
+    F0,
+    #[default]
+    Tempogram,
+    Chromagram,
+}
+
+impl EditorPrimaryView {
+    pub fn from_mode(mode: ViewMode) -> Self {
+        match mode {
+            ViewMode::Waveform => Self::Wave,
+            ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => Self::Spec,
+            ViewMode::Tempogram | ViewMode::Chromagram => Self::Other,
+        }
+    }
+
+    pub fn default_mode(self) -> ViewMode {
+        match self {
+            Self::Wave => ViewMode::Waveform,
+            Self::Spec => ViewMode::Spectrogram,
+            Self::Other => ViewMode::Tempogram,
+        }
+    }
+}
+
+impl EditorSpecSubView {
+    pub fn from_mode(mode: ViewMode) -> Self {
+        match mode {
+            ViewMode::Log => Self::Log,
+            ViewMode::Mel => Self::Mel,
+            _ => Self::Spec,
+        }
+    }
+
+    pub fn to_mode(self) -> ViewMode {
+        match self {
+            Self::Spec => ViewMode::Spectrogram,
+            Self::Log => ViewMode::Log,
+            Self::Mel => ViewMode::Mel,
+        }
+    }
+}
+
+impl EditorOtherSubView {
+    pub fn from_mode(mode: ViewMode) -> Self {
+        match mode {
+            ViewMode::Chromagram => Self::Chromagram,
+            ViewMode::Tempogram => Self::Tempogram,
+            _ => Self::Tempogram,
+        }
+    }
+
+    pub fn to_mode(self) -> ViewMode {
+        match self {
+            Self::F0 => ViewMode::Tempogram,
+            Self::Tempogram => ViewMode::Tempogram,
+            Self::Chromagram => ViewMode::Chromagram,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -313,7 +399,7 @@ impl Default for SpectrogramConfig {
             hop_size: 256,
             overlap: 0.875,
             max_frames: 4096,
-            scale: SpectrogramScale::Log,
+            scale: SpectrogramScale::Linear,
             mel_scale: SpectrogramScale::Linear,
             db_floor: -120.0,
             max_freq_hz: 0.0,
@@ -683,6 +769,8 @@ pub enum RightDragMode {
 pub enum LoopXfadeShape {
     Linear,
     EqualPower,
+    LinearDip,
+    EqualPowerDip,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -788,22 +876,24 @@ pub struct EditorTab {
     pub fade_out_range: Option<(usize, usize)>,
     pub fade_in_shape: FadeShape,
     pub fade_out_shape: FadeShape,
-    pub view_mode: ViewMode,                    // which visualization panel
-    pub show_waveform_overlay: bool,            // draw waveform overlay in Spec/Mel views
-    pub channel_view: ChannelView,              // Mixdown / All / Custom
-    pub bpm_enabled: bool,                      // grid toggle in editor
-    pub bpm_value: f32,                         // current BPM for grid
-    pub bpm_user_set: bool,                     // user-overridden BPM
-    pub bpm_offset_sec: f32,                    // grid offset in seconds
-    pub seek_hold: Option<SeekHoldState>,       // key repeat state for seek
-    pub snap_zero_cross: bool,                  // enable zero-cross snapping
-    pub drag_select_anchor: Option<usize>,      // transient during drag
+    pub primary_view: EditorPrimaryView, // high-level editor view
+    pub spec_sub_view: EditorSpecSubView, // Spec subtree selection
+    pub other_sub_view: EditorOtherSubView, // Other subtree selection
+    pub show_waveform_overlay: bool,     // draw waveform overlay in Spec/Mel views
+    pub channel_view: ChannelView,       // Mixdown / All / Custom
+    pub bpm_enabled: bool,               // grid toggle in editor
+    pub bpm_value: f32,                  // current BPM for grid
+    pub bpm_user_set: bool,              // user-overridden BPM
+    pub bpm_offset_sec: f32,             // grid offset in seconds
+    pub seek_hold: Option<SeekHoldState>, // key repeat state for seek
+    pub snap_zero_cross: bool,           // enable zero-cross snapping
+    pub drag_select_anchor: Option<usize>, // transient during drag
     pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
-    pub right_drag_anchor: Option<usize>,       // anchor for Shift+right-drag selection
-    pub active_tool: ToolKind,                  // current editing tool
-    pub tool_state: ToolState,                  // simple per-tool parameters
-    pub loop_mode: LoopMode,                    // Off / On (whole) / Marker
-    pub dragging_marker: Option<MarkerKind>,    // transient while dragging A/B
+    pub right_drag_anchor: Option<usize>, // anchor for Shift+right-drag selection
+    pub active_tool: ToolKind,           // current editing tool
+    pub tool_state: ToolState,           // simple per-tool parameters
+    pub loop_mode: LoopMode,             // Off / On (whole) / Marker
+    pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
     pub active_tool_last: Option<ToolKind>,
@@ -817,6 +907,29 @@ pub struct EditorTab {
     pub undo_bytes: usize,
     pub redo_stack: Vec<EditorUndoState>,
     pub redo_bytes: usize,
+}
+
+impl EditorTab {
+    pub fn leaf_view_mode(&self) -> ViewMode {
+        match self.primary_view {
+            EditorPrimaryView::Wave => ViewMode::Waveform,
+            EditorPrimaryView::Spec => self.spec_sub_view.to_mode(),
+            EditorPrimaryView::Other => self.other_sub_view.to_mode(),
+        }
+    }
+
+    pub fn set_leaf_view_mode(&mut self, mode: ViewMode) {
+        self.primary_view = EditorPrimaryView::from_mode(mode);
+        match self.primary_view {
+            EditorPrimaryView::Wave => {}
+            EditorPrimaryView::Spec => {
+                self.spec_sub_view = EditorSpecSubView::from_mode(mode);
+            }
+            EditorPrimaryView::Other => {
+                self.other_sub_view = EditorOtherSubView::from_mode(mode);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -835,6 +948,7 @@ pub struct FileMeta {
     pub bpm: Option<f32>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
+    pub cover_art: Option<Arc<egui::ColorImage>>,
     pub thumb: Vec<(f32, f32)>,
     pub decode_error: Option<String>,
 }
@@ -846,6 +960,68 @@ pub struct SpectrogramData {
     pub frame_step: usize,
     pub sample_rate: u32,
     pub values_db: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EditorAnalysisKind {
+    Spectrogram,
+    Tempogram,
+    Chromagram,
+}
+
+#[derive(Clone, Debug)]
+pub struct TempogramData {
+    pub frames: usize,
+    pub tempo_bins: usize,
+    pub frame_step: usize,
+    pub sample_rate: u32,
+    pub bpm_values: Vec<f32>,
+    pub values: Vec<f32>,
+    pub estimated_bpm: Option<f32>,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChromagramData {
+    pub frames: usize,
+    pub bins: usize,
+    pub frame_step: usize,
+    pub sample_rate: u32,
+    pub values: Vec<f32>,
+    pub estimated_key: Option<String>,
+    pub estimated_mode: Option<String>,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EditorAnalysisKey {
+    pub path: PathBuf,
+    pub kind: EditorAnalysisKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum EditorFeatureAnalysisData {
+    Tempogram(TempogramData),
+    Chromagram(ChromagramData),
+}
+
+pub enum EditorFeatureAnalysisJobMsg {
+    TempogramDone {
+        path: PathBuf,
+        generation: u64,
+        data: TempogramData,
+    },
+    ChromagramDone {
+        path: PathBuf,
+        generation: u64,
+        data: ChromagramData,
+    },
+}
+
+pub struct AnalysisProgress {
+    pub done_units: usize,
+    pub total_units: usize,
+    pub started_at: std::time::Instant,
 }
 
 pub struct SpectrogramTile {
@@ -1094,6 +1270,7 @@ pub enum EffectGraphNodeKind {
     Input,
     Output,
     Gain,
+    Loudness,
     MonoMix,
     PitchShift,
     TimeStretch,
@@ -1113,6 +1290,9 @@ pub enum EffectGraphNodeData {
     Output,
     Gain {
         gain_db: f32,
+    },
+    Loudness {
+        target_lufs: f32,
     },
     MonoMix {
         ignored_channels: Vec<bool>,
@@ -1148,6 +1328,7 @@ impl EffectGraphNodeData {
             Self::Input => EffectGraphNodeKind::Input,
             Self::Output => EffectGraphNodeKind::Output,
             Self::Gain { .. } => EffectGraphNodeKind::Gain,
+            Self::Loudness { .. } => EffectGraphNodeKind::Loudness,
             Self::MonoMix { .. } => EffectGraphNodeKind::MonoMix,
             Self::PitchShift { .. } => EffectGraphNodeKind::PitchShift,
             Self::TimeStretch { .. } => EffectGraphNodeKind::TimeStretch,
@@ -1166,6 +1347,7 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::Input => "Input",
             EffectGraphNodeKind::Output => "Output",
             EffectGraphNodeKind::Gain => "Gain",
+            EffectGraphNodeKind::Loudness => "LoudNorm",
             EffectGraphNodeKind::MonoMix => "Mono Mix",
             EffectGraphNodeKind::PitchShift => "PitchShift",
             EffectGraphNodeKind::TimeStretch => "TimeStretch",
@@ -1184,6 +1366,9 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::Input => Self::Input,
             EffectGraphNodeKind::Output => Self::Output,
             EffectGraphNodeKind::Gain => Self::Gain { gain_db: 0.0 },
+            EffectGraphNodeKind::Loudness => Self::Loudness {
+                target_lufs: -14.0,
+            },
             EffectGraphNodeKind::MonoMix => Self::MonoMix {
                 ignored_channels: vec![false; 8],
             },
@@ -1209,6 +1394,7 @@ impl EffectGraphNodeData {
             Self::Input => &[],
             Self::Output => &["in"],
             Self::Gain { .. }
+            | Self::Loudness { .. }
             | Self::MonoMix { .. }
             | Self::PitchShift { .. }
             | Self::TimeStretch { .. }
@@ -1227,6 +1413,7 @@ impl EffectGraphNodeData {
             Self::Output => &[],
             Self::Input
             | Self::Gain { .. }
+            | Self::Loudness { .. }
             | Self::MonoMix { .. }
             | Self::PitchShift { .. }
             | Self::TimeStretch { .. }

@@ -32,6 +32,7 @@ impl WavesPreviewer {
         self.spectro_cache_order.clear();
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
+        self.reset_all_feature_analysis_state();
         self.selected = None;
         self.selected_multi.clear();
         self.select_anchor = None;

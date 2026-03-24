@@ -124,6 +124,7 @@ fn effect_graph_default_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
         EffectGraphNodeKind::DebugWaveform => [340.0, 250.0],
         EffectGraphNodeKind::DebugSpectrum => [360.0, 300.0],
         EffectGraphNodeKind::Gain
+        | EffectGraphNodeKind::Loudness
         | EffectGraphNodeKind::PitchShift
         | EffectGraphNodeKind::TimeStretch
         | EffectGraphNodeKind::Speed => [280.0, 182.0],
@@ -717,6 +718,9 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
         EffectGraphNodeData::Gain { gain_db } => {
             *gain_db = gain_db.clamp(-24.0, 24.0);
         }
+        EffectGraphNodeData::Loudness { target_lufs } => {
+            *target_lufs = target_lufs.clamp(-36.0, 0.0);
+        }
         EffectGraphNodeData::PluginFx { config } => {
             config.params.truncate(256);
             for param in config.params.iter_mut() {
@@ -851,6 +855,7 @@ fn node_label(kind: EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::Input => "Input",
         EffectGraphNodeKind::Output => "Output",
         EffectGraphNodeKind::Gain => "Gain",
+        EffectGraphNodeKind::Loudness => "LoudNorm",
         EffectGraphNodeKind::MonoMix => "Mono Mix",
         EffectGraphNodeKind::PitchShift => "PitchShift",
         EffectGraphNodeKind::TimeStretch => "TimeStretch",
@@ -869,6 +874,9 @@ fn node_parameter_summary(data: &EffectGraphNodeData) -> String {
         EffectGraphNodeData::Input => "Source audio".to_string(),
         EffectGraphNodeData::Output => "Rendered audio".to_string(),
         EffectGraphNodeData::Gain { gain_db } => format!("{gain_db:+.1} dB"),
+        EffectGraphNodeData::Loudness { target_lufs } => {
+            format!("Target {target_lufs:.1} LUFS")
+        }
         EffectGraphNodeData::MonoMix { ignored_channels } => {
             let ignored_count = ignored_channels
                 .iter()
@@ -1528,6 +1536,7 @@ fn effect_graph_layout_priority(data: &EffectGraphNodeData) -> i32 {
     match data {
         EffectGraphNodeData::Input => 0,
         EffectGraphNodeData::Gain { .. } => 10,
+        EffectGraphNodeData::Loudness { .. } => 12,
         EffectGraphNodeData::MonoMix { .. } => 15,
         EffectGraphNodeData::PitchShift { .. } => 20,
         EffectGraphNodeData::TimeStretch { .. } => 30,
@@ -1681,6 +1690,17 @@ fn validate_effect_graph_document(
                     node_id: Some(node.id.clone()),
                 });
             }
+            EffectGraphNodeData::Loudness { target_lufs }
+                if *target_lufs < -36.0 || *target_lufs > 0.0 =>
+            {
+                issues.push(EffectGraphValidationIssue {
+                    severity: EffectGraphSeverity::Warning,
+                    code: "loudness_out_of_range".to_string(),
+                    message: "LoudNorm target is outside -36..0 LUFS and will be clamped on save"
+                        .to_string(),
+                    node_id: Some(node.id.clone()),
+                });
+            }
             EffectGraphNodeData::PitchShift { semitones }
                 if *semitones < -12.0 || *semitones > 12.0 =>
             {
@@ -1723,6 +1743,7 @@ fn validate_effect_graph_document(
             EffectGraphNodeData::Input
             | EffectGraphNodeData::Output
             | EffectGraphNodeData::PluginFx { .. }
+            | EffectGraphNodeData::Loudness { .. }
             | EffectGraphNodeData::MonoMix { .. }
             | EffectGraphNodeData::Duplicate
             | EffectGraphNodeData::SplitChannels
@@ -2512,6 +2533,66 @@ where
                     }
                 }
                 output_buses.insert(make_port_key(&node.id, "out"), bus);
+            }
+            EffectGraphNodeData::Loudness { target_lufs } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let processed_bus = if execution_flavor == EffectGraphExecutionFlavor::FormatOnly {
+                    EffectGraphAudioBus {
+                        channels: bus.channels.clone(),
+                        sample_rate: bus.sample_rate,
+                        channel_layout: bus.channel_layout.clone(),
+                    }
+                } else {
+                    match crate::wave::lufs_integrated_from_multi(&bus.channels, bus.sample_rate) {
+                        Ok(measured_lufs) if measured_lufs.is_finite() => {
+                            let gain_db = *target_lufs - measured_lufs;
+                            let gain = 10.0f32.powf(gain_db / 20.0);
+                            let mut processed_bus = bus;
+                            let mut peak = 0.0f32;
+                            for channel in processed_bus.channels.iter_mut() {
+                                for sample in channel.iter_mut() {
+                                    *sample *= gain;
+                                    peak = peak.max(sample.abs());
+                                }
+                            }
+                            on_event(EffectGraphRuntimeEvent::NodeLog {
+                                node_id: node.id.clone(),
+                                severity: EffectGraphSeverity::Info,
+                                message: format!(
+                                    "Measured {measured_lufs:.1} LUFS, applying {gain_db:+.1} dB toward {target_lufs:.1} LUFS"
+                                ),
+                            });
+                            if peak > 1.0 {
+                                on_event(EffectGraphRuntimeEvent::NodeLog {
+                                    node_id: node.id.clone(),
+                                    severity: EffectGraphSeverity::Warning,
+                                    message: format!(
+                                        "Post-LoudNorm peak exceeds full scale ({peak:.2})"
+                                    ),
+                                });
+                            }
+                            processed_bus
+                        }
+                        Ok(_) | Err(_) => {
+                            on_event(EffectGraphRuntimeEvent::NodeLog {
+                                node_id: node.id.clone(),
+                                severity: EffectGraphSeverity::Warning,
+                                message:
+                                    "Could not measure integrated LUFS; passing input through"
+                                        .to_string(),
+                            });
+                            bus
+                        }
+                    }
+                };
+                output_buses.insert(make_port_key(&node.id, "out"), processed_bus);
             }
             EffectGraphNodeData::PitchShift { semitones } => {
                 let bus =
@@ -4869,6 +4950,49 @@ mod tests {
     }
 
     #[test]
+    fn effect_graph_loudness_node_defaults_and_ports() {
+        let data = EffectGraphNodeData::default_for_kind(EffectGraphNodeKind::Loudness);
+        assert_eq!(data.display_name(), "LoudNorm");
+        assert_eq!(data.input_ports(), &["in"]);
+        assert_eq!(data.output_ports(), &["out"]);
+        let summary = node_parameter_summary(&data);
+        assert!(summary.contains("-14.0 LUFS"));
+    }
+
+    #[test]
+    fn effect_graph_loudness_roundtrips_in_clipboard_and_template() {
+        let payload = EffectGraphClipboardPayload {
+            version: EFFECT_GRAPH_CLIPBOARD_VERSION,
+            origin: [12.0, 24.0],
+            nodes: vec![EffectGraphNode {
+                id: "loudness".to_string(),
+                ui_pos: [0.0, 0.0],
+                ui_size: [280.0, 182.0],
+                data: EffectGraphNodeData::Loudness {
+                    target_lufs: -16.5,
+                },
+            }],
+            edges: Vec::new(),
+        };
+        let text = effect_graph_clipboard_payload_to_text(&payload).expect("serialize payload");
+        let parsed = effect_graph_clipboard_payload_from_text(&text).expect("parse payload");
+        assert_eq!(parsed, payload);
+
+        let file = EffectGraphTemplateFile {
+            schema_version: EFFECT_GRAPH_SCHEMA_VERSION,
+            template_id: "loudness".to_string(),
+            name: "LoudNorm".to_string(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 2,
+            graph: doc_with_nodes(payload.nodes.clone(), Vec::new()),
+        };
+        let json = serde_json::to_string(&file).expect("serialize template");
+        let restored =
+            serde_json::from_str::<EffectGraphTemplateFile>(&json).expect("parse template");
+        assert_eq!(restored.graph.nodes, file.graph.nodes);
+    }
+
+    #[test]
     fn effect_graph_plugin_fx_roundtrips_in_clipboard_and_template() {
         let stub = temp_plugin_stub("vst3");
         let payload = EffectGraphClipboardPayload {
@@ -5160,6 +5284,62 @@ mod tests {
         )
         .expect("runtime ok");
         assert!(out.channels[0][0] > 0.45);
+    }
+
+    #[test]
+    fn effect_graph_runtime_loudness_normalizes_integrated_lufs() {
+        let source = (0..(48_000 * 2))
+            .map(|index| {
+                let phase = index as f32 * std::f32::consts::TAU * 220.0 / 48_000.0;
+                phase.sin() * 0.05
+            })
+            .collect::<Vec<_>>();
+        let input_lufs = crate::wave::lufs_integrated_from_multi(&[source.clone()], 48_000)
+            .expect("input lufs");
+        assert!(input_lufs < -14.0);
+
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "loudness".to_string(),
+                    ui_pos: [100.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Loudness {
+                        target_lufs: -14.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [200.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "loudness", "in"),
+                edge("b", "loudness", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![source], 48_000),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        let out_lufs = crate::wave::lufs_integrated_from_multi(&out.channels, out.sample_rate)
+            .expect("output lufs");
+        assert!(
+            (out_lufs - (-14.0)).abs() < 0.35,
+            "expected about -14 LUFS, got {out_lufs}"
+        );
     }
 
     #[test]

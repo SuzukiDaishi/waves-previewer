@@ -15,6 +15,28 @@ fn map_sample_value_kind(kind: audio_io::SampleValueKind) -> SampleValueKind {
     }
 }
 
+fn decode_cover_art_thumbnail(path: &PathBuf) -> Option<Arc<egui::ColorImage>> {
+    const COVER_ART_THUMB_SIZE: u32 = 40;
+    const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
+
+    let bytes = audio_io::read_embedded_artwork(path)?;
+    if bytes.is_empty() || bytes.len() > MAX_ARTWORK_BYTES {
+        return None;
+    }
+    let image = image::load_from_memory(&bytes).ok()?;
+    let thumb = image.thumbnail(COVER_ART_THUMB_SIZE, COVER_ART_THUMB_SIZE);
+    let rgba = thumb.to_rgba8();
+    let width = rgba.width() as usize;
+    let height = rgba.height() as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+        [width, height],
+        rgba.as_raw(),
+    )))
+}
+
 #[derive(Clone, Debug)]
 pub enum MetaTask {
     Header(PathBuf),
@@ -119,6 +141,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             bpm: audio_io::read_audio_bpm(path),
             created_at: info.created_at,
             modified_at: info.modified_at,
+            cover_art: decode_cover_art_thumbnail(path),
             thumb: Vec::new(),
             decode_error: None,
         }),
@@ -136,6 +159,7 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             bpm: None,
             created_at: None,
             modified_at: None,
+            cover_art: None,
             thumb: Vec::new(),
             decode_error: Some("Decode failed".to_string()),
         }),
@@ -227,6 +251,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             bpm,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
+            cover_art: decode_cover_art_thumbnail(path),
             thumb,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors}"))
@@ -286,6 +311,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             bpm,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
+            cover_art: decode_cover_art_thumbnail(path),
             thumb,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors} (prefix)"))

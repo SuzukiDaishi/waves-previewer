@@ -1196,7 +1196,7 @@ impl super::WavesPreviewer {
         tab.fade_out_range = None;
         tab.fade_in_shape = crate::app::types::FadeShape::SCurve;
         tab.fade_out_shape = crate::app::types::FadeShape::SCurve;
-        tab.view_mode = crate::app::types::ViewMode::Waveform;
+        tab.set_leaf_view_mode(crate::app::types::ViewMode::Waveform);
         tab.snap_zero_cross = true;
         tab.drag_select_anchor = None;
         tab.right_drag_mode = None;
@@ -2512,6 +2512,7 @@ impl super::WavesPreviewer {
         }
         for path in spectro_reset_paths {
             self.cancel_spectrogram_for_path(&path);
+            self.cancel_feature_analysis_for_path(&path);
         }
         if let Some((path, err)) = decode_error {
             self.debug_log(format!("editor decode failed: {} ({err})", path.display()));
@@ -2634,6 +2635,7 @@ impl super::WavesPreviewer {
         self.transcript_inflight.remove(&path_buf);
         self.transcript_ai_inflight.remove(&path_buf);
         self.purge_spectro_cache_entry(&path_buf);
+        self.cancel_feature_analysis_for_path(&path_buf);
         self.edited_cache.remove(&path_buf);
         self.lufs_override.remove(&path_buf);
         self.lufs_recalc_deadline.remove(&path_buf);
@@ -2730,6 +2732,7 @@ impl super::WavesPreviewer {
             self.transcript_inflight.remove(path);
             self.transcript_ai_inflight.remove(path);
             self.purge_spectro_cache_entry(path);
+            self.cancel_feature_analysis_for_path(path);
             self.edited_cache.remove(path);
             self.lufs_override.remove(path);
             self.lufs_recalc_deadline.remove(path);
@@ -2795,6 +2798,7 @@ impl super::WavesPreviewer {
         self.spectro_cache_order.clear();
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
+        self.reset_all_feature_analysis_state();
         self.scan_rx = None;
         self.scan_in_progress = false;
         self.sample_rate_override.clear();
@@ -2873,7 +2877,9 @@ impl super::WavesPreviewer {
                     fade_out_range: cached.fade_out_range,
                     fade_in_shape: cached.fade_in_shape,
                     fade_out_shape: cached.fade_out_shape,
-                    view_mode: crate::app::types::ViewMode::Waveform,
+                    primary_view: crate::app::types::EditorPrimaryView::Wave,
+                    spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
+                    other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
                     show_waveform_overlay: cached.show_waveform_overlay,
                     channel_view: ChannelView::mixdown(),
                     bpm_enabled: cached.bpm_enabled,
@@ -2975,7 +2981,9 @@ impl super::WavesPreviewer {
                 fade_out_range: None,
                 fade_in_shape: crate::app::types::FadeShape::SCurve,
                 fade_out_shape: crate::app::types::FadeShape::SCurve,
-                view_mode: crate::app::types::ViewMode::Waveform,
+                primary_view: crate::app::types::EditorPrimaryView::Wave,
+                spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
+                other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
                 show_waveform_overlay: true,
                 channel_view: ChannelView::mixdown(),
                 bpm_enabled: false,
@@ -3096,7 +3104,9 @@ impl super::WavesPreviewer {
                 fade_out_range: cached.fade_out_range,
                 fade_in_shape: cached.fade_in_shape,
                 fade_out_shape: cached.fade_out_shape,
-                view_mode: crate::app::types::ViewMode::Waveform,
+                primary_view: crate::app::types::EditorPrimaryView::Wave,
+                spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
+                other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
                 show_waveform_overlay: cached.show_waveform_overlay,
                 channel_view: ChannelView::mixdown(),
                 bpm_enabled: cached.bpm_enabled,
@@ -3185,7 +3195,9 @@ impl super::WavesPreviewer {
             fade_out_range: None,
             fade_in_shape: crate::app::types::FadeShape::SCurve,
             fade_out_shape: crate::app::types::FadeShape::SCurve,
-            view_mode: crate::app::types::ViewMode::Waveform,
+            primary_view: crate::app::types::EditorPrimaryView::Wave,
+            spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
+            other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
             show_waveform_overlay: true,
             channel_view: ChannelView::mixdown(),
             bpm_enabled: false,
@@ -3446,6 +3458,11 @@ impl super::WavesPreviewer {
                             .map(|t| t.full_text.as_str())
                             .unwrap_or("");
                         Self::string_order(sa, sb, dir)
+                    }
+                    SortKey::Type => {
+                        let sa = Self::list_type_sort_key(pa_item);
+                        let sb = Self::list_type_sort_key(pb_item);
+                        Self::string_order(sa.as_ref(), sb.as_ref(), dir)
                     }
                     SortKey::Length => Self::option_num_order(
                         ma.and_then(|m| m.duration_secs).filter(|v| v.is_finite()),

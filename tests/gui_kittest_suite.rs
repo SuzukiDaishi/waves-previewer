@@ -7,7 +7,10 @@ mod kittest_suite {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use egui::{Key, Modifiers, MouseWheelUnit};
-    use egui_kittest::{kittest::Queryable, Harness};
+    use egui_kittest::{
+        kittest::{NodeT, Queryable},
+        Harness,
+    };
     use neowaves::app::ToolKind;
     use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
@@ -450,6 +453,39 @@ mod kittest_suite {
     }
 
     #[test]
+    fn list_type_badge_column_visible() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().list_columns.type_badge = true;
+        harness.run_steps(1);
+        let type_nodes: Vec<_> = harness.query_all_by_label("Type").collect();
+        assert!(!type_nodes.is_empty(), "Type badge header not found");
+    }
+
+    #[test]
+    fn list_art_column_visible() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        harness.state_mut().list_columns.cover_art = true;
+        harness.run_steps(1);
+        let art_nodes: Vec<_> = harness.query_all_by_label("Art").collect();
+        assert!(!art_nodes.is_empty(), "Art header not found");
+    }
+
+    #[test]
+    fn list_art_modal_window_visible() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let wav = first_wav_file(&wav_dir()).expect("wav fixture");
+        harness
+            .state_mut()
+            .test_show_list_art_window_placeholder(&wav);
+        harness.run_steps(1);
+        let modal_nodes: Vec<_> = harness.query_all_by_label("Artwork").collect();
+        assert!(!modal_nodes.is_empty(), "Artwork window title not found");
+    }
+
+    #[test]
     fn inspector_tool_combo_reachable() {
         let mut harness = harness_with_wavs(true);
         wait_for_scan(&mut harness);
@@ -702,21 +738,112 @@ mod kittest_suite {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);
         open_first_tab(&mut harness);
-        harness.get_by_label("Spec").click();
-        harness.run_steps(2);
-        assert_eq!(
-            format!("{:?}", harness.state().tabs[0].view_mode),
-            "Spectrogram"
+        let cases = [
+            (neowaves::ViewMode::Spectrogram, "Spec", "Spectrogram"),
+            (neowaves::ViewMode::Log, "Freq Log", "Log"),
+            (neowaves::ViewMode::Mel, "Mel", "Mel"),
+            (neowaves::ViewMode::Tempogram, "Tempogram", "Tempogram"),
+            (neowaves::ViewMode::Chromagram, "Chromagram", "Chromagram"),
+            (neowaves::ViewMode::Waveform, "Wave", "Waveform"),
+        ];
+        for (mode, combo_value, debug_name) in cases {
+            assert!(harness.state_mut().test_set_view_mode(mode));
+            harness.run_steps(2);
+            assert_eq!(
+                format!("{:?}", harness.state().tabs[0].leaf_view_mode()),
+                debug_name
+            );
+            assert!(
+                harness
+                    .query_all_by_value(combo_value)
+                    .any(|node| node.accesskit_node().role() == egui::accesskit::Role::ComboBox),
+                "view selector should show {combo_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_mode_hotkey_cycles_across_other_views() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let expected = [
+            "Spectrogram",
+            "Log",
+            "Mel",
+            "Tempogram",
+            "Chromagram",
+            "Waveform",
+        ];
+        for expected_view in expected {
+            harness.key_press(Key::S);
+            harness.run_steps(2);
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    harness.state().tabs[harness.state().active_tab.unwrap()].leaf_view_mode()
+                ),
+                expected_view
+            );
+        }
+    }
+
+    #[test]
+    fn view_switch_keeps_editor_playback_running() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        harness.key_press(Key::Space);
+        harness.run_steps(3);
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should start"
         );
-        harness.get_by_label("Mel").click();
+        let transport_before = harness.state().test_playback_transport_name().to_string();
+        let sr_before = harness.state().test_playback_transport_sr();
+
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
         harness.run_steps(2);
-        assert_eq!(format!("{:?}", harness.state().tabs[0].view_mode), "Mel");
-        harness.get_by_label("Wave").click();
-        harness.run_steps(2);
-        assert_eq!(
-            format!("{:?}", harness.state().tabs[0].view_mode),
-            "Waveform"
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should continue after Spec switch"
         );
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            transport_before
+        );
+        assert_eq!(harness.state().test_playback_transport_sr(), sr_before);
+
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Tempogram));
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should continue after Other switch"
+        );
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            transport_before
+        );
+        assert_eq!(harness.state().test_playback_transport_sr(), sr_before);
+
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Chromagram));
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "playback should continue after Chromagram switch"
+        );
+        assert_eq!(
+            harness.state().test_playback_transport_name(),
+            transport_before
+        );
+        assert_eq!(harness.state().test_playback_transport_sr(), sr_before);
     }
 
     #[test]
@@ -1124,11 +1251,49 @@ mod kittest_suite {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
-        let before = harness.state().test_tab_samples_len();
+        let (before, expected_start_sample, expected_first_sample) = {
+            let state = harness.state();
+            let tab_idx = state.active_tab.expect("active tab");
+            let tab = &state.tabs[tab_idx];
+            let before = tab.samples_len;
+            let expected_start_sample = ((before as f32) * 0.1).floor() as usize;
+            let expected_first_sample = tab
+                .ch_samples
+                .first()
+                .and_then(|ch| ch.get(expected_start_sample))
+                .copied()
+                .unwrap_or(0.0);
+            (before, expected_start_sample, expected_first_sample)
+        };
         assert!(harness.state_mut().test_apply_trim_frac(0.1, 0.9));
         harness.run_steps(2);
-        let after = harness.state().test_tab_samples_len();
+        let state = harness.state();
+        let tab_idx = state.active_tab.expect("active tab");
+        let tab = &state.tabs[tab_idx];
+        let after = tab.samples_len;
         assert!(after < before);
+        assert!(
+            tab.trim_range.is_none(),
+            "trim range should clear after apply"
+        );
+        assert!(
+            tab.selection.is_none(),
+            "selection should clear after apply trim"
+        );
+        let first_after = tab
+            .ch_samples
+            .first()
+            .and_then(|ch| ch.first())
+            .copied()
+            .unwrap_or(0.0);
+        assert!(
+            (first_after - expected_first_sample).abs() < 1.0e-6,
+            "trim should keep the selected start as the new first sample (start={}, got={}, expected={})",
+            expected_start_sample,
+            first_after,
+            expected_first_sample
+        );
+        assert!(tab.waveform_pyramid.is_some());
         assert!(harness.state().test_tab_dirty());
     }
 
@@ -1192,9 +1357,27 @@ mod kittest_suite {
         assert!(harness
             .state_mut()
             .test_set_loop_mode(neowaves::LoopMode::Marker));
+        assert!(harness.state().test_loop_marker_dirty());
+        assert!(harness.state().test_loop_preview_pending());
         harness.run_steps(2);
         let region = harness.state().test_loop_region();
         assert!(matches!(region, Some((s, e)) if e > s));
+    }
+
+    #[test]
+    fn editor_loop_xfade_works_at_file_edges() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_loop_region_frac(0.0, 1.0));
+        assert!(harness
+            .state_mut()
+            .test_set_loop_xfade_ms(40.0, neowaves::LoopXfadeShape::EqualPowerDip));
+        assert!(harness
+            .state_mut()
+            .test_set_loop_mode(neowaves::LoopMode::Marker));
+        harness.run_steps(2);
+        assert!(harness.state().test_audio_loop_xfade_samples() > 0);
     }
 
     #[test]
@@ -1230,7 +1413,7 @@ mod kittest_suite {
         assert_eq!(
             format!(
                 "{:?}",
-                harness.state().tabs[harness.state().active_tab.unwrap()].view_mode
+                harness.state().tabs[harness.state().active_tab.unwrap()].leaf_view_mode()
             ),
             "Spectrogram"
         );
@@ -1242,7 +1425,7 @@ mod kittest_suite {
         assert_eq!(
             format!(
                 "{:?}",
-                harness.state().tabs[harness.state().active_tab.unwrap()].view_mode
+                harness.state().tabs[harness.state().active_tab.unwrap()].leaf_view_mode()
             ),
             "Mel"
         );
@@ -1392,7 +1575,7 @@ mod kittest_suite {
 
         let tab_idx = harness.state().active_tab.expect("active tab");
         assert_eq!(
-            harness.state().tabs[tab_idx].view_mode,
+            harness.state().tabs[tab_idx].leaf_view_mode(),
             neowaves::ViewMode::Spectrogram
         );
         assert!(harness.state().tabs[tab_idx].show_waveform_overlay);
