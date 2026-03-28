@@ -23,6 +23,19 @@ enum WaveformRenderLod {
     Pyramid,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AmplitudeNavDragKind {
+    MoveCenter,
+    ResizeViewport,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AmplitudeNavDragState {
+    kind: AmplitudeNavDragKind,
+    pointer_amp_offset: f32,
+    fixed_center: f32,
+}
+
 impl crate::app::WavesPreviewer {
     fn build_loop_seam_preview(tab: &EditorTab, sample_rate: u32) -> Option<LoopSeamPreview> {
         if tab.active_tool != ToolKind::LoopEdit {
@@ -228,7 +241,137 @@ impl crate::app::WavesPreviewer {
         }
     }
 
-    fn draw_editor_overview_navigator(
+    fn editor_set_view_offset(tab: &mut EditorTab, new_view: usize) {
+        tab.view_offset = new_view;
+        tab.view_offset_exact = new_view as f64;
+    }
+
+    fn editor_set_view_offset_exact(tab: &mut EditorTab, exact_view: f64, max_left: usize) {
+        let clamped = exact_view.clamp(0.0, max_left as f64);
+        tab.view_offset_exact = clamped;
+        tab.view_offset = clamped.round() as usize;
+    }
+
+    fn editor_selection_anchor_or(tab: &EditorTab, fallback: usize) -> usize {
+        tab.selection_anchor_sample
+            .or_else(|| tab.selection.map(|(a, b)| a.min(b)))
+            .unwrap_or(fallback)
+    }
+
+    fn editor_set_selection_from_anchor(tab: &mut EditorTab, anchor: usize, target: usize) {
+        let (start, end) = if target >= anchor {
+            (anchor, target)
+        } else {
+            (target, anchor)
+        };
+        tab.selection_anchor_sample = Some(anchor);
+        tab.selection = Some((start, end));
+    }
+
+    fn editor_zoom_anchor(
+        mode: EditorHorizontalZoomAnchorMode,
+        tab: &EditorTab,
+        display_samples_len: usize,
+        wave_left: f32,
+        wave_w: f32,
+        pointer_x: Option<f32>,
+        playhead_display: usize,
+    ) -> (usize, f32) {
+        let spp = tab.samples_per_px.max(0.0001);
+        let vis = (wave_w * spp).ceil() as usize;
+        let center_sample = tab
+            .view_offset
+            .saturating_add(vis / 2)
+            .min(display_samples_len);
+        let center_ratio = 0.5f32;
+        let playhead_sample = playhead_display.min(display_samples_len);
+        let playhead_ratio = if vis > 0 {
+            ((playhead_sample.saturating_sub(tab.view_offset)) as f32 / vis as f32).clamp(0.0, 1.0)
+        } else {
+            center_ratio
+        };
+        let pointer = pointer_x.map(|x| {
+            let clamped_x = x.clamp(wave_left, wave_left + wave_w);
+            let ratio = ((clamped_x - wave_left) / wave_w).clamp(0.0, 1.0);
+            let sample = tab
+                .view_offset
+                .saturating_add((ratio * vis as f32) as usize)
+                .min(display_samples_len);
+            (sample, ratio)
+        });
+        match mode {
+            EditorHorizontalZoomAnchorMode::Pointer => pointer
+                .or_else(|| Some((playhead_sample, playhead_ratio)))
+                .unwrap_or((center_sample, center_ratio)),
+            EditorHorizontalZoomAnchorMode::Playhead => {
+                if display_samples_len > 0 {
+                    (playhead_sample, playhead_ratio)
+                } else {
+                    (center_sample, center_ratio)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn waveform_y_from_amp(
+        lane_rect: egui::Rect,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        amp: f32,
+    ) -> f32 {
+        crate::app::render::overlay::waveform_y_from_amp(
+            lane_rect,
+            vertical_zoom,
+            vertical_view_center,
+            amp,
+        )
+    }
+
+    pub(crate) fn waveform_center_y(
+        lane_rect: egui::Rect,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+    ) -> f32 {
+        Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, 0.0)
+    }
+
+    fn amplitude_nav_y_from_amp(rail_rect: egui::Rect, amp: f32) -> f32 {
+        let clamped = amp.clamp(-1.0, 1.0);
+        rail_rect.center().y - clamped * (rail_rect.height() * 0.5)
+    }
+
+    fn amplitude_nav_amp_from_y(rail_rect: egui::Rect, y: f32) -> f32 {
+        let half_h = (rail_rect.height() * 0.5).max(1.0);
+        ((rail_rect.center().y - y) / half_h).clamp(-1.0, 1.0)
+    }
+
+    fn amplitude_nav_viewport_fraction(vertical_zoom: f32) -> f32 {
+        crate::app::render::overlay::visible_half_amplitude(vertical_zoom)
+            .clamp(1.0 / crate::app::EDITOR_MAX_VERTICAL_ZOOM, 1.0)
+    }
+
+    fn amplitude_nav_zoom_from_fraction(viewport_fraction: f32) -> f32 {
+        (1.0 / viewport_fraction.clamp(1.0 / crate::app::EDITOR_MAX_VERTICAL_ZOOM, 1.0))
+            .clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM)
+    }
+
+    fn amplitude_nav_viewport_rect(
+        rail_rect: egui::Rect,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+    ) -> egui::Rect {
+        let viewport_frac = Self::amplitude_nav_viewport_fraction(vertical_zoom);
+        let viewport_h = (rail_rect.height() * viewport_frac).clamp(18.0, rail_rect.height());
+        let center_amp =
+            Self::editor_clamped_vertical_view_center(vertical_zoom, vertical_view_center);
+        let center_y = Self::amplitude_nav_y_from_amp(rail_rect, center_amp);
+        egui::Rect::from_center_size(
+            egui::pos2(rail_rect.center().x, center_y),
+            egui::vec2(rail_rect.width(), viewport_h),
+        )
+    }
+
+    fn draw_editor_time_navigator(
         ui: &mut egui::Ui,
         overview: &[(f32, f32)],
         display_samples_len: usize,
@@ -248,106 +391,318 @@ impl crate::app::WavesPreviewer {
             if left_pad > 0.0 {
                 ui.add_space(left_pad);
             }
-            let desired = egui::vec2(desired_width.max(120.0), 54.0);
-            let (navigator_resp, painter) = ui.allocate_painter(desired, Sense::click_and_drag());
-            rect = navigator_resp.rect;
-            resp = Some(navigator_resp);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Time").small().strong());
+                let desired = egui::vec2(desired_width.max(120.0), 54.0);
+                let (navigator_resp, painter) =
+                    ui.allocate_painter(desired, Sense::click_and_drag());
+                rect = navigator_resp.rect;
+                resp = Some(navigator_resp);
 
-            painter.rect_filled(rect, 6.0, Color32::from_rgb(14, 16, 20));
-            painter.rect_stroke(
-                rect,
-                6.0,
-                Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
-                egui::StrokeKind::Outside,
-            );
+                painter.rect_filled(rect, 6.0, Color32::from_rgb(14, 16, 20));
+                painter.rect_stroke(
+                    rect,
+                    6.0,
+                    Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+                    egui::StrokeKind::Outside,
+                );
+                let wave_rect = rect.shrink2(egui::vec2(8.0, 8.0));
+                let wave_rect = egui::Rect::from_min_max(
+                    wave_rect.min,
+                    egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
+                );
+                let center_y = wave_rect.center().y;
+                let amp = wave_rect.height() * 0.46;
+                if !overview.is_empty() {
+                    let step = overview.len().max(1) as f32;
+                    for (idx, &(lo, hi)) in overview.iter().enumerate() {
+                        let x = wave_rect.left() + (idx as f32 / step) * wave_rect.width();
+                        let y0 = center_y - hi.clamp(-1.0, 1.0) * amp;
+                        let y1 = center_y - lo.clamp(-1.0, 1.0) * amp;
+                        painter.line_segment(
+                            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
+                            Stroke::new(1.0, Color32::from_rgb(120, 138, 162)),
+                        );
+                    }
+                } else {
+                    painter.line_segment(
+                        [
+                            egui::pos2(wave_rect.left(), center_y),
+                            egui::pos2(wave_rect.right(), center_y),
+                        ],
+                        Stroke::new(1.0, Color32::from_rgb(84, 94, 110)),
+                    );
+                }
+
+                let total = display_samples_len.max(1);
+                let visible = visible_samples.clamp(1, total);
+                let max_left = total.saturating_sub(visible);
+                let start_frac = (view_offset.min(max_left) as f32 / total as f32).clamp(0.0, 1.0);
+                let end_frac =
+                    ((view_offset.min(max_left) + visible) as f32 / total as f32).clamp(0.0, 1.0);
+                let viewport_rect = egui::Rect::from_min_max(
+                    egui::pos2(
+                        wave_rect.left() + start_frac * wave_rect.width(),
+                        wave_rect.top(),
+                    ),
+                    egui::pos2(
+                        wave_rect.left() + end_frac * wave_rect.width(),
+                        wave_rect.bottom(),
+                    ),
+                );
+                painter.rect_filled(
+                    viewport_rect,
+                    4.0,
+                    Color32::from_rgba_unmultiplied(72, 160, 255, 34),
+                );
+                painter.rect_stroke(
+                    viewport_rect,
+                    4.0,
+                    Stroke::new(1.5, Color32::from_rgb(92, 188, 255)),
+                    egui::StrokeKind::Outside,
+                );
+
+                let zoom = total as f32 / visible.max(1) as f32;
+                let visible_sec = visible as f32 / sample_rate.max(1) as f32;
+                let total_sec = total as f32 / sample_rate.max(1) as f32;
+                painter.text(
+                    egui::pos2(rect.left() + 8.0, rect.bottom() - 5.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!(
+                        "Zoom x{zoom:.1}  |  Visible {} / {}",
+                        crate::app::helpers::format_time_s(visible_sec),
+                        crate::app::helpers::format_time_s(total_sec)
+                    ),
+                    TextStyle::Small.resolve(ui.style()),
+                    Color32::from_rgb(176, 188, 205),
+                );
+            });
+        });
+        let max_left = display_samples_len
+            .saturating_sub(visible_samples.clamp(1, display_samples_len.max(1)));
+        if max_left == 0 {
+            return None;
+        }
+        let navigator_resp = resp.as_ref().expect("navigator response");
+        if (navigator_resp.clicked() || navigator_resp.dragged())
+            && navigator_resp.interact_pointer_pos().is_some()
+        {
             let wave_rect = rect.shrink2(egui::vec2(8.0, 8.0));
             let wave_rect = egui::Rect::from_min_max(
                 wave_rect.min,
                 egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
             );
-            let center_y = wave_rect.center().y;
-            let amp = wave_rect.height() * 0.46;
-            if !overview.is_empty() {
-                let step = overview.len().max(1) as f32;
-                for (idx, &(lo, hi)) in overview.iter().enumerate() {
-                    let x = wave_rect.left() + (idx as f32 / step) * wave_rect.width();
-                    let y0 = center_y - hi.clamp(-1.0, 1.0) * amp;
-                    let y1 = center_y - lo.clamp(-1.0, 1.0) * amp;
-                    painter.line_segment(
-                        [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-                        Stroke::new(1.0, Color32::from_rgb(120, 138, 162)),
-                    );
-                }
-            } else {
-                painter.line_segment(
-                    [
-                        egui::pos2(wave_rect.left(), center_y),
-                        egui::pos2(wave_rect.right(), center_y),
-                    ],
-                    Stroke::new(1.0, Color32::from_rgb(84, 94, 110)),
-                );
-            }
-
+            let pos = navigator_resp.interact_pointer_pos().unwrap();
+            let ratio = ((pos.x - wave_rect.left()) / wave_rect.width()).clamp(0.0, 1.0);
             let total = display_samples_len.max(1);
             let visible = visible_samples.clamp(1, total);
-            let max_left = total.saturating_sub(visible);
-            let start_frac = (view_offset.min(max_left) as f32 / total as f32).clamp(0.0, 1.0);
-            let end_frac =
-                ((view_offset.min(max_left) + visible) as f32 / total as f32).clamp(0.0, 1.0);
-            let viewport_rect = egui::Rect::from_min_max(
-                egui::pos2(
-                    wave_rect.left() + start_frac * wave_rect.width(),
-                    wave_rect.top(),
-                ),
-                egui::pos2(
-                    wave_rect.left() + end_frac * wave_rect.width(),
-                    wave_rect.bottom(),
-                ),
-            );
-            painter.rect_filled(
-                viewport_rect,
-                4.0,
-                Color32::from_rgba_unmultiplied(72, 160, 255, 34),
-            );
-            painter.rect_stroke(
-                viewport_rect,
-                4.0,
-                Stroke::new(1.5, Color32::from_rgb(92, 188, 255)),
-                egui::StrokeKind::Outside,
-            );
-
-            let zoom = total as f32 / visible.max(1) as f32;
-            let visible_sec = visible as f32 / sample_rate.max(1) as f32;
-            let total_sec = total as f32 / sample_rate.max(1) as f32;
-            painter.text(
-                egui::pos2(rect.left() + 8.0, rect.bottom() - 5.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!(
-                    "Zoom x{zoom:.1}  |  Visible {} / {}",
-                    crate::app::helpers::format_time_s(visible_sec),
-                    crate::app::helpers::format_time_s(total_sec)
-                ),
-                TextStyle::Small.resolve(ui.style()),
-                Color32::from_rgb(176, 188, 205),
-            );
-
-            if max_left == 0 {
-                return;
-            }
-            let navigator_resp = resp.as_ref().expect("navigator response");
-            if (navigator_resp.clicked() || navigator_resp.dragged())
-                && navigator_resp.interact_pointer_pos().is_some()
-            {
-                let pos = navigator_resp.interact_pointer_pos().unwrap();
-                let ratio = ((pos.x - wave_rect.left()) / wave_rect.width()).clamp(0.0, 1.0);
-                let center = (ratio * total as f32).round() as usize;
-                next_view = Some(center.saturating_sub(visible / 2).min(max_left));
-            }
-        });
+            let center = (ratio * total as f32).round() as usize;
+            next_view = Some(center.saturating_sub(visible / 2).min(max_left));
+        }
         next_view
     }
 
-    fn draw_loop_seam_preview(ui: &mut egui::Ui, preview: &LoopSeamPreview) {
+    fn draw_editor_amplitude_navigator(
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        tab: &mut EditorTab,
+    ) -> Option<(f32, f32)> {
+        let current_zoom = tab
+            .vertical_zoom
+            .clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+        let current_center =
+            Self::editor_clamped_vertical_view_center(current_zoom, tab.vertical_view_center);
+        let mut next_zoom = current_zoom;
+        let mut next_center = current_center;
+        let nav_resp = ui.interact(
+            rect,
+            egui::Id::new("editor_amplitude_nav"),
+            Sense::click_and_drag(),
+        );
+        let nav_resp = nav_resp.on_hover_text(format!(
+            "Zoom x{current_zoom:.1}\nCenter {current_center:+.2}"
+        ));
+        let painter = ui.painter_at(rect);
+        let rail_rect = rect;
+        let viewport_rect =
+            Self::amplitude_nav_viewport_rect(rail_rect, current_zoom, current_center);
+        let drag_id = nav_resp.id.with("drag_state");
+        let active_drag_state = ui
+            .ctx()
+            .memory(|mem| mem.data.get_temp::<AmplitudeNavDragState>(drag_id));
+
+        painter.rect_filled(rail_rect, 5.0, Color32::from_rgb(14, 16, 20));
+        painter.rect_stroke(
+            rail_rect,
+            5.0,
+            Stroke::new(1.0, Color32::from_rgb(46, 54, 66)),
+            egui::StrokeKind::Outside,
+        );
+        let zero_y = Self::amplitude_nav_y_from_amp(rail_rect, 0.0);
+        painter.line_segment(
+            [
+                egui::pos2(rail_rect.left(), zero_y),
+                egui::pos2(rail_rect.right(), zero_y),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(86, 98, 116)),
+        );
+        painter.rect_filled(
+            viewport_rect,
+            4.0,
+            Color32::from_rgba_unmultiplied(72, 160, 255, 34),
+        );
+        painter.rect_stroke(
+            viewport_rect,
+            4.0,
+            Stroke::new(1.5, Color32::from_rgb(92, 188, 255)),
+            egui::StrokeKind::Outside,
+        );
+        for y in [viewport_rect.top(), viewport_rect.bottom()] {
+            painter.line_segment(
+                [
+                    egui::pos2(viewport_rect.left() + 2.0, y),
+                    egui::pos2(viewport_rect.right() - 2.0, y),
+                ],
+                Stroke::new(2.0, Color32::from_rgb(110, 210, 255)),
+            );
+        }
+
+        if nav_resp.hovered() || active_drag_state.is_some() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeVertical);
+        }
+
+        let edge_zone = 9.0;
+        let (pointer_pos, pointer_down, pointer_released, time_now, press_positions) =
+            ui.input(|i| {
+                let press_positions = i
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            ..
+                        } if rail_rect.contains(*pos) => Some(*pos),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let pointer_released = i.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::PointerButton {
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            ..
+                        }
+                    )
+                });
+                (
+                    i.pointer.hover_pos().or_else(|| i.pointer.interact_pos()),
+                    i.pointer.primary_down(),
+                    pointer_released,
+                    i.time,
+                    press_positions,
+                )
+            });
+
+        if let Some(pos) = press_positions.last().copied() {
+            let is_double_click = if press_positions.len() >= 2 {
+                let prev = press_positions[press_positions.len() - 2];
+                prev.distance(pos) <= 6.0
+            } else {
+                tab.last_amplitude_nav_click_pos
+                    .map(|prev_pos| {
+                        (time_now - tab.last_amplitude_nav_click_at) <= 0.8
+                            && prev_pos.distance(pos) <= 6.0
+                    })
+                    .unwrap_or(false)
+            };
+            tab.last_amplitude_nav_click_at = time_now;
+            tab.last_amplitude_nav_click_pos = Some(pos);
+
+            if is_double_click {
+                next_zoom = 1.0;
+                next_center = 0.0;
+                ui.ctx().memory_mut(|mem| {
+                    mem.data.remove::<AmplitudeNavDragState>(drag_id);
+                });
+            } else {
+                let pointer_amp = Self::amplitude_nav_amp_from_y(rail_rect, pos.y);
+                let expanded_viewport = viewport_rect.expand2(egui::vec2(7.0, edge_zone));
+                let drag_state = if expanded_viewport.contains(pos)
+                    && ((pos.y - viewport_rect.top()).abs() <= edge_zone
+                        || (pos.y - viewport_rect.bottom()).abs() <= edge_zone)
+                {
+                    Some(AmplitudeNavDragState {
+                        kind: AmplitudeNavDragKind::ResizeViewport,
+                        pointer_amp_offset: 0.0,
+                        fixed_center: current_center,
+                    })
+                } else {
+                    let center = if viewport_rect.expand2(egui::vec2(4.0, 0.0)).contains(pos) {
+                        current_center
+                    } else {
+                        Self::editor_clamped_vertical_view_center(current_zoom, pointer_amp)
+                    };
+                    next_center = center;
+                    Some(AmplitudeNavDragState {
+                        kind: AmplitudeNavDragKind::MoveCenter,
+                        pointer_amp_offset: pointer_amp - center,
+                        fixed_center: center,
+                    })
+                };
+                if let Some(state) = drag_state {
+                    ui.ctx().memory_mut(|mem| {
+                        mem.data.insert_temp(drag_id, state);
+                    });
+                }
+            }
+        }
+
+        if pointer_down {
+            if let (Some(state), Some(pos)) = (active_drag_state, pointer_pos) {
+                let pointer_y = pos.y.clamp(rail_rect.top(), rail_rect.bottom());
+                let pointer_amp = Self::amplitude_nav_amp_from_y(rail_rect, pointer_y);
+                match state.kind {
+                    AmplitudeNavDragKind::MoveCenter => {
+                        next_center = Self::editor_clamped_vertical_view_center(
+                            current_zoom,
+                            pointer_amp - state.pointer_amp_offset,
+                        );
+                    }
+                    AmplitudeNavDragKind::ResizeViewport => {
+                        let half = (pointer_amp - state.fixed_center)
+                            .abs()
+                            .clamp(1.0 / crate::app::EDITOR_MAX_VERTICAL_ZOOM, 1.0);
+                        next_zoom = Self::amplitude_nav_zoom_from_fraction(half)
+                            .clamp(1.0, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+                        next_center = Self::editor_clamped_vertical_view_center(
+                            next_zoom,
+                            state.fixed_center,
+                        );
+                    }
+                }
+            }
+        }
+
+        if pointer_released {
+            ui.ctx().memory_mut(|mem| {
+                mem.data.remove::<AmplitudeNavDragState>(drag_id);
+            });
+        }
+
+        let changed = (next_zoom - current_zoom).abs() > 0.0001
+            || (next_center - current_center).abs() > 0.0001;
+        changed.then_some((next_zoom, next_center))
+    }
+
+    fn draw_loop_seam_preview(
+        ui: &mut egui::Ui,
+        preview: &LoopSeamPreview,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+    ) {
         let desired = egui::vec2(ui.available_width().max(120.0), 84.0);
         let (resp, painter) = ui.allocate_painter(desired, Sense::hover());
         let rect = resp.rect;
@@ -364,8 +719,6 @@ impl crate::app::WavesPreviewer {
             egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
         );
         let footer_y = rect.bottom() - 10.0;
-        let center_y = wave_rect.center().y;
-        let amp = wave_rect.height() * 0.42;
         let seam_x = wave_rect.center().x;
         let half_gap = 6.0;
         let left_rect = egui::Rect::from_min_max(
@@ -378,8 +731,14 @@ impl crate::app::WavesPreviewer {
         );
         painter.line_segment(
             [
-                egui::pos2(wave_rect.left(), center_y),
-                egui::pos2(wave_rect.right(), center_y),
+                egui::pos2(
+                    wave_rect.left(),
+                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
+                ),
+                egui::pos2(
+                    wave_rect.right(),
+                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
+                ),
             ],
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 36)),
         );
@@ -405,15 +764,22 @@ impl crate::app::WavesPreviewer {
             let mut points = Vec::with_capacity(tmp.len());
             for (i, (mn, mx)) in tmp.iter().enumerate() {
                 let x = egui::lerp(target_rect.x_range(), i as f32 / denom);
-                let y_min = center_y - mn.clamp(-1.0, 1.0) * amp;
-                let y_max = center_y - mx.clamp(-1.0, 1.0) * amp;
+                let y_min =
+                    Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mn);
+                let y_max =
+                    Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mx);
                 painter.line_segment(
                     [egui::pos2(x, y_min), egui::pos2(x, y_max)],
                     Stroke::new(1.0, stem_col),
                 );
                 points.push(egui::pos2(
                     x,
-                    center_y - ((mn + mx) * 0.5).clamp(-1.0, 1.0) * amp,
+                    Self::waveform_y_from_amp(
+                        wave_rect,
+                        vertical_zoom,
+                        vertical_view_center,
+                        (mn + mx) * 0.5,
+                    ),
                 ));
             }
             if points.len() >= 2 {
@@ -469,6 +835,8 @@ impl crate::app::WavesPreviewer {
         samples: &[f32],
         sample_rate: u32,
         accent: Color32,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
     ) {
         let desired = egui::vec2(ui.available_width().max(96.0), 84.0);
         let (resp, painter) = ui.allocate_painter(desired, Sense::hover());
@@ -488,12 +856,16 @@ impl crate::app::WavesPreviewer {
             wave_rect.min,
             egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
         );
-        let center_y = wave_rect.center().y;
-        let amp = wave_rect.height() * 0.42;
         painter.line_segment(
             [
-                egui::pos2(wave_rect.left(), center_y),
-                egui::pos2(wave_rect.right(), center_y),
+                egui::pos2(
+                    wave_rect.left(),
+                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
+                ),
+                egui::pos2(
+                    wave_rect.right(),
+                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
+                ),
             ],
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 30)),
         );
@@ -503,8 +875,8 @@ impl crate::app::WavesPreviewer {
         let denom = (tmp.len().saturating_sub(1)).max(1) as f32;
         for (idx, (mn, mx)) in tmp.iter().enumerate() {
             let x = egui::lerp(wave_rect.x_range(), idx as f32 / denom);
-            let y0 = center_y - mx.clamp(-1.0, 1.0) * amp;
-            let y1 = center_y - mn.clamp(-1.0, 1.0) * amp;
+            let y0 = Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mx);
+            let y1 = Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mn);
             painter.line_segment(
                 [egui::pos2(x, y0), egui::pos2(x, y1)],
                 Stroke::new(1.1, accent.gamma_multiply(0.45)),
@@ -637,20 +1009,22 @@ impl crate::app::WavesPreviewer {
         cur
     }
 
-    fn push_peak_shapes(
+    pub(crate) fn push_peak_shapes(
         shapes: &mut Vec<egui::Shape>,
         peaks: &[wf_cache::Peak],
         lane_rect: egui::Rect,
         wave_w: f32,
         scale: f32,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
     ) {
         let n = peaks.len().max(1) as f32;
         for (idx, peak) in peaks.iter().enumerate() {
             let mn = (peak.min * scale).clamp(-1.0, 1.0);
             let mx = (peak.max * scale).clamp(-1.0, 1.0);
             let x = lane_rect.left() + (idx as f32 / n) * wave_w;
-            let y0 = lane_rect.center().y - mx * (lane_rect.height() * 0.48);
-            let y1 = lane_rect.center().y - mn * (lane_rect.height() * 0.48);
+            let y0 = Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mx);
+            let y1 = Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mn);
             let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
             let col = amp_to_color(amp);
             shapes.push(egui::Shape::line_segment(
@@ -666,6 +1040,8 @@ impl crate::app::WavesPreviewer {
         lane_rect: egui::Rect,
         wave_w: f32,
         scale: f32,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
         start: usize,
         end: usize,
         painter: &egui::Painter,
@@ -706,7 +1082,15 @@ impl crate::app::WavesPreviewer {
         let query_ms = query_started.elapsed().as_secs_f32() * 1000.0;
         let draw_started = std::time::Instant::now();
         shapes.clear();
-        Self::push_peak_shapes(shapes, peaks, lane_rect, wave_w, scale);
+        Self::push_peak_shapes(
+            shapes,
+            peaks,
+            lane_rect,
+            wave_w,
+            scale,
+            vertical_zoom,
+            vertical_view_center,
+        );
         if !shapes.is_empty() {
             painter.extend(shapes.drain(..));
         }
@@ -721,6 +1105,8 @@ impl crate::app::WavesPreviewer {
         lane_rect: egui::Rect,
         wave_w: f32,
         scale: f32,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
         start: usize,
         end: usize,
         spp: f32,
@@ -817,12 +1203,18 @@ impl crate::app::WavesPreviewer {
         shapes.clear();
         match lod {
             WaveformRenderLod::Raw => {
-                let scale_y = lane_rect.height() * 0.48;
+                let base_y =
+                    Self::waveform_center_y(lane_rect, vertical_zoom, vertical_view_center);
                 if use_mixdown {
                     if mono.len() == 1 {
                         let sx = lane_rect.left() + wave_w * 0.5;
                         let v = mono[0].mul_add(scale, 0.0).clamp(-1.0, 1.0);
-                        let sy = lane_rect.center().y - v * scale_y;
+                        let sy = Self::waveform_y_from_amp(
+                            lane_rect,
+                            vertical_zoom,
+                            vertical_view_center,
+                            v,
+                        );
                         painter.circle_filled(
                             egui::pos2(sx, sy),
                             2.0,
@@ -835,7 +1227,12 @@ impl crate::app::WavesPreviewer {
                             let v = (sample * scale).clamp(-1.0, 1.0);
                             let t = i as f32 / denom;
                             let sx = lane_rect.left() + t * wave_w;
-                            let sy = lane_rect.center().y - v * scale_y;
+                            let sy = Self::waveform_y_from_amp(
+                                lane_rect,
+                                vertical_zoom,
+                                vertical_view_center,
+                                v,
+                            );
                             line_points.push(egui::pos2(sx, sy));
                         }
                         for i in 1..line_points.len() {
@@ -850,10 +1247,9 @@ impl crate::app::WavesPreviewer {
                         if pps >= 6.0 {
                             for (point, &sample) in line_points.iter().zip(mono.iter()) {
                                 let v = (sample * scale).clamp(-1.0, 1.0);
-                                let base = lane_rect.center().y;
                                 let col = amp_to_color(v.abs().clamp(0.0, 1.0));
                                 shapes.push(egui::Shape::line_segment(
-                                    [egui::pos2(point.x, base), *point],
+                                    [egui::pos2(point.x, base_y), *point],
                                     egui::Stroke::new(1.0, col),
                                 ));
                             }
@@ -866,7 +1262,12 @@ impl crate::app::WavesPreviewer {
                     if samples.len() == 1 {
                         let sx = lane_rect.left() + wave_w * 0.5;
                         let v = samples[0].mul_add(scale, 0.0).clamp(-1.0, 1.0);
-                        let sy = lane_rect.center().y - v * scale_y;
+                        let sy = Self::waveform_y_from_amp(
+                            lane_rect,
+                            vertical_zoom,
+                            vertical_view_center,
+                            v,
+                        );
                         painter.circle_filled(
                             egui::pos2(sx, sy),
                             2.0,
@@ -879,7 +1280,12 @@ impl crate::app::WavesPreviewer {
                             let v = (sample * scale).clamp(-1.0, 1.0);
                             let t = i as f32 / denom;
                             let sx = lane_rect.left() + t * wave_w;
-                            let sy = lane_rect.center().y - v * scale_y;
+                            let sy = Self::waveform_y_from_amp(
+                                lane_rect,
+                                vertical_zoom,
+                                vertical_view_center,
+                                v,
+                            );
                             line_points.push(egui::pos2(sx, sy));
                         }
                         for i in 1..line_points.len() {
@@ -894,10 +1300,9 @@ impl crate::app::WavesPreviewer {
                         if pps >= 6.0 {
                             for (point, &sample) in line_points.iter().zip(samples.iter()) {
                                 let v = (sample * scale).clamp(-1.0, 1.0);
-                                let base = lane_rect.center().y;
                                 let col = amp_to_color(v.abs().clamp(0.0, 1.0));
                                 shapes.push(egui::Shape::line_segment(
-                                    [egui::pos2(point.x, base), *point],
+                                    [egui::pos2(point.x, base_y), *point],
                                     egui::Stroke::new(1.0, col),
                                 ));
                             }
@@ -906,7 +1311,15 @@ impl crate::app::WavesPreviewer {
                 }
             }
             WaveformRenderLod::VisibleMinMax | WaveformRenderLod::Pyramid => {
-                Self::push_peak_shapes(shapes, peaks, lane_rect, wave_w, scale);
+                Self::push_peak_shapes(
+                    shapes,
+                    peaks,
+                    lane_rect,
+                    wave_w,
+                    scale,
+                    vertical_zoom,
+                    vertical_view_center,
+                );
             }
         }
         if !shapes.is_empty() {
@@ -995,6 +1408,8 @@ impl crate::app::WavesPreviewer {
             _ => None,
         };
         let mut touch_spectro_cache = false;
+        let mut pending_viewport_hint: Option<crate::app::editor_viewport::EditorViewportHint> =
+            None;
         ui.horizontal(|ui| {
             let tab = &self.tabs[tab_idx];
             let base = if self.is_virtual_path(&tab.path) {
@@ -1009,6 +1424,7 @@ impl crate::app::WavesPreviewer {
             );
         });
         let mut discard_preview_for_view_change = false;
+        let mut request_preview_refresh = false;
         let mut requested_channel_view: Option<ChannelView> = None;
         let channel_count = self.tabs[tab_idx].ch_samples.len();
         ui.horizontal_wrapped(|ui| {
@@ -1046,10 +1462,18 @@ impl crate::app::WavesPreviewer {
                     });
             });
             if selected_view != prev_view {
+                let prev_preview_supported =
+                    Self::view_supports_wave_preview(prev_view, tab.show_waveform_overlay);
                 tab.set_leaf_view_mode(selected_view);
-                if prev_view == ViewMode::Waveform && selected_view != ViewMode::Waveform {
-                    tab.show_waveform_overlay = false;
+                let next_preview_supported =
+                    Self::view_supports_wave_preview(selected_view, tab.show_waveform_overlay);
+                if prev_preview_supported && !next_preview_supported {
                     discard_preview_for_view_change = true;
+                } else if !prev_preview_supported
+                    && next_preview_supported
+                    && Self::tool_supports_preview(tab.active_tool)
+                {
+                    request_preview_refresh = true;
                 }
             }
             ui.separator();
@@ -1346,23 +1770,13 @@ impl crate::app::WavesPreviewer {
                                         b
                                     }
                                 } else {
-                                    tab.drag_select_anchor.unwrap_or(cur_display)
+                                    Self::editor_selection_anchor_or(tab, cur_display)
                                 }
                             } else {
-                                tab.drag_select_anchor.unwrap_or(cur_display)
+                                Self::editor_selection_anchor_or(tab, cur_display)
                             };
-                            tab.drag_select_anchor = Some(anchor);
-                            let (s, e) = if new_display >= anchor {
-                                (anchor, new_display)
-                            } else {
-                                (new_display, anchor)
-                            };
-                            tab.selection = Some((s, e));
+                            Self::editor_set_selection_from_anchor(tab, anchor, new_display);
                         }
-                    } else if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                        tab.drag_select_anchor = None;
-                        tab.right_drag_mode = None;
-                        tab.right_drag_anchor = None;
                     }
                     if new_display != cur_display {
                         request_seek = Some(map_display_to_audio(new_display));
@@ -1423,7 +1837,7 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .map(|s| s.tab_idx == tab_idx && s.is_apply)
             .unwrap_or(false);
-        let overlay_busy = self.heavy_overlay_rx.is_some() || self.music_preview_state.is_some();
+        let overlay_busy = self.current_tab_preview_busy(tab_idx) || self.music_preview_state.is_some();
         let apply_busy = self.editor_apply_state.is_some() || plugin_apply_busy;
         let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
         let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32)> = None;
@@ -1466,22 +1880,10 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .filter(|p| p.path == tab_path)
             .map(|p| (p.msg.clone(), p.started_at));
-        let preview_msg = if self.heavy_preview_rx.is_some()
-            || self.heavy_overlay_rx.is_some()
-            || self.music_preview_state.is_some()
-        {
-            let msg = if let Some(t) = &self.heavy_preview_tool {
-                match t {
-                    ToolKind::PitchShift => "Previewing PitchShift...".to_string(),
-                    ToolKind::TimeStretch => "Previewing TimeStretch...".to_string(),
-                    _ => "Previewing...".to_string(),
-                }
-            } else if self.music_preview_state.is_some() {
-                "Previewing Music Analyze...".to_string()
-            } else {
-                "Previewing...".to_string()
-            };
+        let preview_msg = if let Some(msg) = self.current_tab_preview_message(tab_idx) {
             Some(msg)
+        } else if self.music_preview_state.is_some() {
+            Some("Previewing Music Analyze...".to_string())
         } else if plugin_preview_busy {
             Some("Previewing Plugin FX...".to_string())
         } else {
@@ -1539,6 +1941,16 @@ impl crate::app::WavesPreviewer {
         ui.horizontal_top(|ui| {
                 let tab = &mut self.tabs[tab_idx];
                 let preview_ok = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
+                let preview_disabled_reason = if !preview_ok {
+                    Some("Preview disabled for large clips")
+                } else if apply_busy {
+                    Some("Preview unavailable while Apply is running")
+                } else if preview_msg.is_some() || plugin_preview_busy {
+                    Some("Preview unavailable while another preview is running")
+                } else {
+                    None
+                };
+                let preview_button_enabled = preview_disabled_reason.is_none();
                 // Canvas area
                 let mut need_restore_preview = false;
                 // Accumulate non-destructive preview audio to audition.
@@ -1574,10 +1986,35 @@ impl crate::app::WavesPreviewer {
                     let mut hover_cursor: Option<egui::CursorIcon> = None;
                     painter.rect_filled(rect, 0.0, Color32::from_rgb(16,16,18));
                     // Layout parameters
+                    let view_mode = tab.leaf_view_mode();
                     let gutter_w = 44.0;
+                    let show_amplitude_navigator = matches!(
+                        view_mode,
+                        ViewMode::Waveform | ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+                    );
+                    let amplitude_nav_gap = if show_amplitude_navigator { 6.0 } else { 0.0 };
+                    let amplitude_nav_right_pad = if show_amplitude_navigator { 6.0 } else { 0.0 };
+                    let amplitude_nav_strip_w = if show_amplitude_navigator { 18.0 } else { 0.0 };
+                    let amplitude_nav_reserved_w =
+                        amplitude_nav_gap + amplitude_nav_right_pad + amplitude_nav_strip_w;
                     let wave_left = rect.left() + gutter_w;
-                    let wave_w = (w - gutter_w).max(1.0);
-                        let view_mode = tab.leaf_view_mode();
+                    let wave_w = (w - gutter_w - amplitude_nav_reserved_w).max(1.0);
+                    let amplitude_nav_rect = if show_amplitude_navigator {
+                        Some(egui::Rect::from_min_max(
+                            egui::pos2(rect.right() - amplitude_nav_right_pad - amplitude_nav_strip_w, rect.top() + 10.0),
+                            egui::pos2(rect.right() - amplitude_nav_right_pad, rect.bottom() - 10.0),
+                        ))
+                    } else {
+                        None
+                    };
+                    tab.last_amplitude_nav_rect = amplitude_nav_rect;
+                    tab.last_amplitude_viewport_rect = amplitude_nav_rect.map(|nav_rect| {
+                        Self::amplitude_nav_viewport_rect(
+                            nav_rect,
+                            tab.vertical_zoom,
+                            tab.vertical_view_center,
+                        )
+                    });
                         let channel_count = tab.ch_samples.len().max(1);
                         let mut visible_channels = tab.channel_view.visible_indices(channel_count);
                         let force_feature_mixdown =
@@ -1605,9 +2042,10 @@ impl crate::app::WavesPreviewer {
                         tab.samples_len
                     };
                     if display_samples_len > 0 && tab.samples_per_px <= 0.0 {
-                        let fit_spp = (display_samples_len as f32 / wave_w.max(1.0)).max(0.01);
+                        let fit_spp = (display_samples_len as f32 / wave_w.max(1.0))
+                            .max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
                         tab.samples_per_px = fit_spp;
-                        tab.view_offset = 0;
+                        Self::editor_set_view_offset(tab, 0);
                     }
                     // Keep the same center sample anchored when the window width changes.
                     if display_samples_len > 0 {
@@ -1620,7 +2058,7 @@ impl crate::app::WavesPreviewer {
                                 let anchor = tab.view_offset.saturating_add(old_vis / 2);
                                 let max_left = display_samples_len.saturating_sub(new_vis);
                                 let new_view = anchor.saturating_sub(new_vis / 2).min(max_left);
-                                tab.view_offset = new_view;
+                                Self::editor_set_view_offset(tab, new_view);
                             }
                         }
                         tab.last_wave_w = wave_w;
@@ -1628,12 +2066,51 @@ impl crate::app::WavesPreviewer {
                         tab.last_wave_w = wave_w;
                     }
 
+            let spp = tab.samples_per_px.max(0.0001);
+            let visible_samples = (wave_w * spp).ceil() as usize;
+            let start = tab.view_offset.min(display_samples_len);
+            let end = (start + visible_samples).min(display_samples_len);
+            pending_viewport_hint = matches!(
+                view_mode,
+                ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+            )
+            .then_some(crate::app::editor_viewport::EditorViewportHint {
+                view_mode,
+                display_samples_len,
+                start,
+                end,
+                wave_width_px: wave_w.round().max(1.0) as usize,
+                lane_height_px: lane_h.round().max(1.0) as usize,
+                lane_count,
+                use_mixdown,
+                visible_channels: visible_channels.clone(),
+            });
+            let current_spectral_viewport_key =
+                if matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel) {
+                    Some(EditorViewportRenderKey {
+                        kind: EditorViewportPayloadKind::Spectral,
+                        view_mode,
+                        source_generation: tab.viewport_source_generation,
+                        display_samples_len,
+                        start,
+                        end,
+                        lane_count: lane_count.max(1),
+                        lane_height_px: lane_h.max(1.0).round() as usize,
+                        wave_width_px: wave_w.max(1.0).round() as usize,
+                        use_mixdown,
+                        visible_channels: visible_channels.clone(),
+                        samples_per_px_bits: tab.samples_per_px.to_bits(),
+                        vertical_zoom_bits: tab.vertical_zoom.to_bits(),
+                        vertical_view_center_bits: tab.vertical_view_center.to_bits(),
+                        scale_bits: 0,
+                        spectro_cfg_digest: Self::editor_spectro_cfg_digest(&self.spectro_cfg),
+                    })
+                } else {
+                    None
+                };
+
             // Time ruler (ticks + labels) across all lanes
             {
-                let spp = tab.samples_per_px.max(0.0001);
-                let vis = (wave_w * spp).ceil() as usize;
-                let start = tab.view_offset.min(display_samples_len);
-                let end = (start + vis).min(display_samples_len);
                 if end > start {
                     let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                     let t0 = start as f32 / sr;
@@ -1725,30 +2202,81 @@ impl crate::app::WavesPreviewer {
                     ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                         if let Some(specs) = spec_cache.as_ref() {
                             touch_spectro_cache = true;
-                            for ci in 0..lane_count {
-                                let lane_top = rect.top() + lane_h * ci as f32;
-                                let lane_rect = egui::Rect::from_min_size(
-                                    egui::pos2(wave_left, lane_top),
-                                    egui::vec2(wave_w, lane_h),
+                            let current_viewport_cache = current_spectral_viewport_key
+                                .as_ref()
+                                .and_then(|key| Self::best_editor_viewport_cache(tab, key));
+                            if let Some(crate::app::types::EditorViewportRenderCache {
+                                payload:
+                                    crate::app::types::EditorViewportCachePayload::Image {
+                                        texture: Some(texture),
+                                        ..
+                                    },
+                                ..
+                            }) = current_viewport_cache
+                            {
+                                painter.image(
+                                    texture.id(),
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(wave_left, rect.top()),
+                                        egui::vec2(wave_w, lane_h * lane_count as f32),
+                                    ),
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    Color32::WHITE,
                                 );
-                                let spec = if use_mixdown {
-                                    specs.get(0)
-                                } else if tab.channel_view.mode == ChannelViewMode::Custom {
-                                    specs.get(ci)
+                            } else {
+                                let lane_spec_indices = if use_mixdown {
+                                    vec![0usize; lane_count.max(1)]
+                                } else if visible_channels.is_empty() {
+                                    (0..lane_count.max(1)).collect::<Vec<_>>()
                                 } else {
                                     visible_channels
-                                        .get(ci)
-                                        .and_then(|idx| specs.get(*idx))
-                                        .or_else(|| specs.get(ci))
+                                        .iter()
+                                        .copied()
+                                        .take(lane_count.max(1))
+                                        .collect::<Vec<_>>()
                                 };
-                                if let Some(spec) = spec {
-                                    Self::draw_spectrogram(
-                                        &painter,
-                                        lane_rect,
-                                        tab,
-                                        spec,
-                                        view_mode,
-                                        &self.spectro_cfg,
+                                let fallback_image = Self::render_spectral_viewport_image(
+                                    specs,
+                                    &lane_spec_indices,
+                                    wave_w.max(1.0).round() as usize,
+                                    lane_h.max(1.0).round() as usize,
+                                    lane_count.max(1),
+                                    start,
+                                    end,
+                                    tab.vertical_zoom,
+                                    tab.vertical_view_center,
+                                    &self.spectro_cfg,
+                                    view_mode,
+                                    crate::app::types::EditorViewportRenderQuality::Coarse,
+                                );
+                                let fallback_texture = ui.ctx().load_texture(
+                                    format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
+                                    fallback_image,
+                                    egui::TextureOptions::LINEAR,
+                                );
+                                painter.image(
+                                    fallback_texture.id(),
+                                    egui::Rect::from_min_size(
+                                        egui::pos2(wave_left, rect.top()),
+                                        egui::vec2(wave_w, lane_h * lane_count as f32),
+                                    ),
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    Color32::WHITE,
+                                );
+                                if spec_loading {
+                                    let fid = TextStyle::Monospace.resolve(ui.style());
+                                    painter.text(
+                                        egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                                        egui::Align2::LEFT_TOP,
+                                        "Building spectrogram...",
+                                        fid,
+                                        Color32::GRAY,
                                     );
                                 }
                             }
@@ -1816,6 +2344,12 @@ impl crate::app::WavesPreviewer {
                             };
                             let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
                             let mel_min = 1.0_f32;
+                            let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+                                view_mode,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                            );
                             for ci in 0..lane_count {
                                 let lane_top = rect.top() + lane_h * ci as f32;
                                 let lane_rect = egui::Rect::from_min_size(
@@ -1858,7 +2392,15 @@ impl crate::app::WavesPreviewer {
                                         },
                                         _ => 0.0,
                                     };
-                                    let y = lane_rect.bottom() - frac * lane_rect.height();
+                                    let visible_frac = if (visible_max - visible_min).abs()
+                                        < f32::EPSILON
+                                    {
+                                        0.0
+                                    } else {
+                                        ((frac - visible_min) / (visible_max - visible_min))
+                                            .clamp(0.0, 1.0)
+                                    };
+                                    let y = lane_rect.bottom() - visible_frac * lane_rect.height();
                                     if last_y.is_finite() && (last_y - y) < 12.0 {
                                         continue;
                                     }
@@ -2008,22 +2550,16 @@ impl crate::app::WavesPreviewer {
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 0.9 } else { 1.1 };
                     let old_spp = tab.samples_per_px.max(0.0001);
-                    let vis = (wave_w * old_spp).ceil() as usize;
-                    let playhead = playhead_display_now.min(display_samples_len);
-                    let anchor = if playhead >= tab.view_offset
-                        && playhead <= tab.view_offset.saturating_add(vis)
-                    {
-                        playhead
-                    } else {
-                        tab.view_offset.saturating_add(vis / 2)
-                    };
-                    let t = if vis > 0 {
-                        ((anchor.saturating_sub(tab.view_offset)) as f32 / vis as f32)
-                            .clamp(0.0, 1.0)
-                    } else {
-                        0.5
-                    };
-                    let min_spp = 0.01;
+                    let (anchor, t) = Self::editor_zoom_anchor(
+                        self.horizontal_zoom_anchor_mode,
+                        tab,
+                        display_samples_len,
+                        wave_left,
+                        wave_w,
+                        None,
+                        playhead_display_now,
+                    );
+                    let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
                     let max_spp_fit =
                         (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
                     let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
@@ -2031,13 +2567,19 @@ impl crate::app::WavesPreviewer {
                     let vis2 = (wave_w * tab.samples_per_px).ceil() as usize;
                     let left = anchor.saturating_sub((t * vis2 as f32) as usize);
                     let max_left = display_samples_len.saturating_sub(vis2);
-                    tab.view_offset = left.min(max_left);
+                    Self::editor_set_view_offset(tab, left.min(max_left));
                 }
             }
 
             // Detect hover using pointer position against our canvas rect (robust across senses)
-            let pointer_over_canvas = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| rect.contains(p));
-            if pointer_over_canvas {
+            let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+            let pointer_over_waveform = pointer_pos.map_or(false, |p| {
+                rect.contains(p)
+                    && amplitude_nav_rect
+                        .map(|amp_rect| !amp_rect.contains(p))
+                        .unwrap_or(true)
+            });
+            if pointer_over_waveform {
                 // Zoom with wheel/pinch over this widget.
                 // `zoom_delta` captures ctrl/cmd+wheel and pinch gestures robustly.
                 let (wheel_raw, wheel_smooth, zoom_delta, modifiers) = ui.input(|i| {
@@ -2054,9 +2596,11 @@ impl crate::app::WavesPreviewer {
                     wheel_smooth
                 };
                 let scroll_y = wheel.y;
-                let pointer_pos = resp.hover_pos();
-                let zoom_factor_from_input = if zoom_delta.is_finite()
-                    && (zoom_delta - 1.0).abs() > 1e-4
+                let pointer_x = resp.hover_pos().map(|p| p.x).filter(|_| pointer_over_waveform);
+                let wheel_has_scroll = wheel.x.abs() > 0.0 || scroll_y.abs() > 0.0;
+                let zoom_factor_from_input = if !wheel_has_scroll
+                    && zoom_delta.is_finite()
+                    && (zoom_delta - 1.0).abs() > 0.10
                 {
                     // egui zoom_delta > 1 means "zoom in". For samples-per-pixel we invert it.
                     Some((1.0 / zoom_delta.max(1e-3)).clamp(0.2, 5.0))
@@ -2087,20 +2631,32 @@ impl crate::app::WavesPreviewer {
                     || zoom_factor_from_input.is_some())
                     && display_samples_len > 0
                 {
-                    // Wheel up = zoom in
                     let factor = zoom_factor_from_input
-                        .unwrap_or_else(|| if scroll_y < 0.0 { 0.9 } else { 1.1 })
+                        .unwrap_or_else(|| {
+                            let zoom_scroll_y = if self.invert_wave_zoom_wheel {
+                                -scroll_y
+                            } else {
+                                scroll_y
+                            };
+                            if zoom_scroll_y > 0.0 {
+                                0.9
+                            } else {
+                                1.1
+                            }
+                        })
                         .clamp(0.2, 5.0);
                     let old_spp = tab.samples_per_px.max(0.0001);
-                    let cursor_x = pointer_pos.map(|p| p.x).unwrap_or(wave_left + wave_w * 0.5).clamp(wave_left, wave_left + wave_w);
-                    let t = ((cursor_x - wave_left) / wave_w).clamp(0.0, 1.0);
+                    let (anchor, t) = Self::editor_zoom_anchor(
+                        self.horizontal_zoom_anchor_mode,
+                        tab,
+                        display_samples_len,
+                        wave_left,
+                        wave_w,
+                        pointer_x,
+                        playhead_display_now,
+                    );
                     let vis = (wave_w * old_spp).ceil() as usize;
-                    let anchor = tab
-                        .view_offset
-                        .saturating_add((t * vis as f32) as usize)
-                        .min(display_samples_len);
-                    // Dynamic clamp: allow full zoom-out to "fit whole"
-                    let min_spp = 0.01; // 100 px per sample
+                    let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
                     let max_spp_fit =
                         (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
                     let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
@@ -2118,19 +2674,19 @@ impl crate::app::WavesPreviewer {
                             old_spp, new_spp, factor, vis, vis2, anchor, new_view, wave_w, fit_whole
                         );
                     }
-                    tab.view_offset = new_view;
+                    Self::editor_set_view_offset(tab, new_view);
                 }
                 // Pan with Shift + wheel (prefer horizontal wheel if available)
-                let scroll_for_pan = if wheel.x.abs() > 0.0 { wheel.x } else { wheel.y };
+                let mut scroll_for_pan = if wheel.x.abs() > 0.0 { wheel.x } else { wheel.y };
+                if self.invert_shift_wheel_pan {
+                    scroll_for_pan = -scroll_for_pan;
+                }
                 if modifiers.shift && scroll_for_pan.abs() > 0.0 && display_samples_len > 0 {
                     let delta_px = -scroll_for_pan.signum() * 60.0; // a page step
-                    let delta = (delta_px * tab.samples_per_px) as isize;
-                    let mut off = tab.view_offset as isize + delta;
                     let vis = (wave_w * tab.samples_per_px).ceil() as usize;
                     let max_left = display_samples_len.saturating_sub(vis);
-                    if off < 0 { off = 0; }
-                    if off as usize > max_left { off = max_left as isize; }
-                    tab.view_offset = off as usize;
+                    let next_exact = tab.view_offset_exact + (delta_px * tab.samples_per_px) as f64;
+                    Self::editor_set_view_offset_exact(tab, next_exact, max_left);
                 }
                 // Pan with Middle drag or Alt + Left drag (DAW-like).
                 let (left_down, mid_down, alt_mod) = ui.input(|i| (
@@ -2142,13 +2698,10 @@ impl crate::app::WavesPreviewer {
                 if (mid_down || alt_left_pan) && display_samples_len > 0 {
                     let dx = ui.input(|i| i.pointer.delta().x);
                     if dx.abs() > 0.0 {
-                        let delta = (-dx * tab.samples_per_px) as isize;
-                        let mut off = tab.view_offset as isize + delta;
                         let vis = (wave_w * tab.samples_per_px).ceil() as usize;
                         let max_left = display_samples_len.saturating_sub(vis);
-                        if off < 0 { off = 0; }
-                        if off as usize > max_left { off = max_left as isize; }
-                        tab.view_offset = off as usize;
+                        let next_exact = tab.view_offset_exact + (-dx * tab.samples_per_px) as f64;
+                        Self::editor_set_view_offset_exact(tab, next_exact, max_left);
                     }
                 }
             }
@@ -2156,42 +2709,40 @@ impl crate::app::WavesPreviewer {
             let mut suppress_seek = false;
             let alt_now = ui.input(|i| i.modifiers.alt);
             // Right drag is dedicated to seek/playhead movement.
-            // Shift+Right drag switches to range selection with playhead anchor.
-            if pointer_over_canvas
+            // Shift+Right drag switches to range selection with button-down anchor.
+            if pointer_over_waveform
                 && !alt_now
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
             {
+                let right_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
                 let right_drag_started = resp.drag_started_by(egui::PointerButton::Secondary);
                 let right_dragging = resp.dragged_by(egui::PointerButton::Secondary);
                 let right_drag_stopped = resp.drag_stopped_by(egui::PointerButton::Secondary);
                 let shift_now = ui.input(|i| i.modifiers.shift);
                 let spp = tab.samples_per_px.max(0.0001);
                 let vis = (wave_w * spp).ceil() as usize;
+                let view_offset = tab.view_offset;
                 let to_display_sample = |x: f32| -> usize {
                     let x = x.clamp(wave_left, wave_left + wave_w);
-                    tab.view_offset
+                    view_offset
                         .saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize)
                         .min(display_samples_len)
                 };
 
-                if right_drag_started {
-                    let playhead_anchor = playhead_display_now.min(display_samples_len);
+                if right_pressed || right_drag_started {
                     tab.right_drag_mode = Some(if shift_now {
                         RightDragMode::SelectRange
                     } else {
                         RightDragMode::Seek
                     });
-                    tab.right_drag_anchor = Some(playhead_anchor);
                     if shift_now {
-                        if let Some(pos) = resp.interact_pointer_pos() {
+                        if let Some(pos) = resp
+                            .interact_pointer_pos()
+                            .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                        {
                             let samp = to_display_sample(pos.x);
-                            let (s, e) = if samp >= playhead_anchor {
-                                (playhead_anchor, samp)
-                            } else {
-                                (samp, playhead_anchor)
-                            };
-                            tab.selection = Some((s, e));
+                            Self::editor_set_selection_from_anchor(tab, samp, samp);
                             suppress_seek = true;
                         }
                     }
@@ -2209,15 +2760,11 @@ impl crate::app::WavesPreviewer {
                                 suppress_seek = true;
                             }
                             RightDragMode::SelectRange => {
-                                let anchor = tab
-                                    .right_drag_anchor
-                                    .unwrap_or_else(|| playhead_display_now.min(display_samples_len));
-                                let (s, e) = if samp >= anchor {
-                                    (anchor, samp)
-                                } else {
-                                    (samp, anchor)
-                                };
-                                tab.selection = Some((s, e));
+                                let anchor = Self::editor_selection_anchor_or(
+                                    tab,
+                                    playhead_display_now.min(display_samples_len),
+                                );
+                                Self::editor_set_selection_from_anchor(tab, anchor, samp);
                                 suppress_seek = true;
                             }
                         }
@@ -2225,10 +2772,9 @@ impl crate::app::WavesPreviewer {
                 }
                 if right_drag_stopped {
                     tab.right_drag_mode = None;
-                    tab.right_drag_anchor = None;
                 }
             }
-            if pointer_over_canvas
+            if pointer_over_waveform
                 && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && display_samples_len > 0
             {
@@ -2304,7 +2850,7 @@ impl crate::app::WavesPreviewer {
                 }
             }
             // Drag to select a range (independent of tool), unless we are dragging markers
-            if pointer_over_canvas
+            if pointer_over_waveform
                 && !alt_now
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
@@ -2315,8 +2861,9 @@ impl crate::app::WavesPreviewer {
                 let spp = tab.samples_per_px.max(0.0001);
                 let vis = (wave_w * spp).ceil() as usize;
                 let playhead_display = playhead_display_now.min(display_samples_len);
+                let view_offset = tab.view_offset;
                 let playhead_x = wave_left
-                    + (((playhead_display.saturating_sub(tab.view_offset)) as f32 / spp)
+                    + (((playhead_display.saturating_sub(view_offset)) as f32 / spp)
                         .clamp(0.0, wave_w));
                 let snap_radius_px = 8.0f32;
                 let to_display_sample_snapped = |x: f32| -> usize {
@@ -2324,42 +2871,34 @@ impl crate::app::WavesPreviewer {
                     if (x - playhead_x).abs() <= snap_radius_px {
                         return playhead_display;
                     }
-                    tab.view_offset
+                    view_offset
                         .saturating_add((((x - wave_left) / wave_w) * vis as f32) as usize)
                         .min(display_samples_len)
                 };
                 if drag_started {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let samp = to_display_sample_snapped(pos.x);
-                        tab.drag_select_anchor = Some(samp);
+                        tab.selection_anchor_sample = Some(samp);
                     }
                 }
                 if dragging {
-                    let anchor = tab.drag_select_anchor.or_else(|| {
+                    let anchor = tab.selection_anchor_sample.or_else(|| {
                         resp.interact_pointer_pos()
                             .map(|pos| to_display_sample_snapped(pos.x))
                     });
-                    if tab.drag_select_anchor.is_none() {
-                        tab.drag_select_anchor = anchor;
+                    if tab.selection_anchor_sample.is_none() {
+                        tab.selection_anchor_sample = anchor;
                     }
                     if let (Some(anchor), Some(pos)) = (anchor, resp.interact_pointer_pos()) {
                         let samp = to_display_sample_snapped(pos.x);
-                        let (s, e) = if samp >= anchor {
-                            (anchor, samp)
-                        } else {
-                            (samp, anchor)
-                        };
-                        tab.selection = Some((s, e));
+                        Self::editor_set_selection_from_anchor(tab, anchor, samp);
                         suppress_seek = true;
                     }
                 }
-                if drag_released {
-                    tab.drag_select_anchor = None;
-                }
+                let _ = drag_released;
             }
             // Selection vs Seek with primary button (Alt+LeftDrag = pan handled above)
             if !alt_now && !suppress_seek {
-                // Primary interactions: click to seek (no range selection)
                 if resp.clicked_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let x = pos.x.clamp(wave_left, wave_left + wave_w);
@@ -2371,10 +2910,19 @@ impl crate::app::WavesPreviewer {
                                 (((x - wave_left) / wave_w) * vis as f32) as usize,
                             )
                             .min(display_samples_len);
-                        if tab.selection.is_some() {
+                        let shift_now = ui.input(|i| i.modifiers.shift);
+                        if shift_now {
+                            let anchor = Self::editor_selection_anchor_or(tab, playhead_display_now);
+                            Self::editor_set_selection_from_anchor(tab, anchor, pos_samp);
+                        } else {
+                            if tab.selection.is_some() {
+                                tab.selection = None;
+                            }
+                            tab.selection_anchor_sample = None;
+                            tab.right_drag_mode = None;
                             tab.selection = None;
+                            request_seek = Some(map_display_to_audio(pos_samp));
                         }
-                        request_seek = Some(map_display_to_audio(pos_samp));
                     }
                 }
             }
@@ -2404,11 +2952,23 @@ impl crate::app::WavesPreviewer {
                 // dB lines: -6, -12 dBFS and center line (0 amp)
                 let dbs = [-6.0f32, -12.0f32];
                 // center
-                painter.line_segment([egui::pos2(lane_rect.left(), lane_rect.center().y), egui::pos2(lane_rect.right(), lane_rect.center().y)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
+                let center_y =
+                    Self::waveform_center_y(lane_rect, tab.vertical_zoom, tab.vertical_view_center);
+                painter.line_segment([egui::pos2(lane_rect.left(), center_y), egui::pos2(lane_rect.right(), center_y)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
                 for &db in &dbs {
                     let a = db_to_amp(db).clamp(0.0, 1.0);
-                    let y0 = lane_rect.center().y - a * (lane_rect.height()*0.48);
-                    let y1 = lane_rect.center().y + a * (lane_rect.height()*0.48);
+                    let y0 = Self::waveform_y_from_amp(
+                        lane_rect,
+                        tab.vertical_zoom,
+                        tab.vertical_view_center,
+                        a,
+                    );
+                    let y1 = Self::waveform_y_from_amp(
+                        lane_rect,
+                        tab.vertical_zoom,
+                        tab.vertical_view_center,
+                        -a,
+                    );
                     painter.line_segment([egui::pos2(lane_rect.left(), y0), egui::pos2(lane_rect.right(), y0)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
                     painter.line_segment([egui::pos2(lane_rect.left(), y1), egui::pos2(lane_rect.right(), y1)], egui::Stroke::new(1.0, Color32::from_rgb(45,45,50)));
                     // labels on the left gutter
@@ -2417,34 +2977,39 @@ impl crate::app::WavesPreviewer {
                 }
 
                 if visible_len > 0 {
-                    let (wave_lod, lane_query_ms, lane_draw_ms) =
-                        if tab.loading && !tab.loading_waveform_minmax.is_empty() {
-                            Self::render_loading_overview_waveform(
-                                &tab.loading_waveform_minmax,
-                                display_samples_len.max(1),
-                                lane_rect,
-                                wave_w,
-                                scale,
-                                start,
-                                end,
-                                &painter,
-                                &mut waveform_scratch,
-                            )
-                        } else {
-                            Self::render_editor_lane_waveform(
-                                &*tab,
-                                use_mixdown,
-                                channel_index,
-                                lane_rect,
-                                wave_w,
-                                scale,
-                                start,
-                                end,
-                                spp,
-                                &painter,
-                                &mut waveform_scratch,
-                            )
-                        };
+                    let (wave_lod, lane_query_ms, lane_draw_ms) = if tab.loading
+                        && !tab.loading_waveform_minmax.is_empty()
+                    {
+                        Self::render_loading_overview_waveform(
+                            &tab.loading_waveform_minmax,
+                            display_samples_len.max(1),
+                            lane_rect,
+                            wave_w,
+                            scale,
+                            tab.vertical_zoom,
+                            tab.vertical_view_center,
+                            start,
+                            end,
+                            &painter,
+                            &mut waveform_scratch,
+                        )
+                    } else {
+                        Self::render_editor_lane_waveform(
+                            &*tab,
+                            use_mixdown,
+                            channel_index,
+                            lane_rect,
+                            wave_w,
+                            scale,
+                            tab.vertical_zoom,
+                            tab.vertical_view_center,
+                            start,
+                            end,
+                            spp,
+                            &painter,
+                            &mut waveform_scratch,
+                        )
+                    };
                     waveform_query_ms_total += lane_query_ms;
                     waveform_draw_ms_total += lane_draw_ms;
                     if use_mixdown && !matches!(wave_lod, WaveformRenderLod::Pyramid) {
@@ -2518,7 +3083,17 @@ impl crate::app::WavesPreviewer {
                                             ov::compute_overlay_bins_for_base_columns(start, visible_len, startb, over_vis, buf, bins)
                                         };
                                         // Draw full overlay
-                                        ov::draw_bins_locked(&painter, lane_rect, wave_w, &bins_values, scale, OVERLAY_COLOR, OVERLAY_STROKE_BASE);
+                                        ov::draw_bins_locked(
+                                            &painter,
+                                            lane_rect,
+                                            wave_w,
+                                            &bins_values,
+                                            scale,
+                                            tab.vertical_zoom,
+                                            tab.vertical_view_center,
+                                            OVERLAY_COLOR,
+                                            OVERLAY_STROKE_BASE,
+                                        );
                                         // Emphasize LoopEdit boundary segments if applicable
                                         if tab.active_tool == ToolKind::LoopEdit && !unwrap_preview {
                                             if let Some((a, b)) = tab.loop_region {
@@ -2547,7 +3122,16 @@ impl crate::app::WavesPreviewer {
                                                                 let span_w = ((p1 - p0) as f32 / bins as f32) * wave_w;
                                                                 let span_rect = egui::Rect::from_min_size(egui::pos2(span_left, lane_rect.top()), egui::vec2(span_w, lane_rect.height()));
                                                                 let sub = &bins_values[p0..p1];
-                                                                ov::draw_bins_in_rect(&painter, span_rect, sub, scale, OVERLAY_COLOR, OVERLAY_STROKE_EMPH);
+                                                                ov::draw_bins_in_rect(
+                                                                    &painter,
+                                                                    span_rect,
+                                                                    sub,
+                                                                    scale,
+                                                                    tab.vertical_zoom,
+                                                                    tab.vertical_view_center,
+                                                                    OVERLAY_COLOR,
+                                                                    OVERLAY_STROKE_EMPH,
+                                                                );
                                                             }
                                                         }
                                                     }
@@ -2616,6 +3200,8 @@ impl crate::app::WavesPreviewer {
                                             wave_w,
                                             &values,
                                             scale,
+                                            tab.vertical_zoom,
+                                            tab.vertical_view_center,
                                             egui::Color32::from_rgb(80, 240, 160),
                                             1.3,
                                         );
@@ -2686,7 +3272,6 @@ impl crate::app::WavesPreviewer {
                                     let seg_x0 = lane_rect.left() + ((p0 - startb) as f32 / over_vis as f32) * ov_w;
                                     let count = seg_w.max(1.0) as usize; // ~1 point per px
                                     let denom = (count.saturating_sub(1)).max(1) as f32;
-                                    let scale_y = lane_rect.height() * 0.48;
                                     #[cfg(debug_assertions)]
                                     if self.debug.cfg.enabled && self.debug.overlay_trace {
                                         let band = egui::Rect::from_min_max(egui::pos2(seg_x0, lane_rect.top()), egui::pos2(seg_x0 + seg_w, lane_rect.bottom()));
@@ -2701,7 +3286,12 @@ impl crate::app::WavesPreviewer {
                                         let idx = p0; // head of segment as representative
                                         let v = (buf[idx] * scale).clamp(-1.0, 1.0);
                                         let sx = seg_x0 + (seg_w * 0.5);
-                                        let sy = lane_rect.center().y - v * scale_y;
+                                        let sy = Self::waveform_y_from_amp(
+                                            lane_rect,
+                                            tab.vertical_zoom,
+                                            tab.vertical_view_center,
+                                            v,
+                                        );
                                         // Draw a short tick so it remains visible
                                         let tick_h = (lane_rect.height() * 0.10).max(2.0);
                                         painter.line_segment(
@@ -2720,7 +3310,12 @@ impl crate::app::WavesPreviewer {
                                         let idx = p0 + ((t * (seg_len as f32 - 1.0)).round() as usize).min(seg_len - 1);
                                         let v = (buf[idx] * scale).clamp(-1.0, 1.0);
                                         let sx = seg_x0 + t * seg_w;
-                                        let sy = lane_rect.center().y - v * scale_y;
+                                        let sy = Self::waveform_y_from_amp(
+                                            lane_rect,
+                                            tab.vertical_zoom,
+                                            tab.vertical_view_center,
+                                            v,
+                                        );
                                         let p = egui::pos2(sx, sy);
                                         if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.8, Color32::from_rgb(80, 240, 160))); }
                                         last = Some(p);
@@ -2746,7 +3341,15 @@ impl crate::app::WavesPreviewer {
                                                 )
                                         };
                                         crate::app::render::overlay::draw_bins_locked(
-                                            &painter, lane_rect, wave_w, &values, scale, egui::Color32::from_rgb(80, 240, 160), 1.3
+                                            &painter,
+                                            lane_rect,
+                                            wave_w,
+                                            &values,
+                                            scale,
+                                            tab.vertical_zoom,
+                                            tab.vertical_view_center,
+                                            egui::Color32::from_rgb(80, 240, 160),
+                                            1.3,
                                         );
                                     }
                                     // Emphasize LoopEdit boundary subranges if present (thicker over the same px columns)
@@ -2782,8 +3385,18 @@ impl crate::app::WavesPreviewer {
                                                 let mn = (mn * scale).clamp(-1.0, 1.0);
                                                 let mx = (mx * scale).clamp(-1.0, 1.0);
                                                 let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
-                                                let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
-                                                let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                                let y0 = Self::waveform_y_from_amp(
+                                                    lane_rect,
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
+                                                    mx,
+                                                );
+                                                let y1 = Self::waveform_y_from_amp(
+                                                    lane_rect,
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
+                                                    mn,
+                                                );
                                                 painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6, Color32::from_rgb(80, 240, 160)));
                                             }
                                         }
@@ -2820,15 +3433,29 @@ impl crate::app::WavesPreviewer {
                                                 let mn = (mn * scale).clamp(-1.0, 1.0);
                                                 let mx = (mx * scale).clamp(-1.0, 1.0);
                                                 let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
-                                                let y0 = lane_rect.center().y - mx * (lane_rect.height()*0.48);
-                                                let y1 = lane_rect.center().y - mn * (lane_rect.height()*0.48);
+                                                let y0 = Self::waveform_y_from_amp(
+                                                    lane_rect,
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
+                                                    mx,
+                                                );
+                                                let y1 = Self::waveform_y_from_amp(
+                                                    lane_rect,
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
+                                                    mn,
+                                                );
                                                 painter.line_segment([egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))], egui::Stroke::new(1.6, Color32::from_rgb(80, 240, 160)));
                                             }
                                         }
                                     }
                                 } else {
                                     let denom = (endb - startb - 1).max(1) as f32;
-                                    let scale_y = lane_rect.height() * 0.48;
+                                    let base_y = Self::waveform_center_y(
+                                        lane_rect,
+                                        tab.vertical_zoom,
+                                        tab.vertical_view_center,
+                                    );
                                     #[cfg(debug_assertions)]
                                     {
                                         let x0 = lane_rect.left();
@@ -2841,7 +3468,12 @@ impl crate::app::WavesPreviewer {
                                         let v = (buf[i] * scale).clamp(-1.0, 1.0);
                                         let t = (i - startb) as f32 / denom;
                                         let sx = lane_rect.left() + t * ov_w;
-                                        let sy = lane_rect.center().y - v * scale_y;
+                                        let sy = Self::waveform_y_from_amp(
+                                            lane_rect,
+                                            tab.vertical_zoom,
+                                            tab.vertical_view_center,
+                                            v,
+                                        );
                                         let p = egui::pos2(sx, sy);
                                         if let Some(lp) = last { painter.line_segment([lp, p], egui::Stroke::new(1.5, Color32::from_rgb(80, 240, 160))); }
                                         last = Some(p);
@@ -2853,9 +3485,13 @@ impl crate::app::WavesPreviewer {
                                             let v = (buf[i] * scale).clamp(-1.0, 1.0);
                                             let t = (i - startb) as f32 / denom;
                                             let sx = lane_rect.left() + t * ov_w;
-                                            let sy = lane_rect.center().y - v * scale_y;
-                                            let base = lane_rect.center().y;
-                                            painter.line_segment([egui::pos2(sx, base), egui::pos2(sx, sy)], egui::Stroke::new(1.0, Color32::from_rgb(80, 240, 160)));
+                                            let sy = Self::waveform_y_from_amp(
+                                                lane_rect,
+                                                tab.vertical_zoom,
+                                                tab.vertical_view_center,
+                                                v,
+                                            );
+                                            painter.line_segment([egui::pos2(sx, base_y), egui::pos2(sx, sy)], egui::Stroke::new(1.0, Color32::from_rgb(80, 240, 160)));
                                         }
                                     }
                                 }
@@ -3227,7 +3863,7 @@ impl crate::app::WavesPreviewer {
                 }
 
                 // Cursor feedback for editor handles
-                if pointer_over_canvas {
+                if pointer_over_waveform {
                     let handle_radius = 7.0;
                     if tab.dragging_marker.is_some() {
                         hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
@@ -3300,19 +3936,35 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            if let Some(amp_rect) = amplitude_nav_rect {
+                if let Some((next_zoom, next_center)) =
+                    Self::draw_editor_amplitude_navigator(ui, amp_rect, tab)
+                {
+                    tab.vertical_zoom = next_zoom
+                        .clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+                    tab.vertical_view_center = next_center;
+                    Self::editor_clamp_vertical_view(tab);
+                    tab.last_amplitude_viewport_rect = Some(Self::amplitude_nav_viewport_rect(
+                        amp_rect,
+                        tab.vertical_zoom,
+                        tab.vertical_view_center,
+                    ));
+                }
+            }
+
             if tab_samples_len > 0 {
                 let spp = tab.samples_per_px.max(0.0001);
                 let vis = (wave_w * spp).ceil() as usize;
                 let max_left = tab_samples_len.saturating_sub(vis);
                 if tab.view_offset > max_left {
-                    tab.view_offset = max_left;
+                    Self::editor_set_view_offset(tab, max_left);
                 }
                 let overview = if tab.loading && !tab.loading_waveform_minmax.is_empty() {
                     tab.loading_waveform_minmax.as_slice()
                 } else {
                     tab.waveform_minmax.as_slice()
                 };
-                if let Some(next_view) = Self::draw_editor_overview_navigator(
+                if let Some(next_view) = Self::draw_editor_time_navigator(
                     ui,
                     overview,
                     tab_samples_len,
@@ -3322,7 +3974,7 @@ impl crate::app::WavesPreviewer {
                     gutter_w,
                     wave_w,
                 ) {
-                    tab.view_offset = next_view;
+                    Self::editor_set_view_offset(tab, next_view);
                 }
             }
 
@@ -3818,11 +4470,15 @@ impl crate::app::WavesPreviewer {
                                                     &seam_preview.raw_left,
                                                     seam_preview.sample_rate,
                                                     Color32::from_rgb(120, 176, 255),
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
                                                 );
                                                 cols[1].label("Seam preview");
                                                 Self::draw_loop_seam_preview(
                                                     &mut cols[1],
                                                     &seam_preview,
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
                                                 );
                                                 cols[2].label("Post-Loop window");
                                                 Self::draw_loop_window_preview(
@@ -3830,6 +4486,8 @@ impl crate::app::WavesPreviewer {
                                                     &seam_preview.raw_right,
                                                     seam_preview.sample_rate,
                                                     Color32::from_rgb(92, 255, 224),
+                                                    tab.vertical_zoom,
+                                                    tab.vertical_view_center,
                                                 );
                                             });
                                         } else {
@@ -3839,8 +4497,8 @@ impl crate::app::WavesPreviewer {
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):
                                         // Build a mono preview applying the current loop crossfade to the mixdown.
-                                        if !preview_ok {
-                                            ui.label(RichText::new("Preview disabled for large clips").weak());
+                                        if let Some(reason) = preview_disabled_reason {
+                                            ui.label(RichText::new(reason).weak());
                                         } else if let Some((a,b)) = tab.loop_region {
                                             let cf = Self::effective_loop_xfade_samples(
                                                 a,
@@ -4036,8 +4694,8 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        if !preview_ok {
-                                            ui.label(RichText::new("Preview disabled for large clips").weak());
+                                        if let Some(reason) = preview_disabled_reason {
+                                            ui.label(RichText::new(reason).weak());
                                         }
                                         // Trim range is separated from loop markers and set from generic selection.
                                         let mut range_opt = tab.trim_range;
@@ -4109,8 +4767,8 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        if !preview_ok {
-                                            ui.label(RichText::new("Preview disabled for large clips").weak());
+                                        if let Some(reason) = preview_disabled_reason {
+                                            ui.label(RichText::new(reason).weak());
                                         }
                                         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                         let shape_label = |shape: crate::app::types::FadeShape| match shape {
@@ -4319,7 +4977,6 @@ impl crate::app::WavesPreviewer {
                                             tab.tool_state = ToolState{ pitch_semitones: semi, ..tab.tool_state };
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::PitchShift);
-                                            tab.preview_overlay = None;
                                             if preview_ok || tab.dirty {
                                                 let mono = Self::editor_mixdown_mono(tab);
                                                 pending_heavy_preview = Some((ToolKind::PitchShift, mono, semi));
@@ -4354,7 +5011,6 @@ impl crate::app::WavesPreviewer {
                                             tab.tool_state = ToolState{ stretch_rate: rate, ..tab.tool_state };
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::TimeStretch);
-                                            tab.preview_overlay = None;
                                             if preview_ok || tab.dirty {
                                                 let mono = Self::editor_mixdown_mono(tab);
                                                 pending_heavy_preview = Some((ToolKind::TimeStretch, mono, rate));
@@ -4376,8 +5032,8 @@ impl crate::app::WavesPreviewer {
                                     });
                                 }
                                 ToolKind::Gain => {
-                                    if !preview_ok {
-                                        ui.label(RichText::new("Preview disabled for large clips").weak());
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
                                     }
                                     let st = tab.tool_state;
                                     let mut gain_db = st.gain_db;
@@ -4416,8 +5072,8 @@ impl crate::app::WavesPreviewer {
                                     }
                                 }
                                 ToolKind::Normalize => {
-                                    if !preview_ok {
-                                        ui.label(RichText::new("Preview disabled for large clips").weak());
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
                                     }
                                     let st = tab.tool_state;
                                     let mut target_db = st.normalize_target_db;
@@ -4448,7 +5104,7 @@ impl crate::app::WavesPreviewer {
                                             }
                                         }
                                     };
-                                    if preview_ok {
+                                    if preview_button_enabled {
                                         let changed = (target_db - st.normalize_target_db).abs() > 1e-6;
                                         if changed {
                                             preview_normalize(target_db, tab);
@@ -4457,7 +5113,10 @@ impl crate::app::WavesPreviewer {
                                         tab.preview_audio_tool = None;
                                         tab.preview_overlay = None;
                                     }
-                                    if ui.add_enabled(preview_ok, egui::Button::new("Preview")).clicked() {
+                                    if ui
+                                        .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
+                                        .clicked()
+                                    {
                                         preview_normalize(target_db, tab);
                                     }
                                     if ui.button("Apply").clicked() {
@@ -4469,8 +5128,8 @@ impl crate::app::WavesPreviewer {
                                     }
                                 }
                                 ToolKind::Loudness => {
-                                    if !preview_ok {
-                                        ui.label(RichText::new("Preview disabled for large clips").weak());
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
                                     }
                                     let st = tab.tool_state;
                                     let mut target_lufs = st.loudness_target_lufs;
@@ -4485,7 +5144,10 @@ impl crate::app::WavesPreviewer {
                                         loudness_target_lufs: target_lufs,
                                         ..tab.tool_state
                                     };
-                                    if ui.add_enabled(preview_ok, egui::Button::new("Preview")).clicked() {
+                                    if ui
+                                        .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
+                                        .clicked()
+                                    {
                                         if let Ok(lufs) = crate::wave::lufs_integrated_from_multi(
                                             &tab.ch_samples,
                                             self.audio.shared.out_sample_rate,
@@ -5225,11 +5887,14 @@ impl crate::app::WavesPreviewer {
                                     });
                                 }
                                 ToolKind::Reverse => {
-                                    if !preview_ok {
-                                        ui.label(RichText::new("Preview disabled for large clips").weak());
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
                                     }
                                     ui.horizontal_wrapped(|ui| {
-                                        if ui.add_enabled(preview_ok, egui::Button::new("Preview")).clicked() {
+                                        if ui
+                                            .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
+                                            .clicked()
+                                        {
                                             // per-channel overlay
                                             let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
                                             for ch in overlay.iter_mut() { ch.reverse(); }
@@ -5257,7 +5922,17 @@ impl crate::app::WavesPreviewer {
                             ui.label(
                                 RichText::new("Values: dB (log magnitude)").monospace().weak(),
                             );
-                            ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
+                            let overlay_resp =
+                                ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
+                            if overlay_resp.changed() {
+                                if tab.show_waveform_overlay {
+                                    if Self::tool_supports_preview(tab.active_tool) {
+                                        request_preview_refresh = true;
+                                    }
+                                } else {
+                                    tab.preview_overlay = None;
+                                }
+                            }
                         }
                         ViewMode::Tempogram => {
                             ui.label(RichText::new("Tempogram").strong());
@@ -5442,6 +6117,9 @@ impl crate::app::WavesPreviewer {
                 }
                 if stop_playback { self.audio.stop(); }
                 if need_restore_preview { self.clear_preview_if_any(tab_idx); }
+                if request_preview_refresh {
+                    self.refresh_tool_preview_for_tab(tab_idx);
+                }
                 if let Some(s) = request_seek {
                     self.audio.seek_to_sample(s);
                     let seek_display = map_audio_to_display(s);
@@ -5452,7 +6130,7 @@ impl crate::app::WavesPreviewer {
                         if seek_display < tab.view_offset || seek_display > right {
                             let max_left = tab.samples_len.saturating_sub(vis);
                             let centered = seek_display.saturating_sub(vis / 2);
-                            tab.view_offset = centered.min(max_left);
+                            Self::editor_set_view_offset(tab, centered.min(max_left));
                         }
                     }
                 }
@@ -5461,6 +6139,9 @@ impl crate::app::WavesPreviewer {
         self.plugin_search_path_input = plugin_search_path_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
+        }
+        if let Some(hint) = pending_viewport_hint {
+            self.ensure_editor_viewport_for_tab(tab_idx, hint);
         }
         if waveform_query_ms_total > 0.0 {
             self.debug_push_waveform_query_sample(waveform_query_ms_total);

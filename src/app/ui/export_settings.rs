@@ -1,6 +1,6 @@
 use crate::app::types::{
-    ConflictPolicy, ItemBgMode, SaveMode, SpectrogramScale, SrcQuality, ThemeMode, ViewMode,
-    WindowFunction,
+    ConflictPolicy, EditorHorizontalZoomAnchorMode, EditorPauseResumeMode, ItemBgMode, SaveMode,
+    SpectrogramScale, SrcQuality, ThemeMode, ViewMode, WindowFunction,
 };
 use egui::RichText;
 
@@ -299,6 +299,61 @@ impl crate::app::WavesPreviewer {
                                 self.zero_cross_epsilon = eps.max(0.0);
                                 self.save_prefs();
                             }
+                            let mut invert_zoom_wheel = self.invert_wave_zoom_wheel;
+                            if ui
+                                .checkbox(&mut invert_zoom_wheel, "Invert wave zoom wheel")
+                                .changed()
+                            {
+                                self.invert_wave_zoom_wheel = invert_zoom_wheel;
+                                self.save_prefs();
+                            }
+                            let mut invert_shift_pan = self.invert_shift_wheel_pan;
+                            if ui
+                                .checkbox(
+                                    &mut invert_shift_pan,
+                                    "Invert Shift+wheel horizontal pan",
+                                )
+                                .changed()
+                            {
+                                self.invert_shift_wheel_pan = invert_shift_pan;
+                                self.save_prefs();
+                            }
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Zoom Anchor:");
+                                let mut next_anchor = self.horizontal_zoom_anchor_mode;
+                                ui.selectable_value(
+                                    &mut next_anchor,
+                                    EditorHorizontalZoomAnchorMode::Pointer,
+                                    "Pointer",
+                                );
+                                ui.selectable_value(
+                                    &mut next_anchor,
+                                    EditorHorizontalZoomAnchorMode::Playhead,
+                                    "Playhead",
+                                );
+                                if next_anchor != self.horizontal_zoom_anchor_mode {
+                                    self.horizontal_zoom_anchor_mode = next_anchor;
+                                    self.save_prefs();
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("Pause Resume:");
+                                let mut next_mode = self.editor_pause_resume_mode;
+                                ui.selectable_value(
+                                    &mut next_mode,
+                                    EditorPauseResumeMode::ReturnToLastStart,
+                                    "Return to last start",
+                                );
+                                ui.selectable_value(
+                                    &mut next_mode,
+                                    EditorPauseResumeMode::ContinueFromPause,
+                                    "Continue from pause",
+                                );
+                                if next_mode != self.editor_pause_resume_mode {
+                                    self.editor_pause_resume_mode = next_mode;
+                                    self.save_prefs();
+                                }
+                            });
                             let mut view_change: Option<(usize, ViewMode, ViewMode)> = None;
                             if let Some(tab_idx) = self.active_tab {
                                 if let Some(tab) = self.tabs.get_mut(tab_idx) {

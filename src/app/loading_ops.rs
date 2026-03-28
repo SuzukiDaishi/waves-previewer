@@ -55,6 +55,7 @@ impl super::WavesPreviewer {
                             tab.waveform_minmax.clear();
                             tab.waveform_pyramid = None;
                         }
+                        Self::invalidate_editor_viewport_cache(tab);
                     }
                 }
             }

@@ -328,6 +328,10 @@ pub struct ProjectTab {
     pub snap_zero_cross: bool,
     pub view_offset: usize,
     pub samples_per_px: f32,
+    #[serde(default = "default_vertical_zoom")]
+    pub vertical_zoom: f32,
+    #[serde(default = "default_vertical_view_center")]
+    pub vertical_view_center: f32,
     pub dirty: bool,
     #[serde(default)]
     pub buffer_sample_rate: Option<u32>,
@@ -358,6 +362,14 @@ pub struct ProjectPluginFxDraft {
     pub last_error: Option<String>,
     #[serde(default)]
     pub last_backend_log: Option<String>,
+}
+
+fn default_vertical_zoom() -> f32 {
+    1.0
+}
+
+fn default_vertical_view_center() -> f32 {
+    0.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -725,6 +737,8 @@ pub fn project_tab_from_tab(
         snap_zero_cross: tab.snap_zero_cross,
         view_offset: tab.view_offset,
         samples_per_px: tab.samples_per_px,
+        vertical_zoom: tab.vertical_zoom,
+        vertical_view_center: tab.vertical_view_center,
         dirty: tab.dirty,
         buffer_sample_rate: Some(tab.buffer_sample_rate.max(1)),
         edited_audio: edited_audio.map(|p| rel_path(&p, base)),

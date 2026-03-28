@@ -584,6 +584,8 @@ impl AudioEngine {
                     } else {
                         0
                     };
+                    let mut meter_sum_sq = 0.0f64;
+                    let mut meter_count = 0usize;
                     let mut pos = pos_f.floor() as usize;
                     for frame in data.chunks_mut(channels) {
                         if pos >= len {
@@ -625,7 +627,10 @@ impl AudioEngine {
                             } else {
                                 Self::sample_at_interp(samples, src_ch, pos_f)
                             };
-                            *out_sample = T::from_sample((sample * vol).clamp(-1.0, 1.0));
+                            let out = (sample * vol).clamp(-1.0, 1.0);
+                            *out_sample = T::from_sample(out);
+                            meter_sum_sq += f64::from(out * out);
+                            meter_count = meter_count.saturating_add(1);
                         }
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
@@ -641,7 +646,14 @@ impl AudioEngine {
                         .store(pos_f, std::sync::atomic::Ordering::Relaxed);
                     shared
                         .meter_rms
-                        .store(0.0, std::sync::atomic::Ordering::Relaxed);
+                        .store(
+                            if meter_count > 0 {
+                                (meter_sum_sq / meter_count as f64).sqrt() as f32
+                            } else {
+                                0.0
+                            },
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     return;
                 }
 
@@ -668,6 +680,8 @@ impl AudioEngine {
                     } else {
                         0
                     };
+                    let mut meter_sum_sq = 0.0f64;
+                    let mut meter_count = 0usize;
                     let mut pos = pos_f.floor() as usize;
                     for frame in data.chunks_mut(channels) {
                         if pos >= len {
@@ -707,7 +721,10 @@ impl AudioEngine {
                             } else {
                                 stream.sample_at_interp(src_ch, pos_f)
                             };
-                            *out_sample = T::from_sample((sample * vol).clamp(-1.0, 1.0));
+                            let out = (sample * vol).clamp(-1.0, 1.0);
+                            *out_sample = T::from_sample(out);
+                            meter_sum_sq += f64::from(out * out);
+                            meter_count = meter_count.saturating_add(1);
                         }
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
@@ -723,7 +740,14 @@ impl AudioEngine {
                         .store(pos_f, std::sync::atomic::Ordering::Relaxed);
                     shared
                         .meter_rms
-                        .store(0.0, std::sync::atomic::Ordering::Relaxed);
+                        .store(
+                            if meter_count > 0 {
+                                (meter_sum_sq / meter_count as f64).sqrt() as f32
+                            } else {
+                                0.0
+                            },
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     return;
                 }
 
@@ -1092,6 +1116,59 @@ impl AudioEngine {
         let i1 = (i0 + 1).min(max_index);
         let t = (pf - i0 as f64).clamp(0.0, 1.0) as f32;
         channel[i0] * (1.0 - t) + channel[i1] * t
+    }
+
+    pub fn current_source_meter_rms_fallback(&self, window_frames: usize) -> f32 {
+        let len = self.current_source_len();
+        if len == 0 {
+            return 0.0;
+        }
+        let mut pos_f = self.shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
+        if !pos_f.is_finite() || pos_f < 0.0 {
+            pos_f = self.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed) as f64;
+        }
+        let vol = self.shared.vol.load(std::sync::atomic::Ordering::Relaxed);
+        let rate = self
+            .shared
+            .rate
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(0.25, 4.0) as f64;
+        let window_frames = window_frames.max(1).min(len.max(1));
+        let maybe_samples = self.shared.samples.load();
+        let maybe_stream = self.shared.streamed_wav.load();
+        let mut sum_sq = 0.0f64;
+        let mut count = 0usize;
+        if let Some(samples_arc) = maybe_samples.as_ref() {
+            let samples = samples_arc.as_ref();
+            let src_channels = samples.channel_count().max(1);
+            for _ in 0..window_frames {
+                let mut mixed = 0.0f32;
+                for src_ch in 0..src_channels {
+                    mixed += Self::sample_at_interp(samples, src_ch, pos_f);
+                }
+                let out = ((mixed / src_channels as f32) * vol).clamp(-1.0, 1.0);
+                sum_sq += f64::from(out * out);
+                count = count.saturating_add(1);
+                pos_f = (pos_f + rate).min(len.saturating_sub(1) as f64);
+            }
+        } else if let Some(stream) = maybe_stream.as_ref() {
+            let src_channels = stream.channel_count().max(1);
+            for _ in 0..window_frames {
+                let mut mixed = 0.0f32;
+                for src_ch in 0..src_channels {
+                    mixed += stream.sample_at_interp(src_ch, pos_f);
+                }
+                let out = ((mixed / src_channels as f32) * vol).clamp(-1.0, 1.0);
+                sum_sq += f64::from(out * out);
+                count = count.saturating_add(1);
+                pos_f = (pos_f + rate).min(len.saturating_sub(1) as f64);
+            }
+        }
+        if count > 0 {
+            (sum_sq / count as f64).sqrt() as f32
+        } else {
+            0.0
+        }
     }
 
     #[allow(dead_code)]

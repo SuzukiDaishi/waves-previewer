@@ -2,6 +2,34 @@ use egui::{Color32, Painter, Rect};
 
 use super::binning::{minmax_over_ranges, pos_step_ranges};
 
+pub fn visible_half_amplitude(vertical_zoom: f32) -> f32 {
+    1.0 / vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM)
+}
+
+pub fn clamped_vertical_view_center(vertical_zoom: f32, vertical_view_center: f32) -> f32 {
+    let zoom = vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+    if zoom <= 1.0 {
+        0.0
+    } else {
+        let half = visible_half_amplitude(zoom).clamp(0.0, 1.0);
+        let limit = (1.0 - half).max(0.0);
+        vertical_view_center.clamp(-limit, limit)
+    }
+}
+
+pub fn waveform_y_from_amp(
+    lane_rect: Rect,
+    vertical_zoom: f32,
+    vertical_view_center: f32,
+    amp: f32,
+) -> f32 {
+    let zoom = vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+    let visible_half = visible_half_amplitude(zoom).max(f32::EPSILON);
+    let center = clamped_vertical_view_center(zoom, vertical_view_center);
+    let normalized = ((amp.clamp(-1.0, 1.0) - center) / visible_half).clamp(-1.0, 1.0);
+    lane_rect.center().y - normalized * (lane_rect.height() * 0.48)
+}
+
 /// Map the visible original window [start, start+visible_len) into overlay domain of length `overlay_total`.
 /// Returns (startb, endb, over_vis).
 pub fn map_visible_overlay(
@@ -66,6 +94,8 @@ pub fn draw_bins_locked(
     wave_w: f32,
     bins_values: &[(f32, f32)],
     scale: f32,
+    vertical_zoom: f32,
+    vertical_view_center: f32,
     color: Color32,
     stroke: f32,
 ) {
@@ -74,8 +104,8 @@ pub fn draw_bins_locked(
         let mn = (mn0 * scale).clamp(-1.0, 1.0);
         let mx = (mx0 * scale).clamp(-1.0, 1.0);
         let x = lane_rect.left() + (idx as f32 / n) * wave_w;
-        let y0 = lane_rect.center().y - mx * (lane_rect.height() * 0.48);
-        let y1 = lane_rect.center().y - mn * (lane_rect.height() * 0.48);
+        let y0 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mx);
+        let y1 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mn);
         painter.line_segment(
             [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
             egui::Stroke::new(stroke, color),
@@ -191,6 +221,8 @@ pub fn draw_bins_in_rect(
     span_rect: Rect,
     bins_values: &[(f32, f32)],
     scale: f32,
+    vertical_zoom: f32,
+    vertical_view_center: f32,
     color: Color32,
     stroke: f32,
 ) {
@@ -200,8 +232,8 @@ pub fn draw_bins_in_rect(
         let mn = (mn0 * scale).clamp(-1.0, 1.0);
         let mx = (mx0 * scale).clamp(-1.0, 1.0);
         let x = span_rect.left() + (idx as f32 / n) * wave_w;
-        let y0 = span_rect.center().y - mx * (span_rect.height() * 0.48);
-        let y1 = span_rect.center().y - mn * (span_rect.height() * 0.48);
+        let y0 = waveform_y_from_amp(span_rect, vertical_zoom, vertical_view_center, mx);
+        let y1 = waveform_y_from_amp(span_rect, vertical_zoom, vertical_view_center, mn);
         painter.line_segment(
             [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
             egui::Stroke::new(stroke, color),

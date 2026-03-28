@@ -569,6 +569,7 @@ impl crate::app::WavesPreviewer {
                 Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
             tab.waveform_minmax = waveform_minmax;
             tab.waveform_pyramid = waveform_pyramid;
+            Self::invalidate_editor_viewport_cache(tab);
             tab.dirty = true;
             tab.music_analysis_draft.preview_active = false;
             tab.music_analysis_draft.preview_error = None;

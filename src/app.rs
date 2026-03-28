@@ -13,6 +13,7 @@ use egui::{Align, Color32, Key, RichText, Sense, TextStyle};
 use egui_extras::TableBuilder;
 // use walkdir::WalkDir; // unused here (used in logic.rs)
 
+type HeavyPreviewMessage = (std::path::PathBuf, ToolKind, Vec<f32>, u64);
 type HeavyOverlayMessage = (std::path::PathBuf, Vec<Vec<f32>>, usize, u64);
 
 mod audio_ops;
@@ -22,6 +23,7 @@ mod debug_ops;
 mod dialogs;
 mod editor_features;
 mod editor_ops;
+mod editor_viewport;
 mod effect_graph_ops;
 mod export_ops;
 mod external;
@@ -100,6 +102,11 @@ const LIST_PREVIEW_PREFETCH_INFLIGHT_MAX: usize = 2;
 const LIST_BG_META_LARGE_THRESHOLD: usize = 8_000;
 const LIST_BG_META_INFLIGHT_LIMIT: usize = 192;
 const LIST_PLAY_EMIT_SECS: f32 = 0.75;
+const EDITOR_MIN_VERTICAL_ZOOM: f32 = 0.25;
+const EDITOR_MAX_VERTICAL_ZOOM: f32 = 32.0;
+const EDITOR_MIN_SAMPLES_PER_PX: f32 = 0.0025;
+const EDITOR_VIEWPORT_COARSE_MAX_COLUMNS: usize = 128;
+const EDITOR_VIEWPORT_COARSE_FINE_DELAY_MS: u64 = 90;
 
 // moved to types.rs
 
@@ -263,6 +270,7 @@ struct PlaybackSessionState {
     user_speed: f32,
     transport_sr: u32,
     is_playing: bool,
+    last_play_start_display_sample: Option<usize>,
     dry_audio: Option<Arc<AudioBuffer>>,
     last_applied_master_gain_db: f32,
     last_applied_file_gain_db: f32,
@@ -276,6 +284,7 @@ impl Default for PlaybackSessionState {
             user_speed: 1.0,
             transport_sr: 48_000,
             is_playing: false,
+            last_play_start_display_sample: None,
             dry_audio: None,
             last_applied_master_gain_db: f32::NAN,
             last_applied_file_gain_db: f32::NAN,
@@ -392,6 +401,9 @@ pub struct WavesPreviewer {
     pub spectro_cfg: SpectrogramConfig,
     pub spectro_tx: Option<std::sync::mpsc::Sender<SpectrogramJobMsg>>,
     pub spectro_rx: Option<std::sync::mpsc::Receiver<SpectrogramJobMsg>>,
+    pub editor_viewport_tx: Option<std::sync::mpsc::Sender<EditorViewportJobMsg>>,
+    pub editor_viewport_rx: Option<std::sync::mpsc::Receiver<EditorViewportJobMsg>>,
+    editor_viewport_generation_counter: u64,
     pub editor_feature_cache: HashMap<EditorAnalysisKey, std::sync::Arc<EditorFeatureAnalysisData>>,
     pub editor_feature_inflight: HashSet<EditorAnalysisKey>,
     pub editor_feature_progress: HashMap<EditorAnalysisKey, AnalysisProgress>,
@@ -449,6 +461,10 @@ pub struct WavesPreviewer {
     // list filtering
     skip_dotfiles: bool,
     zero_cross_epsilon: f32,
+    invert_wave_zoom_wheel: bool,
+    invert_shift_wheel_pan: bool,
+    horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode,
+    editor_pause_resume_mode: EditorPauseResumeMode,
     // processing mode
     mode: RateMode,
     // heavy processing state (overlay)
@@ -561,13 +577,17 @@ pub struct WavesPreviewer {
     pending_activate_path: Option<PathBuf>,
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
-    // Heavy preview worker for Pitch/Stretch (mono)
-    heavy_preview_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
-    heavy_preview_tool: Option<ToolKind>,
+    // Heavy preview worker for Pitch/Stretch (mono) with path/generation guard
+    heavy_preview_rx: Option<std::sync::mpsc::Receiver<HeavyPreviewMessage>>,
+    heavy_preview_gen_counter: u64,
+    heavy_preview_expected_gen: u64,
+    heavy_preview_expected_path: Option<PathBuf>,
+    heavy_preview_expected_tool: Option<ToolKind>,
     // Heavy overlay worker (per-channel preview for Pitch/Stretch) with generation guard
     heavy_overlay_rx: Option<std::sync::mpsc::Receiver<HeavyOverlayMessage>>,
     overlay_gen_counter: u64,
     overlay_expected_gen: u64,
+    overlay_expected_path: Option<PathBuf>,
     overlay_expected_tool: Option<ToolKind>,
 
     // startup automation/screenshot
@@ -703,6 +723,14 @@ impl WavesPreviewer {
         transport: PlaybackTransportKind,
         transport_sr: u32,
     ) {
+        let keep_last_start = matches!(
+            (&self.playback_session.source, &source),
+            (PlaybackSourceKind::EditorTab(prev), PlaybackSourceKind::EditorTab(next))
+                if prev == next
+        );
+        if !keep_last_start {
+            self.playback_session.last_play_start_display_sample = None;
+        }
         self.playback_session.source = source;
         self.playback_session.transport = transport;
         self.playback_session.transport_sr = transport_sr.max(1);
@@ -737,36 +765,89 @@ impl WavesPreviewer {
         self.audio.set_rate(rate);
     }
 
-    pub(super) fn playback_sync_state_snapshot(&mut self) {
-        self.playback_session.is_playing = self.playback_is_playing_now();
-    }
-
-    fn current_output_meter_db(&self) -> f32 {
-        let Some(buffer) = self.audio.shared.samples.load_full() else {
-            return -80.0;
+    pub(super) fn playback_capture_editor_start_display_sample(&mut self) {
+        let Some(tab_idx) = self
+            .active_tab
+            .filter(|_| self.is_editor_workspace_active())
+        else {
+            self.playback_session.last_play_start_display_sample = None;
+            return;
         };
-        let len = buffer.len();
-        if len == 0 {
-            return -80.0;
-        }
-        let pos = self
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            self.playback_session.last_play_start_display_sample = None;
+            return;
+        };
+        let audio_len = self.audio.current_source_len();
+        let mut audio_pos = self
             .audio
             .shared
             .play_pos
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .min(len.saturating_sub(1));
-        let window = 1024usize.min(len.saturating_sub(pos).max(1));
-        let channel_count = buffer.channel_count().max(1);
-        let mut sum_sq = 0.0f32;
-        for sample_idx in pos..pos.saturating_add(window) {
-            let mut mixed = 0.0f32;
-            for channel in &buffer.channels {
-                mixed += channel.get(sample_idx).copied().unwrap_or(0.0);
-            }
-            let mixed = mixed / channel_count as f32;
-            sum_sq += mixed * mixed;
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if audio_len > 0 && audio_pos >= audio_len {
+            audio_pos = 0;
         }
-        let rms = (sum_sq / window.max(1) as f32).sqrt();
+        self.playback_session.last_play_start_display_sample =
+            Some(self.map_audio_to_display_sample(tab, audio_pos));
+    }
+
+    pub(super) fn playback_return_editor_to_last_start_if_needed(&mut self) {
+        if self.editor_pause_resume_mode != EditorPauseResumeMode::ReturnToLastStart {
+            return;
+        }
+        let Some(display_sample) = self.playback_session.last_play_start_display_sample else {
+            return;
+        };
+        let tab_idx = match &self.playback_session.source {
+            PlaybackSourceKind::EditorTab(path) => {
+                self.tabs.iter().position(|tab| &tab.path == path)
+            }
+            _ => self
+                .active_tab
+                .filter(|_| self.is_editor_workspace_active()),
+        };
+        let Some(tab_idx) = tab_idx else {
+            self.playback_session.last_play_start_display_sample = None;
+            return;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            self.playback_session.last_play_start_display_sample = None;
+            return;
+        };
+        let audio_sample = self.map_display_to_audio_sample(tab, display_sample);
+        self.audio.seek_to_sample(audio_sample);
+    }
+
+    pub(super) fn playback_sync_state_snapshot(&mut self) {
+        let was_playing = self.playback_session.is_playing;
+        let is_playing = self.playback_is_playing_now();
+        self.playback_session.is_playing = is_playing;
+        if was_playing && !is_playing {
+            let len = self.audio.current_source_len();
+            let pos = self
+                .audio
+                .shared
+                .play_pos
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if len == 0 || pos >= len.saturating_sub(1) {
+                self.playback_session.last_play_start_display_sample = None;
+            }
+        }
+    }
+
+    fn current_output_meter_db(&self) -> f32 {
+        if !self.playback_is_playing_now() {
+            return -80.0;
+        }
+        let callback_rms = self
+            .audio
+            .shared
+            .meter_rms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let rms = if callback_rms > 0.0 {
+            callback_rms
+        } else {
+            self.audio.current_source_meter_rms_fallback(1024)
+        };
         if rms > 0.0 {
             (20.0 * rms.max(1.0e-8).log10()).clamp(-80.0, 6.0)
         } else {
@@ -788,6 +869,7 @@ impl WavesPreviewer {
             self.playback_session.dry_audio = None;
             self.playback_session.last_applied_master_gain_db = f32::NAN;
             self.playback_session.last_applied_file_gain_db = f32::NAN;
+            self.playback_session.last_play_start_display_sample = None;
         }
     }
 
@@ -883,107 +965,6 @@ impl WavesPreviewer {
     }
     fn editor_mixdown_mono(tab: &EditorTab) -> Vec<f32> {
         Self::mixdown_channels(&tab.ch_samples, tab.samples_len)
-    }
-    fn draw_spectrogram(
-        painter: &egui::Painter,
-        area: egui::Rect,
-        tab: &EditorTab,
-        spec: &SpectrogramData,
-        view_mode: ViewMode,
-        cfg: &SpectrogramConfig,
-    ) {
-        if spec.frames == 0 || spec.bins == 0 {
-            return;
-        }
-        let width_px = area.width().max(1.0);
-        let height_px = area.height().max(1.0);
-        let spp = tab.samples_per_px.max(0.0001);
-        let vis = (width_px * spp).ceil() as usize;
-        let start = tab.view_offset.min(tab.samples_len);
-        let end = (start + vis).min(tab.samples_len);
-        let frame_step = spec.frame_step.max(1);
-        let f0 = (start / frame_step).min(spec.frames.saturating_sub(1));
-        let mut f1 = (end / frame_step).min(spec.frames);
-        if f1 <= f0 {
-            f1 = (f0 + 1).min(spec.frames);
-        }
-        let frame_count = f1.saturating_sub(f0).max(1);
-        let target_w = (width_px / 3.0).clamp(64.0, 256.0) as usize;
-        let target_h = (height_px / 3.0).clamp(64.0, 192.0) as usize;
-        let cell_w = width_px / target_w as f32;
-        let cell_h = height_px / target_h as f32;
-        let max_bin = spec.bins.saturating_sub(1).max(1);
-        let sr = spec.sample_rate.max(1) as f32;
-        let mut max_freq = sr * 0.5;
-        if cfg.max_freq_hz > 0.0 {
-            max_freq = cfg.max_freq_hz.min(max_freq).max(1.0);
-        }
-        let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
-        let mel_min = 1.0_f32;
-        let log_min = 20.0_f32.min(max_freq).max(1.0);
-        for x in 0..target_w {
-            let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
-            let base = frame_idx * spec.bins;
-            for y in 0..target_h {
-                // y=0 is bottom row; map low frequency to bottom, high to top.
-                let frac = y as f32 / (target_h.saturating_sub(1)) as f32;
-                let bin = match view_mode {
-                    ViewMode::Spectrogram | ViewMode::Waveform => {
-                        let freq = frac * max_freq;
-                        let pos = (freq / max_freq).clamp(0.0, 1.0);
-                        (pos * max_bin as f32).round() as usize
-                    }
-                    ViewMode::Log => {
-                        let freq = if max_freq <= log_min {
-                            frac * max_freq
-                        } else {
-                            let ratio = max_freq / log_min;
-                            log_min * ratio.powf(frac)
-                        };
-                        let pos = (freq / max_freq).clamp(0.0, 1.0);
-                        (pos * max_bin as f32).round() as usize
-                    }
-                    ViewMode::Mel => {
-                        let mel = match cfg.mel_scale {
-                            SpectrogramScale::Linear => mel_max * frac,
-                            SpectrogramScale::Log => {
-                                if mel_max <= mel_min {
-                                    mel_max * frac
-                                } else {
-                                    let ratio = mel_max / mel_min;
-                                    mel_min * ratio.powf(frac)
-                                }
-                            }
-                        };
-                        let freq = 700.0 * (10.0_f32.powf(mel / 2595.0) - 1.0);
-                        let pos = (freq / max_freq).clamp(0.0, 1.0);
-                        (pos * max_bin as f32).round() as usize
-                    }
-                    ViewMode::Tempogram | ViewMode::Chromagram => 0,
-                };
-                let idx = base + bin.min(max_bin);
-                let db_raw = spec
-                    .values_db
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(-120.0)
-                    .clamp(cfg.db_floor, 0.0);
-                let norm = if (0.0 - cfg.db_floor).abs() < f32::EPSILON {
-                    0.0
-                } else {
-                    (db_raw - cfg.db_floor) / (0.0 - cfg.db_floor)
-                };
-                let db_mapped = -80.0 + norm.clamp(0.0, 1.0) * 80.0;
-                let col = db_to_color(db_mapped);
-                let x0 = area.left() + x as f32 * cell_w;
-                let y0 = area.bottom() - (y as f32 + 1.0) * cell_h;
-                let r = egui::Rect::from_min_size(
-                    egui::pos2(x0, y0),
-                    egui::vec2(cell_w + 0.5, cell_h + 0.5),
-                );
-                painter.rect_filled(r, 0.0, col);
-            }
-        }
     }
     // editor operations moved to editor_ops.rs
     fn effective_loop_xfade_samples(
@@ -2282,6 +2263,9 @@ impl WavesPreviewer {
             spectro_cfg: SpectrogramConfig::default(),
             spectro_tx: None,
             spectro_rx: None,
+            editor_viewport_tx: None,
+            editor_viewport_rx: None,
+            editor_viewport_generation_counter: 0,
             editor_feature_cache: HashMap::new(),
             editor_feature_inflight: HashSet::new(),
             editor_feature_progress: HashMap::new(),
@@ -2329,6 +2313,10 @@ impl WavesPreviewer {
             search_deadline: None,
             skip_dotfiles: true,
             zero_cross_epsilon: 1.0e-4,
+            invert_wave_zoom_wheel: false,
+            invert_shift_wheel_pan: false,
+            horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode::Pointer,
+            editor_pause_resume_mode: EditorPauseResumeMode::ReturnToLastStart,
             mode: RateMode::Speed,
             processing: None,
             processing_job_id: 0,
@@ -2439,10 +2427,14 @@ impl WavesPreviewer {
             pending_activate_kind: None,
             pending_activate_ready: false,
             heavy_preview_rx: None,
-            heavy_preview_tool: None,
+            heavy_preview_gen_counter: 0,
+            heavy_preview_expected_gen: 0,
+            heavy_preview_expected_path: None,
+            heavy_preview_expected_tool: None,
             heavy_overlay_rx: None,
             overlay_gen_counter: 0,
             overlay_expected_gen: 0,
+            overlay_expected_path: None,
             overlay_expected_tool: None,
 
             startup: startup_state,
@@ -2492,6 +2484,8 @@ impl WavesPreviewer {
             waveform_minmax: tab.waveform_minmax.clone(),
             waveform_pyramid: tab.waveform_pyramid.clone(),
             view_offset: tab.view_offset,
+            vertical_zoom: tab.vertical_zoom,
+            vertical_view_center: tab.vertical_view_center,
             samples_per_px: tab.samples_per_px,
             selection: tab.selection,
             ab_loop: tab.ab_loop,
@@ -2581,6 +2575,9 @@ impl WavesPreviewer {
             tab.waveform_minmax = state.waveform_minmax;
             tab.waveform_pyramid = state.waveform_pyramid;
             tab.view_offset = state.view_offset;
+            tab.view_offset_exact = state.view_offset as f64;
+            tab.vertical_zoom = state.vertical_zoom;
+            tab.vertical_view_center = state.vertical_view_center;
             tab.samples_per_px = state.samples_per_px;
             tab.selection = state.selection;
             tab.ab_loop = state.ab_loop;
@@ -2603,10 +2600,16 @@ impl WavesPreviewer {
             tab.markers_applied = state.markers_applied;
             tab.loop_region_applied = state.loop_region_applied;
             tab.loop_region_committed = state.loop_region_committed;
-            tab.drag_select_anchor = None;
+            tab.selection_anchor_sample = None;
             tab.dragging_marker = None;
             tab.preview_offset_samples = None;
+            tab.last_amplitude_nav_rect = None;
+            tab.last_amplitude_viewport_rect = None;
+            tab.last_amplitude_nav_click_at = 0.0;
+            tab.last_amplitude_nav_click_pos = None;
             tab.dirty = state.dirty;
+            Self::editor_clamp_ranges(tab);
+            Self::invalidate_editor_viewport_cache(tab);
             Self::update_markers_dirty(tab);
             Self::update_loop_markers_dirty(tab);
         }
@@ -2756,6 +2759,7 @@ impl eframe::App for WavesPreviewer {
         // Drain spectrogram jobs (tiled)
         self.apply_spectrogram_updates(ctx);
         self.apply_feature_analysis_updates(ctx);
+        self.apply_editor_viewport_render_updates(ctx);
 
         // Drain export results
         self.drain_export_results(ctx);

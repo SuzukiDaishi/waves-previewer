@@ -1,4 +1,4 @@
-use crate::app::render::waveform_pyramid::WaveformPyramidSet;
+use crate::app::render::waveform_pyramid::{Peak, WaveformPyramidSet};
 use crate::audio::AudioBuffer;
 use crate::markers::MarkerEntry;
 use serde::{Deserialize, Serialize};
@@ -766,6 +766,18 @@ pub enum RightDragMode {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditorHorizontalZoomAnchorMode {
+    Pointer,
+    Playhead,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EditorPauseResumeMode {
+    ReturnToLastStart,
+    ContinueFromPause,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoopXfadeShape {
     Linear,
     EqualPower,
@@ -846,8 +858,24 @@ pub struct EditorTab {
     pub samples_len_visual: usize, // length used for viewport math while loading
     pub loading_waveform_minmax: Vec<(f32, f32)>, // coarse overview while full decode streams
     pub view_offset: usize,        // first visible sample index
+    pub view_offset_exact: f64,    // authoritative horizontal view position
     pub samples_per_px: f32,       // time zoom: samples per pixel
+    pub vertical_zoom: f32,        // waveform vertical zoom multiplier
+    pub vertical_view_center: f32, // centered waveform viewport anchor in [-1, 1]
     pub last_wave_w: f32,          // last waveform width (for resize anchoring)
+    pub last_amplitude_nav_rect: Option<egui::Rect>, // transient right rail rect for UI tests
+    pub last_amplitude_viewport_rect: Option<egui::Rect>, // transient right rail viewport
+    pub last_amplitude_nav_click_at: f64, // transient double-click timing for amplitude rail
+    pub last_amplitude_nav_click_pos: Option<egui::Pos2>, // transient double-click location
+    pub viewport_source_generation: u64, // transient source generation for viewport cache
+    pub viewport_render_requested_generation: u64, // transient latest queued viewport request
+    pub viewport_render_requested_key: Option<EditorViewportRenderKey>, // transient desired key
+    pub viewport_render_pending_fine_at: Option<Instant>, // transient fine render debounce
+    pub viewport_render_inflight_coarse_generation: Option<u64>, // transient coarse inflight
+    pub viewport_render_inflight_fine_generation: Option<u64>, // transient fine inflight
+    pub viewport_render_coarse: Option<EditorViewportRenderCache>, // transient coarse viewport
+    pub viewport_render_fine: Option<EditorViewportRenderCache>, // transient fine viewport
+    pub viewport_render_last: Option<EditorViewportRenderCache>, // transient stale fallback
     pub dirty: bool,               // unsaved edits exist
     #[allow(dead_code)]
     pub ops: Vec<EditOp>, // non-destructive operations (skeleton)
@@ -887,9 +915,8 @@ pub struct EditorTab {
     pub bpm_offset_sec: f32,             // grid offset in seconds
     pub seek_hold: Option<SeekHoldState>, // key repeat state for seek
     pub snap_zero_cross: bool,           // enable zero-cross snapping
-    pub drag_select_anchor: Option<usize>, // transient during drag
+    pub selection_anchor_sample: Option<usize>, // shared Shift/click/drag anchor
     pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
-    pub right_drag_anchor: Option<usize>, // anchor for Shift+right-drag selection
     pub active_tool: ToolKind,           // current editing tool
     pub tool_state: ToolState,           // simple per-tool parameters
     pub loop_mode: LoopMode,             // Off / On (whole) / Marker
@@ -960,6 +987,82 @@ pub struct SpectrogramData {
     pub frame_step: usize,
     pub sample_rate: u32,
     pub values_db: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorViewportRenderQuality {
+    Coarse,
+    Fine,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditorViewportPayloadKind {
+    Waveform,
+    Spectral,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorViewportRenderKey {
+    pub kind: EditorViewportPayloadKind,
+    pub view_mode: ViewMode,
+    pub source_generation: u64,
+    pub display_samples_len: usize,
+    pub start: usize,
+    pub end: usize,
+    pub lane_count: usize,
+    pub lane_height_px: usize,
+    pub wave_width_px: usize,
+    pub use_mixdown: bool,
+    pub visible_channels: Vec<usize>,
+    pub samples_per_px_bits: u32,
+    pub vertical_zoom_bits: u32,
+    pub vertical_view_center_bits: u32,
+    pub scale_bits: u32,
+    pub spectro_cfg_digest: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum EditorViewportWaveLane {
+    Peaks(Vec<Peak>),
+    Samples(Vec<f32>),
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorViewportWavePayload {
+    pub lanes: Vec<EditorViewportWaveLane>,
+}
+
+#[derive(Clone)]
+pub enum EditorViewportRenderPayload {
+    Waveform(EditorViewportWavePayload),
+    Image(Arc<egui::ColorImage>),
+}
+
+#[derive(Clone)]
+pub enum EditorViewportCachePayload {
+    Waveform(EditorViewportWavePayload),
+    Image {
+        image: Arc<egui::ColorImage>,
+        texture: Option<egui::TextureHandle>,
+    },
+}
+
+#[derive(Clone)]
+pub struct EditorViewportRenderCache {
+    pub key: EditorViewportRenderKey,
+    pub quality: EditorViewportRenderQuality,
+    pub ready_at: Instant,
+    pub payload: EditorViewportCachePayload,
+}
+
+pub enum EditorViewportJobMsg {
+    Ready {
+        tab_path: PathBuf,
+        generation: u64,
+        quality: EditorViewportRenderQuality,
+        key: EditorViewportRenderKey,
+        payload: EditorViewportRenderPayload,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1186,6 +1289,8 @@ pub struct EditorUndoState {
     pub waveform_minmax: Vec<(f32, f32)>,
     pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub view_offset: usize,
+    pub vertical_zoom: f32,
+    pub vertical_view_center: f32,
     pub samples_per_px: f32,
     pub selection: Option<(usize, usize)>,
     pub ab_loop: Option<(usize, usize)>,
@@ -1366,9 +1471,7 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::Input => Self::Input,
             EffectGraphNodeKind::Output => Self::Output,
             EffectGraphNodeKind::Gain => Self::Gain { gain_db: 0.0 },
-            EffectGraphNodeKind::Loudness => Self::Loudness {
-                target_lufs: -14.0,
-            },
+            EffectGraphNodeKind::Loudness => Self::Loudness { target_lufs: -14.0 },
             EffectGraphNodeKind::MonoMix => Self::MonoMix {
                 ignored_channels: vec![false; 8],
             },

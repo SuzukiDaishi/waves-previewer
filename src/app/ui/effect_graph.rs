@@ -1970,11 +1970,9 @@ impl crate::app::WavesPreviewer {
                         }
                         EffectGraphNodeData::Loudness { .. } => {
                             ui.label(
-                                RichText::new(
-                                    "Measures integrated LUFS and applies matching gain",
-                                )
-                                .small()
-                                .color(Color32::from_rgb(160, 176, 192)),
+                                RichText::new("Measures integrated LUFS and applies matching gain")
+                                    .small()
+                                    .color(Color32::from_rgb(160, 176, 192)),
                             );
                             ui.label(
                                 RichText::new("Format and duration stay unchanged")
@@ -2125,15 +2123,13 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                     if let Some(mut value) = target_lufs {
-                        let response = ui.add(
-                            egui::Slider::new(&mut value, -36.0..=0.0).text("Target LUFS"),
-                        );
+                        let response =
+                            ui.add(egui::Slider::new(&mut value, -36.0..=0.0).text("Target LUFS"));
                         if response.changed() {
                             self.effect_graph_push_undo_snapshot();
                             if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
-                                node_mut.data = EffectGraphNodeData::Loudness {
-                                    target_lufs: value,
-                                };
+                                node_mut.data =
+                                    EffectGraphNodeData::Loudness { target_lufs: value };
                             }
                             self.effect_graph.draft_dirty = true;
                             self.revalidate_effect_graph_draft();

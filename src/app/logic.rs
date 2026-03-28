@@ -461,7 +461,24 @@ impl super::WavesPreviewer {
             }
             return;
         }
+        if self.is_editor_workspace_active() {
+            let now_playing = self
+                .audio
+                .shared
+                .playing
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if now_playing {
+                self.audio.stop();
+                self.playback_return_editor_to_last_start_if_needed();
+            } else {
+                self.playback_capture_editor_start_display_sample();
+                self.audio.play();
+            }
+            self.playback_sync_state_snapshot();
+            return;
+        }
         self.audio.toggle_play();
+        self.playback_sync_state_snapshot();
     }
 
     fn editor_decode_strategy(path: &Path) -> EditorDecodeStrategy {
@@ -1173,8 +1190,16 @@ impl super::WavesPreviewer {
 
     fn reset_tab_defaults(tab: &mut EditorTab) {
         tab.view_offset = 0;
+        tab.view_offset_exact = 0.0;
         tab.samples_per_px = 0.0;
+        tab.vertical_zoom = 1.0;
+        tab.vertical_view_center = 0.0;
         tab.last_wave_w = 0.0;
+        tab.last_amplitude_nav_rect = None;
+        tab.last_amplitude_viewport_rect = None;
+        tab.last_amplitude_nav_click_at = 0.0;
+        tab.last_amplitude_nav_click_pos = None;
+        Self::invalidate_editor_viewport_cache(tab);
         tab.dirty = false;
         tab.ops.clear();
         tab.selection = None;
@@ -1198,9 +1223,8 @@ impl super::WavesPreviewer {
         tab.fade_out_shape = crate::app::types::FadeShape::SCurve;
         tab.set_leaf_view_mode(crate::app::types::ViewMode::Waveform);
         tab.snap_zero_cross = true;
-        tab.drag_select_anchor = None;
+        tab.selection_anchor_sample = None;
         tab.right_drag_mode = None;
-        tab.right_drag_anchor = None;
         tab.active_tool = crate::app::types::ToolKind::LoopEdit;
         tab.tool_state = crate::app::types::ToolState {
             fade_in_ms: 0.0,
@@ -2308,16 +2332,18 @@ impl super::WavesPreviewer {
             if new_display_len == 0 {
                 tab.samples_per_px = 0.0;
                 tab.view_offset = 0;
+                tab.view_offset_exact = 0.0;
                 return;
             }
             if old_display_len > 0 && new_display_len != old_display_len {
                 let ratio = new_display_len as f32 / old_display_len as f32;
                 if old_spp > 0.0 {
-                    tab.samples_per_px = (old_spp * ratio).max(0.0001);
+                    tab.samples_per_px = (old_spp * ratio).max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
                 } else {
                     tab.samples_per_px = 0.0;
                 }
                 tab.view_offset = ((old_view as f32) * ratio).round() as usize;
+                tab.view_offset_exact = tab.view_offset as f64;
                 tab.loop_xfade_samples = ((tab.loop_xfade_samples as f32) * ratio).round() as usize;
             } else if old_spp <= 0.0 {
                 tab.samples_per_px = 0.0;
@@ -2401,6 +2427,7 @@ impl super::WavesPreviewer {
                                 tab.loading = false;
                                 tab.loading_waveform_minmax.clear();
                                 tab.samples_len_visual = tab.samples_len;
+                                Self::invalidate_editor_viewport_cache(tab);
                                 if tab.samples_len != old_audio_len {
                                     spectro_reset_paths.push(tab.path.clone());
                                 }
@@ -2427,6 +2454,7 @@ impl super::WavesPreviewer {
                                 tab.loading = true;
                                 if !res.loading_waveform_minmax.is_empty() {
                                     tab.loading_waveform_minmax = res.loading_waveform_minmax;
+                                    Self::invalidate_editor_viewport_cache(tab);
                                 }
                                 if let Some(visual_total_frames) =
                                     res.visual_total_frames.filter(|v| *v > 0)
@@ -2854,8 +2882,24 @@ impl super::WavesPreviewer {
                     samples_len_visual: cached.samples_len,
                     loading_waveform_minmax: Vec::new(),
                     view_offset: 0,
+                    view_offset_exact: 0.0,
                     samples_per_px: 0.0,
+                    vertical_zoom: 1.0,
+                    vertical_view_center: 0.0,
                     last_wave_w: 0.0,
+                    last_amplitude_nav_rect: None,
+                    last_amplitude_viewport_rect: None,
+                    last_amplitude_nav_click_at: 0.0,
+                    last_amplitude_nav_click_pos: None,
+                    viewport_source_generation: 1,
+                    viewport_render_requested_generation: 0,
+                    viewport_render_requested_key: None,
+                    viewport_render_pending_fine_at: None,
+                    viewport_render_inflight_coarse_generation: None,
+                    viewport_render_inflight_fine_generation: None,
+                    viewport_render_coarse: None,
+                    viewport_render_fine: None,
+                    viewport_render_last: None,
                     dirty: cached.dirty,
                     ops: Vec::new(),
                     selection: None,
@@ -2888,9 +2932,8 @@ impl super::WavesPreviewer {
                     bpm_offset_sec: cached.bpm_offset_sec,
                     seek_hold: None,
                     snap_zero_cross: cached.snap_zero_cross,
-                    drag_select_anchor: None,
+                    selection_anchor_sample: None,
                     right_drag_mode: None,
-                    right_drag_anchor: None,
                     active_tool: cached.active_tool,
                     tool_state: cached.tool_state,
                     loop_mode: cached.loop_mode,
@@ -2958,8 +3001,24 @@ impl super::WavesPreviewer {
                 samples_len_visual: samples_len,
                 loading_waveform_minmax: Vec::new(),
                 view_offset: 0,
+                view_offset_exact: 0.0,
                 samples_per_px: 0.0,
+                vertical_zoom: 1.0,
+                vertical_view_center: 0.0,
                 last_wave_w: 0.0,
+                last_amplitude_nav_rect: None,
+                last_amplitude_viewport_rect: None,
+                last_amplitude_nav_click_at: 0.0,
+                last_amplitude_nav_click_pos: None,
+                viewport_source_generation: 1,
+                viewport_render_requested_generation: 0,
+                viewport_render_requested_key: None,
+                viewport_render_pending_fine_at: None,
+                viewport_render_inflight_coarse_generation: None,
+                viewport_render_inflight_fine_generation: None,
+                viewport_render_coarse: None,
+                viewport_render_fine: None,
+                viewport_render_last: None,
                 dirty: false,
                 ops: Vec::new(),
                 selection: None,
@@ -2992,9 +3051,8 @@ impl super::WavesPreviewer {
                 bpm_offset_sec: 0.0,
                 seek_hold: None,
                 snap_zero_cross: true,
-                drag_select_anchor: None,
+                selection_anchor_sample: None,
                 right_drag_mode: None,
-                right_drag_anchor: None,
                 active_tool: crate::app::types::ToolKind::LoopEdit,
                 tool_state: crate::app::types::ToolState {
                     fade_in_ms: 0.0,
@@ -3081,8 +3139,24 @@ impl super::WavesPreviewer {
                 samples_len_visual: cached.samples_len,
                 loading_waveform_minmax: Vec::new(),
                 view_offset: 0,
+                view_offset_exact: 0.0,
                 samples_per_px: 0.0,
+                vertical_zoom: 1.0,
+                vertical_view_center: 0.0,
                 last_wave_w: 0.0,
+                last_amplitude_nav_rect: None,
+                last_amplitude_viewport_rect: None,
+                last_amplitude_nav_click_at: 0.0,
+                last_amplitude_nav_click_pos: None,
+                viewport_source_generation: 1,
+                viewport_render_requested_generation: 0,
+                viewport_render_requested_key: None,
+                viewport_render_pending_fine_at: None,
+                viewport_render_inflight_coarse_generation: None,
+                viewport_render_inflight_fine_generation: None,
+                viewport_render_coarse: None,
+                viewport_render_fine: None,
+                viewport_render_last: None,
                 dirty: cached.dirty,
                 ops: Vec::new(),
                 selection: None,
@@ -3115,9 +3189,8 @@ impl super::WavesPreviewer {
                 bpm_offset_sec: cached.bpm_offset_sec,
                 seek_hold: None,
                 snap_zero_cross: cached.snap_zero_cross,
-                drag_select_anchor: None,
+                selection_anchor_sample: None,
                 right_drag_mode: None,
-                right_drag_anchor: None,
                 active_tool: cached.active_tool,
                 tool_state: cached.tool_state,
                 loop_mode: cached.loop_mode,
@@ -3172,8 +3245,24 @@ impl super::WavesPreviewer {
             samples_len_visual: estimated_visual_frames.unwrap_or(0),
             loading_waveform_minmax: initial_loading_overview,
             view_offset: 0,
+            view_offset_exact: 0.0,
             samples_per_px: 0.0,
+            vertical_zoom: 1.0,
+            vertical_view_center: 0.0,
             last_wave_w: 0.0,
+            last_amplitude_nav_rect: None,
+            last_amplitude_viewport_rect: None,
+            last_amplitude_nav_click_at: 0.0,
+            last_amplitude_nav_click_pos: None,
+            viewport_source_generation: 1,
+            viewport_render_requested_generation: 0,
+            viewport_render_requested_key: None,
+            viewport_render_pending_fine_at: None,
+            viewport_render_inflight_coarse_generation: None,
+            viewport_render_inflight_fine_generation: None,
+            viewport_render_coarse: None,
+            viewport_render_fine: None,
+            viewport_render_last: None,
             dirty: false,
             ops: Vec::new(),
             selection: None,
@@ -3206,9 +3295,8 @@ impl super::WavesPreviewer {
             bpm_offset_sec: 0.0,
             seek_hold: None,
             snap_zero_cross: true,
-            drag_select_anchor: None,
+            selection_anchor_sample: None,
             right_drag_mode: None,
-            right_drag_anchor: None,
             active_tool: crate::app::types::ToolKind::LoopEdit,
             tool_state: crate::app::types::ToolState {
                 fade_in_ms: 0.0,

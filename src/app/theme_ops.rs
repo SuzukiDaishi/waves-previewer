@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle, Visuals};
 
 use super::types::{
-    ConflictPolicy, ExportConfig, ItemBgMode, ListColumnConfig, SaveMode, SpectrogramConfig,
-    SpectrogramScale, SrcQuality, ThemeMode, TranscriptComputeTarget, TranscriptModelVariant,
-    TranscriptPerfMode, WindowFunction,
+    ConflictPolicy, EditorHorizontalZoomAnchorMode, EditorPauseResumeMode, ExportConfig,
+    ItemBgMode, ListColumnConfig, SaveMode, SpectrogramConfig, SpectrogramScale, SrcQuality,
+    ThemeMode, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode, WindowFunction,
 };
 use super::WavesPreviewer;
 
@@ -231,6 +231,20 @@ impl WavesPreviewer {
                         self.zero_cross_epsilon = v.max(0.0);
                     }
                 }
+            } else if let Some(rest) = line.strip_prefix("editor_invert_wave_zoom_wheel=") {
+                self.invert_wave_zoom_wheel = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("editor_invert_shift_wheel_pan=") {
+                self.invert_shift_wheel_pan = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("editor_horizontal_zoom_anchor=") {
+                self.horizontal_zoom_anchor_mode = match rest.trim().to_ascii_lowercase().as_str() {
+                    "playhead" => EditorHorizontalZoomAnchorMode::Playhead,
+                    _ => EditorHorizontalZoomAnchorMode::Pointer,
+                };
+            } else if let Some(rest) = line.strip_prefix("editor_pause_resume_mode=") {
+                self.editor_pause_resume_mode = match rest.trim().to_ascii_lowercase().as_str() {
+                    "continue_from_pause" => EditorPauseResumeMode::ContinueFromPause,
+                    _ => EditorPauseResumeMode::ReturnToLastStart,
+                };
             } else if let Some(rest) = line.strip_prefix("spectro_fft=") {
                 if let Ok(v) = rest.trim().parse::<usize>() {
                     self.spectro_cfg.fft_size = v;
@@ -549,9 +563,31 @@ impl WavesPreviewer {
         let zoo_voice_enabled = if self.zoo_voice_enabled { "1" } else { "0" };
         let zoo_use_bpm = if self.zoo_use_bpm { "1" } else { "0" };
         let zoo_flip_manual = if self.zoo_flip_manual { "1" } else { "0" };
+        let invert_wave_zoom_wheel = if self.invert_wave_zoom_wheel {
+            "1"
+        } else {
+            "0"
+        };
+        let invert_shift_wheel_pan = if self.invert_shift_wheel_pan {
+            "1"
+        } else {
+            "0"
+        };
+        let horizontal_zoom_anchor = match self.horizontal_zoom_anchor_mode {
+            EditorHorizontalZoomAnchorMode::Pointer => "pointer",
+            EditorHorizontalZoomAnchorMode::Playhead => "playhead",
+        };
+        let editor_pause_resume_mode = match self.editor_pause_resume_mode {
+            EditorPauseResumeMode::ReturnToLastStart => "return_to_last_start",
+            EditorPauseResumeMode::ContinueFromPause => "continue_from_pause",
+        };
         let mut out = format!(
             "theme={}\nskip_dotfiles={}\n\
 zero_cross_eps={:.6}\n\
+editor_invert_wave_zoom_wheel={}\n\
+editor_invert_shift_wheel_pan={}\n\
+editor_horizontal_zoom_anchor={}\n\
+editor_pause_resume_mode={}\n\
 spectro_fft={}\n\
 spectro_window={}\n\
 spectro_hop={}\n\
@@ -597,6 +633,10 @@ zoo_flip_manual={}\n",
             theme,
             skip,
             self.zero_cross_epsilon,
+            invert_wave_zoom_wheel,
+            invert_shift_wheel_pan,
+            horizontal_zoom_anchor,
+            editor_pause_resume_mode,
             self.spectro_cfg.fft_size,
             window,
             self.spectro_cfg.hop_size,

@@ -2584,9 +2584,8 @@ where
                             on_event(EffectGraphRuntimeEvent::NodeLog {
                                 node_id: node.id.clone(),
                                 severity: EffectGraphSeverity::Warning,
-                                message:
-                                    "Could not measure integrated LUFS; passing input through"
-                                        .to_string(),
+                                message: "Could not measure integrated LUFS; passing input through"
+                                    .to_string(),
                             });
                             bus
                         }
@@ -3994,6 +3993,7 @@ impl WavesPreviewer {
                 tab.samples_len = new_len;
                 tab.waveform_minmax = waveform.clone();
                 tab.waveform_pyramid = waveform_pyramid.clone();
+                Self::invalidate_editor_viewport_cache(tab);
                 tab.dirty = true;
                 tab.preview_overlay = None;
                 tab.preview_audio_tool = None;
@@ -4968,9 +4968,7 @@ mod tests {
                 id: "loudness".to_string(),
                 ui_pos: [0.0, 0.0],
                 ui_size: [280.0, 182.0],
-                data: EffectGraphNodeData::Loudness {
-                    target_lufs: -16.5,
-                },
+                data: EffectGraphNodeData::Loudness { target_lufs: -16.5 },
             }],
             edges: Vec::new(),
         };
@@ -5294,8 +5292,8 @@ mod tests {
                 phase.sin() * 0.05
             })
             .collect::<Vec<_>>();
-        let input_lufs = crate::wave::lufs_integrated_from_multi(&[source.clone()], 48_000)
-            .expect("input lufs");
+        let input_lufs =
+            crate::wave::lufs_integrated_from_multi(&[source.clone()], 48_000).expect("input lufs");
         assert!(input_lufs < -14.0);
 
         let doc = doc_with_nodes(
@@ -5310,9 +5308,7 @@ mod tests {
                     id: "loudness".to_string(),
                     ui_pos: [100.0, 0.0],
                     ui_size: [200.0, 100.0],
-                    data: EffectGraphNodeData::Loudness {
-                        target_lufs: -14.0,
-                    },
+                    data: EffectGraphNodeData::Loudness { target_lufs: -14.0 },
                 },
                 EffectGraphNode {
                     id: "output".to_string(),

@@ -1284,12 +1284,21 @@ impl super::WavesPreviewer {
                     t.bpm_user_set = tab.bpm_user_set;
                     t.bpm_offset_sec = tab.bpm_offset_sec;
                     t.view_offset = tab.view_offset;
+                    t.view_offset_exact = tab.view_offset as f64;
                     t.samples_per_px = tab.samples_per_px;
+                    t.vertical_zoom = tab.vertical_zoom;
+                    t.vertical_view_center = tab.vertical_view_center;
+                    t.last_amplitude_nav_rect = None;
+                    t.last_amplitude_viewport_rect = None;
+                    t.last_amplitude_nav_click_at = 0.0;
+                    t.last_amplitude_nav_click_pos = None;
+                    Self::invalidate_editor_viewport_cache(t);
                     t.dirty = tab.dirty;
                     if let Some(overlay) = preview_overlay {
                         t.preview_overlay = Some(overlay);
                         t.preview_audio_tool = preview_tool;
                     }
+                    Self::editor_clamp_ranges(t);
                 }
             }
         }

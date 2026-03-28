@@ -1,10 +1,80 @@
 use std::path::PathBuf;
 
 use super::helpers::db_to_amp;
-use super::types::{PreviewOverlay, ToolKind, ViewMode};
+use super::types::{EditorTab, PreviewOverlay, ToolKind, ViewMode};
 use super::{WavesPreviewer, LIVE_PREVIEW_SAMPLE_LIMIT};
 
 impl WavesPreviewer {
+    pub(super) fn tool_supports_preview(tool: ToolKind) -> bool {
+        matches!(
+            tool,
+            ToolKind::Fade
+                | ToolKind::PitchShift
+                | ToolKind::TimeStretch
+                | ToolKind::Gain
+                | ToolKind::Normalize
+                | ToolKind::Loudness
+                | ToolKind::Reverse
+        )
+    }
+
+    pub(super) fn view_supports_wave_preview(
+        view_mode: ViewMode,
+        show_waveform_overlay: bool,
+    ) -> bool {
+        matches!(view_mode, ViewMode::Waveform)
+            || (matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel)
+                && show_waveform_overlay)
+    }
+
+    fn preview_matches_tool(tab: &EditorTab, tool: ToolKind) -> bool {
+        tab.preview_audio_tool == Some(tool)
+            && tab
+                .preview_overlay
+                .as_ref()
+                .map(|overlay| overlay.source_tool == tool)
+                .unwrap_or(false)
+    }
+
+    pub(super) fn clear_heavy_preview_state(&mut self) {
+        self.heavy_preview_rx = None;
+        self.heavy_preview_expected_gen = 0;
+        self.heavy_preview_expected_path = None;
+        self.heavy_preview_expected_tool = None;
+    }
+
+    pub(super) fn clear_heavy_overlay_state(&mut self) {
+        self.heavy_overlay_rx = None;
+        self.overlay_expected_gen = 0;
+        self.overlay_expected_path = None;
+        self.overlay_expected_tool = None;
+    }
+
+    pub(super) fn current_tab_preview_busy(&self, tab_idx: usize) -> bool {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let path = tab.path.as_path();
+        (self.heavy_preview_rx.is_some()
+            && self.heavy_preview_expected_path.as_deref() == Some(path))
+            || (self.heavy_overlay_rx.is_some()
+                && self.overlay_expected_path.as_deref() == Some(path))
+    }
+
+    pub(super) fn current_tab_preview_message(&self, tab_idx: usize) -> Option<String> {
+        if !self.current_tab_preview_busy(tab_idx) {
+            return None;
+        }
+        let tool = self
+            .heavy_preview_expected_tool
+            .or(self.overlay_expected_tool);
+        Some(match tool {
+            Some(ToolKind::PitchShift) => "Previewing PitchShift...".to_string(),
+            Some(ToolKind::TimeStretch) => "Previewing TimeStretch...".to_string(),
+            _ => "Previewing...".to_string(),
+        })
+    }
+
     pub(super) fn preview_restore_audio_for_tab(&mut self, tab_idx: usize) {
         let source_time_sec = self.playback_current_source_time_sec();
         self.audio.stop();
@@ -77,13 +147,16 @@ impl WavesPreviewer {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
-        if tab.leaf_view_mode() != ViewMode::Waveform {
+        if !Self::view_supports_wave_preview(tab.leaf_view_mode(), tab.show_waveform_overlay) {
             return;
         }
-        if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
+        if !Self::tool_supports_preview(tab.active_tool) {
             return;
         }
-        if self.heavy_preview_rx.is_some() || self.heavy_overlay_rx.is_some() {
+        if Self::preview_matches_tool(tab, tab.active_tool) {
+            return;
+        }
+        if self.current_tab_preview_busy(tab_idx) {
             return;
         }
         let tool = tab.active_tool;
@@ -115,7 +188,6 @@ impl WavesPreviewer {
                     self.audio.stop();
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.preview_audio_tool = Some(ToolKind::PitchShift);
-                        tab.preview_overlay = None;
                     }
                     if use_path_preview {
                         self.spawn_heavy_preview_from_path(
@@ -143,7 +215,6 @@ impl WavesPreviewer {
                     self.audio.stop();
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.preview_audio_tool = Some(ToolKind::TimeStretch);
-                        tab.preview_overlay = None;
                     }
                     if use_path_preview {
                         self.spawn_heavy_preview_from_path(
@@ -284,6 +355,65 @@ impl WavesPreviewer {
                 }
                 self.set_preview_mono(tab_idx, ToolKind::Normalize, mono);
             }
+            ToolKind::Loudness => {
+                const DEFAULT_LOUDNESS_LUFS: f32 = -14.0;
+                if !allow_light_preview
+                    || (st.loudness_target_lufs - DEFAULT_LOUDNESS_LUFS).abs() <= 1e-6
+                {
+                    return;
+                }
+                if let Ok(lufs) = crate::wave::lufs_integrated_from_multi(
+                    &ch_samples,
+                    self.audio.shared.out_sample_rate,
+                ) {
+                    if !lufs.is_finite() {
+                        return;
+                    }
+                    let gain_db = st.loudness_target_lufs - lufs;
+                    let gain = db_to_amp(gain_db);
+                    let mut overlay = ch_samples.clone();
+                    for ch in overlay.iter_mut() {
+                        for v in ch.iter_mut() {
+                            *v = (*v * gain).clamp(-1.0, 1.0);
+                        }
+                    }
+                    let mono = Self::mixdown_channels(&overlay, samples_len);
+                    if mono.is_empty() {
+                        return;
+                    }
+                    let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
+                    if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                        tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                            overlay,
+                            ToolKind::Loudness,
+                            timeline_len,
+                        ));
+                    }
+                    self.set_preview_mono(tab_idx, ToolKind::Loudness, mono);
+                }
+            }
+            ToolKind::Reverse => {
+                if !allow_light_preview {
+                    return;
+                }
+                let mut overlay = ch_samples.clone();
+                for ch in overlay.iter_mut() {
+                    ch.reverse();
+                }
+                let mono = Self::mixdown_channels(&overlay, samples_len);
+                if mono.is_empty() {
+                    return;
+                }
+                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                        overlay,
+                        ToolKind::Reverse,
+                        timeline_len,
+                    ));
+                }
+                self.set_preview_mono(tab_idx, ToolKind::Reverse, mono);
+            }
             _ => {}
         }
     }
@@ -303,19 +433,25 @@ impl WavesPreviewer {
             tab.preview_overlay = None;
         }
         // also discard any in-flight preview/overlay job
-        self.heavy_preview_rx = None;
-        self.heavy_preview_tool = None;
-        self.heavy_overlay_rx = None;
-        self.overlay_expected_tool = None;
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
         self.cancel_music_preview_run();
     }
 
     pub(super) fn spawn_heavy_preview_owned(&mut self, mono: Vec<f32>, tool: ToolKind, param: f32) {
         use std::sync::mpsc;
-        let sr = self.audio.shared.out_sample_rate; // cancel previous job by dropping receiver
-        self.heavy_preview_rx = None;
-        self.heavy_preview_tool = None;
-        let (tx, rx) = mpsc::channel::<Vec<f32>>();
+        let sr = self.audio.shared.out_sample_rate;
+        let path = self
+            .active_tab
+            .and_then(|idx| self.tabs.get(idx).map(|tab| tab.path.clone()))
+            .unwrap_or_default();
+        self.clear_heavy_preview_state();
+        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
+        let gen = self.heavy_preview_gen_counter;
+        self.heavy_preview_expected_gen = gen;
+        self.heavy_preview_expected_path = Some(path.clone());
+        self.heavy_preview_expected_tool = Some(tool);
+        let (tx, rx) = mpsc::channel::<super::HeavyPreviewMessage>();
         std::thread::spawn(move || {
             let out = match tool {
                 ToolKind::PitchShift => {
@@ -326,10 +462,9 @@ impl WavesPreviewer {
                 }
                 _ => mono,
             };
-            let _ = tx.send(out);
+            let _ = tx.send((path, tool, out, gen));
         });
         self.heavy_preview_rx = Some(rx);
-        self.heavy_preview_tool = Some(tool);
     }
 
     pub(super) fn spawn_heavy_preview_from_path(
@@ -342,9 +477,14 @@ impl WavesPreviewer {
         let sr = self.audio.shared.out_sample_rate;
         let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         let bit_depth = self.bit_depth_override.get(&path).copied();
-        self.heavy_preview_rx = None;
-        self.heavy_preview_tool = None;
-        let (tx, rx) = mpsc::channel::<Vec<f32>>();
+        self.clear_heavy_preview_state();
+        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
+        let gen = self.heavy_preview_gen_counter;
+        self.heavy_preview_expected_gen = gen;
+        self.heavy_preview_expected_path = Some(path.clone());
+        self.heavy_preview_expected_tool = Some(tool);
+        let (tx, rx) = mpsc::channel::<super::HeavyPreviewMessage>();
+        let out_path = path.clone();
         std::thread::spawn(move || {
             let (mut mono, in_sr) = match crate::wave::decode_wav_mono(&path) {
                 Ok(v) => v,
@@ -367,10 +507,9 @@ impl WavesPreviewer {
                 }
                 _ => mono,
             };
-            let _ = tx.send(out);
+            let _ = tx.send((out_path, tool, out, gen));
         });
         self.heavy_preview_rx = Some(rx);
-        self.heavy_preview_tool = Some(tool);
     }
 
     // Spawn per-channel overlay generator (Pitch/Stretch) in a worker thread.
@@ -382,10 +521,8 @@ impl WavesPreviewer {
         param: f32,
     ) {
         use std::sync::mpsc;
-        // Cancel previous overlay job by dropping receiver
-        self.heavy_overlay_rx = None;
+        self.clear_heavy_overlay_state();
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-            tab.preview_overlay = None;
             let path = tab.path.clone();
             let ch = tab.ch_samples.clone();
             let sr = self.audio.shared.out_sample_rate;
@@ -394,6 +531,7 @@ impl WavesPreviewer {
             self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
             let gen = self.overlay_gen_counter;
             self.overlay_expected_gen = gen;
+            self.overlay_expected_path = Some(path.clone());
             self.overlay_expected_tool = Some(tool);
             let (tx, rx) = mpsc::channel::<(std::path::PathBuf, Vec<Vec<f32>>, usize, u64)>();
             std::thread::spawn(move || {
@@ -426,10 +564,11 @@ impl WavesPreviewer {
         param: f32,
     ) {
         use std::sync::mpsc;
-        self.heavy_overlay_rx = None;
+        self.clear_heavy_overlay_state();
         self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
         let gen = self.overlay_gen_counter;
         self.overlay_expected_gen = gen;
+        self.overlay_expected_path = Some(path.clone());
         self.overlay_expected_tool = Some(tool);
         let out_sr = self.audio.shared.out_sample_rate;
         let resample_quality = Self::to_wave_resample_quality(self.src_quality);

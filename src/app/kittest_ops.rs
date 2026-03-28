@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::app::types::{
     LoopMode, LoopXfadeShape, MusicAnalysisResult, ProcessingResult, ProcessingState,
-    ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ViewMode,
+    ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -515,6 +515,114 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).map(|tab| tab.active_tool)
     }
 
+    pub fn test_preview_audio_tool(&self) -> Option<ToolKind> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).and_then(|tab| tab.preview_audio_tool)
+    }
+
+    pub fn test_preview_overlay_tool(&self) -> Option<ToolKind> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.preview_overlay.as_ref().map(|overlay| overlay.source_tool))
+    }
+
+    pub fn test_preview_overlay_present(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|tab| tab.preview_overlay.is_some())
+            .unwrap_or(false)
+    }
+
+    pub fn test_preview_busy_for_active_tab(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.current_tab_preview_busy(tab_idx)
+    }
+
+    pub fn test_refresh_tool_preview_active_tab(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.refresh_tool_preview_for_tab(tab_idx);
+        true
+    }
+
+    pub fn test_set_tool_gain_db(&mut self, gain_db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.tool_state = ToolState {
+            gain_db,
+            ..tab.tool_state
+        };
+        true
+    }
+
+    pub fn test_set_tool_normalize_target_db(&mut self, target_db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.tool_state = ToolState {
+            normalize_target_db: target_db,
+            ..tab.tool_state
+        };
+        true
+    }
+
+    pub fn test_set_tool_fade_ms(&mut self, fade_in_ms: f32, fade_out_ms: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.tool_state = ToolState {
+            fade_in_ms,
+            fade_out_ms,
+            ..tab.tool_state
+        };
+        true
+    }
+
+    pub fn test_set_tool_pitch_semitones(&mut self, semitones: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.tool_state = ToolState {
+            pitch_semitones: semitones,
+            ..tab.tool_state
+        };
+        true
+    }
+
+    pub fn test_set_tool_stretch_rate(&mut self, stretch_rate: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.tool_state = ToolState {
+            stretch_rate,
+            ..tab.tool_state
+        };
+        true
+    }
+
     pub fn test_set_bpm_offset_sec(&mut self, offset_sec: f32) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -543,15 +651,21 @@ impl super::WavesPreviewer {
             return false;
         };
         tab.selection = Some((s, e));
-        tab.drag_select_anchor = None;
+        tab.selection_anchor_sample = None;
         tab.right_drag_mode = None;
-        tab.right_drag_anchor = None;
         true
     }
 
     pub fn test_tab_selection(&self) -> Option<(usize, usize)> {
         let tab_idx = self.active_tab?;
         self.tabs.get(tab_idx).and_then(|tab| tab.selection)
+    }
+
+    pub fn test_tab_selection_anchor(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.selection_anchor_sample)
     }
 
     pub fn test_tab_right_drag_mode(&self) -> Option<&'static str> {
@@ -563,7 +677,12 @@ impl super::WavesPreviewer {
         })
     }
 
-    pub fn test_simulate_right_drag(&mut self, shift: bool, to_frac: f32) -> bool {
+    pub fn test_simulate_right_drag_from_frac(
+        &mut self,
+        start_frac: f32,
+        shift: bool,
+        to_frac: f32,
+    ) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
         };
@@ -574,22 +693,19 @@ impl super::WavesPreviewer {
             return false;
         }
         let max_idx = tab.samples_len.saturating_sub(1);
+        let anchor = ((tab.samples_len as f32) * start_frac.clamp(0.0, 1.0))
+            .round()
+            .clamp(0.0, max_idx as f32) as usize;
         let target = ((tab.samples_len as f32) * to_frac.clamp(0.0, 1.0))
             .round()
             .clamp(0.0, max_idx as f32) as usize;
-        let anchor = self
-            .audio
-            .shared
-            .play_pos
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .min(max_idx);
         tab.right_drag_mode = Some(if shift {
             crate::app::types::RightDragMode::SelectRange
         } else {
             crate::app::types::RightDragMode::Seek
         });
-        tab.right_drag_anchor = Some(anchor);
         if shift {
+            tab.selection_anchor_sample = Some(anchor);
             let (s, e) = if target >= anchor {
                 (anchor, target)
             } else {
@@ -600,7 +716,180 @@ impl super::WavesPreviewer {
             self.audio.seek_to_sample(target);
         }
         tab.right_drag_mode = None;
-        tab.right_drag_anchor = None;
+        true
+    }
+
+    pub fn test_simulate_right_drag(&mut self, shift: bool, to_frac: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        if tab.samples_len == 0 {
+            return false;
+        }
+        let max_idx = tab.samples_len.saturating_sub(1).max(1);
+        let anchor = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(max_idx) as f32
+            / max_idx as f32;
+        self.test_simulate_right_drag_from_frac(anchor, shift, to_frac)
+    }
+
+    pub fn test_last_play_start_display_sample(&self) -> Option<usize> {
+        self.playback_session.last_play_start_display_sample
+    }
+
+    pub fn test_tab_vertical_zoom(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.vertical_zoom)
+    }
+
+    pub fn test_tab_vertical_view_center(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.vertical_view_center)
+    }
+
+    pub fn test_set_tab_vertical_zoom(&mut self, zoom: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.vertical_zoom = zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+        Self::editor_clamp_vertical_view(tab);
+        true
+    }
+
+    pub fn test_set_tab_vertical_view_center(&mut self, center: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.vertical_view_center = center.clamp(-1.0, 1.0);
+        Self::editor_clamp_vertical_view(tab);
+        true
+    }
+
+    pub fn test_tab_amplitude_nav_rect(&self) -> Option<egui::Rect> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.last_amplitude_nav_rect)
+    }
+
+    pub fn test_tab_amplitude_nav_viewport_rect(&self) -> Option<egui::Rect> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.last_amplitude_viewport_rect)
+    }
+
+    pub fn test_tab_amplitude_nav_reserved_width(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).and_then(|tab| {
+            let nav = tab.last_amplitude_nav_rect?;
+            Some((tab.last_wave_w + nav.width() + 30.0 - 18.0) - tab.last_wave_w)
+        })
+    }
+
+    pub fn test_tab_amplitude_nav_strip_width(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.last_amplitude_nav_rect.map(|rect| rect.width()))
+    }
+
+    pub fn test_clear_tab_amplitude_nav_rects(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.last_amplitude_nav_rect = None;
+        tab.last_amplitude_viewport_rect = None;
+        true
+    }
+
+    pub fn test_tab_view_offset(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.view_offset)
+    }
+
+    pub fn test_set_tab_view_offset(&mut self, view_offset: usize) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.view_offset = view_offset.min(tab.samples_len.saturating_sub(1));
+        tab.view_offset_exact = tab.view_offset as f64;
+        true
+    }
+
+    pub fn test_tab_samples_per_px(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.samples_per_px)
+    }
+
+    pub fn test_meter_db(&self) -> f32 {
+        self.meter_db
+    }
+
+    pub fn test_editor_pref_invert_wave_zoom_wheel(&self) -> bool {
+        self.invert_wave_zoom_wheel
+    }
+
+    pub fn test_set_editor_pref_invert_wave_zoom_wheel(&mut self, enabled: bool) {
+        self.invert_wave_zoom_wheel = enabled;
+    }
+
+    pub fn test_editor_pref_invert_shift_wheel_pan(&self) -> bool {
+        self.invert_shift_wheel_pan
+    }
+
+    pub fn test_set_editor_pref_invert_shift_wheel_pan(&mut self, enabled: bool) {
+        self.invert_shift_wheel_pan = enabled;
+    }
+
+    pub fn test_editor_pref_horizontal_zoom_anchor(&self) -> &'static str {
+        match self.horizontal_zoom_anchor_mode {
+            crate::app::types::EditorHorizontalZoomAnchorMode::Pointer => "pointer",
+            crate::app::types::EditorHorizontalZoomAnchorMode::Playhead => "playhead",
+        }
+    }
+
+    pub fn test_set_editor_pref_horizontal_zoom_anchor(&mut self, mode: &str) -> bool {
+        self.horizontal_zoom_anchor_mode = match mode {
+            "pointer" => crate::app::types::EditorHorizontalZoomAnchorMode::Pointer,
+            "playhead" => crate::app::types::EditorHorizontalZoomAnchorMode::Playhead,
+            _ => return false,
+        };
+        true
+    }
+
+    pub fn test_editor_pref_pause_resume_mode(&self) -> &'static str {
+        match self.editor_pause_resume_mode {
+            crate::app::types::EditorPauseResumeMode::ReturnToLastStart => "return_to_last_start",
+            crate::app::types::EditorPauseResumeMode::ContinueFromPause => "continue_from_pause",
+        }
+    }
+
+    pub fn test_set_editor_pref_pause_resume_mode(&mut self, mode: &str) -> bool {
+        self.editor_pause_resume_mode = match mode {
+            "return_to_last_start" => crate::app::types::EditorPauseResumeMode::ReturnToLastStart,
+            "continue_from_pause" => crate::app::types::EditorPauseResumeMode::ContinueFromPause,
+            _ => return false,
+        };
         true
     }
 

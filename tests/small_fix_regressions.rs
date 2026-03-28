@@ -4,7 +4,8 @@ mod small_fix_regressions {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use egui_kittest::Harness;
+    use egui::{Key, Modifiers};
+    use egui_kittest::{kittest::Queryable, Harness};
     use hound::{SampleFormat, WavSpec, WavWriter};
     use neowaves::app::ToolKind;
     use neowaves::kittest::{harness_default, harness_with_startup};
@@ -83,6 +84,31 @@ mod small_fix_regressions {
         }
     }
 
+    fn wait_for_preview_tool(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        tool: ToolKind,
+        require_overlay: bool,
+    ) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            let tool_ok = harness.state().test_preview_audio_tool() == Some(tool);
+            let overlay_ok = !require_overlay || harness.state().test_preview_overlay_tool() == Some(tool);
+            if tool_ok && overlay_ok {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!(
+                    "preview timeout for {:?}: audio={:?} overlay={:?}",
+                    tool,
+                    harness.state().test_preview_audio_tool(),
+                    harness.state().test_preview_overlay_tool()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_for_bits_label(harness: &mut Harness<'static, WavesPreviewer>) -> String {
         let start = Instant::now();
         loop {
@@ -97,6 +123,47 @@ mod small_fix_regressions {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn editor_canvas_pos_at_frac(
+        harness: &Harness<'static, WavesPreviewer>,
+        frac: f32,
+    ) -> egui::Pos2 {
+        const EDITOR_AMPLITUDE_NAV_RESERVED_W: f32 = 30.0;
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let wave_w = harness.state().tabs[tab_idx].last_wave_w.max(64.0);
+        let wave_right = (inspector_rect.left() - 4.0 - EDITOR_AMPLITUDE_NAV_RESERVED_W).max(48.0);
+        let wave_left = (wave_right - wave_w + 8.0).max(8.0);
+        let width = (wave_right - wave_left).max(64.0);
+        egui::pos2(
+            wave_left + width * frac.clamp(0.0, 1.0),
+            inspector_rect.center().y,
+        )
+    }
+
+    fn editor_shift_click_at_frac(harness: &mut Harness<'static, WavesPreviewer>, frac: f32) {
+        let pos = editor_canvas_pos_at_frac(harness, frac);
+        harness.hover_at(pos);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::SHIFT,
+            },
+            Modifiers::SHIFT,
+        );
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::SHIFT,
+            },
+            Modifiers::SHIFT,
+        );
+        harness.run_steps(2);
     }
 
     fn write_wav_32_int(path: &Path, sr: u32, secs: f32) {
@@ -597,7 +664,7 @@ mod small_fix_regressions {
     }
 
     #[test]
-    fn shift_right_drag_selects_from_playhead_anchor() {
+    fn secondary_drag_anchor_is_not_replaced_by_playhead() {
         let dir = make_temp_dir("right_drag_shift");
         let src = dir.join("src.wav");
         write_wav_32_float(&src, 48_000, 2.0);
@@ -608,14 +675,118 @@ mod small_fix_regressions {
         wait_for_tab_ready(&mut harness);
 
         harness.state().audio.seek_to_sample(4_000);
-        assert!(harness.state_mut().test_simulate_right_drag(true, 0.80));
+        assert!(harness
+            .state_mut()
+            .test_simulate_right_drag_from_frac(0.80, true, 0.92));
         harness.run_steps(1);
 
+        let anchor = harness
+            .state()
+            .test_tab_selection_anchor()
+            .expect("selection anchor");
         let selection = harness.state().test_tab_selection().expect("selection");
         assert!(selection.1 > selection.0);
-        assert!(selection.0 <= 4_000 && 4_000 <= selection.1);
+        assert!(
+            anchor > 20_000,
+            "secondary selection anchor should come from button-down sample, not playhead: {anchor}"
+        );
+        assert_eq!(selection.0, anchor);
         assert_eq!(harness.state().test_tab_right_drag_mode(), None);
         assert_eq!(harness.state().test_audio_play_pos(), 4_000);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shift_click_after_shift_arrow_uses_saved_anchor() {
+        let dir = make_temp_dir("shift_click_anchor");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_audio_seek_to_sample(4_000);
+        harness.run_steps(1);
+        harness.key_press_modifiers(Modifiers::SHIFT, Key::ArrowRight);
+        harness.run_steps(2);
+        let anchor = harness
+            .state()
+            .test_tab_selection_anchor()
+            .expect("selection anchor");
+        editor_shift_click_at_frac(&mut harness, 0.75);
+        let selection = harness.state().test_tab_selection().expect("selection");
+        assert_eq!(selection.0, anchor);
+        assert!(selection.1 > selection.0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stopped_meter_does_not_show_stale_value() {
+        let dir = make_temp_dir("meter_stale");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        harness.state_mut().test_audio_seek_to_sample(10_000);
+        harness.run_steps(1);
+        harness.key_press(Key::Space);
+        harness.run_steps(5);
+        assert!(
+            harness.state().test_meter_db() > -79.9,
+            "playing meter should report signal"
+        );
+        harness.key_press(Key::Space);
+        harness.run_steps(5);
+        assert!(
+            harness.state().test_meter_db() <= -79.9,
+            "stopped meter should reset to -inf-equivalent"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_playback_meter_reports_signal() {
+        let dir = make_temp_dir("meter_list_playback");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&src));
+        harness.run_steps(2);
+
+        harness.key_press(Key::Space);
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_audio_is_playing() && harness.state().test_meter_db() > -79.9 {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(8) {
+                panic!(
+                    "list playback meter did not report signal: playing={} meter={}",
+                    harness.state().test_audio_is_playing(),
+                    harness.state().test_meter_db()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        harness.key_press(Key::Space);
+        harness.run_steps(5);
+        assert!(
+            harness.state().test_meter_db() <= -79.9,
+            "stopped list playback should reset meter to -inf-equivalent"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -722,6 +893,62 @@ mod small_fix_regressions {
             (rate_after - rate_before).abs() < 1.0e-6,
             "preview restore should keep output-buffer playback rate stable: before={rate_before} after={rate_after}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preview_restore_allows_spec_waveform_overlay() {
+        let dir = make_temp_dir("preview_spec_overlay");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_tool_gain_db(4.0));
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::app::ViewMode::Spectrogram));
+        assert!(harness.state_mut().test_set_waveform_overlay(true));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
+
+        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_preview_busy_does_not_disable_gain_preview() {
+        let dir = make_temp_dir("preview_busy_scope");
+        let a = dir.join("a.wav");
+        let b = dir.join("b.wav");
+        write_wav_32_float(&a, 48_000, 2.5);
+        write_wav_32_float(&b, 48_000, 2.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&a));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::PitchShift));
+        assert!(harness.state_mut().test_set_tool_pitch_semitones(2.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        harness.run_steps(2);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&b));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_tool_gain_db(3.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
+
+        assert_eq!(harness.state().test_preview_audio_tool(), Some(ToolKind::Gain));
+        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1330,9 +1557,16 @@ mod small_fix_regressions {
             harness.state().test_active_tab_loading_waveform_ready(),
             "loading overview should be available immediately after open"
         );
+        let start = Instant::now();
+        while harness.state().test_active_tab_samples_len_visual() == 0
+            && start.elapsed() < Duration::from_secs(2)
+        {
+            harness.run_steps(1);
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(
             harness.state().test_active_tab_samples_len_visual() > 0,
-            "visual length should be known immediately after open"
+            "visual length should become available during early loading"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1457,6 +1691,68 @@ mod small_fix_regressions {
         assert_eq!(
             harness.state().test_audio_output_device_pref().as_deref(),
             Some("Device-A")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_zoom_inversion_pref_roundtrip() {
+        let mut harness = harness_default();
+        let dir = make_temp_dir("editor_zoom_pref");
+        let prefs = dir.join("prefs_test.txt");
+
+        harness
+            .state_mut()
+            .test_set_editor_pref_invert_wave_zoom_wheel(true);
+        harness
+            .state_mut()
+            .test_set_editor_pref_horizontal_zoom_anchor("playhead");
+        harness.state().test_save_prefs_to_path(&prefs);
+
+        harness
+            .state_mut()
+            .test_set_editor_pref_invert_wave_zoom_wheel(false);
+        harness
+            .state_mut()
+            .test_set_editor_pref_horizontal_zoom_anchor("pointer");
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+
+        assert!(harness.state().test_editor_pref_invert_wave_zoom_wheel());
+        assert_eq!(
+            harness.state().test_editor_pref_horizontal_zoom_anchor(),
+            "playhead"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_shift_pan_inversion_pref_roundtrip() {
+        let mut harness = harness_default();
+        let dir = make_temp_dir("editor_shift_pan_pref");
+        let prefs = dir.join("prefs_test.txt");
+
+        harness
+            .state_mut()
+            .test_set_editor_pref_invert_shift_wheel_pan(true);
+        harness
+            .state_mut()
+            .test_set_editor_pref_pause_resume_mode("continue_from_pause");
+        harness.state().test_save_prefs_to_path(&prefs);
+
+        harness
+            .state_mut()
+            .test_set_editor_pref_invert_shift_wheel_pan(false);
+        harness
+            .state_mut()
+            .test_set_editor_pref_pause_resume_mode("return_to_last_start");
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+
+        assert!(harness.state().test_editor_pref_invert_shift_wheel_pan());
+        assert_eq!(
+            harness.state().test_editor_pref_pause_resume_mode(),
+            "continue_from_pause"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

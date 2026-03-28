@@ -496,7 +496,7 @@ impl crate::app::WavesPreviewer {
                                     self.cancel_effect_graph_run();
                                 }
                             }
-                            if let Some(t) = &self.heavy_preview_tool {
+                            if let Some(t) = &self.heavy_preview_expected_tool {
                                 ui.add(egui::Spinner::new());
                                 let msg = match t {
                                     ToolKind::PitchShift => "Previewing PitchShift",

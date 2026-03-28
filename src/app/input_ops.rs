@@ -397,6 +397,7 @@ impl super::WavesPreviewer {
             let max_left = tab_mut.samples_len.saturating_sub(vis);
             let left = target_display.saturating_sub(vis / 2);
             tab_mut.view_offset = left.min(max_left);
+            tab_mut.view_offset_exact = tab_mut.view_offset as f64;
         }
     }
 

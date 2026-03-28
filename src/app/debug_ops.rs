@@ -771,10 +771,8 @@ impl WavesPreviewer {
     }
 
     pub(super) fn cancel_heavy_preview(&mut self) {
-        self.heavy_preview_rx = None;
-        self.heavy_preview_tool = None;
-        self.heavy_overlay_rx = None;
-        self.overlay_expected_tool = None;
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
     }
 
     pub(super) fn default_debug_summary_path(&mut self) -> PathBuf {
@@ -1334,9 +1332,8 @@ impl WavesPreviewer {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         if let Some((s, e)) = Self::debug_range_for_tab(tab, start_frac, end_frac) {
                             tab.selection = Some((s, e));
-                            tab.drag_select_anchor = None;
+                            tab.selection_anchor_sample = None;
                             tab.right_drag_mode = None;
-                            tab.right_drag_anchor = None;
                             self.debug_log(format!("auto: selection {s}..{e}"));
                         }
                     }
