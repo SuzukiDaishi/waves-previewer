@@ -271,6 +271,8 @@ struct PlaybackSessionState {
     transport_sr: u32,
     is_playing: bool,
     last_play_start_display_sample: Option<usize>,
+    applied_mode: RateMode,
+    applied_playback_rate: f32,
     dry_audio: Option<Arc<AudioBuffer>>,
     last_applied_master_gain_db: f32,
     last_applied_file_gain_db: f32,
@@ -285,11 +287,35 @@ impl Default for PlaybackSessionState {
             transport_sr: 48_000,
             is_playing: false,
             last_play_start_display_sample: None,
+            applied_mode: RateMode::Speed,
+            applied_playback_rate: 1.0,
             dry_audio: None,
             last_applied_master_gain_db: f32::NAN,
             last_applied_file_gain_db: f32::NAN,
         }
     }
+}
+
+struct PlaybackFxRenderState {
+    source: PlaybackSourceKind,
+    source_generation: u64,
+    job_id: u64,
+    mode: RateMode,
+    playback_rate: f32,
+    pitch_semitones: f32,
+    autoplay_when_ready: bool,
+    rx: std::sync::mpsc::Receiver<PlaybackFxResult>,
+}
+
+struct PlaybackFxResult {
+    source: PlaybackSourceKind,
+    source_generation: u64,
+    job_id: u64,
+    mode: RateMode,
+    playback_rate: f32,
+    pitch_semitones: f32,
+    buffer_sr: u32,
+    audio: Arc<AudioBuffer>,
 }
 
 pub struct WavesPreviewer {
@@ -307,6 +333,15 @@ pub struct WavesPreviewer {
     audio_output_error: Option<String>,
     pub playback_rate: f32,
     playback_session: PlaybackSessionState,
+    playback_fx_state: Option<PlaybackFxRenderState>,
+    playback_fx_job_id: u64,
+    playback_source_generation: u64,
+    playback_base_audio: Option<Arc<AudioBuffer>>,
+    prepared_playback_fx_audio: Option<Arc<AudioBuffer>>,
+    prepared_playback_fx_generation: u64,
+    prepared_playback_fx_mode: Option<RateMode>,
+    prepared_playback_fx_rate: f32,
+    prepared_playback_fx_pitch: f32,
     // unified numeric control via DragValue; no string normalization
     pub pitch_semitones: f32,
     pub meter_db: f32,
@@ -336,6 +371,7 @@ pub struct WavesPreviewer {
     transcript_supported_tasks: Vec<String>,
     music_ai_model_dir: Option<PathBuf>,
     music_ai_available: bool,
+    music_ai_demucs_model_path: Option<PathBuf>,
     music_ai_state: Option<MusicAnalyzeRunState>,
     music_model_download_state: Option<MusicModelDownloadState>,
     music_ai_last_error: Option<String>,
@@ -622,6 +658,74 @@ impl WavesPreviewer {
         }
     }
 
+    fn playback_live_mapping_rate(&self) -> f32 {
+        if self.mode == RateMode::Speed {
+            self.playback_rate.max(0.25)
+        } else {
+            1.0
+        }
+    }
+
+    fn playback_set_applied_mapping(&mut self, mode: RateMode, playback_rate: f32) {
+        self.playback_session.applied_mode = mode;
+        self.playback_session.applied_playback_rate = playback_rate.max(0.25);
+    }
+
+    fn next_playback_fx_job_id(&mut self) -> u64 {
+        self.playback_fx_job_id = self.playback_fx_job_id.wrapping_add(1).max(1);
+        self.playback_fx_job_id
+    }
+
+    fn playback_fx_required_for(mode: RateMode, playback_rate: f32, pitch_semitones: f32) -> bool {
+        match mode {
+            RateMode::Speed => false,
+            RateMode::PitchShift => pitch_semitones.abs() > 0.0001,
+            RateMode::TimeStretch => (playback_rate - 1.0).abs() > 0.0001,
+        }
+    }
+
+    fn playback_mode_needs_fx_buffer(&self) -> bool {
+        Self::playback_fx_required_for(self.mode, self.playback_rate, self.pitch_semitones)
+    }
+
+    fn clear_prepared_playback_fx(&mut self) {
+        self.prepared_playback_fx_audio = None;
+        self.prepared_playback_fx_generation = 0;
+        self.prepared_playback_fx_mode = None;
+        self.prepared_playback_fx_rate = 1.0;
+        self.prepared_playback_fx_pitch = 0.0;
+    }
+
+    fn clear_pending_playback_fx_render(&mut self) {
+        self.playback_fx_state = None;
+    }
+
+    fn clear_playback_fx_state(&mut self) {
+        self.clear_pending_playback_fx_render();
+        self.clear_prepared_playback_fx();
+    }
+
+    fn prepared_playback_fx_matches_current(&self) -> bool {
+        self.prepared_playback_fx_audio.is_some()
+            && self.prepared_playback_fx_generation == self.playback_source_generation
+            && self.prepared_playback_fx_mode == Some(self.mode)
+            && (self.prepared_playback_fx_rate - self.playback_rate).abs() <= 1.0e-6
+            && (self.prepared_playback_fx_pitch - self.pitch_semitones).abs() <= 1.0e-6
+    }
+
+    fn pending_playback_fx_matches_current(&self) -> bool {
+        self.playback_fx_state
+            .as_ref()
+            .map(|state| {
+                state.source_generation == self.playback_source_generation
+                    && state.source == self.playback_session.source
+                    && state.mode == self.mode
+                    && (state.playback_rate - self.playback_rate).abs() <= 1.0e-6
+                    && (state.pitch_semitones - self.pitch_semitones).abs() <= 1.0e-6
+            })
+            .unwrap_or(false)
+    }
+
     fn playback_rate_from_values(
         transport: PlaybackTransportKind,
         user_speed: f32,
@@ -629,7 +733,7 @@ impl WavesPreviewer {
         out_sr: u32,
     ) -> f32 {
         match transport {
-            PlaybackTransportKind::Buffer => 1.0,
+            PlaybackTransportKind::Buffer => user_speed.clamp(0.25, 4.0),
             PlaybackTransportKind::ExactStreamWav => {
                 let src = transport_sr.max(1) as f32;
                 let out = out_sr.max(1) as f32;
@@ -686,7 +790,11 @@ impl WavesPreviewer {
         frames.max(0.0).round() as usize
     }
 
-    pub(super) fn playback_current_source_time_sec(&self) -> Option<f64> {
+    fn playback_current_source_time_sec_with(
+        &self,
+        mode: RateMode,
+        playback_rate: f32,
+    ) -> Option<f64> {
         if matches!(self.playback_session.source, PlaybackSourceKind::None) {
             return None;
         }
@@ -696,25 +804,41 @@ impl WavesPreviewer {
             .play_pos_f
             .load(std::sync::atomic::Ordering::Relaxed);
         Some(Self::playback_source_time_for_output_pos(
-            self.mode,
+            mode,
             self.playback_session.transport,
             pos_f as f64,
             self.playback_session.transport_sr.max(1),
             self.audio.shared.out_sample_rate.max(1),
-            self.playback_rate,
+            playback_rate,
         ))
     }
 
-    pub(super) fn playback_seek_to_source_time(&self, mode: RateMode, source_time_sec: f64) {
+    pub(super) fn playback_current_source_time_sec(&self) -> Option<f64> {
+        self.playback_current_source_time_sec_with(
+            self.playback_session.applied_mode,
+            self.playback_session.applied_playback_rate,
+        )
+    }
+
+    pub(super) fn playback_seek_to_source_time_with(
+        &self,
+        mode: RateMode,
+        playback_rate: f32,
+        source_time_sec: f64,
+    ) {
         let pos = Self::playback_output_pos_for_source_time(
             mode,
             self.playback_session.transport,
             source_time_sec,
             self.playback_session.transport_sr.max(1),
             self.audio.shared.out_sample_rate.max(1),
-            self.playback_rate,
+            playback_rate,
         );
         self.audio.seek_to_sample(pos);
+    }
+
+    pub(super) fn playback_seek_to_source_time(&self, mode: RateMode, source_time_sec: f64) {
+        self.playback_seek_to_source_time_with(mode, self.playback_rate, source_time_sec);
     }
 
     pub(super) fn playback_mark_source(
@@ -736,10 +860,14 @@ impl WavesPreviewer {
         self.playback_session.transport_sr = transport_sr.max(1);
         self.playback_session.user_speed = self.playback_user_speed_for_mode();
         self.playback_session.is_playing = self.playback_is_playing_now();
+        self.playback_set_applied_mapping(self.mode, self.playback_live_mapping_rate());
         self.playback_session.dry_audio = match transport {
             PlaybackTransportKind::Buffer => self.audio.shared.samples.load_full(),
             PlaybackTransportKind::ExactStreamWav => None,
         };
+        self.playback_base_audio = self.playback_session.dry_audio.clone();
+        self.playback_source_generation = self.playback_source_generation.wrapping_add(1).max(1);
+        self.clear_playback_fx_state();
         self.playback_session.last_applied_master_gain_db = f32::NAN;
         self.playback_session.last_applied_file_gain_db = f32::NAN;
         self.playback_refresh_rate_for_current_source();
@@ -751,6 +879,35 @@ impl WavesPreviewer {
         buffer_sr: u32,
     ) {
         self.playback_mark_source(source, PlaybackTransportKind::Buffer, buffer_sr);
+    }
+
+    pub(super) fn playback_mark_source_without_buffer(
+        &mut self,
+        source: PlaybackSourceKind,
+        transport: PlaybackTransportKind,
+        transport_sr: u32,
+    ) {
+        let keep_last_start = matches!(
+            (&self.playback_session.source, &source),
+            (PlaybackSourceKind::EditorTab(prev), PlaybackSourceKind::EditorTab(next))
+                if prev == next
+        );
+        if !keep_last_start {
+            self.playback_session.last_play_start_display_sample = None;
+        }
+        self.playback_session.source = source;
+        self.playback_session.transport = transport;
+        self.playback_session.transport_sr = transport_sr.max(1);
+        self.playback_session.user_speed = self.playback_user_speed_for_mode();
+        self.playback_session.is_playing = self.playback_is_playing_now();
+        self.playback_set_applied_mapping(self.mode, self.playback_live_mapping_rate());
+        self.playback_session.dry_audio = None;
+        self.playback_base_audio = None;
+        self.playback_source_generation = self.playback_source_generation.wrapping_add(1).max(1);
+        self.clear_playback_fx_state();
+        self.playback_session.last_applied_master_gain_db = f32::NAN;
+        self.playback_session.last_applied_file_gain_db = f32::NAN;
+        self.playback_refresh_rate_for_current_source();
     }
 
     pub(super) fn playback_refresh_rate_for_current_source(&mut self) {
@@ -866,7 +1023,10 @@ impl WavesPreviewer {
             self.playback_session.transport = PlaybackTransportKind::Buffer;
             self.playback_session.is_playing = false;
             self.playback_session.transport_sr = self.audio.shared.out_sample_rate.max(1);
+            self.playback_set_applied_mapping(RateMode::Speed, 1.0);
             self.playback_session.dry_audio = None;
+            self.playback_base_audio = None;
+            self.clear_playback_fx_state();
             self.playback_session.last_applied_master_gain_db = f32::NAN;
             self.playback_session.last_applied_file_gain_db = f32::NAN;
             self.playback_session.last_play_start_display_sample = None;
@@ -1320,6 +1480,18 @@ impl WavesPreviewer {
     fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
         let audio_len = self.audio.current_source_len();
         let display_len = Self::editor_display_samples_len(tab);
+        if let Some(display_sr) = self.editor_transport_display_sample_rate(tab) {
+            let source_time_sec = Self::playback_source_time_for_output_pos(
+                self.playback_session.applied_mode,
+                self.playback_session.transport,
+                audio_pos as f64,
+                self.playback_session.transport_sr.max(1),
+                self.audio.shared.out_sample_rate.max(1),
+                self.playback_session.applied_playback_rate,
+            );
+            let mapped = (source_time_sec * display_sr as f64).round().max(0.0) as usize;
+            return mapped.min(display_len);
+        }
         if audio_len == 0 || display_len == 0 || audio_len == display_len {
             return audio_pos.min(display_len);
         }
@@ -1332,6 +1504,18 @@ impl WavesPreviewer {
     fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
         let audio_len = self.audio.current_source_len();
         let display_len = Self::editor_display_samples_len(tab);
+        if let Some(display_sr) = self.editor_transport_display_sample_rate(tab) {
+            let source_time_sec = display_pos.min(display_len) as f64 / display_sr.max(1) as f64;
+            let mapped = Self::playback_output_pos_for_source_time(
+                self.playback_session.applied_mode,
+                self.playback_session.transport,
+                source_time_sec,
+                self.playback_session.transport_sr.max(1),
+                self.audio.shared.out_sample_rate.max(1),
+                self.playback_session.applied_playback_rate,
+            );
+            return mapped.min(audio_len.max(1));
+        }
         if audio_len == 0 {
             return display_pos;
         }
@@ -1343,6 +1527,18 @@ impl WavesPreviewer {
             .saturating_add((display_len / 2) as u128)
             / (display_len as u128)) as usize;
         mapped.min(audio_len)
+    }
+
+    fn editor_transport_display_sample_rate(&self, tab: &EditorTab) -> Option<u32> {
+        match &self.playback_session.source {
+            PlaybackSourceKind::EditorTab(path)
+                if path == &tab.path
+                    && self.playback_session.transport == PlaybackTransportKind::ExactStreamWav =>
+            {
+                Some(self.playback_session.transport_sr.max(1))
+            }
+            _ => None,
+        }
     }
 
     fn export_list_csv(
@@ -1840,6 +2036,7 @@ impl WavesPreviewer {
             }
             mcp::UiCommand::SetMode(args) => {
                 let prev = self.mode;
+                let prev_rate = self.playback_rate;
                 self.mode = match args.mode.as_str() {
                     "Speed" => RateMode::Speed,
                     "PitchShift" => RateMode::PitchShift,
@@ -1847,35 +2044,34 @@ impl WavesPreviewer {
                     _ => prev,
                 };
                 if self.mode != prev {
-                    self.playback_refresh_rate_for_current_source();
-                    self.rebuild_current_buffer_with_mode();
+                    self.refresh_playback_mode_for_current_source(prev, prev_rate);
                 }
                 ok(json!({"ok": true}))
             }
             mcp::UiCommand::SetSpeed(args) => {
+                let prev_rate = self.playback_rate;
                 self.playback_rate = args.rate;
                 match self.mode {
                     RateMode::Speed | RateMode::TimeStretch => {
-                        self.playback_refresh_rate_for_current_source();
-                        self.rebuild_current_buffer_with_mode();
+                        self.refresh_playback_mode_for_current_source(self.mode, prev_rate);
                     }
                     _ => {}
                 }
                 ok(json!({"ok": true}))
             }
             mcp::UiCommand::SetPitch(args) => {
+                let prev_rate = self.playback_rate;
                 self.pitch_semitones = args.semitones;
                 if self.mode == RateMode::PitchShift {
-                    self.playback_refresh_rate_for_current_source();
-                    self.rebuild_current_buffer_with_mode();
+                    self.refresh_playback_mode_for_current_source(self.mode, prev_rate);
                 }
                 ok(json!({"ok": true}))
             }
             mcp::UiCommand::SetStretch(args) => {
+                let prev_rate = self.playback_rate;
                 self.playback_rate = args.rate;
                 if self.mode == RateMode::TimeStretch {
-                    self.playback_refresh_rate_for_current_source();
-                    self.rebuild_current_buffer_with_mode();
+                    self.refresh_playback_mode_for_current_source(self.mode, prev_rate);
                 }
                 ok(json!({"ok": true}))
             }
@@ -2170,6 +2366,15 @@ impl WavesPreviewer {
             audio_output_error: None,
             playback_rate: 1.0,
             playback_session: PlaybackSessionState::default(),
+            playback_fx_state: None,
+            playback_fx_job_id: 0,
+            playback_source_generation: 0,
+            playback_base_audio: None,
+            prepared_playback_fx_audio: None,
+            prepared_playback_fx_generation: 0,
+            prepared_playback_fx_mode: None,
+            prepared_playback_fx_rate: 1.0,
+            prepared_playback_fx_pitch: 0.0,
             pitch_semitones: 0.0,
             meter_db: -80.0,
             tabs: Vec::new(),
@@ -2198,6 +2403,7 @@ impl WavesPreviewer {
             transcript_supported_tasks: Vec::new(),
             music_ai_model_dir: None,
             music_ai_available: false,
+            music_ai_demucs_model_path: None,
             music_ai_state: None,
             music_model_download_state: None,
             music_ai_last_error: None,
@@ -2767,6 +2973,7 @@ impl eframe::App for WavesPreviewer {
         // Drain LUFS (with gain) recompute results
         self.drain_lufs_recalc_results();
         self.drain_effect_graph_runner(ctx);
+        self.tick_playback_fx_state(ctx);
 
         // Pump LUFS recompute worker (debounced)
         self.pump_lufs_recalc_worker();
@@ -3566,6 +3773,7 @@ impl eframe::App for WavesPreviewer {
         let fast_repaint = playing
             || self.scan_in_progress
             || self.processing.is_some()
+            || self.playback_fx_state.is_some()
             || self.list_preview_rx.is_some()
             || self.list_preview_pending_path.is_some()
             || self.editor_decode_state.is_some()

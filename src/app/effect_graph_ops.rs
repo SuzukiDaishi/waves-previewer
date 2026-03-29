@@ -3275,6 +3275,8 @@ impl WavesPreviewer {
             self.audio.stop();
             self.playback_session.source = crate::app::PlaybackSourceKind::None;
             self.playback_session.is_playing = false;
+            self.playback_base_audio = None;
+            self.clear_playback_fx_state();
         }
         self.effect_graph.workspace_open = false;
         self.effect_graph.pending_action = None;

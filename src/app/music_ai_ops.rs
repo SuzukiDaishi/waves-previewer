@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -29,13 +30,18 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .map(|dir| has_required_music_model_files(dir))
             .unwrap_or(false);
+        self.music_ai_demucs_model_path = self
+            .music_ai_model_dir
+            .as_ref()
+            .and_then(|dir| resolve_demucs_model_path(dir));
     }
 
     pub(super) fn music_ai_has_model(&self) -> bool {
-        self.music_ai_model_dir
-            .as_ref()
-            .map(|dir| has_required_music_model_files(dir))
-            .unwrap_or(false)
+        self.music_ai_available && self.music_ai_model_dir.is_some()
+    }
+
+    pub(super) fn music_ai_has_demucs_model(&self) -> bool {
+        self.music_ai_demucs_model_path.is_some()
     }
 
     pub(super) fn music_ai_can_uninstall(&self) -> bool {
@@ -132,14 +138,27 @@ impl crate::app::WavesPreviewer {
         let path = tab.path.clone();
         let stems_dir_override = tab.music_analysis_draft.stems_dir_override.clone();
         let stems = resolve_stem_paths(path.as_path(), stems_dir_override.as_deref());
-        let can_demix = resolve_demucs_model_path(model_dir.as_path()).is_some();
+        let demucs_model_path = self
+            .music_ai_demucs_model_path
+            .clone()
+            .or_else(|| resolve_demucs_model_path(model_dir.as_path()));
+        let can_demix = demucs_model_path.is_some();
         if !stems.is_ready() && !can_demix {
+            let searched = stems
+                .searched_roots
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let message = format!(
+                "Stems not found ({}) and auto-Demucs is unavailable. Searched: {}. Repair model files or place bass.wav/drums.wav/other.wav/vocals.wav in one of those folders.",
+                stems.missing.join(", "),
+                searched
+            );
             if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
-                tab_mut.music_analysis_draft.last_error = Some(format!(
-                    "Missing stems: {} (Demucs model not found)",
-                    stems.missing.join(", ")
-                ));
+                tab_mut.music_analysis_draft.last_error = Some(message.clone());
             }
+            self.music_ai_last_error = Some(message);
             return;
         }
         let source_kind = if stems.is_ready() {
@@ -177,7 +196,7 @@ impl crate::app::WavesPreviewer {
             let loaded = match load_or_demix_stems_for_preview(
                 path.as_path(),
                 &stems,
-                model_dir.as_path(),
+                demucs_model_path.as_deref(),
                 target_sr,
                 &cancel_flag,
                 &mut send_progress,
@@ -611,6 +630,12 @@ impl crate::app::WavesPreviewer {
         let selection = tab.selection;
         let base_channels = tab.ch_samples.clone();
         let samples_len = tab.samples_len;
+        let sample_rate = tab.buffer_sample_rate.max(1);
+        let source_len = tab.music_analysis_draft.analysis_source_len.max(1);
+        let analysis_result = tab.music_analysis_draft.result.clone();
+        let preview_click_beat = tab.music_analysis_draft.preview_click_beat;
+        let preview_click_downbeat = tab.music_analysis_draft.preview_click_downbeat;
+        let preview_cue_section = tab.music_analysis_draft.preview_cue_section;
         self.cancel_music_preview_run();
         self.music_preview_generation_counter =
             self.music_preview_generation_counter.wrapping_add(1);
@@ -640,23 +665,34 @@ impl crate::app::WavesPreviewer {
                 return;
             }
 
-            let mut overlay = if selection_only {
-                base_channels
-            } else {
-                mixed.clone()
-            };
-            if selection_only {
-                if let Some((a0, b0)) = selection {
-                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                    for (ch_idx, ch) in overlay.iter_mut().enumerate() {
-                        if let Some(src) = mixed.get(ch_idx) {
-                            let end = b.min(ch.len()).min(src.len());
-                            let start = a.min(end);
-                            ch[start..end].copy_from_slice(&src[start..end]);
+            let mut processed = mixed;
+            if let Some(result) = analysis_result.as_ref() {
+                let cue = build_music_sonify_channels(
+                    result,
+                    source_len,
+                    processed.len(),
+                    samples_len,
+                    sample_rate,
+                    preview_click_beat,
+                    preview_click_downbeat,
+                    preview_cue_section,
+                );
+                if !cue.is_empty() {
+                    for (ch_idx, ch) in processed.iter_mut().enumerate() {
+                        if let Some(cue_ch) = cue.get(ch_idx) {
+                            let n = ch.len().min(cue_ch.len());
+                            for i in 0..n {
+                                ch[i] += cue_ch[i];
+                            }
                         }
                     }
                 }
             }
+            let mut overlay = if selection_only {
+                merge_processed_into_selection(base_channels, &processed, selection)
+            } else {
+                processed
+            };
 
             let (peak_abs, clip_applied) = sanitize_and_clip_channels(&mut overlay);
             if cancel_thread.load(Ordering::Relaxed) {
@@ -937,6 +973,209 @@ fn mix_stems_with_gains(
     out
 }
 
+fn build_music_sonify_channels(
+    result: &super::types::MusicAnalysisResult,
+    source_len: usize,
+    target_channels: usize,
+    target_len: usize,
+    sample_rate: u32,
+    preview_click_beat: bool,
+    preview_click_downbeat: bool,
+    preview_cue_section: bool,
+) -> Vec<Vec<f32>> {
+    let target_channels = target_channels.max(1);
+    let target_len = target_len.max(1);
+    if !preview_click_beat && !preview_click_downbeat && !preview_cue_section {
+        return vec![vec![0.0; target_len]; target_channels];
+    }
+
+    let remapped_downbeats: Vec<usize> = result
+        .downbeats
+        .iter()
+        .copied()
+        .map(|pos| remap_sample(pos, source_len, target_len))
+        .collect();
+    let remapped_beats: Vec<usize> = result
+        .beats
+        .iter()
+        .copied()
+        .map(|pos| remap_sample(pos, source_len, target_len))
+        .collect();
+    let remapped_sections: Vec<usize> = result
+        .sections
+        .iter()
+        .filter(|(_, label)| {
+            !label.eq_ignore_ascii_case("start") && !label.eq_ignore_ascii_case("end")
+        })
+        .map(|(pos, _)| remap_sample(*pos, source_len, target_len))
+        .collect();
+
+    let mut mono = vec![0.0f32; target_len];
+    if preview_click_beat {
+        sonify_beats(
+            &mut mono,
+            &remapped_beats,
+            &remapped_downbeats,
+            sample_rate,
+            preview_click_downbeat,
+        );
+    }
+    if preview_click_downbeat {
+        sonify_downbeats(&mut mono, &remapped_downbeats, sample_rate);
+    }
+    if preview_cue_section {
+        sonify_sections(&mut mono, &remapped_sections, sample_rate);
+    }
+
+    let mut out = Vec::with_capacity(target_channels);
+    for _ in 0..target_channels {
+        out.push(mono.clone());
+    }
+    out
+}
+
+fn merge_processed_into_selection(
+    mut base_channels: Vec<Vec<f32>>,
+    processed_channels: &[Vec<f32>],
+    selection: Option<(usize, usize)>,
+) -> Vec<Vec<f32>> {
+    let Some((a0, b0)) = selection else {
+        return base_channels;
+    };
+    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+    for (ch_idx, ch) in base_channels.iter_mut().enumerate() {
+        if let Some(src) = processed_channels.get(ch_idx) {
+            let end = b.min(ch.len()).min(src.len());
+            let start = a.min(end);
+            ch[start..end].copy_from_slice(&src[start..end]);
+        }
+    }
+    base_channels
+}
+
+fn sonify_beats(
+    out: &mut [f32],
+    beats: &[usize],
+    downbeats: &[usize],
+    sample_rate: u32,
+    suppress_downbeat_duplicates: bool,
+) {
+    let filtered = if suppress_downbeat_duplicates && !downbeats.is_empty() {
+        let threshold = ((sample_rate as f32) * 0.03).round() as usize;
+        beats
+            .iter()
+            .copied()
+            .filter(|beat| {
+                !downbeats
+                    .iter()
+                    .any(|downbeat| downbeat.abs_diff(*beat) <= threshold)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        beats.to_vec()
+    };
+    let click = synthesize_click(sample_rate, 1500.0, 0.1);
+    for pos in filtered {
+        add_waveform_at(out, pos, &click);
+    }
+}
+
+fn sonify_downbeats(out: &mut [f32], downbeats: &[usize], sample_rate: u32) {
+    let click = synthesize_click(sample_rate, 3000.0, 0.1);
+    for &pos in downbeats {
+        add_waveform_at(out, pos, &click);
+    }
+}
+
+fn sonify_sections(out: &mut [f32], section_boundaries: &[usize], sample_rate: u32) {
+    let click_offsets = geomspace(4.0, 0.1, 25, false);
+    let click_freqs = geomspace(40.0, 4000.0, 25, true);
+    let drop = synthesize_drop(sample_rate, 4000.0, 40.0, 0.5);
+    for &boundary in section_boundaries {
+        for (offset_sec, freq) in click_offsets.iter().zip(click_freqs.iter()) {
+            let offset_samples = ((*offset_sec) * (sample_rate as f32)).round() as usize;
+            if boundary <= offset_samples {
+                continue;
+            }
+            let start = boundary - offset_samples;
+            let click = synthesize_click(sample_rate, *freq, 0.1);
+            add_waveform_at(out, start, &click);
+        }
+        add_waveform_at(out, boundary, &drop);
+    }
+}
+
+fn add_waveform_at(out: &mut [f32], start: usize, waveform: &[f32]) {
+    if start >= out.len() || waveform.is_empty() {
+        return;
+    }
+    let end = (start + waveform.len()).min(out.len());
+    for (dst, src) in out[start..end].iter_mut().zip(waveform.iter()) {
+        *dst += *src;
+    }
+}
+
+fn synthesize_click(sample_rate: u32, click_freq: f32, click_duration: f32) -> Vec<f32> {
+    if sample_rate == 0 || click_freq <= 0.0 || click_duration <= 0.0 {
+        return Vec::new();
+    }
+    let length = ((sample_rate as f32) * click_duration).round() as usize;
+    if length == 0 {
+        return Vec::new();
+    }
+    let angular = 2.0 * PI * click_freq / sample_rate as f32;
+    let denom = (length.saturating_sub(1)).max(1) as f32;
+    let mut out = vec![0.0f32; length];
+    for (idx, sample) in out.iter_mut().enumerate() {
+        let env = 2.0f32.powf(-10.0 * (idx as f32) / denom);
+        *sample = ((idx as f32) * angular).sin() * env;
+    }
+    out
+}
+
+fn synthesize_drop(sample_rate: u32, start_freq: f32, end_freq: f32, duration: f32) -> Vec<f32> {
+    if sample_rate == 0 || start_freq <= 0.0 || end_freq <= 0.0 || duration <= 0.0 {
+        return Vec::new();
+    }
+    let length = ((sample_rate as f32) * duration).round() as usize;
+    if length == 0 {
+        return Vec::new();
+    }
+    let freqs = geomspace(start_freq, end_freq, length, true);
+    let denom = (length.saturating_sub(1)).max(1) as f32;
+    let mut out = vec![0.0f32; length];
+    let mut phase = 0.0f32;
+    for (idx, sample) in out.iter_mut().enumerate() {
+        let env = 2.0f32.powf(-4.0 * (idx as f32) / denom);
+        phase += 2.0 * PI * freqs[idx] / sample_rate as f32;
+        *sample = phase.sin() * env;
+    }
+    out
+}
+
+fn geomspace(start: f32, end: f32, num: usize, endpoint: bool) -> Vec<f32> {
+    if num == 0 {
+        return Vec::new();
+    }
+    if num == 1 {
+        return vec![start];
+    }
+    if start == 0.0 || end == 0.0 {
+        return vec![start; num];
+    }
+    let log_start = start.abs().ln();
+    let log_end = end.abs().ln();
+    let denom = if endpoint {
+        (num - 1) as f32
+    } else {
+        num as f32
+    };
+    let step = (log_end - log_start) / denom.max(1.0);
+    (0..num)
+        .map(|idx| (log_start + step * (idx as f32)).exp())
+        .collect()
+}
+
 fn sanitize_and_clip_channels(channels: &mut [Vec<f32>]) -> (f32, bool) {
     let mut peak_abs = 0.0f32;
     for ch in channels.iter_mut() {
@@ -962,10 +1201,11 @@ fn sanitize_and_clip_channels(channels: &mut [Vec<f32>]) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        fold_download_progress, gain_to_amp, is_ai_marker_label, mix_stems_with_gains,
-        music_progress_phase, remap_sample, sanitize_and_clip_channels,
+        build_music_sonify_channels, fold_download_progress, gain_to_amp, is_ai_marker_label,
+        merge_processed_into_selection, mix_stems_with_gains, music_progress_phase, remap_sample,
+        sanitize_and_clip_channels,
     };
-    use crate::app::types::{MusicStemSet, StemGainsDb};
+    use crate::app::types::{MusicAnalysisResult, MusicStemSet, StemGainsDb};
 
     #[test]
     fn ai_marker_label_detects_prefix() {
@@ -1003,6 +1243,84 @@ mod tests {
         let expected = (1.0 * gain_to_amp(-6.0)) + 0.5 + (0.25 * gain_to_amp(-12.0));
         assert!((out[0][0] - expected).abs() < 1.0e-4);
         assert!((out[0][1] - expected).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn sonify_channels_place_clicks_at_remapped_positions() {
+        let result = MusicAnalysisResult {
+            beats: vec![50],
+            downbeats: vec![100],
+            sections: Vec::new(),
+            estimated_bpm: None,
+        };
+        let out = build_music_sonify_channels(&result, 200, 1, 400, 1_000, true, true, false);
+        assert_eq!(out.len(), 1);
+        assert!(out[0][100..200].iter().any(|v| v.abs() > 1.0e-6));
+        assert!(out[0][200..300].iter().any(|v| v.abs() > 1.0e-6));
+        assert!(out[0][0..80].iter().all(|v| v.abs() < 1.0e-6));
+    }
+
+    #[test]
+    fn sonify_sections_ignore_start_and_end_labels() {
+        let result_with_edges = MusicAnalysisResult {
+            beats: Vec::new(),
+            downbeats: Vec::new(),
+            sections: vec![
+                (100, "start".to_string()),
+                (200, "verse".to_string()),
+                (900, "end".to_string()),
+            ],
+            estimated_bpm: None,
+        };
+        let result_without_edges = MusicAnalysisResult {
+            beats: Vec::new(),
+            downbeats: Vec::new(),
+            sections: vec![(200, "verse".to_string())],
+            estimated_bpm: None,
+        };
+        let with_edges = build_music_sonify_channels(
+            &result_with_edges,
+            1_200,
+            1,
+            1_200,
+            1_000,
+            false,
+            false,
+            true,
+        );
+        let without_edges = build_music_sonify_channels(
+            &result_without_edges,
+            1_200,
+            1,
+            1_200,
+            1_000,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(with_edges, without_edges);
+        assert!(with_edges[0][200..700].iter().any(|v| v.abs() > 1.0e-6));
+    }
+
+    #[test]
+    fn sonify_channels_all_off_are_silent() {
+        let result = MusicAnalysisResult {
+            beats: vec![50],
+            downbeats: vec![100],
+            sections: vec![(150, "chorus".to_string())],
+            estimated_bpm: None,
+        };
+        let out = build_music_sonify_channels(&result, 200, 2, 400, 1_000, false, false, false);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().flatten().all(|v| v.abs() < 1.0e-6));
+    }
+
+    #[test]
+    fn merge_processed_into_selection_only_writes_inside_range() {
+        let base = vec![vec![0.1, 0.1, 0.1, 0.1, 0.1]];
+        let processed = vec![vec![0.9, 0.9, 0.9, 0.9, 0.9]];
+        let merged = merge_processed_into_selection(base, &processed, Some((1, 4)));
+        assert_eq!(merged[0], vec![0.1, 0.9, 0.9, 0.9, 0.1]);
     }
 
     #[test]

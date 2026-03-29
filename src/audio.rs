@@ -347,9 +347,59 @@ impl AudioEngine {
         let description = device.description().ok()?;
         let trimmed = description.name().trim();
         if trimmed.is_empty() {
+            return None;
+        }
+        let detail = description
+            .manufacturer()
+            .or_else(|| description.driver())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match detail {
+            Some(detail)
+                if !trimmed.eq_ignore_ascii_case(detail)
+                    && !trimmed.contains(&format!("({detail})")) =>
+            {
+                Some(format!("{trimmed} ({detail})"))
+            }
+            _ => Some(trimmed.to_string()),
+        }
+    }
+
+    pub(crate) fn legacy_output_device_alias(display_name: &str) -> Option<String> {
+        let trimmed = display_name.trim();
+        let (head, tail) = trimmed.rsplit_once(" (")?;
+        if !trimmed.ends_with(')') {
+            return None;
+        }
+        let head = head.trim();
+        let tail = tail.trim_end_matches(')').trim();
+        if head.is_empty() || tail.is_empty() {
             None
         } else {
-            Some(trimmed.to_string())
+            Some(head.to_string())
+        }
+    }
+
+    pub(crate) fn resolve_output_device_name_for_list(
+        requested_name: &str,
+        display_names: &[String],
+    ) -> Option<String> {
+        let requested_name = requested_name.trim();
+        if requested_name.is_empty() {
+            return None;
+        }
+        if display_names.iter().any(|name| name == requested_name) {
+            return Some(requested_name.to_string());
+        }
+        let mut alias_matches = display_names
+            .iter()
+            .filter(|name| Self::legacy_output_device_alias(name).as_deref() == Some(requested_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if alias_matches.len() == 1 {
+            alias_matches.pop()
+        } else {
+            None
         }
     }
 
@@ -451,7 +501,7 @@ impl AudioEngine {
         let host = cpal::default_host();
         let requested = name.map(str::trim).filter(|v| !v.is_empty());
         let device = if let Some(requested_name) = requested {
-            let mut found = None;
+            let mut alias_matches = Vec::new();
             let devices = host
                 .output_devices()
                 .context("failed to enumerate output devices")?;
@@ -460,11 +510,25 @@ impl AudioEngine {
                     continue;
                 };
                 if candidate_name == requested_name {
-                    found = Some(candidate);
+                    alias_matches.clear();
+                    alias_matches.push(candidate);
                     break;
                 }
+                if Self::legacy_output_device_alias(&candidate_name).as_deref()
+                    == Some(requested_name)
+                {
+                    alias_matches.push(candidate);
+                }
             }
-            found.with_context(|| format!("output device not found: {requested_name}"))?
+            match alias_matches.len() {
+                1 => alias_matches
+                    .pop()
+                    .with_context(|| format!("output device not found: {requested_name}"))?,
+                0 => anyhow::bail!("output device not found: {requested_name}"),
+                _ => anyhow::bail!(
+                    "output device name is ambiguous: {requested_name}. Select the full device name."
+                ),
+            }
         } else {
             host.default_output_device()
                 .context("No default output device")?
@@ -644,16 +708,14 @@ impl AudioEngine {
                     shared
                         .play_pos_f
                         .store(pos_f, std::sync::atomic::Ordering::Relaxed);
-                    shared
-                        .meter_rms
-                        .store(
-                            if meter_count > 0 {
-                                (meter_sum_sq / meter_count as f64).sqrt() as f32
-                            } else {
-                                0.0
-                            },
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                    shared.meter_rms.store(
+                        if meter_count > 0 {
+                            (meter_sum_sq / meter_count as f64).sqrt() as f32
+                        } else {
+                            0.0
+                        },
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     return;
                 }
 
@@ -738,16 +800,14 @@ impl AudioEngine {
                     shared
                         .play_pos_f
                         .store(pos_f, std::sync::atomic::Ordering::Relaxed);
-                    shared
-                        .meter_rms
-                        .store(
-                            if meter_count > 0 {
-                                (meter_sum_sq / meter_count as f64).sqrt() as f32
-                            } else {
-                                0.0
-                            },
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                    shared.meter_rms.store(
+                        if meter_count > 0 {
+                            (meter_sum_sq / meter_count as f64).sqrt() as f32
+                        } else {
+                            0.0
+                        },
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     return;
                 }
 
@@ -1123,9 +1183,15 @@ impl AudioEngine {
         if len == 0 {
             return 0.0;
         }
-        let mut pos_f = self.shared.play_pos_f.load(std::sync::atomic::Ordering::Relaxed);
+        let mut pos_f = self
+            .shared
+            .play_pos_f
+            .load(std::sync::atomic::Ordering::Relaxed);
         if !pos_f.is_finite() || pos_f < 0.0 {
-            pos_f = self.shared.play_pos.load(std::sync::atomic::Ordering::Relaxed) as f64;
+            pos_f = self
+                .shared
+                .play_pos
+                .load(std::sync::atomic::Ordering::Relaxed) as f64;
         }
         let vol = self.shared.vol.load(std::sync::atomic::Ordering::Relaxed);
         let rate = self
@@ -1447,6 +1513,47 @@ mod tests {
         assert!(
             (actual_pos - expected_pos).abs() < 1.0e-6 * expected_pos.max(1.0),
             "long-run playhead drifted from expected position: expected={expected_pos} actual={actual_pos}"
+        );
+    }
+
+    #[test]
+    fn legacy_output_device_alias_extracts_short_windows_name() {
+        assert_eq!(
+            AudioEngine::legacy_output_device_alias("スピーカー (Realtek(R) Audio)"),
+            Some("スピーカー".to_string())
+        );
+        assert_eq!(
+            AudioEngine::legacy_output_device_alias("BenQ GW2490 (NVIDIA High Definition Audio)"),
+            Some("BenQ GW2490".to_string())
+        );
+        assert_eq!(AudioEngine::legacy_output_device_alias("Realtek Digital Output"), None);
+    }
+
+    #[test]
+    fn resolve_output_device_name_for_list_prefers_exact_and_skips_ambiguous_legacy_names() {
+        let devices = vec![
+            "スピーカー (AT-CSP1)".to_string(),
+            "スピーカー (Realtek(R) Audio)".to_string(),
+            "Realtek Digital Output (Realtek(R) Audio)".to_string(),
+        ];
+        assert_eq!(
+            AudioEngine::resolve_output_device_name_for_list(
+                "スピーカー (Realtek(R) Audio)",
+                &devices
+            ),
+            Some("スピーカー (Realtek(R) Audio)".to_string())
+        );
+        assert_eq!(
+            AudioEngine::resolve_output_device_name_for_list(
+                "Realtek Digital Output",
+                &devices
+            ),
+            Some("Realtek Digital Output (Realtek(R) Audio)".to_string())
+        );
+        assert_eq!(
+            AudioEngine::resolve_output_device_name_for_list("スピーカー", &devices),
+            None,
+            "ambiguous legacy short names should not silently pick the wrong device"
         );
     }
 }

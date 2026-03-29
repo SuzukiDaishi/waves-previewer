@@ -380,26 +380,49 @@ impl super::WavesPreviewer {
                         if self.is_list_workspace_active()
                             && self.playing_path.as_ref() == Some(&res.path)
                         {
-                            self.audio.set_samples_buffer(audio);
-                            self.mark_list_preview_source(&res.path, res.play_sr.max(1));
-                            if let Some(buf) = self.audio.shared.samples.load().as_ref() {
-                                self.audio.set_loop_region(0, buf.len());
-                            }
-                            self.audio.set_loop_enabled(false);
                             let selected_matches = self
                                 .selected_path_buf()
                                 .map(|p| p == res.path)
                                 .unwrap_or(false);
-                            if self.list_play_pending
-                                || (self.auto_play_list_nav && selected_matches)
-                            {
-                                self.audio.play();
-                                // Keep pending intent across prefix->full handoff so
-                                // manual list playback does not stop at prefix length.
-                                if res.is_final {
-                                    self.list_play_pending = false;
+                            let needs_play =
+                                self.list_play_pending || (self.auto_play_list_nav && selected_matches);
+                            let defer_live_audio_for_fx = self.playback_mode_needs_fx_buffer()
+                                && selected_matches
+                                && (needs_play
+                                    || matches!(
+                                        &self.playback_session.source,
+                                        super::PlaybackSourceKind::ListPreview(path)
+                                            if path == &res.path
+                                    ));
+                            if defer_live_audio_for_fx {
+                                self.playback_mark_source_without_buffer(
+                                    super::PlaybackSourceKind::ListPreview(res.path.clone()),
+                                    super::PlaybackTransportKind::Buffer,
+                                    res.play_sr.max(1),
+                                );
+                                if needs_play && self.spawn_playback_fx_render(true) {
+                                    self.audio.play();
+                                    if res.is_final {
+                                        self.list_play_pending = false;
+                                    }
+                                    self.debug_mark_list_play_start(&res.path);
                                 }
-                                self.debug_mark_list_play_start(&res.path);
+                            } else {
+                                self.audio.set_samples_buffer(audio);
+                                self.mark_list_preview_source(&res.path, res.play_sr.max(1));
+                                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
+                                    self.audio.set_loop_region(0, buf.len());
+                                }
+                                self.audio.set_loop_enabled(false);
+                                if needs_play {
+                                    self.audio.play();
+                                    // Keep pending intent across prefix->full handoff so
+                                    // manual list playback does not stop at prefix length.
+                                    if res.is_final {
+                                        self.list_play_pending = false;
+                                    }
+                                    self.debug_mark_list_play_start(&res.path);
+                                }
                             }
                         }
                         if res.is_final {
@@ -455,22 +478,40 @@ impl super::WavesPreviewer {
                         };
                         let use_cached_now = !truncated || cached_secs >= min_secs;
                         if use_cached_now {
-                            self.audio.set_samples_buffer(audio);
-                            self.mark_list_preview_source(&path, play_sr);
-                            if let Some(buf) = self.audio.shared.samples.load().as_ref() {
-                                self.audio.set_loop_region(0, buf.len());
-                            }
-                            self.audio.set_loop_enabled(false);
-                            self.audio.stop();
-                            self.apply_effective_volume();
-                            self.debug_mark_list_preview_ready(&path);
-                            if needs_play {
-                                self.audio.play();
-                                // Keep pending intent while prefix buffer is active.
-                                if !truncated {
-                                    self.list_play_pending = false;
+                            if self.playback_mode_needs_fx_buffer() && needs_play {
+                                self.audio.stop();
+                                self.playback_mark_source_without_buffer(
+                                    super::PlaybackSourceKind::ListPreview(path.clone()),
+                                    super::PlaybackTransportKind::Buffer,
+                                    play_sr,
+                                );
+                                self.apply_effective_volume();
+                                self.debug_mark_list_preview_ready(&path);
+                                if self.spawn_playback_fx_render(true) {
+                                    self.audio.play();
+                                    if !truncated {
+                                        self.list_play_pending = false;
+                                    }
+                                    self.debug_mark_list_play_start(&path);
                                 }
-                                self.debug_mark_list_play_start(&path);
+                            } else {
+                                self.audio.set_samples_buffer(audio);
+                                self.mark_list_preview_source(&path, play_sr);
+                                if let Some(buf) = self.audio.shared.samples.load().as_ref() {
+                                    self.audio.set_loop_region(0, buf.len());
+                                }
+                                self.audio.set_loop_enabled(false);
+                                self.audio.stop();
+                                self.apply_effective_volume();
+                                self.debug_mark_list_preview_ready(&path);
+                                if needs_play {
+                                    self.audio.play();
+                                    // Keep pending intent while prefix buffer is active.
+                                    if !truncated {
+                                        self.list_play_pending = false;
+                                    }
+                                    self.debug_mark_list_play_start(&path);
+                                }
                             }
                             if truncated {
                                 let continue_secs = if needs_play { 0.0 } else { 0.35 };

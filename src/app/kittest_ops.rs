@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::app::types::{
-    LoopMode, LoopXfadeShape, MusicAnalysisResult, ProcessingResult, ProcessingState,
+    LoopMode, LoopXfadeShape, MusicAnalysisResult, MusicStemSet, ProcessingResult, ProcessingState,
     ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
@@ -152,7 +153,9 @@ impl super::WavesPreviewer {
     pub fn test_seed_prepared_audio_buffer(&mut self, mono: Vec<f32>) {
         let buffer = std::sync::Arc::new(crate::audio::AudioBuffer::from_mono(mono));
         self.audio.set_samples_buffer(buffer.clone());
-        self.playback_session.dry_audio = Some(buffer);
+        self.playback_session.dry_audio = Some(buffer.clone());
+        self.playback_base_audio = Some(buffer);
+        self.clear_playback_fx_state();
         self.playback_session.last_applied_master_gain_db = self.volume_db;
         self.playback_session.last_applied_file_gain_db = 0.0;
     }
@@ -206,6 +209,14 @@ impl super::WavesPreviewer {
 
     pub fn test_refresh_playback_rate(&mut self) {
         self.playback_refresh_rate_for_current_source();
+    }
+
+    pub fn test_refresh_playback_mode_for_current_source(
+        &mut self,
+        prev_mode: RateMode,
+        prev_rate: f32,
+    ) {
+        self.refresh_playback_mode_for_current_source(prev_mode, prev_rate);
     }
 
     pub fn test_rebuild_current_buffer_with_mode(&mut self) {
@@ -285,6 +296,21 @@ impl super::WavesPreviewer {
 
     pub fn test_processing_active(&self) -> bool {
         self.processing.is_some()
+    }
+
+    pub fn test_playback_fx_active(&self) -> bool {
+        self.playback_fx_state.is_some()
+    }
+
+    pub fn test_prepared_playback_fx_ready(&self) -> bool {
+        self.prepared_playback_fx_audio.is_some()
+    }
+
+    pub fn test_prepared_playback_fx_len(&self) -> usize {
+        self.prepared_playback_fx_audio
+            .as_ref()
+            .map(|audio| audio.len())
+            .unwrap_or(0)
     }
 
     pub fn test_inject_processing_result(
@@ -517,14 +543,18 @@ impl super::WavesPreviewer {
 
     pub fn test_preview_audio_tool(&self) -> Option<ToolKind> {
         let tab_idx = self.active_tab?;
-        self.tabs.get(tab_idx).and_then(|tab| tab.preview_audio_tool)
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.preview_audio_tool)
     }
 
     pub fn test_preview_overlay_tool(&self) -> Option<ToolKind> {
         let tab_idx = self.active_tab?;
-        self.tabs
-            .get(tab_idx)
-            .and_then(|tab| tab.preview_overlay.as_ref().map(|overlay| overlay.source_tool))
+        self.tabs.get(tab_idx).and_then(|tab| {
+            tab.preview_overlay
+                .as_ref()
+                .map(|overlay| overlay.source_tool)
+        })
     }
 
     pub fn test_preview_overlay_present(&self) -> bool {
@@ -761,7 +791,10 @@ impl super::WavesPreviewer {
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return false;
         };
-        tab.vertical_zoom = zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+        tab.vertical_zoom = zoom.clamp(
+            crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+            crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+        );
         Self::editor_clamp_vertical_view(tab);
         true
     }
@@ -1068,6 +1101,40 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_set_music_analysis_result_data(
+        &mut self,
+        beats: Vec<usize>,
+        downbeats: Vec<usize>,
+        sections: Vec<(usize, String)>,
+        source_len: usize,
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.music_analysis_draft.result = Some(MusicAnalysisResult {
+            beats,
+            downbeats,
+            sections,
+            estimated_bpm: None,
+        });
+        tab.music_analysis_draft.analysis_source_len = source_len.max(1);
+        true
+    }
+
+    pub fn test_set_mock_music_model_status(&mut self, analysis_ready: bool, demucs_ready: bool) {
+        let mock_dir = PathBuf::from(r"C:\mock\music-analyze-model");
+        self.music_ai_model_dir = analysis_ready.then_some(mock_dir.clone());
+        self.music_ai_available = analysis_ready;
+        self.music_ai_demucs_model_path = if analysis_ready && demucs_ready {
+            Some(mock_dir.join("htdemucs.onnx"))
+        } else {
+            None
+        };
+    }
+
     pub fn test_music_preview_gains_db(&self) -> Option<(f32, f32, f32, f32)> {
         let tab_idx = self.active_tab?;
         let tab = self.tabs.get(tab_idx)?;
@@ -1077,6 +1144,70 @@ impl super::WavesPreviewer {
             tab.music_analysis_draft.preview_gains_db.other,
             tab.music_analysis_draft.preview_gains_db.vocals,
         ))
+    }
+
+    pub fn test_set_music_sonify_flags(
+        &mut self,
+        beat_click: bool,
+        downbeat_accent: bool,
+        section_cue: bool,
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.music_analysis_draft.preview_click_beat = beat_click;
+        tab.music_analysis_draft.preview_click_downbeat = downbeat_accent;
+        tab.music_analysis_draft.preview_cue_section = section_cue;
+        true
+    }
+
+    pub fn test_music_sonify_flags(&self) -> Option<(bool, bool, bool)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some((
+            tab.music_analysis_draft.preview_click_beat,
+            tab.music_analysis_draft.preview_click_downbeat,
+            tab.music_analysis_draft.preview_cue_section,
+        ))
+    }
+
+    pub fn test_music_preview_peak_abs(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some(tab.music_analysis_draft.preview_peak_abs)
+    }
+
+    pub fn test_set_mock_music_stems_audio(&mut self, fill: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let sample_rate = tab.buffer_sample_rate.max(1);
+        let channels = tab.ch_samples.len().max(1);
+        let len = tab.samples_len.max(1);
+        let zero_channels = || vec![vec![0.0f32; len]; channels];
+        let fill_channels = || vec![vec![fill; len]; channels];
+        tab.music_analysis_draft.stems_audio = Some(Arc::new(MusicStemSet {
+            sample_rate,
+            bass: fill_channels(),
+            drums: zero_channels(),
+            other: zero_channels(),
+            vocals: zero_channels(),
+        }));
+        true
+    }
+
+    pub fn test_apply_music_preview_mix_active_tab(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.apply_music_preview_mix_for_tab(tab_idx);
+        true
     }
 
     pub fn test_set_waveform_overlay(&mut self, enabled: bool) -> bool {
@@ -1414,6 +1545,53 @@ impl super::WavesPreviewer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    pub fn test_audio_play_pos_display(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some(self.map_audio_to_display_sample(tab, self.test_audio_play_pos()))
+    }
+
+    pub fn test_force_active_tab_exact_stream_transport(&mut self, sample_rate: u32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        self.playback_mark_source(
+            crate::app::PlaybackSourceKind::EditorTab(tab.path.clone()),
+            crate::app::PlaybackTransportKind::ExactStreamWav,
+            sample_rate.max(1),
+        );
+        true
+    }
+
+    pub fn test_set_active_tab_loading_visual_len(&mut self, visual_len: usize) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.loading = true;
+        tab.samples_len_visual = visual_len.max(1);
+        true
+    }
+
+    pub fn test_active_tab_channel_sample(&self, channel: usize, sample_idx: usize) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.ch_samples.get(channel))
+            .and_then(|channel| channel.get(sample_idx))
+            .copied()
+    }
+
+    pub fn test_active_tab_waveform_minmax_len(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.waveform_minmax.len())
+    }
+
     pub fn test_tab_ranges_in_bounds(&self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1629,6 +1807,10 @@ impl super::WavesPreviewer {
 
     pub fn test_open_effect_graph_workspace(&mut self) {
         self.open_effect_graph_workspace();
+    }
+
+    pub fn test_effect_graph_predicted_output_summary(&self) -> Option<String> {
+        self.effect_graph_predicted_output_summary()
     }
 
     pub fn test_add_effect_graph_plugin_node(&mut self) -> bool {

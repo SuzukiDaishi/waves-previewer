@@ -56,13 +56,12 @@ impl super::WavesPreviewer {
                                             ));
                                     }
                                 } else {
-                                    tab.preview_overlay = Some(
-                                        Self::preview_overlay_from_channels(
+                                    tab.preview_overlay =
+                                        Some(Self::preview_overlay_from_channels(
                                             overlay,
                                             tab.active_tool,
                                             timeline_len,
-                                        ),
-                                    );
+                                        ));
                                 }
                             }
                         }

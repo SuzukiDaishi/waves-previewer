@@ -84,6 +84,26 @@ mod small_fix_regressions {
         }
     }
 
+    fn wait_for_playback_fx_ready(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_prepared_playback_fx_ready()
+                && !harness.state().test_playback_fx_active()
+            {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(12) {
+                panic!(
+                    "playback fx timeout: active={} prepared={}",
+                    harness.state().test_playback_fx_active(),
+                    harness.state().test_prepared_playback_fx_ready()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_for_preview_tool(
         harness: &mut Harness<'static, WavesPreviewer>,
         tool: ToolKind,
@@ -93,7 +113,8 @@ mod small_fix_regressions {
         loop {
             harness.run_steps(1);
             let tool_ok = harness.state().test_preview_audio_tool() == Some(tool);
-            let overlay_ok = !require_overlay || harness.state().test_preview_overlay_tool() == Some(tool);
+            let overlay_ok =
+                !require_overlay || harness.state().test_preview_overlay_tool() == Some(tool);
             if tool_ok && overlay_ok {
                 return;
             }
@@ -475,26 +496,36 @@ mod small_fix_regressions {
 
         harness.state_mut().test_set_mode_pitch_shift();
         harness.state_mut().test_set_pitch_semitones(5.0);
-        let immediate = harness
-            .state_mut()
-            .test_force_load_selected_list_preview_for_play();
+        harness.state_mut().test_request_workspace_play_toggle();
+        harness.run_steps(2);
         assert!(
-            !immediate,
-            "pitch/time mode should enqueue heavy processing for normal list play"
+            harness.state().test_playback_fx_active()
+                || harness.state().test_prepared_playback_fx_ready(),
+            "pitch/time mode should enqueue playback-fx rendering for normal list play"
         );
         assert!(
-            harness.state().test_processing_autoplay_when_ready(),
-            "processing state should keep autoplay intent for normal list play"
+            !harness.state().test_processing_active(),
+            "topbar pitch/time playback should not use editor/list processing state"
         );
 
         let start = Instant::now();
         loop {
             harness.run_steps(1);
-            if harness.state().test_audio_is_playing() {
+            if harness.state().test_audio_is_playing()
+                && harness.state().test_prepared_playback_fx_ready()
+            {
                 break;
             }
             if start.elapsed() > Duration::from_secs(8) {
-                panic!("normal list play did not auto-start after heavy processing");
+                panic!(
+                    "normal list play did not auto-start after playback-fx render: playing={} prepared={} active={} len={} prepared_len={} rate={}",
+                    harness.state().test_audio_is_playing(),
+                    harness.state().test_prepared_playback_fx_ready(),
+                    harness.state().test_playback_fx_active(),
+                    harness.state().test_audio_buffer_len(),
+                    harness.state().test_prepared_playback_fx_len(),
+                    harness.state().test_audio_rate(),
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -504,7 +535,7 @@ mod small_fix_regressions {
 
     #[test]
     fn tab_switch_during_heavy_processing_keeps_target_audio() {
-        let dir = make_temp_dir("tab_switch_heavy");
+        let dir = make_temp_dir("tab_switch_playback_fx");
         let long = dir.join("a_long.wav");
         let short = dir.join("b_short.wav");
         write_wav_32_float(&long, 48_000, 8.0);
@@ -529,8 +560,16 @@ mod small_fix_regressions {
 
         harness.state_mut().test_set_mode_time_stretch();
         harness.state_mut().test_set_playback_rate(0.5);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        harness.run_steps(1);
+        assert!(
+            harness.state().test_playback_fx_active(),
+            "topbar stretch should start playback-fx render for the active source"
+        );
 
-        // Start heavy processing on long tab, then immediately switch back to short tab.
+        // Start playback-fx render on long tab, then immediately switch back to short tab.
         assert!(harness.state_mut().test_open_tab_for_path(&long));
         harness.run_steps(1);
         std::thread::sleep(Duration::from_millis(10));
@@ -547,6 +586,7 @@ mod small_fix_regressions {
                 && playing.as_deref() == Some(short.as_path())
                 && len > 0
                 && len < 200_000
+                && !harness.state().test_playback_fx_active()
             {
                 ready = true;
                 break;
@@ -555,7 +595,7 @@ mod small_fix_regressions {
         }
         assert!(
             ready,
-            "target tab did not stabilize after heavy-processing switch (active={:?} playing={:?} len={})",
+            "target tab did not stabilize after playback-fx switch (active={:?} playing={:?} len={})",
             harness.state().test_active_tab_path(),
             harness.state().test_playing_path(),
             harness.state().test_audio_buffer_len()
@@ -884,7 +924,7 @@ mod small_fix_regressions {
         harness.state_mut().test_refresh_playback_rate();
         harness.run_steps(2);
         let rate_before = harness.state().test_audio_rate();
-        assert!((rate_before - 1.0).abs() < 1.0e-6);
+        assert!((rate_before - 1.25).abs() < 1.0e-6);
 
         assert!(harness.state_mut().test_force_preview_restore_active_tab());
         harness.run_steps(2);
@@ -917,7 +957,10 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
 
-        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -935,7 +978,9 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_open_tab_for_path(&a));
         wait_for_tab_ready(&mut harness);
 
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::PitchShift));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::PitchShift));
         assert!(harness.state_mut().test_set_tool_pitch_semitones(2.0));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         harness.run_steps(2);
@@ -947,8 +992,14 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
 
-        assert_eq!(harness.state().test_preview_audio_tool(), Some(ToolKind::Gain));
-        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::Gain)
+        );
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -980,8 +1031,8 @@ mod small_fix_regressions {
 
         let rate_after = harness.state().test_audio_rate();
         assert!(
-            (rate_after - 1.0).abs() < 1.0e-6,
-            "session sidecar reopen should keep callback rate fixed at unity: rate={rate_after}"
+            (rate_after - 1.11).abs() < 1.0e-6,
+            "session sidecar reopen should keep callback rate fixed at speed value: rate={rate_after}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1011,13 +1062,13 @@ mod small_fix_regressions {
             "passive list selection should not activate exact streaming transport"
         );
         assert!(
-            (rate_before - 1.0).abs() < 1.0e-6,
-            "list preview callback should stay at unity: rate={rate_before}"
+            (rate_before - 1.20).abs() < 1.0e-6,
+            "list preview callback should follow speed mode even on buffer transport: rate={rate_before}"
         );
         let rendered_len = harness.state().test_audio_buffer_len();
         assert!(
-            rendered_len.abs_diff(80_000) <= 4,
-            "speed preview should be fully rendered before playback: len={rendered_len}"
+            rendered_len.abs_diff(96_000) <= 4,
+            "speed mode should not change passive list preview buffer length: len={rendered_len}"
         );
 
         let _ = harness
@@ -1343,6 +1394,235 @@ mod small_fix_regressions {
             !harness.state().test_processing_active(),
             "Speed mode should leave processing state empty"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_topbar_speed_does_not_change_waveform_cache_or_samples() {
+        let dir = make_temp_dir("editor_speed_visual_stable");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        let sample_before = harness
+            .state()
+            .test_active_tab_channel_sample(0, 128)
+            .expect("tab sample before");
+        let visual_before = harness.state().test_active_tab_samples_len_visual();
+        let waveform_bins_before = harness
+            .state()
+            .test_active_tab_waveform_minmax_len()
+            .expect("waveform bins before");
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(0.5);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness
+                .state()
+                .test_active_tab_channel_sample(0, 128)
+                .expect("tab sample after"),
+            sample_before
+        );
+        assert_eq!(harness.state().test_active_tab_samples_len_visual(), visual_before);
+        assert_eq!(
+            harness
+                .state()
+                .test_active_tab_waveform_minmax_len()
+                .expect("waveform bins after"),
+            waveform_bins_before
+        );
+        assert!(
+            (harness.state().test_audio_rate() - 0.5).abs() < 1.0e-6,
+            "speed mode should change callback rate without rebuilding tab waveform"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_topbar_pitch_does_not_mutate_tab_audio() {
+        let dir = make_temp_dir("editor_pitch_playback_fx");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        let sample_before = harness
+            .state()
+            .test_active_tab_channel_sample(0, 256)
+            .expect("tab sample before");
+        let visual_before = harness.state().test_active_tab_samples_len_visual();
+
+        harness.state_mut().test_set_mode_pitch_shift();
+        harness.state_mut().test_set_pitch_semitones(4.0);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        wait_for_playback_fx_ready(&mut harness);
+
+        assert!(
+            !harness.state().test_processing_active(),
+            "topbar pitch should use playback-fx rendering instead of processing state"
+        );
+        assert_eq!(
+            harness
+                .state()
+                .test_active_tab_channel_sample(0, 256)
+                .expect("tab sample after"),
+            sample_before
+        );
+        assert_eq!(harness.state().test_active_tab_samples_len_visual(), visual_before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_topbar_stretch_does_not_mutate_tab_audio() {
+        let dir = make_temp_dir("editor_stretch_playback_fx");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        let sample_before = harness
+            .state()
+            .test_active_tab_channel_sample(0, 256)
+            .expect("tab sample before");
+        let visual_before = harness.state().test_active_tab_samples_len_visual();
+
+        harness.state_mut().test_set_mode_time_stretch();
+        harness.state_mut().test_set_playback_rate(0.5);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        wait_for_playback_fx_ready(&mut harness);
+
+        assert!(
+            !harness.state().test_processing_active(),
+            "topbar stretch should use playback-fx rendering instead of processing state"
+        );
+        assert_eq!(
+            harness
+                .state()
+                .test_active_tab_channel_sample(0, 256)
+                .expect("tab sample after"),
+            sample_before
+        );
+        assert_eq!(harness.state().test_active_tab_samples_len_visual(), visual_before);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn effect_graph_topbar_mode_does_not_change_predicted_duration() {
+        let dir = make_temp_dir("effect_graph_topbar_prediction_stable");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&src));
+        harness.run_steps(2);
+        harness.state_mut().test_open_effect_graph_workspace();
+        harness.run_steps(2);
+
+        let summary_before = harness
+            .state()
+            .test_effect_graph_predicted_output_summary()
+            .expect("predicted summary before");
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(0.5);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        harness.run_steps(2);
+
+        let summary_after = harness
+            .state()
+            .test_effect_graph_predicted_output_summary()
+            .expect("predicted summary after");
+
+        assert_eq!(
+            summary_after, summary_before,
+            "topbar playback-only speed should not change effect-graph prediction"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_playback_recovers_after_returning_from_pitch_mode() {
+        let dir = make_temp_dir("list_playback_restore_after_pitch");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 2.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&src));
+        harness.run_steps(2);
+
+        harness.state_mut().test_set_mode_pitch_shift();
+        harness.state_mut().test_set_pitch_semitones(4.0);
+        harness.state_mut().test_request_workspace_play_toggle();
+        wait_for_playback_fx_ready(&mut harness);
+        let start_fx = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_audio_is_playing() {
+                break;
+            }
+            if start_fx.elapsed() > Duration::from_secs(8) {
+                panic!("pitch-mode list playback did not start");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        harness.run_steps(2);
+        assert!(!harness.state().test_audio_is_playing());
+
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::PitchShift, 1.0);
+        harness.run_steps(2);
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        let start_speed = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_audio_is_playing() && harness.state().test_meter_db() > -79.9 {
+                break;
+            }
+            if start_speed.elapsed() > Duration::from_secs(8) {
+                panic!(
+                    "speed-mode list playback did not recover after pitch mode: playing={} meter={} len={} rate={}",
+                    harness.state().test_audio_is_playing(),
+                    harness.state().test_meter_db(),
+                    harness.state().test_audio_buffer_len(),
+                    harness.state().test_audio_rate(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

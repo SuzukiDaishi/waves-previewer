@@ -342,7 +342,8 @@ mod kittest_suite {
         loop {
             harness.run_steps(1);
             let tool_ok = harness.state().test_preview_audio_tool() == Some(tool);
-            let overlay_ok = !require_overlay || harness.state().test_preview_overlay_tool() == Some(tool);
+            let overlay_ok =
+                !require_overlay || harness.state().test_preview_overlay_tool() == Some(tool);
             if tool_ok && overlay_ok {
                 break;
             }
@@ -1926,6 +1927,73 @@ mod kittest_suite {
     }
 
     #[test]
+    fn editor_high_zoom_ctrl_arrow_sample_step_does_not_stall() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        for _ in 0..10 {
+            editor_zoom_in_once(&mut harness);
+        }
+        let len = harness.state().test_tab_samples_len().max(1);
+        let start = len / 2;
+        harness.state_mut().test_audio_seek_to_sample(start);
+        harness.run_steps(2);
+
+        let before = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("playhead display before");
+        for _ in 0..12 {
+            harness.key_press_modifiers(Modifiers::CTRL, Key::ArrowRight);
+            harness.run_steps(1);
+        }
+        let after = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("playhead display after");
+        assert!(
+            after >= before.saturating_add(8),
+            "ctrl+arrow sample stepping should continue advancing at high zoom: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn editor_high_zoom_ctrl_arrow_sample_step_does_not_stall_in_exact_stream_mapping() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let len = harness.state().test_tab_samples_len().max(1);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_loading_visual_len(len.saturating_mul(2)));
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_exact_stream_transport(48_000));
+        for _ in 0..10 {
+            editor_zoom_in_once(&mut harness);
+        }
+        harness.state_mut().test_audio_seek_to_sample(len / 2);
+        harness.run_steps(2);
+
+        let before = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("playhead display before");
+        for _ in 0..12 {
+            harness.key_press_modifiers(Modifiers::CTRL, Key::ArrowRight);
+            harness.run_steps(1);
+        }
+        let after = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("playhead display after");
+        assert!(
+            after >= before.saturating_add(8),
+            "ctrl+arrow should keep advancing under exact-stream display mapping: before={before} after={after}"
+        );
+    }
+
+    #[test]
     fn editor_right_drag_then_shift_click_reuses_anchor() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -2613,8 +2681,14 @@ mod kittest_suite {
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
 
-        assert_eq!(harness.state().test_preview_audio_tool(), Some(ToolKind::Gain));
-        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::Gain)
+        );
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
         assert!(audio_buffer_len(harness.state()) > 0);
     }
 
@@ -2624,7 +2698,9 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
 
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::Normalize));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::Normalize));
         assert!(harness.state_mut().test_set_tool_normalize_target_db(-3.0));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         wait_for_preview_tool(&mut harness, ToolKind::Normalize, true);
@@ -2650,8 +2726,14 @@ mod kittest_suite {
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         wait_for_preview_tool(&mut harness, ToolKind::Fade, true);
 
-        assert_eq!(harness.state().test_preview_audio_tool(), Some(ToolKind::Fade));
-        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Fade));
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::Fade)
+        );
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Fade)
+        );
     }
 
     #[test]
@@ -2675,12 +2757,18 @@ mod kittest_suite {
 
         assert!(harness.state_mut().test_open_tab_for_path(&b));
         wait_for_tab_ready(&mut harness);
-        assert_eq!(harness.state().test_active_tab_path().as_deref(), Some(b.as_path()));
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(b.as_path())
+        );
 
         assert!(harness.state_mut().test_open_tab_for_path(&a));
         wait_for_tab_ready(&mut harness);
         wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
-        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2693,12 +2781,17 @@ mod kittest_suite {
 
         assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
         assert!(harness.state_mut().test_set_tool_gain_db(5.0));
-        assert!(harness.state_mut().test_set_view_mode(neowaves::app::ViewMode::Spectrogram));
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::app::ViewMode::Spectrogram));
         assert!(harness.state_mut().test_set_waveform_overlay(true));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
 
-        assert_eq!(harness.state().test_preview_overlay_tool(), Some(ToolKind::Gain));
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
         assert!(harness.state().test_preview_overlay_present());
     }
 
@@ -2716,14 +2809,19 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         assert!(harness.state_mut().test_open_tab_for_path(&a));
         wait_for_tab_ready(&mut harness);
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::PitchShift));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::PitchShift));
         assert!(harness.state_mut().test_set_tool_pitch_semitones(3.5));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         harness.run_steps(2);
 
         assert!(harness.state_mut().test_open_tab_for_path(&b));
         wait_for_tab_ready(&mut harness);
-        assert_eq!(harness.state().test_active_tab_path().as_deref(), Some(b.as_path()));
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(b.as_path())
+        );
 
         assert!(harness.state_mut().test_open_tab_for_path(&a));
         wait_for_tab_ready(&mut harness);
@@ -2760,14 +2858,19 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         assert!(harness.state_mut().test_open_tab_for_path(&a));
         wait_for_tab_ready(&mut harness);
-        assert!(harness.state_mut().test_set_active_tool(ToolKind::TimeStretch));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::TimeStretch));
         assert!(harness.state_mut().test_set_tool_stretch_rate(1.35));
         assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
         harness.run_steps(2);
 
         assert!(harness.state_mut().test_open_tab_for_path(&b));
         wait_for_tab_ready(&mut harness);
-        assert_eq!(harness.state().test_active_tab_path().as_deref(), Some(b.as_path()));
+        assert_eq!(
+            harness.state().test_active_tab_path().as_deref(),
+            Some(b.as_path())
+        );
 
         assert!(harness.state_mut().test_open_tab_for_path(&a));
         wait_for_tab_ready(&mut harness);
@@ -2931,6 +3034,87 @@ mod kittest_suite {
         assert!(gains.2 <= 24.0 && gains.2 >= -80.0);
         assert!(gains.3 <= 24.0 && gains.3 >= -80.0);
         assert!((gains.0 - 24.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn music_analyze_ui_distinguishes_analysis_model_and_demucs_status() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness
+            .state_mut()
+            .test_set_mock_music_model_status(true, false);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::MusicAnalyze));
+        harness.run_steps(3);
+
+        harness.get_by_label("Analyze model: ready");
+        harness.get_by_label("Auto Demucs: missing");
+        harness.get_by_label("Repair Model Files...");
+        harness.get_by_label("Input unavailable: stems not found and auto-Demucs is unavailable");
+    }
+
+    #[test]
+    fn music_analyze_ui_shows_sonify_checkboxes() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::MusicAnalyze));
+        assert!(harness
+            .state_mut()
+            .test_set_music_analysis_result_mock(true));
+        harness.run_steps(3);
+
+        harness.get_by_label("Beat Click");
+        harness.get_by_label("DownBeat Accent");
+        harness.get_by_label("Section Cue");
+        harness.get_by_label("Apply writes the current stem mix and enabled cue sounds.");
+    }
+
+    #[test]
+    fn music_analyze_sonify_checkbox_builds_preview_audio_and_overlay() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::MusicAnalyze));
+        let source_len = harness.state().test_tab_samples_len().max(1);
+        assert!(harness.state_mut().test_set_music_analysis_result_data(
+            vec![source_len / 4],
+            vec![source_len / 2],
+            vec![(source_len * 3 / 4, "chorus".to_string())],
+            source_len,
+        ));
+        assert!(harness.state_mut().test_set_mock_music_stems_audio(0.0));
+        assert!(harness
+            .state_mut()
+            .test_set_music_sonify_flags(true, false, false));
+        assert!(harness
+            .state_mut()
+            .test_apply_music_preview_mix_active_tab());
+
+        wait_for_preview_tool(&mut harness, ToolKind::MusicAnalyze, true);
+        wait_for_preview_idle(&mut harness);
+
+        assert!(
+            harness
+                .state()
+                .test_music_preview_peak_abs()
+                .unwrap_or_default()
+                > 0.0
+        );
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::MusicAnalyze)
+        );
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::MusicAnalyze)
+        );
     }
 
     #[test]

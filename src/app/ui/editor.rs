@@ -351,8 +351,10 @@ impl crate::app::WavesPreviewer {
     }
 
     fn amplitude_nav_zoom_from_fraction(viewport_fraction: f32) -> f32 {
-        (1.0 / viewport_fraction.clamp(1.0 / crate::app::EDITOR_MAX_VERTICAL_ZOOM, 1.0))
-            .clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM)
+        (1.0 / viewport_fraction.clamp(1.0 / crate::app::EDITOR_MAX_VERTICAL_ZOOM, 1.0)).clamp(
+            crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+            crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+        )
     }
 
     fn amplitude_nav_viewport_rect(
@@ -507,9 +509,10 @@ impl crate::app::WavesPreviewer {
         rect: egui::Rect,
         tab: &mut EditorTab,
     ) -> Option<(f32, f32)> {
-        let current_zoom = tab
-            .vertical_zoom
-            .clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+        let current_zoom = tab.vertical_zoom.clamp(
+            crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+            crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+        );
         let current_center =
             Self::editor_clamped_vertical_view_center(current_zoom, tab.vertical_view_center);
         let mut next_zoom = current_zoom;
@@ -1350,7 +1353,30 @@ impl crate::app::WavesPreviewer {
             .load(std::sync::atomic::Ordering::Relaxed);
         let tab_samples_len = Self::editor_display_samples_len(&self.tabs[tab_idx]);
         let audio_len = self.audio.current_source_len();
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let transport = self.playback_session.transport;
+        let transport_sr = self.playback_session.transport_sr.max(1);
+        let playback_rate = self.playback_session.applied_playback_rate;
+        let mode = self.playback_session.applied_mode;
+        let exact_stream_display_mapping = matches!(
+            &self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(path)
+                if path == &self.tabs[tab_idx].path
+                    && transport == crate::app::PlaybackTransportKind::ExactStreamWav
+        );
         let map_audio_to_display = |audio_pos: usize| -> usize {
+            if exact_stream_display_mapping {
+                let source_time_sec = Self::playback_source_time_for_output_pos(
+                    mode,
+                    transport,
+                    audio_pos as f64,
+                    transport_sr,
+                    out_sr,
+                    playback_rate,
+                );
+                let mapped = (source_time_sec * transport_sr as f64).round().max(0.0) as usize;
+                return mapped.min(tab_samples_len);
+            }
             if audio_len == 0 || tab_samples_len == 0 || audio_len == tab_samples_len {
                 return audio_pos.min(tab_samples_len);
             }
@@ -1361,6 +1387,19 @@ impl crate::app::WavesPreviewer {
             mapped.min(tab_samples_len)
         };
         let map_display_to_audio = |display_pos: usize| -> usize {
+            if exact_stream_display_mapping {
+                let source_time_sec =
+                    display_pos.min(tab_samples_len) as f64 / transport_sr.max(1) as f64;
+                return Self::playback_output_pos_for_source_time(
+                    mode,
+                    transport,
+                    source_time_sec,
+                    transport_sr,
+                    out_sr,
+                    playback_rate,
+                )
+                .min(audio_len.max(1));
+            }
             if audio_len == 0 {
                 return display_pos;
             }
@@ -1837,11 +1876,13 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .map(|s| s.tab_idx == tab_idx && s.is_apply)
             .unwrap_or(false);
-        let overlay_busy = self.current_tab_preview_busy(tab_idx) || self.music_preview_state.is_some();
+        let overlay_busy =
+            self.current_tab_preview_busy(tab_idx) || self.music_preview_state.is_some();
         let apply_busy = self.editor_apply_state.is_some() || plugin_apply_busy;
         let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
         let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32)> = None;
         let music_model_ready = self.music_ai_has_model();
+        let music_demucs_ready = self.music_ai_has_demucs_model();
         let music_model_downloading = self.music_model_download_state.is_some();
         let music_model_dir_text = self
             .music_ai_model_dir
@@ -5197,16 +5238,37 @@ impl crate::app::WavesPreviewer {
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
                                         if music_model_ready {
                                             ui.label(
-                                                RichText::new("Model: ready")
+                                                RichText::new("Analyze model: ready")
                                                     .color(egui::Color32::from_rgb(120, 220, 140)),
                                             );
                                         } else if music_model_downloading {
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.add(egui::Spinner::new());
-                                                ui.label(RichText::new("Model: downloading...").weak());
+                                                ui.label(
+                                                    RichText::new("Analyze model: downloading...")
+                                                        .weak(),
+                                                );
                                             });
                                         } else {
-                                            ui.label(RichText::new("Model: not installed").weak());
+                                            ui.label(
+                                                RichText::new("Analyze model: not installed")
+                                                    .weak(),
+                                            );
+                                        }
+                                        if music_model_ready {
+                                            if music_demucs_ready {
+                                                ui.label(
+                                                    RichText::new("Auto Demucs: ready").color(
+                                                        egui::Color32::from_rgb(120, 220, 140),
+                                                    ),
+                                                );
+                                            } else {
+                                                ui.label(
+                                                    RichText::new("Auto Demucs: missing").color(
+                                                        egui::Color32::from_rgb(220, 170, 120),
+                                                    ),
+                                                );
+                                            }
                                         }
                                         if let Some(model_dir) = music_model_dir_text.as_ref() {
                                             ui.label(
@@ -5226,14 +5288,26 @@ impl crate::app::WavesPreviewer {
                                                 {
                                                     pending_music_model_download = true;
                                                 }
-                                            } else if ui
-                                                .add_enabled(
-                                                    music_can_uninstall,
-                                                    egui::Button::new("Uninstall Model..."),
-                                                )
-                                                .clicked()
-                                            {
-                                                pending_music_model_uninstall = true;
+                                            } else {
+                                                if !music_demucs_ready
+                                                    && ui
+                                                        .add_enabled(
+                                                            music_can_uninstall,
+                                                            egui::Button::new("Repair Model Files..."),
+                                                        )
+                                                        .clicked()
+                                                {
+                                                    pending_music_model_download = true;
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        music_can_uninstall,
+                                                        egui::Button::new("Uninstall Model..."),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    pending_music_model_uninstall = true;
+                                                }
                                             }
                                         });
                                         if let Some(err) = tab.music_analysis_draft.last_error.as_ref() {
@@ -5253,24 +5327,35 @@ impl crate::app::WavesPreviewer {
                                             tab.path.as_path(),
                                             tab.music_analysis_draft.stems_dir_override.as_deref(),
                                         );
-                                        let demucs_ready = self
-                                            .music_ai_model_dir
-                                            .as_deref()
-                                            .and_then(music_onnx::resolve_demucs_model_path)
-                                            .is_some();
+                                        let searched_dirs = stems
+                                            .searched_roots
+                                            .iter()
+                                            .map(|path| path.display().to_string())
+                                            .collect::<Vec<_>>()
+                                            .join(" | ");
                                         if stems.is_ready() {
                                             ui.label(
                                                 RichText::new("Input: stems ready")
                                                     .color(egui::Color32::from_rgb(120, 220, 140)),
                                             );
-                                        } else if demucs_ready {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Stem dir: {}",
+                                                    stems.root_dir.display()
+                                                ))
+                                                .small()
+                                                .weak(),
+                                            );
+                                        } else if music_demucs_ready {
                                             ui.label(
                                                 RichText::new("Input: source audio (auto Demucs)")
                                                 .color(egui::Color32::from_rgb(120, 200, 220)),
                                             );
                                         } else {
                                             ui.label(
-                                                RichText::new("Input: stems not found")
+                                                RichText::new(
+                                                    "Input unavailable: stems not found and auto-Demucs is unavailable",
+                                                )
                                                 .color(egui::Color32::from_rgb(220, 170, 120)),
                                             );
                                             ui.label(
@@ -5282,8 +5367,24 @@ impl crate::app::WavesPreviewer {
                                                 .weak(),
                                             );
                                         }
+                                        ui.label(
+                                            RichText::new(format!("Searched: {searched_dirs}"))
+                                                .small()
+                                                .weak(),
+                                        );
+                                        if music_onnx::source_audio_has_timing_risk(
+                                            tab.path.as_path(),
+                                        ) {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Timing note: compressed input can shift beat markers. WAV is recommended.",
+                                                )
+                                                .small()
+                                                .color(egui::Color32::from_rgb(220, 180, 110)),
+                                            );
+                                        }
                                         let can_analyze = music_model_ready
-                                            && (stems.is_ready() || demucs_ready)
+                                            && (stems.is_ready() || music_demucs_ready)
                                             && !tab.music_analysis_draft.analysis_inflight
                                             && !music_analyze_running;
                                         ui.horizontal_wrapped(|ui| {
@@ -5412,6 +5513,33 @@ impl crate::app::WavesPreviewer {
                                                     pending_music_apply_markers = true;
                                                 }
                                             });
+
+                                            ui.separator();
+                                            ui.label(RichText::new("Sonify").strong());
+                                            let mut sonify_changed = false;
+                                            sonify_changed |= ui
+                                                .checkbox(
+                                                    &mut tab.music_analysis_draft.preview_click_beat,
+                                                    "Beat Click",
+                                                )
+                                                .changed();
+                                            sonify_changed |= ui
+                                                .checkbox(
+                                                    &mut tab.music_analysis_draft.preview_click_downbeat,
+                                                    "DownBeat Accent",
+                                                )
+                                                .changed();
+                                            sonify_changed |= ui
+                                                .checkbox(
+                                                    &mut tab.music_analysis_draft.preview_cue_section,
+                                                    "Section Cue",
+                                                )
+                                                .changed();
+                                            if sonify_changed {
+                                                tab.music_analysis_draft.preview_active = false;
+                                                pending_music_preview_refresh = true;
+                                                stop_playback = true;
+                                            }
 
                                             ui.separator();
                                             ui.label(RichText::new("Stem Preview (dB)").strong());
@@ -5551,6 +5679,13 @@ impl crate::app::WavesPreviewer {
                                             });
                                             ui.label(
                                                 RichText::new("Preview updates live (async).")
+                                                .small()
+                                                .weak(),
+                                            );
+                                            ui.label(
+                                                RichText::new(
+                                                    "Apply writes the current stem mix and enabled cue sounds.",
+                                                )
                                                 .small()
                                                 .weak(),
                                             );

@@ -73,25 +73,29 @@ impl WavesPreviewer {
         }
 
         let needs_render = self.playback_session.last_applied_file_gain_db != file_gain_db
-            || self.playback_session.dry_audio.is_none();
+            || (self.prepared_playback_fx_audio.is_none() && self.playback_base_audio.is_none());
         if !needs_render {
             self.playback_session.last_applied_master_gain_db = master_gain_db;
             return;
         }
-        let Some(dry_audio) = self
-            .playback_session
-            .dry_audio
+        let Some(base_audio) = self
+            .prepared_playback_fx_audio
             .clone()
+            .or_else(|| self.playback_base_audio.clone())
+            .or_else(|| self.playback_session.dry_audio.clone())
             .or_else(|| self.audio.shared.samples.load_full())
         else {
             self.playback_session.last_applied_master_gain_db = master_gain_db;
             self.playback_session.last_applied_file_gain_db = file_gain_db;
             return;
         };
-        self.playback_session.dry_audio = Some(dry_audio.clone());
+        if self.prepared_playback_fx_audio.is_none() {
+            self.playback_base_audio = Some(base_audio.clone());
+            self.playback_session.dry_audio = Some(base_audio.clone());
+        }
 
         let gain = db_to_amp(file_gain_db).clamp(0.0, 16.0);
-        let mut channels = dry_audio.channels.clone();
+        let mut channels = base_audio.channels.clone();
         if (gain - 1.0).abs() > 1.0e-6 {
             for channel in &mut channels {
                 for sample in channel {
@@ -123,6 +127,16 @@ impl WavesPreviewer {
                 self.audio_output_devices = devices;
                 if let Some(name) = self.audio_output_device_name.clone() {
                     if !self.audio_output_devices.iter().any(|d| d == &name) {
+                        if let Some(resolved) =
+                            crate::audio::AudioEngine::resolve_output_device_name_for_list(
+                                &name,
+                                &self.audio_output_devices,
+                            )
+                        {
+                            self.audio_output_device_name = Some(resolved);
+                            self.audio_output_error = None;
+                            return;
+                        }
                         self.audio_output_error = Some(format!(
                             "Output device not available: {name}. Using default."
                         ));
@@ -147,7 +161,10 @@ impl WavesPreviewer {
         self.playback_session.transport = crate::app::PlaybackTransportKind::Buffer;
         self.playback_session.is_playing = false;
         self.playback_session.transport_sr = self.audio.shared.out_sample_rate.max(1);
+        self.playback_set_applied_mapping(crate::app::RateMode::Speed, 1.0);
         self.playback_session.dry_audio = None;
+        self.playback_base_audio = None;
+        self.clear_playback_fx_state();
         self.playback_session.last_applied_master_gain_db = f32::NAN;
         self.playback_session.last_applied_file_gain_db = f32::NAN;
         self.playback_refresh_rate_for_current_source();

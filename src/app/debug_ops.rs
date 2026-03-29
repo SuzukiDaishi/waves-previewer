@@ -1559,12 +1559,14 @@ impl WavesPreviewer {
                 }
             }
             DebugAction::ToggleMode => {
+                let prev_mode = self.mode;
+                let prev_rate = self.playback_rate;
                 self.mode = match self.mode {
                     RateMode::Speed => RateMode::PitchShift,
                     RateMode::PitchShift => RateMode::TimeStretch,
                     RateMode::TimeStretch => RateMode::Speed,
                 };
-                self.rebuild_current_buffer_with_mode();
+                self.refresh_playback_mode_for_current_source(prev_mode, prev_rate);
                 self.debug_log("auto: toggle mode");
             }
             DebugAction::PlayPause => {

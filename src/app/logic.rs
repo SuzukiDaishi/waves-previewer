@@ -3,6 +3,7 @@ use crate::loop_markers;
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use walkdir::WalkDir;
 
@@ -180,7 +181,7 @@ impl super::WavesPreviewer {
     }
 
     fn exact_stream_path_eligible_cached(&self, path: &Path) -> bool {
-        if self.mode != RateMode::Speed {
+        if self.playback_mode_needs_fx_buffer() {
             return false;
         }
         if !path.is_file() {
@@ -429,6 +430,246 @@ impl super::WavesPreviewer {
         }
     }
 
+    pub(super) fn spawn_playback_fx_render(&mut self, autoplay_when_ready: bool) -> bool {
+        if !self.playback_mode_needs_fx_buffer() {
+            return true;
+        }
+        let source = self.playback_session.source.clone();
+        if matches!(source, super::PlaybackSourceKind::None) {
+            return false;
+        }
+        if self.prepared_playback_fx_matches_current() {
+            return true;
+        }
+        if self.pending_playback_fx_matches_current() {
+            if let Some(state) = &mut self.playback_fx_state {
+                state.autoplay_when_ready |= autoplay_when_ready;
+            }
+            return false;
+        }
+        self.clear_pending_playback_fx_render();
+        let source_generation = self.playback_source_generation;
+        let mode = self.mode;
+        let playback_rate = self.playback_rate;
+        let pitch_semitones = self.pitch_semitones;
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let job_id = self.next_playback_fx_job_id();
+        let path_spec = match &source {
+            super::PlaybackSourceKind::EditorTab(path) | super::PlaybackSourceKind::ListPreview(path) => {
+                Some((path.clone(), self.offline_render_spec_for_path(path)))
+            }
+            _ => None,
+        };
+        let base_audio = self
+            .playback_base_audio
+            .clone()
+            .filter(|audio| audio.len() > 0)
+            .or_else(|| self.audio.shared.samples.load_full().filter(|audio| audio.len() > 0));
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<super::PlaybackFxResult>();
+        let source_for_thread = source.clone();
+        std::thread::spawn(move || {
+            let mut channels = if let Some(audio) = base_audio {
+                audio.channels.clone()
+            } else if let Some((path, spec)) = path_spec {
+                match crate::audio_io::decode_audio_multi(&path) {
+                    Ok((channels, in_sr)) => {
+                        super::WavesPreviewer::render_channels_offline_with_spec(
+                            channels,
+                            in_sr,
+                            spec,
+                            false,
+                        )
+                    }
+                    Err(_) => return,
+                }
+            } else {
+                return;
+            };
+            for channel in &mut channels {
+                let original = channel.clone();
+                let processed = match mode {
+                    RateMode::PitchShift => crate::wave::process_pitchshift_offline(
+                        channel,
+                        out_sr,
+                        out_sr,
+                        pitch_semitones,
+                    ),
+                    RateMode::TimeStretch => crate::wave::process_timestretch_offline(
+                        channel,
+                        out_sr,
+                        out_sr,
+                        playback_rate,
+                    ),
+                    RateMode::Speed => channel.clone(),
+                };
+                *channel = if processed.is_empty() {
+                    original
+                } else {
+                    processed
+                };
+            }
+            super::WavesPreviewer::sync_channel_lengths(&mut channels);
+            let audio = Arc::new(crate::audio::AudioBuffer::from_channels(channels));
+            let _ = tx.send(super::PlaybackFxResult {
+                source: source_for_thread,
+                source_generation,
+                job_id,
+                mode,
+                playback_rate,
+                pitch_semitones,
+                buffer_sr: out_sr,
+                audio,
+            });
+        });
+        self.playback_fx_state = Some(super::PlaybackFxRenderState {
+            source,
+            source_generation,
+            job_id,
+            mode,
+            playback_rate,
+            pitch_semitones,
+            autoplay_when_ready,
+            rx,
+        });
+        false
+    }
+
+    pub(super) fn apply_ready_playback_fx_audio(
+        &mut self,
+        source: super::PlaybackSourceKind,
+        audio: Arc<crate::audio::AudioBuffer>,
+        buffer_sr: u32,
+        mode: RateMode,
+        playback_rate: f32,
+        source_time_sec: Option<f64>,
+        resume_after_apply: bool,
+    ) {
+        self.prepared_playback_fx_audio = Some(audio.clone());
+        self.prepared_playback_fx_generation = self.playback_source_generation;
+        self.prepared_playback_fx_mode = Some(mode);
+        self.prepared_playback_fx_rate = playback_rate;
+        self.prepared_playback_fx_pitch = self.pitch_semitones;
+        self.audio.stop();
+        self.audio.set_samples_buffer(audio);
+        self.playback_session.source = source.clone();
+        self.playback_session.transport = super::PlaybackTransportKind::Buffer;
+        self.playback_session.transport_sr = buffer_sr.max(1);
+        self.playback_set_applied_mapping(
+            mode,
+            match mode {
+                RateMode::Speed => playback_rate.max(0.25),
+                RateMode::PitchShift => 1.0,
+                RateMode::TimeStretch => playback_rate.max(0.25),
+            },
+        );
+        self.playback_refresh_rate_for_current_source();
+        self.playback_session.last_applied_master_gain_db = f32::NAN;
+        self.playback_session.last_applied_file_gain_db = f32::NAN;
+        self.apply_effective_volume();
+        if let Some(source_time_sec) = source_time_sec {
+            self.playback_seek_to_source_time_with(mode, playback_rate, source_time_sec);
+        }
+        if let super::PlaybackSourceKind::EditorTab(path) = &source {
+            if let Some(tab) = self.tabs.iter().find(|tab| &tab.path == path) {
+                self.apply_loop_mode_for_tab(tab);
+            }
+        }
+        if resume_after_apply {
+            self.audio.play();
+            if let super::PlaybackSourceKind::ListPreview(path) = &source {
+                self.debug_mark_list_play_start(path);
+            }
+        }
+    }
+
+    fn restore_current_playback_source_after_fx(
+        &mut self,
+        source_time_sec: Option<f64>,
+        resume_after_restore: bool,
+    ) {
+        self.clear_prepared_playback_fx();
+        let source = self.playback_session.source.clone();
+        match source {
+            super::PlaybackSourceKind::EditorTab(path) => {
+                if let Some(tab_idx) = self.tabs.iter().position(|tab| tab.path == path) {
+                    self.preview_restore_audio_for_tab(tab_idx);
+                    if let Some(tab) = self.tabs.get(tab_idx) {
+                        self.apply_loop_mode_for_tab(tab);
+                    }
+                } else if let Some(base) = self.playback_base_audio.clone() {
+                    self.audio.stop();
+                    self.audio.set_samples_buffer(base);
+                    self.playback_mark_buffer_source(
+                        super::PlaybackSourceKind::EditorTab(path.clone()),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
+                    if let Some(tab) = self.tabs.iter().find(|tab| tab.path == path) {
+                        self.apply_loop_mode_for_tab(tab);
+                    }
+                }
+            }
+            super::PlaybackSourceKind::ListPreview(path) => {
+                if self.try_activate_list_stream_transport(&path) {
+                    // transport activation reapplies effective volume internally
+                } else if let Some(base) = self.playback_base_audio.clone() {
+                    self.audio.stop();
+                    self.audio.set_samples_buffer(base);
+                    self.mark_list_preview_source(&path, self.audio.shared.out_sample_rate.max(1));
+                    self.audio.set_loop_enabled(false);
+                    self.apply_effective_volume();
+                } else if let Some(row_idx) = self.row_for_path(&path) {
+                    self.select_and_load(row_idx, false);
+                }
+            }
+            super::PlaybackSourceKind::EffectGraph | super::PlaybackSourceKind::ToolPreview => {
+                if let Some(base) = self.playback_base_audio.clone() {
+                    self.audio.stop();
+                    self.audio.set_samples_buffer(base);
+                    self.playback_mark_buffer_source(
+                        source.clone(),
+                        self.audio.shared.out_sample_rate.max(1),
+                    );
+                    self.apply_effective_volume();
+                }
+            }
+            super::PlaybackSourceKind::None => {}
+        }
+        self.playback_set_applied_mapping(self.mode, self.playback_live_mapping_rate());
+        self.playback_refresh_rate_for_current_source();
+        if let Some(source_time_sec) = source_time_sec {
+            self.playback_seek_to_source_time(self.mode, source_time_sec);
+        }
+        if resume_after_restore {
+            self.audio.play();
+            if let super::PlaybackSourceKind::ListPreview(path) = self.playback_session.source.clone()
+            {
+                self.debug_mark_list_play_start(&path);
+            }
+        }
+    }
+
+    pub(super) fn refresh_playback_mode_for_current_source(
+        &mut self,
+        prev_mode: RateMode,
+        prev_playback_rate: f32,
+    ) {
+        let source_time_sec = self.playback_current_source_time_sec_with(prev_mode, prev_playback_rate);
+        let was_playing = self.playback_is_playing_now();
+        if self.playback_mode_needs_fx_buffer() {
+            let _ = self.spawn_playback_fx_render(was_playing);
+            self.playback_refresh_rate_for_current_source();
+            return;
+        }
+        self.clear_pending_playback_fx_render();
+        if self.prepared_playback_fx_audio.is_some() {
+            self.restore_current_playback_source_after_fx(source_time_sec, was_playing);
+        } else {
+            self.playback_set_applied_mapping(self.mode, self.playback_live_mapping_rate());
+            self.playback_refresh_rate_for_current_source();
+        }
+    }
+
     pub(super) fn request_workspace_play_toggle(&mut self) {
         if self.is_list_workspace_active() {
             let now_playing = self
@@ -440,11 +681,34 @@ impl super::WavesPreviewer {
                 self.audio.stop();
                 self.list_play_pending = false;
             } else if self.force_load_selected_list_preview_for_play() {
+                if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
+                    self.list_play_pending = true;
+                    return;
+                }
                 self.audio.play();
                 if let Some(path) = self.selected_path_buf() {
                     self.debug_mark_list_play_start(&path);
                 }
             } else {
+                if self.playback_mode_needs_fx_buffer() {
+                    if let Some(path) = self.selected_path_buf() {
+                        self.playing_path = Some(path.clone());
+                        self.audio.set_loop_enabled(false);
+                        self.audio.stop();
+                        self.playback_mark_source_without_buffer(
+                            super::PlaybackSourceKind::ListPreview(path.clone()),
+                            super::PlaybackTransportKind::Buffer,
+                            self.audio.shared.out_sample_rate.max(1),
+                        );
+                        self.list_play_pending = true;
+                        if self.spawn_playback_fx_render(true) {
+                            self.audio.play();
+                            self.list_play_pending = false;
+                            self.debug_mark_list_play_start(&path);
+                        }
+                        return;
+                    }
+                }
                 self.list_play_pending = true;
             }
             return;
@@ -472,12 +736,33 @@ impl super::WavesPreviewer {
                 self.playback_return_editor_to_last_start_if_needed();
             } else {
                 self.playback_capture_editor_start_display_sample();
+                if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
+                    self.playback_sync_state_snapshot();
+                    return;
+                }
                 self.audio.play();
             }
             self.playback_sync_state_snapshot();
             return;
         }
-        self.audio.toggle_play();
+        let now_playing = self
+            .audio
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if now_playing {
+            self.audio.stop();
+        } else {
+            let needs_playback_fx = matches!(
+                self.playback_session.source,
+                super::PlaybackSourceKind::EffectGraph | super::PlaybackSourceKind::ToolPreview
+            ) && self.playback_mode_needs_fx_buffer();
+            if needs_playback_fx && !self.spawn_playback_fx_render(true) {
+                self.playback_sync_state_snapshot();
+                return;
+            }
+            self.audio.play();
+        }
         self.playback_sync_state_snapshot();
     }
 
@@ -662,6 +947,15 @@ impl super::WavesPreviewer {
         out
     }
 
+    fn sync_channel_lengths(channels: &mut Vec<Vec<f32>>) {
+        let max_len = channels.iter().map(|channel| channel.len()).max().unwrap_or(0);
+        for channel in channels {
+            if channel.len() < max_len {
+                channel.resize(max_len, 0.0);
+            }
+        }
+    }
+
     pub(super) fn apply_sample_rate_preview_for_path(
         &mut self,
         path: &Path,
@@ -696,18 +990,15 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn mode_requires_offline_processing(&self) -> bool {
-        match self.mode {
-            RateMode::Speed | RateMode::TimeStretch => (self.playback_rate - 1.0).abs() > 0.0001,
-            RateMode::PitchShift => self.pitch_semitones.abs() > 0.0001,
-        }
+        false
     }
 
     pub(super) fn offline_render_spec_for_path(&self, path: &Path) -> OfflineRenderSpec {
         OfflineRenderSpec {
-            mode: self.mode,
-            speed_rate: self.playback_rate,
-            pitch_semitones: self.pitch_semitones,
-            stretch_rate: self.playback_rate,
+            mode: RateMode::Speed,
+            speed_rate: 1.0,
+            pitch_semitones: 0.0,
+            stretch_rate: 1.0,
             master_gain_db: 0.0,
             file_gain_db: self.pending_gain_db_for_path(path),
             out_sr: self.audio.shared.out_sample_rate.max(1),
@@ -2338,7 +2629,8 @@ impl super::WavesPreviewer {
             if old_display_len > 0 && new_display_len != old_display_len {
                 let ratio = new_display_len as f32 / old_display_len as f32;
                 if old_spp > 0.0 {
-                    tab.samples_per_px = (old_spp * ratio).max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
+                    tab.samples_per_px =
+                        (old_spp * ratio).max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
                 } else {
                     tab.samples_per_px = 0.0;
                 }

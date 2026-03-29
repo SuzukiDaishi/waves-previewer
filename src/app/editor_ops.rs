@@ -8,14 +8,20 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_visible_half_amplitude(vertical_zoom: f32) -> f32 {
-        1.0 / vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM)
+        1.0 / vertical_zoom.clamp(
+            crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+            crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+        )
     }
 
     pub(super) fn editor_clamped_vertical_view_center(
         vertical_zoom: f32,
         vertical_view_center: f32,
     ) -> f32 {
-        let zoom = vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+        let zoom = vertical_zoom.clamp(
+            crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+            crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+        );
         if zoom <= 1.0 {
             0.0
         } else {
@@ -26,9 +32,10 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_clamp_vertical_view(tab: &mut crate::app::types::EditorTab) {
-        tab.vertical_zoom = tab
-            .vertical_zoom
-            .clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+        tab.vertical_zoom = tab.vertical_zoom.clamp(
+            crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+            crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+        );
         tab.vertical_view_center =
             Self::editor_clamped_vertical_view_center(tab.vertical_zoom, tab.vertical_view_center);
     }

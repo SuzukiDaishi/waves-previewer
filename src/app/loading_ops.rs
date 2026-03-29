@@ -4,6 +4,55 @@ use super::types::{ProcessingResult, ProcessingTarget};
 use super::BULK_RESAMPLE_BLOCK_SECS;
 
 impl super::WavesPreviewer {
+    pub(super) fn tick_playback_fx_state(&mut self, ctx: &egui::Context) {
+        let mut ready_result: Option<super::PlaybackFxResult> = None;
+        let mut disconnected = false;
+        if let Some(state) = &mut self.playback_fx_state {
+            match state.rx.try_recv() {
+                Ok(result) => ready_result = Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => disconnected = true,
+            }
+        }
+        if disconnected {
+            self.playback_fx_state = None;
+            ctx.request_repaint();
+            return;
+        }
+        let Some(result) = ready_result else {
+            return;
+        };
+        let Some(state) = self.playback_fx_state.take() else {
+            return;
+        };
+        let valid = state.job_id == result.job_id
+            && state.source_generation == result.source_generation
+            && state.source == result.source
+            && state.mode == result.mode
+            && (state.playback_rate - result.playback_rate).abs() <= 1.0e-6
+            && (state.pitch_semitones - result.pitch_semitones).abs() <= 1.0e-6
+            && state.source_generation == self.playback_source_generation
+            && state.source == self.playback_session.source
+            && state.mode == self.mode
+            && (state.playback_rate - self.playback_rate).abs() <= 1.0e-6
+            && (state.pitch_semitones - self.pitch_semitones).abs() <= 1.0e-6;
+        if !valid {
+            ctx.request_repaint();
+            return;
+        }
+        let source_time_sec = self.playback_current_source_time_sec();
+        self.apply_ready_playback_fx_audio(
+            result.source,
+            result.audio,
+            result.buffer_sr,
+            result.mode,
+            result.playback_rate,
+            source_time_sec,
+            state.autoplay_when_ready,
+        );
+        ctx.request_repaint();
+    }
+
     pub(super) fn tick_processing_state(&mut self, ctx: &egui::Context) {
         let mut processing_done: Option<(ProcessingResult, bool)> = None;
         let mut source_time_sec = None;

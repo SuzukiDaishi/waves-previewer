@@ -3,11 +3,17 @@ use egui::{Color32, Painter, Rect};
 use super::binning::{minmax_over_ranges, pos_step_ranges};
 
 pub fn visible_half_amplitude(vertical_zoom: f32) -> f32 {
-    1.0 / vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM)
+    1.0 / vertical_zoom.clamp(
+        crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+        crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+    )
 }
 
 pub fn clamped_vertical_view_center(vertical_zoom: f32, vertical_view_center: f32) -> f32 {
-    let zoom = vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+    let zoom = vertical_zoom.clamp(
+        crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+        crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+    );
     if zoom <= 1.0 {
         0.0
     } else {
@@ -23,7 +29,10 @@ pub fn waveform_y_from_amp(
     vertical_view_center: f32,
     amp: f32,
 ) -> f32 {
-    let zoom = vertical_zoom.clamp(crate::app::EDITOR_MIN_VERTICAL_ZOOM, crate::app::EDITOR_MAX_VERTICAL_ZOOM);
+    let zoom = vertical_zoom.clamp(
+        crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+        crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+    );
     let visible_half = visible_half_amplitude(zoom).max(f32::EPSILON);
     let center = clamped_vertical_view_center(zoom, vertical_view_center);
     let normalized = ((amp.clamp(-1.0, 1.0) - center) / visible_half).clamp(-1.0, 1.0);

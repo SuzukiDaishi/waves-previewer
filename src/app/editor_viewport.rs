@@ -86,11 +86,17 @@ enum WaveLaneRequest {
 
 impl super::WavesPreviewer {
     pub(super) fn editor_visible_vertical_fraction(vertical_zoom: f32) -> f32 {
-        1.0 / vertical_zoom.clamp(super::EDITOR_MIN_VERTICAL_ZOOM, super::EDITOR_MAX_VERTICAL_ZOOM)
+        1.0 / vertical_zoom.clamp(
+            super::EDITOR_MIN_VERTICAL_ZOOM,
+            super::EDITOR_MAX_VERTICAL_ZOOM,
+        )
     }
 
     pub(super) fn editor_clamped_vertical_center(vertical_zoom: f32, center: f32) -> f32 {
-        let zoom = vertical_zoom.clamp(super::EDITOR_MIN_VERTICAL_ZOOM, super::EDITOR_MAX_VERTICAL_ZOOM);
+        let zoom = vertical_zoom.clamp(
+            super::EDITOR_MIN_VERTICAL_ZOOM,
+            super::EDITOR_MAX_VERTICAL_ZOOM,
+        );
         if zoom <= 1.0 {
             0.0
         } else {
@@ -114,7 +120,8 @@ impl super::WavesPreviewer {
         } else {
             0.0
         };
-        let visible_fraction = Self::editor_visible_vertical_fraction(vertical_zoom).clamp(0.0, 1.0);
+        let visible_fraction =
+            Self::editor_visible_vertical_fraction(vertical_zoom).clamp(0.0, 1.0);
         let center_frac = ((center + 1.0) * 0.5).clamp(0.0, 1.0);
         let min_frac = (center_frac - visible_fraction * 0.5).clamp(0.0, 1.0);
         let max_frac = (center_frac + visible_fraction * 0.5).clamp(0.0, 1.0);
@@ -146,8 +153,10 @@ impl super::WavesPreviewer {
     }
 
     fn bump_editor_viewport_generation(&mut self) -> u64 {
-        self.editor_viewport_generation_counter =
-            self.editor_viewport_generation_counter.wrapping_add(1).max(1);
+        self.editor_viewport_generation_counter = self
+            .editor_viewport_generation_counter
+            .wrapping_add(1)
+            .max(1);
         self.editor_viewport_generation_counter
     }
 
@@ -233,7 +242,9 @@ impl super::WavesPreviewer {
             return;
         };
         let now = Instant::now();
-        let (key_changed, needs_fine, previous_generation) = if let Some(tab) = self.tabs.get(tab_idx) {
+        let (key_changed, needs_fine, previous_generation) = if let Some(tab) =
+            self.tabs.get(tab_idx)
+        {
             let key_changed = tab
                 .viewport_render_requested_key
                 .as_ref()
@@ -246,7 +257,11 @@ impl super::WavesPreviewer {
                     .viewport_render_pending_fine_at
                     .map(|deadline| now >= deadline)
                     .unwrap_or(false);
-            (key_changed, needs_fine, tab.viewport_render_requested_generation)
+            (
+                key_changed,
+                needs_fine,
+                tab.viewport_render_requested_generation,
+            )
         } else {
             return;
         };
@@ -326,10 +341,26 @@ impl super::WavesPreviewer {
         tab.viewport_render_fine
             .as_ref()
             .filter(|cache| exact(cache))
-            .or_else(|| tab.viewport_render_coarse.as_ref().filter(|cache| exact(cache)))
-            .or_else(|| tab.viewport_render_last.as_ref().filter(|cache| compatible(cache)))
-            .or_else(|| tab.viewport_render_fine.as_ref().filter(|cache| compatible(cache)))
-            .or_else(|| tab.viewport_render_coarse.as_ref().filter(|cache| compatible(cache)))
+            .or_else(|| {
+                tab.viewport_render_coarse
+                    .as_ref()
+                    .filter(|cache| exact(cache))
+            })
+            .or_else(|| {
+                tab.viewport_render_last
+                    .as_ref()
+                    .filter(|cache| compatible(cache))
+            })
+            .or_else(|| {
+                tab.viewport_render_fine
+                    .as_ref()
+                    .filter(|cache| compatible(cache))
+            })
+            .or_else(|| {
+                tab.viewport_render_coarse
+                    .as_ref()
+                    .filter(|cache| compatible(cache))
+            })
     }
 
     fn build_editor_viewport_key(
@@ -448,7 +479,8 @@ impl super::WavesPreviewer {
                         lanes.push(WaveLaneRequest::Samples {
                             samples: channel[start..end].to_vec(),
                             bins,
-                            render_raw: raw_mode && visible_len <= hint.wave_width_px.saturating_mul(4),
+                            render_raw: raw_mode
+                                && visible_len <= hint.wave_width_px.saturating_mul(4),
                         });
                     }
                 }
@@ -583,16 +615,17 @@ impl super::WavesPreviewer {
                                     / bins.max(1) as u128) as usize,
                             );
                             let s1 = start.saturating_add(
-                                ((visible_len as u128)
-                                    .saturating_mul((col + 1) as u128)
+                                ((visible_len as u128).saturating_mul((col + 1) as u128)
                                     / bins.max(1) as u128) as usize,
                             );
                             let mut i0 = ((s0 as u128).saturating_mul(overview.len() as u128)
-                                / display_samples_len.max(1) as u128) as usize;
+                                / display_samples_len.max(1) as u128)
+                                as usize;
                             let mut i1 = (((s1.max(s0 + 1) as u128)
                                 .saturating_mul(overview.len() as u128))
-                                .saturating_add(display_samples_len.max(1) as u128 - 1)
-                                / display_samples_len.max(1) as u128) as usize;
+                            .saturating_add(display_samples_len.max(1) as u128 - 1)
+                                / display_samples_len.max(1) as u128)
+                                as usize;
                             i0 = i0.min(overview.len().saturating_sub(1));
                             i1 = i1.clamp(i0 + 1, overview.len());
                             let mut mn = 1.0f32;
@@ -685,9 +718,14 @@ impl super::WavesPreviewer {
             EditorViewportRenderQuality::Fine => (lane_height_px / 2).clamp(64, 192),
         };
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
-        let mut image = ColorImage::filled([target_w.max(1), total_h], Color32::from_rgb(12, 14, 18));
-        let (visible_min, visible_max) =
-            Self::editor_vertical_range_for_view(view_mode, vertical_zoom, vertical_view_center, cfg);
+        let mut image =
+            ColorImage::filled([target_w.max(1), total_h], Color32::from_rgb(12, 14, 18));
+        let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+            view_mode,
+            vertical_zoom,
+            vertical_view_center,
+            cfg,
+        );
         for lane_idx in 0..lane_count.max(1) {
             let spec = lane_spec_indices
                 .get(lane_idx)

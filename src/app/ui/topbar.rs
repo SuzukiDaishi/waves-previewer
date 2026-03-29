@@ -750,6 +750,7 @@ impl crate::app::WavesPreviewer {
                         s.spacing.button_padding = egui::vec2(4.0, 2.0);
                         ui.label("Mode");
                         let prev_mode = self.mode;
+                        let prev_rate = self.playback_rate;
                         for (m, label) in [
                             (RateMode::Speed, "Speed"),
                             (RateMode::PitchShift, "Pitch"),
@@ -760,11 +761,11 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                         if self.mode != prev_mode {
-                            self.playback_refresh_rate_for_current_source();
-                            self.rebuild_current_buffer_with_mode();
+                            self.refresh_playback_mode_for_current_source(prev_mode, prev_rate);
                         }
                         match self.mode {
                             RateMode::Speed => {
+                                let prev_rate = self.playback_rate;
                                 let resp = ui.add(
                                     egui::DragValue::new(&mut self.playback_rate)
                                         .range(0.25..=4.0)
@@ -773,8 +774,10 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" x"),
                                 );
                                 if resp.changed() {
-                                    self.playback_refresh_rate_for_current_source();
-                                    self.rebuild_current_buffer_with_mode();
+                                    self.refresh_playback_mode_for_current_source(
+                                        RateMode::Speed,
+                                        prev_rate,
+                                    );
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()
                                 {
@@ -811,6 +814,7 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             RateMode::PitchShift => {
+                                let prev_rate = self.playback_rate;
                                 let resp = ui.add(
                                     egui::DragValue::new(&mut self.pitch_semitones)
                                         .range(-12.0..=12.0)
@@ -819,8 +823,10 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" st"),
                                 );
                                 if resp.changed() {
-                                    self.playback_refresh_rate_for_current_source();
-                                    self.rebuild_current_buffer_with_mode();
+                                    self.refresh_playback_mode_for_current_source(
+                                        RateMode::PitchShift,
+                                        prev_rate,
+                                    );
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()
                                 {
@@ -857,6 +863,7 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             RateMode::TimeStretch => {
+                                let prev_rate = self.playback_rate;
                                 let resp = ui.add(
                                     egui::DragValue::new(&mut self.playback_rate)
                                         .range(0.25..=4.0)
@@ -865,8 +872,10 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" x"),
                                 );
                                 if resp.changed() {
-                                    self.playback_refresh_rate_for_current_source();
-                                    self.rebuild_current_buffer_with_mode();
+                                    self.refresh_playback_mode_for_current_source(
+                                        RateMode::TimeStretch,
+                                        prev_rate,
+                                    );
                                 }
                                 let nav_up = if resp.has_focus() && self.is_list_workspace_active()
                                 {

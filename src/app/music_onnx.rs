@@ -60,11 +60,13 @@ impl InferenceExecMode {
 
 #[derive(Debug, Clone)]
 pub(super) struct StemResolveResult {
+    pub root_dir: PathBuf,
     pub bass: PathBuf,
     pub drums: PathBuf,
     pub other: PathBuf,
     pub vocals: PathBuf,
     pub missing: Vec<String>,
+    pub searched_roots: Vec<PathBuf>,
 }
 
 impl StemResolveResult {
@@ -152,14 +154,59 @@ pub(super) fn has_required_music_model_files(dir: &Path) -> bool {
 }
 
 pub(super) fn resolve_demucs_model_path(model_dir: &Path) -> Option<PathBuf> {
-    let candidates = ["htdemucs.onnx", "onnx/htdemucs.onnx"];
+    let candidates = [
+        "htdemucs.onnx",
+        "htdemucs_6s.onnx",
+        "onnx/htdemucs.onnx",
+        "onnx/htdemucs_6s.onnx",
+        "demucs/htdemucs.onnx",
+        "demucs/htdemucs_6s.onnx",
+        "onnx/demucs/htdemucs.onnx",
+        "onnx/demucs/htdemucs_6s.onnx",
+        "onnx/models/htdemucs.onnx",
+        "onnx/models/htdemucs_6s.onnx",
+    ];
     for rel in candidates {
         let path = model_dir.join(rel);
         if path.is_file() {
             return Some(path);
         }
     }
-    None
+    let mut fallback = None::<(usize, PathBuf)>;
+    for entry in walkdir::WalkDir::new(model_dir)
+        .follow_links(false)
+        .max_depth(4)
+        .into_iter()
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("onnx") {
+            continue;
+        }
+        let lower = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !lower.contains("demucs") {
+            continue;
+        }
+        let rank = if lower == "htdemucs.onnx" {
+            0
+        } else if lower.starts_with("htdemucs") {
+            1
+        } else {
+            2
+        };
+        match &fallback {
+            Some((best_rank, _)) if *best_rank <= rank => {}
+            _ => fallback = Some((rank, path.to_path_buf())),
+        }
+    }
+    fallback.map(|(_, path)| path)
 }
 
 pub(super) fn download_music_model_snapshot_with_progress<F>(
@@ -191,7 +238,15 @@ where
         "onnx/folds/harmonix-fold0.onnx",
         "onnx/folds/harmonix-fold0.json",
         "htdemucs.onnx",
+        "htdemucs_6s.onnx",
         "onnx/htdemucs.onnx",
+        "onnx/htdemucs_6s.onnx",
+        "demucs/htdemucs.onnx",
+        "demucs/htdemucs_6s.onnx",
+        "onnx/demucs/htdemucs.onnx",
+        "onnx/demucs/htdemucs_6s.onnx",
+        "onnx/models/htdemucs.onnx",
+        "onnx/models/htdemucs_6s.onnx",
     ];
     let mut ordered: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -228,24 +283,22 @@ where
     })
 }
 
-pub(super) fn resolve_stem_paths(
-    audio_path: &Path,
-    stems_dir_override: Option<&Path>,
-) -> StemResolveResult {
-    let stem_name = audio_path
+fn push_unique_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    if roots.iter().any(|existing| existing == &root) {
+        return;
+    }
+    roots.push(root);
+}
+
+fn music_audio_stem_name(audio_path: &Path) -> String {
+    audio_path
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("audio");
+        .map(|stem| stem.to_string_lossy().trim().to_string())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| "audio".to_string())
+}
 
-    let root_dir = match stems_dir_override {
-        Some(dir) => dir.to_path_buf(),
-        None => audio_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("stems")
-            .join(stem_name),
-    };
-
+fn stem_resolve_from_root(root_dir: PathBuf, searched_roots: Vec<PathBuf>) -> StemResolveResult {
     let bass = root_dir.join("bass.wav");
     let drums = root_dir.join("drums.wav");
     let other = root_dir.join("other.wav");
@@ -264,12 +317,112 @@ pub(super) fn resolve_stem_paths(
     }
 
     StemResolveResult {
+        root_dir,
         bass,
         drums,
         other,
         vocals,
         missing,
+        searched_roots,
     }
+}
+
+fn stem_candidate_roots(audio_path: &Path, stems_dir_override: Option<&Path>) -> Vec<PathBuf> {
+    let stem_name = music_audio_stem_name(audio_path);
+    let parent_dir = audio_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut roots = Vec::<PathBuf>::new();
+    if let Some(dir) = stems_dir_override {
+        push_unique_root(&mut roots, dir.to_path_buf());
+        push_unique_root(&mut roots, dir.join(&stem_name));
+        return roots;
+    }
+    let mut anchors = vec![parent_dir.to_path_buf()];
+    if let Some(grand_parent) = parent_dir.parent() {
+        push_unique_root(&mut anchors, grand_parent.to_path_buf());
+    }
+    for anchor in anchors {
+        push_unique_root(&mut roots, anchor.join("stems").join(&stem_name));
+        push_unique_root(
+            &mut roots,
+            anchor.join("demix").join("htdemucs").join(&stem_name),
+        );
+        push_unique_root(
+            &mut roots,
+            anchor.join("demix_onnx").join("htdemucs").join(&stem_name),
+        );
+        push_unique_root(&mut roots, anchor.join("htdemucs").join(&stem_name));
+        push_unique_root(&mut roots, anchor.join("demucs").join(&stem_name));
+    }
+    roots
+}
+
+pub(super) fn resolve_stem_paths(
+    audio_path: &Path,
+    stems_dir_override: Option<&Path>,
+) -> StemResolveResult {
+    let searched_roots = stem_candidate_roots(audio_path, stems_dir_override);
+    let mut best: Option<StemResolveResult> = None;
+    for root_dir in &searched_roots {
+        let candidate = stem_resolve_from_root(root_dir.clone(), searched_roots.clone());
+        if candidate.is_ready() {
+            return candidate;
+        }
+        let replace = match best.as_ref() {
+            None => true,
+            Some(current) => {
+                let candidate_rank = (
+                    candidate.missing.len(),
+                    (!candidate.root_dir.exists()) as usize,
+                );
+                let current_rank = (current.missing.len(), (!current.root_dir.exists()) as usize);
+                candidate_rank < current_rank
+            }
+        };
+        if replace {
+            best = Some(candidate);
+        }
+    }
+    best.unwrap_or_else(|| stem_resolve_from_root(PathBuf::from("."), searched_roots))
+}
+
+pub(super) fn source_audio_has_timing_risk(audio_path: &Path) -> bool {
+    let ext = audio_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    matches!(
+        ext.as_deref(),
+        Some("mp3")
+            | Some("aac")
+            | Some("m4a")
+            | Some("mp4")
+            | Some("ogg")
+            | Some("opus")
+            | Some("wma")
+    )
+}
+
+fn normalize_loaded_stem_channels(
+    mut channels: Vec<Vec<f32>>,
+    src_path: &Path,
+) -> Result<Vec<Vec<f32>>, String> {
+    if channels.is_empty() {
+        return Err(format!("decoded zero channels: {}", src_path.display()));
+    }
+    let min_len = channels.iter().map(|ch| ch.len()).min().unwrap_or(0);
+    if min_len == 0 {
+        return Err(format!("decoded zero samples: {}", src_path.display()));
+    }
+    for ch in channels.iter_mut() {
+        ch.truncate(min_len);
+    }
+    if channels.len() == 1 {
+        channels.push(channels[0].clone());
+    }
+    if channels.len() > 2 {
+        channels.truncate(2);
+    }
+    Ok(channels)
 }
 
 pub(super) fn load_stems_for_preview(
@@ -284,17 +437,15 @@ pub(super) fn load_stems_for_preview(
     let load_one = |path: &Path| -> Result<Vec<Vec<f32>>, String> {
         let (channels, sr) = crate::audio_io::decode_audio_multi(path)
             .map_err(|e| format!("decode failed ({}): {e}", path.display()))?;
-        if channels.is_empty() {
-            return Err(format!("decoded zero channels: {}", path.display()));
-        }
-        if sr == target_sr {
-            Ok(channels)
+        let channels = if sr == target_sr {
+            channels
         } else {
-            Ok(channels
+            channels
                 .into_iter()
                 .map(|ch| resample_linear(&ch, sr, target_sr))
-                .collect())
-        }
+                .collect()
+        };
+        normalize_loaded_stem_channels(channels, path)
     };
 
     let bass = load_one(stems.bass.as_path())?;
@@ -318,7 +469,7 @@ pub(super) fn load_stems_for_preview(
 pub(super) fn load_or_demix_stems_for_preview(
     audio_path: &Path,
     stems: &StemResolveResult,
-    model_dir: &Path,
+    demucs_model_path: Option<&Path>,
     target_sr: u32,
     cancel_requested: &Arc<AtomicBool>,
     on_progress: &mut dyn FnMut(String),
@@ -328,16 +479,15 @@ pub(super) fn load_or_demix_stems_for_preview(
         on_progress("Loading stems...".to_string());
         return load_stems_for_preview(stems, target_sr, cancel_requested);
     }
-    let demucs_model = resolve_demucs_model_path(model_dir).ok_or_else(|| {
+    let demucs_model = demucs_model_path.ok_or_else(|| {
         format!(
-            "Missing stems ({}) and Demucs model not found in {}",
+            "Missing stems ({}) and Demucs model is unavailable",
             stems.missing.join(", "),
-            model_dir.display()
         )
     })?;
     demix_input_audio_to_stems(
         audio_path,
-        demucs_model.as_path(),
+        demucs_model,
         target_sr,
         cancel_requested,
         on_progress,
@@ -2658,6 +2808,7 @@ mod tests {
     use super::{
         estimate_bpm_from_beats_samples, has_required_music_model_files, normalize_to_stereo_sr,
         resolve_demucs_model_path, resolve_music_model_dir_with_hint, resolve_stem_paths,
+        source_audio_has_timing_risk,
     };
 
     #[test]
@@ -2702,6 +2853,55 @@ mod tests {
     }
 
     #[test]
+    fn stem_resolve_finds_allinone_demix_layout() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_music_demix_layout_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let audio_dir = dir.join("audio");
+        let demix_dir = dir.join("demix").join("htdemucs").join("song");
+        std::fs::create_dir_all(&audio_dir).expect("audio temp");
+        std::fs::create_dir_all(&demix_dir).expect("demix temp");
+        let audio = audio_dir.join("song.wav");
+        std::fs::write(&audio, b"x").expect("dummy");
+        for name in ["bass.wav", "drums.wav", "other.wav", "vocals.wav"] {
+            std::fs::write(demix_dir.join(name), b"wav").expect("stem");
+        }
+        let resolved = resolve_stem_paths(&audio, None);
+        assert!(resolved.is_ready());
+        assert_eq!(resolved.root_dir, demix_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stem_resolve_override_accepts_parent_directory() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_music_stem_parent_override_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let audio_dir = dir.join("audio");
+        let stems_parent = dir.join("demix").join("htdemucs");
+        let stems_dir = stems_parent.join("song");
+        std::fs::create_dir_all(&audio_dir).expect("audio temp");
+        std::fs::create_dir_all(&stems_dir).expect("stems temp");
+        let audio = audio_dir.join("song.wav");
+        std::fs::write(&audio, b"x").expect("dummy");
+        for name in ["bass.wav", "drums.wav", "other.wav", "vocals.wav"] {
+            std::fs::write(stems_dir.join(name), b"wav").expect("stem");
+        }
+        let resolved = resolve_stem_paths(&audio, Some(stems_parent.as_path()));
+        assert!(resolved.is_ready());
+        assert_eq!(resolved.root_dir, stems_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn required_model_files_detect_manifest_or_single_model() {
         let dir = std::env::temp_dir().join(format!(
             "neowaves_music_model_req_{}",
@@ -2730,6 +2930,24 @@ mod tests {
         std::fs::write(dir.join("htdemucs.onnx"), b"b").expect("root demucs");
         let path = resolve_demucs_model_path(&dir).expect("demucs path");
         assert_eq!(path, dir.join("htdemucs.onnx"));
+    }
+
+    #[test]
+    fn resolve_demucs_model_accepts_nested_fallbacks() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_music_demucs_nested_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let nested = dir.join("onnx").join("demucs");
+        std::fs::create_dir_all(&nested).expect("nested demucs dir");
+        let expected = nested.join("htdemucs_6s.onnx");
+        std::fs::write(&expected, b"a").expect("nested demucs");
+        let path = resolve_demucs_model_path(&dir).expect("demucs path");
+        assert_eq!(path, expected);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2787,5 +3005,18 @@ mod tests {
         let fast_bpm = estimate_bpm_from_beats_samples(&fast, sr).expect("fast bpm");
         assert!((slow_bpm - 60.0).abs() < 0.5);
         assert!((fast_bpm - 150.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn source_audio_reports_lossy_timing_risk() {
+        assert!(source_audio_has_timing_risk(std::path::Path::new(
+            "song.mp3"
+        )));
+        assert!(source_audio_has_timing_risk(std::path::Path::new(
+            "song.m4a"
+        )));
+        assert!(!source_audio_has_timing_risk(std::path::Path::new(
+            "song.wav"
+        )));
     }
 }

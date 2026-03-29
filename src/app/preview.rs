@@ -23,8 +23,10 @@ impl WavesPreviewer {
         show_waveform_overlay: bool,
     ) -> bool {
         matches!(view_mode, ViewMode::Waveform)
-            || (matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel)
-                && show_waveform_overlay)
+            || (matches!(
+                view_mode,
+                ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+            ) && show_waveform_overlay)
     }
 
     fn preview_matches_tool(tab: &EditorTab, tool: ToolKind) -> bool {
