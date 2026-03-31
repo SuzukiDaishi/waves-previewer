@@ -10,6 +10,8 @@ use crate::app::types::{
     EffectGraphSpectrumMode,
 };
 
+const EFFECT_GRAPH_MONITOR_DOWNMIX_NOTE: &str = "Preview monitor downmixes >2ch to stereo";
+
 fn world_to_screen(
     canvas_rect: egui::Rect,
     pan: egui::Vec2,
@@ -468,7 +470,7 @@ impl crate::app::WavesPreviewer {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn effect_graph_toggle_playback(
+    pub(in crate::app) fn effect_graph_toggle_playback(
         &mut self,
         target: EffectGraphPlaybackTarget,
         audio: Arc<crate::audio::AudioBuffer>,
@@ -498,6 +500,10 @@ impl crate::app::WavesPreviewer {
     ) -> &'static str {
         if self.effect_graph_playback_active(target) {
             "Stop"
+        } else if target == EffectGraphPlaybackTarget::Input
+            && self.effect_graph.input_preview_worker_state.rx.is_some()
+        {
+            "Loading..."
         } else {
             play_label
         }
@@ -667,7 +673,21 @@ impl crate::app::WavesPreviewer {
     }
 
     fn ui_effect_graph_tester(&mut self, ui: &mut egui::Ui) {
-        let predicted_output_summary = self.effect_graph_predicted_output_summary();
+        let predicted_output_format = self.effect_graph_predicted_output_format().ok();
+        let predicted_output_summary = predicted_output_format
+            .as_ref()
+            .map(|predicted| predicted.summary.clone());
+        let show_monitor_downmix_note = predicted_output_format
+            .as_ref()
+            .map(|predicted| predicted.channel_count > 2)
+            .unwrap_or(false)
+            || self
+                .effect_graph
+                .tester
+                .last_output_bus
+                .as_ref()
+                .map(|bus| bus.channels.len() > 2)
+                .unwrap_or(false);
         ui.heading("Test");
         ui.label("Target audio");
         let target_edit = ui.add(egui::TextEdit::singleline(
@@ -675,6 +695,8 @@ impl crate::app::WavesPreviewer {
         ));
         if target_edit.changed() {
             self.effect_graph.tester.target_path = None;
+            self.invalidate_effect_graph_input_preview();
+            self.invalidate_effect_graph_prediction_cache();
         }
         ui.horizontal(|ui| {
             if ui.button("Use Current").clicked() {
@@ -687,6 +709,8 @@ impl crate::app::WavesPreviewer {
                 {
                     self.effect_graph.tester.target_path = Some(path.clone());
                     self.effect_graph.tester.target_path_input = path.display().to_string();
+                    self.invalidate_effect_graph_input_preview();
+                    self.invalidate_effect_graph_prediction_cache();
                 }
             }
         });
@@ -741,14 +765,9 @@ impl crate::app::WavesPreviewer {
                 )
                 .clicked()
             {
-                let audio = self
-                    .effect_graph
-                    .tester
-                    .last_input_audio
-                    .clone()
-                    .or_else(|| self.effect_graph_preview_input_audio().ok());
-                if let Some(audio) = audio {
-                    self.effect_graph_toggle_playback(EffectGraphPlaybackTarget::Input, audio);
+                if let Err(err) = self.start_effect_graph_input_preview(true) {
+                    self.effect_graph.tester.last_error = Some(err.clone());
+                    self.push_effect_graph_console(EffectGraphSeverity::Error, "input", err, None);
                 }
             }
             if ui
@@ -776,6 +795,13 @@ impl crate::app::WavesPreviewer {
         }
         if let Some(summary) = predicted_output_summary {
             ui.label(RichText::new(summary).color(Color32::from_rgb(150, 190, 255)));
+        }
+        if show_monitor_downmix_note {
+            ui.label(
+                RichText::new(EFFECT_GRAPH_MONITOR_DOWNMIX_NOTE)
+                    .small()
+                    .color(Color32::from_rgb(118, 132, 148)),
+            );
         }
         if let Some(ms) = self.effect_graph.tester.last_run_ms {
             ui.label(format!("Last run: {ms:.1} ms"));
@@ -977,7 +1003,21 @@ impl crate::app::WavesPreviewer {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let predicted_output_summary = self.effect_graph_predicted_output_summary();
+        let predicted_output_format = self.effect_graph_predicted_output_format().ok();
+        let predicted_output_summary = predicted_output_format
+            .as_ref()
+            .map(|predicted| predicted.summary.clone());
+        let show_monitor_downmix_note = predicted_output_format
+            .as_ref()
+            .map(|predicted| predicted.channel_count > 2)
+            .unwrap_or(false)
+            || self
+                .effect_graph
+                .tester
+                .last_output_bus
+                .as_ref()
+                .map(|bus| bus.channels.len() > 2)
+                .unwrap_or(false);
         let split_live_width = self
             .effect_graph
             .tester
@@ -1423,16 +1463,13 @@ impl crate::app::WavesPreviewer {
                                 )
                                 .clicked()
                             {
-                                let audio = self
-                                    .effect_graph
-                                    .tester
-                                    .last_input_audio
-                                    .clone()
-                                    .or_else(|| self.effect_graph_preview_input_audio().ok());
-                                if let Some(audio) = audio {
-                                    self.effect_graph_toggle_playback(
-                                        EffectGraphPlaybackTarget::Input,
-                                        audio,
+                                if let Err(err) = self.start_effect_graph_input_preview(true) {
+                                    self.effect_graph.tester.last_error = Some(err.clone());
+                                    self.push_effect_graph_console(
+                                        EffectGraphSeverity::Error,
+                                        "input",
+                                        err,
+                                        None,
                                     );
                                 }
                             }
@@ -1459,6 +1496,13 @@ impl crate::app::WavesPreviewer {
                                     .small()
                                     .color(Color32::from_rgb(160, 176, 192)),
                             );
+                            if show_monitor_downmix_note {
+                                ui.label(
+                                    RichText::new(EFFECT_GRAPH_MONITOR_DOWNMIX_NOTE)
+                                        .small()
+                                        .color(Color32::from_rgb(118, 132, 148)),
+                                );
+                            }
                             if ui
                                 .add_enabled(
                                     self.effect_graph.tester.last_output_audio.is_some(),
@@ -2027,6 +2071,11 @@ impl crate::app::WavesPreviewer {
                                     RichText::new("Auto widen branch outputs")
                                         .small()
                                         .color(Color32::from_rgb(160, 176, 192)),
+                                );
+                                ui.label(
+                                    RichText::new("Duplicate branches widen instead of mixing")
+                                        .small()
+                                        .color(Color32::from_rgb(118, 132, 148)),
                                 );
                                 ui.label(
                                     RichText::new("Preserves untouched slots where possible")

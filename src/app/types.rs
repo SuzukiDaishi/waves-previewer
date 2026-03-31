@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -1785,7 +1785,10 @@ pub enum EffectGraphWorkerEvent {
     PathFinished {
         path: PathBuf,
         output_bus: EffectGraphAudioBus,
+        input_bus: Option<EffectGraphAudioBus>,
+        input_monitor_audio: Option<Arc<AudioBuffer>>,
         monitor_audio: Vec<Vec<f32>>,
+        rough_waveform: Vec<(f32, f32)>,
         total_elapsed_ms: f32,
     },
     Failed {
@@ -1945,6 +1948,47 @@ pub struct EffectGraphPluginGuiSessionState {
     pub rx: std::sync::mpsc::Receiver<PluginGuiEvent>,
 }
 
+#[derive(Clone, Debug)]
+pub struct EffectGraphPredictionCacheEntry {
+    pub generation: u64,
+    pub target_signature: String,
+    pub result: Result<EffectGraphPredictedFormat, String>,
+}
+
+#[derive(Debug)]
+pub struct EffectGraphInputPreviewResult {
+    pub job_id: u64,
+    pub target_path: PathBuf,
+    pub input_bus: Option<EffectGraphAudioBus>,
+    pub input_audio: Option<Arc<AudioBuffer>>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct EffectGraphInputPreviewState {
+    pub active_job_id: u64,
+    pub autoplay_requested: bool,
+    pub rx: Option<Receiver<EffectGraphInputPreviewResult>>,
+}
+
+#[derive(Debug)]
+pub struct EffectGraphApplyPostprocessJob {
+    pub generation: u64,
+    pub path: PathBuf,
+    pub channels: Vec<Vec<f32>>,
+    pub final_sample_rate: u32,
+    pub bits_per_sample: u16,
+}
+
+#[derive(Debug)]
+pub struct EffectGraphApplyPostprocessResult {
+    pub generation: u64,
+    pub path: PathBuf,
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
+    pub display_meta: FileMeta,
+}
+
 #[derive(Debug)]
 pub struct EffectGraphState {
     pub workspace_open: bool,
@@ -1960,6 +2004,13 @@ pub struct EffectGraphState {
     pub plugin_runtime: HashMap<String, EffectGraphPluginNodeRuntimeState>,
     pub plugin_probe_state: Option<EffectGraphPluginProbeState>,
     pub plugin_gui_state: Option<EffectGraphPluginGuiSessionState>,
+    pub run_generation: u64,
+    pub prediction_generation: u64,
+    pub cached_predicted_output_format: Option<EffectGraphPredictionCacheEntry>,
+    pub input_preview_worker_state: EffectGraphInputPreviewState,
+    pub postprocess_tx: Option<Sender<EffectGraphApplyPostprocessJob>>,
+    pub postprocess_rx: Option<Receiver<EffectGraphApplyPostprocessResult>>,
+    pub pending_effect_graph_commits: HashMap<PathBuf, u64>,
     pub undo_stack: Vec<EffectGraphUndoState>,
     pub redo_stack: Vec<EffectGraphUndoState>,
     pub console: EffectGraphConsoleState,
@@ -1994,6 +2045,13 @@ impl Default for EffectGraphState {
             plugin_runtime: HashMap::new(),
             plugin_probe_state: None,
             plugin_gui_state: None,
+            run_generation: 0,
+            prediction_generation: 0,
+            cached_predicted_output_format: None,
+            input_preview_worker_state: EffectGraphInputPreviewState::default(),
+            postprocess_tx: None,
+            postprocess_rx: None,
+            pending_effect_graph_commits: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             console: EffectGraphConsoleState::default(),

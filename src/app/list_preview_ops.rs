@@ -384,8 +384,8 @@ impl super::WavesPreviewer {
                                 .selected_path_buf()
                                 .map(|p| p == res.path)
                                 .unwrap_or(false);
-                            let needs_play =
-                                self.list_play_pending || (self.auto_play_list_nav && selected_matches);
+                            let needs_play = self.list_play_pending
+                                || (self.auto_play_list_nav && selected_matches);
                             let defer_live_audio_for_fx = self.playback_mode_needs_fx_buffer()
                                 && selected_matches
                                 && (needs_play

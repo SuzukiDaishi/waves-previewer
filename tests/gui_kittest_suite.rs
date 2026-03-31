@@ -1994,6 +1994,186 @@ mod kittest_suite {
     }
 
     #[test]
+    fn editor_exact_stream_playhead_uses_editor_display_rate() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(48_000));
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_exact_stream_transport(44_100));
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        harness.state_mut().test_playback_seek_to_source_time(1.0);
+        harness.run_steps(2);
+
+        let display_sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        let display_pos = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display playhead");
+        assert!(
+            display_pos.abs_diff(display_sr as usize) <= 1,
+            "editor playhead should use display sample rate, not transport sr: pos={display_pos} display_sr={display_sr}"
+        );
+    }
+
+    #[test]
+    fn editor_display_seek_roundtrip_preserves_source_time_in_exact_stream() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(48_000));
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_exact_stream_transport(44_100));
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+
+        let display_sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        let target_display = (display_sr as usize).saturating_mul(3) / 2;
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(target_display));
+        harness.run_steps(2);
+
+        let source_time = harness
+            .state()
+            .test_playback_current_source_time_sec()
+            .expect("source time");
+        let display_after = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display after");
+        let expected_time = target_display as f64 / display_sr.max(1) as f64;
+        assert!(
+            (source_time - expected_time).abs() < 0.02,
+            "display seek should preserve source time: expected={expected_time:.6} actual={source_time:.6}"
+        );
+        assert!(
+            display_after.abs_diff(target_display) <= 1,
+            "display seek should roundtrip through audio position: target={target_display} actual={display_after}"
+        );
+    }
+
+    #[test]
+    fn editor_buffer_speed_mode_playhead_tracks_source_time() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(48_000));
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_buffer_transport(48_000));
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(0.5);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+        harness.state_mut().test_playback_seek_to_source_time(1.0);
+        harness.run_steps(2);
+
+        let display_sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        let source_time = harness
+            .state()
+            .test_playback_current_source_time_sec()
+            .expect("source time");
+        let display_pos = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display playhead");
+        assert!(
+            (source_time - 1.0).abs() < 0.02,
+            "buffer speed mode should still track source time: {source_time:.6}"
+        );
+        assert!(
+            display_pos.abs_diff(display_sr as usize) <= 1,
+            "display playhead should stay on the audible source-time position under speed mode: pos={display_pos} display_sr={display_sr}"
+        );
+    }
+
+    #[test]
+    fn editor_loading_visual_len_and_final_ready_keep_playhead_alignment() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let tab_len = harness.state().test_tab_samples_len().max(1);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(48_000));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_loading_visual_len(tab_len.saturating_mul(2)));
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_exact_stream_transport(44_100));
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+
+        let display_sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        let target_display = (display_sr as usize).min(tab_len.saturating_sub(1));
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(target_display));
+        harness.run_steps(2);
+        let before_time = harness
+            .state()
+            .test_playback_current_source_time_sec()
+            .expect("source time before final ready");
+        let before_display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display before final ready");
+
+        assert!(harness.state_mut().test_finish_active_tab_loading_visual());
+        harness.run_steps(2);
+
+        let after_time = harness
+            .state()
+            .test_playback_current_source_time_sec()
+            .expect("source time after final ready");
+        let after_display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display after final ready");
+        assert!(
+            (after_time - before_time).abs() < 0.02,
+            "final ready should not move source time: before={before_time:.6} after={after_time:.6}"
+        );
+        assert!(
+            after_display.abs_diff(before_display) <= 1,
+            "final ready should not move display playhead: before={before_display} after={after_display}"
+        );
+    }
+
+    #[test]
     fn editor_right_drag_then_shift_click_reuses_anchor() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -2987,6 +3167,35 @@ mod kittest_suite {
     }
 
     #[test]
+    fn effect_graph_duplicate_split_predicts_five_channels_and_shows_downmix_note() {
+        let mut harness = harness_empty();
+        harness
+            .state_mut()
+            .test_seed_effect_graph_duplicate_split_five_channel_doc();
+        harness.run_steps(3);
+
+        let summary = harness
+            .state_mut()
+            .test_effect_graph_predicted_output_summary()
+            .expect("predicted summary");
+        assert!(
+            summary.contains("Predicted: 5 ch /"),
+            "expected 5ch summary, got {summary}"
+        );
+        assert!(
+            summary.ends_with("/ adaptive"),
+            "expected adaptive summary, got {summary}"
+        );
+        assert!(
+            !harness
+                .query_all_by_label("Preview monitor downmixes >2ch to stereo")
+                .collect::<Vec<_>>()
+                .is_empty(),
+            "expected monitor downmix note to be visible"
+        );
+    }
+
+    #[test]
     fn spectrogram_hop_ui_shows_derived_overlap() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -2996,6 +3205,39 @@ mod kittest_suite {
 
         harness.get_by_label("Hop Size:");
         harness.get_by_label("Overlap: 93.8% (derived)");
+    }
+
+    #[test]
+    fn effect_graph_run_test_defers_pristine_input_decode() {
+        let dir = wav_dir();
+        let src = first_wav_file(&dir).expect("fixture wav");
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_select_path(&src));
+        harness.run_steps(2);
+        harness
+            .state_mut()
+            .test_seed_effect_graph_duplicate_split_five_channel_doc();
+        harness.run_steps(2);
+
+        harness
+            .state_mut()
+            .test_start_effect_graph_test_run()
+            .expect("start effect graph test run");
+
+        assert!(
+            harness.state().test_effect_graph_runner_active(),
+            "expected runner to become active immediately"
+        );
+        assert!(
+            !harness.state().test_effect_graph_last_input_audio_ready(),
+            "pristine target should not decode input audio on the UI thread before worker results drain"
+        );
+        assert!(
+            !harness.state().test_effect_graph_last_input_bus_ready(),
+            "pristine target should not populate last_input_bus synchronously"
+        );
     }
 
     #[test]

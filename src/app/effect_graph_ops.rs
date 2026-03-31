@@ -12,12 +12,15 @@ use super::types::{
     AppliedEffectGraphStamp, CachedEdit, EffectGraphAudioBus, EffectGraphChannelFlowHint,
     EffectGraphChannelLayout, EffectGraphChannelLayoutEntry, EffectGraphCombineMode,
     EffectGraphDebugPreview, EffectGraphDebugViewState, EffectGraphDocument, EffectGraphEdge,
-    EffectGraphLibraryEntry, EffectGraphNode, EffectGraphNodeData, EffectGraphNodeKind,
-    EffectGraphNodeRunPhase, EffectGraphNodeRunStatus, EffectGraphPendingAction,
+    EffectGraphInputPreviewResult, EffectGraphLibraryEntry, EffectGraphNode,
+    EffectGraphNodeData, EffectGraphNodeKind, EffectGraphNodeRunPhase,
+    EffectGraphNodeRunStatus, EffectGraphPendingAction, EffectGraphPlaybackTarget,
     EffectGraphPluginNodeRuntimeState, EffectGraphPortKey, EffectGraphPredictedFormat,
-    EffectGraphRunMode, EffectGraphSeverity, EffectGraphSpectrumMode, EffectGraphTemplateFile,
-    EffectGraphUndoState, EffectGraphValidationIssue, EffectGraphWorkerEvent, MediaSource,
-    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, UndoScope, WorkspaceView,
+    EffectGraphPredictionCacheEntry, EffectGraphRunMode, EffectGraphSeverity,
+    EffectGraphSpectrumMode, EffectGraphTemplateFile, EffectGraphUndoState,
+    EffectGraphValidationIssue, EffectGraphWorkerEvent, EffectGraphApplyPostprocessJob,
+    EffectGraphApplyPostprocessResult, MediaSource, SpectrogramConfig, SpectrogramScale,
+    ToolKind, ToolState, UndoScope, WorkspaceView,
 };
 use super::WavesPreviewer;
 use crate::audio::AudioBuffer;
@@ -31,6 +34,9 @@ const EFFECT_GRAPH_EMBEDDED_SAMPLE_LABEL: &str = "Embedded sample (10s chirp + w
 const EFFECT_GRAPH_EMBEDDED_SAMPLE_WORKER_PATH: &str = "[embedded effect graph sample]";
 const EFFECT_GRAPH_EMBEDDED_SAMPLE_WAV: &[u8] =
     include_bytes!("assets/effect_graph_test_sample.wav");
+const EFFECT_GRAPH_ROUGH_WAVEFORM_BINS: usize = 256;
+const EFFECT_GRAPH_RUNNER_EVENT_BUDGET: usize = 32;
+const EFFECT_GRAPH_RUNNER_DRAIN_BUDGET_MS: u128 = 4;
 
 static EFFECT_GRAPH_EMBEDDED_SAMPLE_DECODED: OnceLock<Result<(Vec<Vec<f32>>, u32), String>> =
     OnceLock::new();
@@ -111,6 +117,15 @@ fn default_tool_state() -> ToolState {
         stretch_rate: 1.0,
         loop_repeat: 2,
     }
+}
+
+fn effect_graph_build_rough_waveform(channels: &[Vec<f32>]) -> Vec<(f32, f32)> {
+    let samples_len = channels_frame_len(channels);
+    crate::wave::build_waveform_minmax_from_channels(
+        channels,
+        samples_len,
+        EFFECT_GRAPH_ROUGH_WAVEFORM_BINS,
+    )
 }
 
 fn effect_graph_default_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
@@ -244,15 +259,38 @@ fn split_slot_entry_for_index(
     input_layout: &EffectGraphChannelLayout,
     channel_index: usize,
 ) -> EffectGraphChannelLayoutEntry {
+    let auto_branch_group_id = input_layout
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            EffectGraphChannelLayoutEntry::AutoPlaced {
+                branch_group_id, ..
+            } => Some(branch_group_id.as_str()),
+            EffectGraphChannelLayoutEntry::Vacant { .. } => None,
+            EffectGraphChannelLayoutEntry::Dense
+            | EffectGraphChannelLayoutEntry::Slotted { .. } => Some(""),
+        })
+        .try_fold(None, |current: Option<&str>, next| match current {
+            Some(existing) if existing != next => None,
+            Some(existing) => Some(Some(existing)),
+            None if next.is_empty() => None,
+            None => Some(Some(next)),
+        })
+        .flatten()
+        .map(|value| value.to_string());
     match input_layout.entries.get(channel_index) {
         Some(EffectGraphChannelLayoutEntry::Dense) => EffectGraphChannelLayoutEntry::Slotted {
             slot_index: channel_index,
         },
-        Some(EffectGraphChannelLayoutEntry::AutoPlaced { .. }) => {
-            EffectGraphChannelLayoutEntry::Slotted {
-                slot_index: channel_index,
-            }
-        }
+        Some(EffectGraphChannelLayoutEntry::AutoPlaced {
+            origin_slot,
+            branch_group_id,
+            ..
+        }) => EffectGraphChannelLayoutEntry::AutoPlaced {
+            origin_slot: *origin_slot,
+            branch_group_id: branch_group_id.clone(),
+            branch_channel_index: channel_index,
+        },
         Some(EffectGraphChannelLayoutEntry::Slotted { slot_index }) => {
             EffectGraphChannelLayoutEntry::Slotted {
                 slot_index: *slot_index,
@@ -263,9 +301,17 @@ fn split_slot_entry_for_index(
                 requested_slot: *requested_slot,
             }
         }
-        None => EffectGraphChannelLayoutEntry::Vacant {
-            requested_slot: channel_index,
-        },
+        None => auto_branch_group_id
+            .map(
+                |branch_group_id| EffectGraphChannelLayoutEntry::AutoPlaced {
+                    origin_slot: None,
+                    branch_group_id,
+                    branch_channel_index: channel_index,
+                },
+            )
+            .unwrap_or(EffectGraphChannelLayoutEntry::Vacant {
+                requested_slot: channel_index,
+            }),
     }
 }
 
@@ -283,22 +329,6 @@ fn make_split_output_layout(
     EffectGraphChannelLayout {
         declared_width,
         entries: vec![entry],
-    }
-}
-
-fn silent_mono_bus(
-    len: usize,
-    sample_rate: u32,
-    declared_width: usize,
-    requested_slot: usize,
-) -> EffectGraphAudioBus {
-    EffectGraphAudioBus {
-        channels: vec![vec![0.0; len]],
-        sample_rate: sample_rate.max(1),
-        channel_layout: EffectGraphChannelLayout {
-            declared_width,
-            entries: vec![EffectGraphChannelLayoutEntry::Vacant { requested_slot }],
-        },
     }
 }
 
@@ -1063,6 +1093,39 @@ fn flow_hint_lane_centroid(hint: &EffectGraphChannelFlowHint) -> Option<f32> {
     }
 }
 
+fn split_flow_hint_for_index(
+    input_hint: Option<&EffectGraphChannelFlowHint>,
+    channel_index: usize,
+) -> EffectGraphChannelFlowHint {
+    match input_hint {
+        Some(EffectGraphChannelFlowHint::Slotted {
+            declared_width_hint,
+            slot_indices,
+        }) => EffectGraphChannelFlowHint::Slotted {
+            declared_width_hint: *declared_width_hint,
+            slot_indices: vec![slot_indices
+                .get(channel_index)
+                .copied()
+                .unwrap_or(channel_index)],
+        },
+        Some(EffectGraphChannelFlowHint::AutoPlaced {
+            declared_width_hint,
+            origin_slots,
+            ..
+        }) => EffectGraphChannelFlowHint::AutoPlaced {
+            declared_width_hint: *declared_width_hint,
+            origin_slots: vec![origin_slots.get(channel_index).copied().unwrap_or(None)],
+            branch_group_count: 1,
+            predicted_channels_hint: 1,
+        },
+        Some(EffectGraphChannelFlowHint::Unknown) => EffectGraphChannelFlowHint::Unknown,
+        _ => EffectGraphChannelFlowHint::Slotted {
+            declared_width_hint: input_hint.and_then(flow_hint_declared_width),
+            slot_indices: vec![channel_index],
+        },
+    }
+}
+
 fn combine_mode_from_hints<'a>(
     hints: impl IntoIterator<Item = &'a EffectGraphChannelFlowHint>,
 ) -> Option<EffectGraphCombineMode> {
@@ -1208,14 +1271,11 @@ fn effect_graph_infer_flow_hints(
                 }
             }
             EffectGraphNodeData::SplitChannels => {
-                let declared_width_hint = input_hints.iter().find_map(flow_hint_declared_width);
+                let input_hint = input_hints.first();
                 for (index, port_id) in node.data.output_ports().iter().enumerate() {
                     output_hints.insert(
                         make_port_key(&node.id, port_id),
-                        EffectGraphChannelFlowHint::Slotted {
-                            declared_width_hint,
-                            slot_indices: vec![index],
-                        },
+                        split_flow_hint_for_index(input_hint, index),
                     );
                 }
             }
@@ -2258,6 +2318,8 @@ fn adaptive_combine_channels_by_layout(
 
     let mut anchored_auto_blocks =
         std::collections::BTreeMap::<usize, Vec<AdaptivePlacementBlock>>::new();
+    let mut grouped_auto_blocks =
+        HashMap::<String, Vec<(usize, usize, Option<usize>, Vec<f32>)>>::new();
     let mut slotted_channels = std::collections::BTreeMap::<usize, Vec<Vec<f32>>>::new();
     let mut vacant_slots = std::collections::BTreeSet::<usize>::new();
     let mut unanchored_blocks = Vec::<AdaptivePlacementBlock>::new();
@@ -2265,8 +2327,6 @@ fn adaptive_combine_channels_by_layout(
 
     for (socket_order, bus) in buses.iter_mut().enumerate() {
         pad_channels_with_silence(&mut bus.channels, longest_len);
-
-        let mut grouped_auto = HashMap::<String, Vec<(usize, Option<usize>, Vec<f32>)>>::new();
         let mut dense_channels = Vec::<Vec<f32>>::new();
 
         for (channel_index, channel) in bus.channels.iter().enumerate() {
@@ -2292,37 +2352,16 @@ fn adaptive_combine_channels_by_layout(
                     branch_group_id,
                     branch_channel_index,
                 } => {
-                    grouped_auto.entry(branch_group_id).or_default().push((
-                        branch_channel_index,
-                        origin_slot,
-                        channel.clone(),
-                    ));
+                    grouped_auto_blocks
+                        .entry(branch_group_id)
+                        .or_default()
+                        .push((
+                            socket_order,
+                            branch_channel_index,
+                            origin_slot,
+                            channel.clone(),
+                        ));
                 }
-            }
-        }
-
-        for (_, mut group) in grouped_auto {
-            group.sort_by_key(|(branch_channel_index, _, _)| *branch_channel_index);
-            let anchor_slot = group
-                .iter()
-                .filter_map(|(_, origin_slot, _)| *origin_slot)
-                .min();
-            let channels = group
-                .into_iter()
-                .map(|(_, _, channel)| channel)
-                .collect::<Vec<_>>();
-            let block = AdaptivePlacementBlock {
-                anchor_slot,
-                channels,
-                socket_order,
-            };
-            if let Some(slot_index) = block.anchor_slot {
-                anchored_auto_blocks
-                    .entry(slot_index)
-                    .or_default()
-                    .push(block);
-            } else {
-                unanchored_blocks.push(block);
             }
         }
 
@@ -2332,6 +2371,38 @@ fn adaptive_combine_channels_by_layout(
                 channels: dense_channels,
                 socket_order,
             });
+        }
+    }
+
+    for (_, mut group) in grouped_auto_blocks {
+        group.sort_by_key(|(socket_order, branch_channel_index, _, _)| {
+            (*socket_order, *branch_channel_index)
+        });
+        let anchor_slot = group
+            .iter()
+            .filter_map(|(_, _, origin_slot, _)| *origin_slot)
+            .min();
+        let socket_order = group
+            .iter()
+            .map(|(socket_order, _, _, _)| *socket_order)
+            .min()
+            .unwrap_or(usize::MAX);
+        let channels = group
+            .into_iter()
+            .map(|(_, _, _, channel)| channel)
+            .collect::<Vec<_>>();
+        let block = AdaptivePlacementBlock {
+            anchor_slot,
+            channels,
+            socket_order,
+        };
+        if let Some(slot_index) = block.anchor_slot {
+            anchored_auto_blocks
+                .entry(slot_index)
+                .or_default()
+                .push(block);
+        } else {
+            unanchored_blocks.push(block);
         }
     }
 
@@ -2706,19 +2777,19 @@ where
                         })?;
                 let max_len = channels_frame_len(&bus.channels);
                 for (index, port_id) in node.data.output_ports().iter().enumerate() {
+                    let channel_layout = make_split_output_layout(&bus.channel_layout, index);
                     let output_bus = if let Some(channel) = bus.channels.get(index) {
                         EffectGraphAudioBus {
                             channels: vec![channel.clone()],
                             sample_rate: bus.sample_rate,
-                            channel_layout: make_split_output_layout(&bus.channel_layout, index),
+                            channel_layout,
                         }
                     } else {
-                        silent_mono_bus(
-                            max_len,
-                            bus.sample_rate,
-                            bus.channel_layout.declared_width,
-                            index,
-                        )
+                        EffectGraphAudioBus {
+                            channels: vec![vec![0.0; max_len]],
+                            sample_rate: bus.sample_rate,
+                            channel_layout,
+                        }
                     };
                     output_buses.insert(make_port_key(&node.id, port_id), output_bus);
                 }
@@ -3236,6 +3307,7 @@ impl WavesPreviewer {
         if self.effect_graph.canvas.zoom <= 0.0 {
             self.effect_graph.canvas.zoom = self.effect_graph.draft.canvas.zoom.max(0.25);
         }
+        self.invalidate_effect_graph_prediction_cache();
     }
 
     pub(super) fn effect_graph_has_errors(&self) -> bool {
@@ -3485,7 +3557,7 @@ impl WavesPreviewer {
         Ok(())
     }
 
-    fn effective_audio_bus_for_path(&self, path: &Path) -> Option<EffectGraphAudioBus> {
+    fn resident_effect_graph_audio_bus_for_path(&self, path: &Path) -> Option<EffectGraphAudioBus> {
         if let Some(tab) = self
             .tabs
             .iter()
@@ -3518,14 +3590,7 @@ impl WavesPreviewer {
                 return None;
             }
         }
-        if !path.is_file() {
-            return None;
-        }
-        let (mut channels, in_sr) = crate::wave::decode_wav_multi(path).ok()?;
-        if let Some(depth) = self.bit_depth_override.get(path).copied() {
-            crate::wave::quantize_channels_in_place(&mut channels, depth);
-        }
-        Some(dense_audio_bus(channels, in_sr.max(1)))
+        None
     }
 
     fn effect_graph_monitor_audio_from_bus(
@@ -3569,12 +3634,143 @@ impl WavesPreviewer {
             .cloned()
             .map(|path| EffectGraphWorkerInput {
                 bit_depth: self.bit_depth_override.get(&path).copied(),
-                input_bus: self.effective_audio_bus_for_path(&path),
+                input_bus: self.resident_effect_graph_audio_bus_for_path(&path),
                 monitor_sr,
                 path,
                 resample_quality,
             })
             .collect()
+    }
+
+    pub(super) fn invalidate_effect_graph_prediction_cache(&mut self) {
+        self.effect_graph.prediction_generation =
+            self.effect_graph.prediction_generation.wrapping_add(1);
+        self.effect_graph.cached_predicted_output_format = None;
+    }
+
+    pub(super) fn invalidate_effect_graph_input_preview(&mut self) {
+        self.effect_graph.input_preview_worker_state.active_job_id = self
+            .effect_graph
+            .input_preview_worker_state
+            .active_job_id
+            .wrapping_add(1);
+        self.effect_graph.input_preview_worker_state.autoplay_requested = false;
+        self.effect_graph.input_preview_worker_state.rx = None;
+        self.effect_graph.tester.last_input_audio = None;
+        self.effect_graph.tester.last_input_bus = None;
+    }
+
+    fn effect_graph_prediction_target_signature(&self) -> Result<String, String> {
+        let input_bus = self.effect_graph_prediction_input_bus()?;
+        let target = self
+            .effect_graph_test_target_candidate()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| EFFECT_GRAPH_EMBEDDED_SAMPLE_WORKER_PATH.to_string());
+        Ok(format!(
+            "{target}|{}|{}|{}",
+            input_bus.sample_rate.max(1),
+            input_bus.channels.len(),
+            input_bus.channel_layout.declared_width.max(input_bus.channels.len())
+        ))
+    }
+
+    fn ensure_effect_graph_postprocess_worker(&mut self) {
+        if self.effect_graph.postprocess_tx.is_some() && self.effect_graph.postprocess_rx.is_some() {
+            return;
+        }
+        use std::sync::mpsc;
+        let (job_tx, job_rx) = mpsc::channel::<EffectGraphApplyPostprocessJob>();
+        let (result_tx, result_rx) = mpsc::channel::<EffectGraphApplyPostprocessResult>();
+        std::thread::spawn(move || {
+            while let Ok(job) = job_rx.recv() {
+                let samples_len = channels_frame_len(&job.channels);
+                let (waveform_minmax, waveform_pyramid) =
+                    WavesPreviewer::build_editor_waveform_cache(&job.channels, samples_len);
+                let display_meta = WavesPreviewer::build_meta_from_audio(
+                    &job.channels,
+                    job.final_sample_rate.max(1),
+                    job.bits_per_sample,
+                );
+                if result_tx
+                    .send(EffectGraphApplyPostprocessResult {
+                        generation: job.generation,
+                        path: job.path,
+                        waveform_minmax,
+                        waveform_pyramid,
+                        display_meta,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.effect_graph.postprocess_tx = Some(job_tx);
+        self.effect_graph.postprocess_rx = Some(result_rx);
+    }
+
+    fn queue_effect_graph_apply_postprocess(
+        &mut self,
+        generation: u64,
+        path: &Path,
+        channels: &[Vec<f32>],
+        final_sample_rate: u32,
+    ) {
+        self.ensure_effect_graph_postprocess_worker();
+        let bits_per_sample = self.effective_bits_for_path(path).unwrap_or(32);
+        self.effect_graph
+            .pending_effect_graph_commits
+            .insert(path.to_path_buf(), generation);
+        if let Some(tx) = self.effect_graph.postprocess_tx.as_ref() {
+            if tx
+                .send(EffectGraphApplyPostprocessJob {
+                    generation,
+                    path: path.to_path_buf(),
+                    channels: channels.to_vec(),
+                    final_sample_rate,
+                    bits_per_sample,
+                })
+                .is_err()
+            {
+                self.effect_graph.postprocess_tx = None;
+                self.effect_graph.postprocess_rx = None;
+                self.effect_graph.pending_effect_graph_commits.remove(path);
+            }
+        }
+    }
+
+    fn apply_effect_graph_postprocess_result(
+        &mut self,
+        result: EffectGraphApplyPostprocessResult,
+    ) {
+        let is_current = self
+            .effect_graph
+            .pending_effect_graph_commits
+            .get(&result.path)
+            .copied()
+            == Some(result.generation);
+        if !is_current {
+            return;
+        }
+        if let Some(tab_idx) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.path.as_path() == result.path.as_path())
+        {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.waveform_minmax = result.waveform_minmax.clone();
+                tab.waveform_pyramid = result.waveform_pyramid.clone();
+                Self::invalidate_editor_viewport_cache(tab);
+            }
+        }
+        if let Some(cached) = self.edited_cache.get_mut(&result.path) {
+            cached.waveform_minmax = result.waveform_minmax;
+            cached.waveform_pyramid = result.waveform_pyramid;
+            cached.display_meta = Some(result.display_meta);
+        }
+        self.effect_graph
+            .pending_effect_graph_commits
+            .remove(&result.path);
     }
 
     fn spawn_effect_graph_worker(
@@ -3591,6 +3787,7 @@ impl WavesPreviewer {
         let (tx, rx) = mpsc::channel::<EffectGraphWorkerEvent>();
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let cancel_thread = cancel_requested.clone();
+        self.effect_graph.run_generation = self.effect_graph.run_generation.wrapping_add(1);
         self.effect_graph.runner.mode = Some(mode);
         self.effect_graph.runner.started_at = Some(Instant::now());
         self.effect_graph.runner.total = inputs.len();
@@ -3643,6 +3840,11 @@ impl WavesPreviewer {
                     dense_audio_bus(channels, in_sr.max(1))
                 };
                 let started = Instant::now();
+                let input_bus_for_summary = if mode == EffectGraphRunMode::TestPreview {
+                    Some(input_bus.clone())
+                } else {
+                    None
+                };
                 let result = run_effect_graph_document_internal(
                     &document,
                     input_bus,
@@ -3685,10 +3887,22 @@ impl WavesPreviewer {
                             input.monitor_sr,
                             input.resample_quality,
                         );
+                        let rough_waveform = effect_graph_build_rough_waveform(&output_bus.channels);
                         let _ = tx.send(EffectGraphWorkerEvent::PathFinished {
                             path: input.path,
                             output_bus,
+                            input_bus: input_bus_for_summary.clone(),
+                            input_monitor_audio: input_bus_for_summary
+                                .as_ref()
+                                .map(|bus| Arc::new(AudioBuffer::from_channels(
+                                    monitor_channels_from_bus_at_rate(
+                                        bus,
+                                        input.monitor_sr,
+                                        input.resample_quality,
+                                    ),
+                                ))),
                             monitor_audio,
+                            rough_waveform,
                             total_elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
                         });
                     }
@@ -3719,6 +3933,8 @@ impl WavesPreviewer {
         if let Some(path) = self.selected_path_buf() {
             self.effect_graph.tester.target_path_input = path.display().to_string();
             self.effect_graph.tester.target_path = Some(path);
+            self.invalidate_effect_graph_input_preview();
+            self.invalidate_effect_graph_prediction_cache();
         }
     }
 
@@ -3791,17 +4007,32 @@ impl WavesPreviewer {
     }
 
     pub(super) fn effect_graph_predicted_output_format(
-        &self,
+        &mut self,
     ) -> Result<EffectGraphPredictedFormat, String> {
+        let target_signature = self.effect_graph_prediction_target_signature()?;
+        if let Some(cache) = self.effect_graph.cached_predicted_output_format.as_ref() {
+            if cache.generation == self.effect_graph.prediction_generation
+                && cache.target_signature == target_signature
+            {
+                return cache.result.clone();
+            }
+        }
         let input_bus = self.effect_graph_prediction_input_bus()?;
-        predict_effect_graph_output_format(
+        let result = predict_effect_graph_output_format(
             &clone_sanitized_document(&self.effect_graph.draft),
             &input_bus,
             Self::to_wave_resample_quality(self.src_quality),
-        )
+        );
+        self.effect_graph.cached_predicted_output_format = Some(EffectGraphPredictionCacheEntry {
+            generation: self.effect_graph.prediction_generation,
+            target_signature,
+            result: result.clone(),
+        });
+        result
     }
 
-    pub(super) fn effect_graph_predicted_output_summary(&self) -> Option<String> {
+    #[allow(dead_code)]
+    pub(super) fn effect_graph_predicted_output_summary(&mut self) -> Option<String> {
         self.effect_graph_predicted_output_format()
             .ok()
             .map(|predicted| predicted.summary)
@@ -3823,31 +4054,93 @@ impl WavesPreviewer {
         Ok(dense_audio_bus(channels, in_sr.max(1)))
     }
 
-    pub(super) fn effect_graph_preview_input_audio(&mut self) -> Result<Arc<AudioBuffer>, String> {
-        let bus = if let Some(target_path) = self.effect_graph_test_target_candidate() {
-            self.effective_audio_bus_for_path(&target_path)
-                .ok_or_else(|| format!("Could not load input audio: {}", target_path.display()))?
-        } else {
-            self.effect_graph_embedded_sample_bus()?
-        };
-        Ok(self.effect_graph_monitor_audio_from_bus(&bus))
-    }
-
-    fn effect_graph_resolve_test_input_audio(
+    fn effect_graph_resolve_test_input_source(
         &self,
-    ) -> Result<(EffectGraphAudioBus, Option<PathBuf>, PathBuf), String> {
+    ) -> Result<(Option<EffectGraphAudioBus>, Option<PathBuf>, PathBuf), String> {
         if let Some(target_path) = self.effect_graph_test_target_candidate() {
-            let input_bus = self
-                .effective_audio_bus_for_path(&target_path)
-                .ok_or_else(|| format!("Could not load input audio: {}", target_path.display()))?;
+            let input_bus = self.resident_effect_graph_audio_bus_for_path(&target_path);
             Ok((input_bus, Some(target_path.clone()), target_path))
         } else {
             Ok((
-                self.effect_graph_embedded_sample_bus()?,
+                Some(self.effect_graph_embedded_sample_bus()?),
                 None,
                 PathBuf::from(EFFECT_GRAPH_EMBEDDED_SAMPLE_WORKER_PATH),
             ))
         }
+    }
+
+    pub(super) fn start_effect_graph_input_preview(&mut self, autoplay: bool) -> Result<(), String> {
+        if let Some(audio) = self.effect_graph.tester.last_input_audio.clone() {
+            if autoplay {
+                self.effect_graph_toggle_playback(EffectGraphPlaybackTarget::Input, audio);
+            }
+            return Ok(());
+        }
+        let Some(target_path) = self.effect_graph_test_target_candidate() else {
+            let bus = self.effect_graph_embedded_sample_bus()?;
+            let audio = self.effect_graph_monitor_audio_from_bus(&bus);
+            self.effect_graph.tester.last_input_bus = Some(bus);
+            self.effect_graph.tester.last_input_audio = Some(audio.clone());
+            if autoplay {
+                self.effect_graph_toggle_playback(EffectGraphPlaybackTarget::Input, audio);
+            }
+            return Ok(());
+        };
+        if let Some(bus) = self.resident_effect_graph_audio_bus_for_path(&target_path) {
+            let audio = self.effect_graph_monitor_audio_from_bus(&bus);
+            self.effect_graph.tester.last_input_bus = Some(bus);
+            self.effect_graph.tester.last_input_audio = Some(audio.clone());
+            if autoplay {
+                self.effect_graph_toggle_playback(EffectGraphPlaybackTarget::Input, audio);
+            }
+            return Ok(());
+        }
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<EffectGraphInputPreviewResult>();
+        self.effect_graph.input_preview_worker_state.active_job_id = self
+            .effect_graph
+            .input_preview_worker_state
+            .active_job_id
+            .wrapping_add(1);
+        let job_id = self.effect_graph.input_preview_worker_state.active_job_id;
+        self.effect_graph.input_preview_worker_state.autoplay_requested = autoplay;
+        self.effect_graph.input_preview_worker_state.rx = Some(rx);
+        let bit_depth = self.bit_depth_override.get(&target_path).copied();
+        let monitor_sr = self.audio.shared.out_sample_rate.max(1);
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        std::thread::spawn(move || {
+            let result = match crate::wave::decode_wav_multi(&target_path) {
+                Ok((mut channels, sample_rate)) => {
+                    if let Some(depth) = bit_depth {
+                        crate::wave::quantize_channels_in_place(&mut channels, depth);
+                    }
+                    let input_bus = dense_audio_bus(channels, sample_rate.max(1));
+                    let input_audio = Arc::new(AudioBuffer::from_channels(
+                        monitor_channels_from_bus_at_rate(
+                            &input_bus,
+                            monitor_sr,
+                            resample_quality,
+                        ),
+                    ));
+                    EffectGraphInputPreviewResult {
+                        job_id,
+                        target_path,
+                        input_bus: Some(input_bus),
+                        input_audio: Some(input_audio),
+                        error: None,
+                    }
+                }
+                Err(err) => EffectGraphInputPreviewResult {
+                    job_id,
+                    target_path,
+                    input_bus: None,
+                    input_audio: None,
+                    error: Some(format!("decode failed: {err}")),
+                },
+            };
+            let _ = tx.send(result);
+        });
+        Ok(())
     }
 
     pub(super) fn start_effect_graph_test_run(&mut self) -> Result<(), String> {
@@ -3856,7 +4149,8 @@ impl WavesPreviewer {
             return Err("Effect Graph has validation errors".to_string());
         }
         self.effect_graph.debug_previews.clear();
-        let (input_bus, target_path, worker_path) = self.effect_graph_resolve_test_input_audio()?;
+        self.invalidate_effect_graph_input_preview();
+        let (input_bus, target_path, worker_path) = self.effect_graph_resolve_test_input_source()?;
         self.effect_graph.tester.target_path = target_path.clone();
         if let Some(path) = target_path {
             self.effect_graph.tester.target_path_input = path.display().to_string();
@@ -3869,9 +4163,10 @@ impl WavesPreviewer {
                 None,
             );
         }
-        self.effect_graph.tester.last_input_bus = Some(input_bus.clone());
-        self.effect_graph.tester.last_input_audio =
-            Some(self.effect_graph_monitor_audio_from_bus(&input_bus));
+        self.effect_graph.tester.last_input_bus = input_bus.clone();
+        self.effect_graph.tester.last_input_audio = input_bus
+            .as_ref()
+            .map(|bus| self.effect_graph_monitor_audio_from_bus(bus));
         self.effect_graph.tester.last_output_bus = None;
         self.effect_graph.tester.last_output_audio = None;
         self.effect_graph.tester.last_error = None;
@@ -3898,16 +4193,18 @@ impl WavesPreviewer {
                 template_updated_at_unix_ms: 0,
             }
         };
+        let monitor_sr = self.audio.shared.out_sample_rate.max(1);
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         self.spawn_effect_graph_worker(
             EffectGraphRunMode::TestPreview,
             clone_sanitized_document(&self.effect_graph.draft),
             stamp,
             vec![EffectGraphWorkerInput {
                 path: worker_path,
-                input_bus: Some(input_bus),
+                input_bus,
                 bit_depth: None,
-                monitor_sr: self.audio.shared.out_sample_rate.max(1),
-                resample_quality: Self::to_wave_resample_quality(self.src_quality),
+                monitor_sr,
+                resample_quality,
             }],
         );
         Ok(())
@@ -3947,29 +4244,14 @@ impl WavesPreviewer {
         Ok(())
     }
 
-    fn waveform_from_channels(
-        channels: &[Vec<f32>],
-    ) -> (
-        Vec<(f32, f32)>,
-        Option<std::sync::Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
-    ) {
-        let len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
-        Self::build_editor_waveform_cache(channels, len)
-    }
-
     fn apply_effect_graph_result_to_path(
         &mut self,
         path: &Path,
         channels: Vec<Vec<f32>>,
         final_sample_rate: u32,
+        rough_waveform: Vec<(f32, f32)>,
+        generation: u64,
     ) {
-        let bits = self.effective_bits_for_path(path).unwrap_or(32);
-        let (waveform, waveform_pyramid) = Self::waveform_from_channels(&channels);
-        let display_meta = Some(Self::build_meta_from_audio(
-            &channels,
-            final_sample_rate.max(1),
-            bits,
-        ));
         let new_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
         let template_stamp = self.effect_graph.runner.template_stamp.clone();
 
@@ -3993,8 +4275,8 @@ impl WavesPreviewer {
                 tab.ch_samples = channels.clone();
                 tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                 tab.samples_len = new_len;
-                tab.waveform_minmax = waveform.clone();
-                tab.waveform_pyramid = waveform_pyramid.clone();
+                tab.waveform_minmax = rough_waveform.clone();
+                tab.waveform_pyramid = None;
                 Self::invalidate_editor_viewport_cache(tab);
                 tab.dirty = true;
                 tab.preview_overlay = None;
@@ -4013,7 +4295,11 @@ impl WavesPreviewer {
                 buffer_sample_rate: tab.buffer_sample_rate.max(1),
                 waveform_minmax: tab.waveform_minmax.clone(),
                 waveform_pyramid: tab.waveform_pyramid.clone(),
-                display_meta: display_meta.clone(),
+                display_meta: self
+                    .edited_cache
+                    .get(path)
+                    .and_then(|cached| cached.display_meta.clone())
+                    .or_else(|| self.meta_for_path(path).cloned()),
                 dirty: tab.dirty,
                 loop_region: tab.loop_region,
                 loop_region_committed: tab.loop_region_committed,
@@ -4050,9 +4336,9 @@ impl WavesPreviewer {
                 ch_samples: channels.clone(),
                 samples_len: new_len,
                 buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
-                waveform_minmax: waveform.clone(),
-                waveform_pyramid: waveform_pyramid.clone(),
-                display_meta: display_meta.clone(),
+                waveform_minmax: rough_waveform.clone(),
+                waveform_pyramid: None,
+                display_meta: existing.display_meta.clone(),
                 dirty: true,
                 loop_region: remap_range(existing.loop_region, old_len, new_len),
                 loop_region_committed: remap_range(
@@ -4092,9 +4378,9 @@ impl WavesPreviewer {
                 ch_samples: channels.clone(),
                 samples_len: new_len,
                 buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
-                waveform_minmax: waveform.clone(),
-                waveform_pyramid: waveform_pyramid.clone(),
-                display_meta: display_meta.clone(),
+                waveform_minmax: rough_waveform.clone(),
+                waveform_pyramid: None,
+                display_meta: self.meta_for_path(path).cloned(),
                 dirty: true,
                 loop_region: None,
                 loop_region_committed: None,
@@ -4133,12 +4419,22 @@ impl WavesPreviewer {
         cached.ch_samples = channels;
         cached.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
         cached.samples_len = new_len;
-        cached.waveform_minmax = waveform;
-        cached.waveform_pyramid = waveform_pyramid;
-        cached.display_meta = display_meta;
+        cached.waveform_minmax = rough_waveform;
+        cached.waveform_pyramid = None;
         cached.dirty = true;
         cached.applied_effect_graph = template_stamp;
         self.edited_cache.insert(path.to_path_buf(), cached);
+        let channels_for_postprocess = self
+            .edited_cache
+            .get(path)
+            .map(|cached| cached.ch_samples.clone())
+            .unwrap_or_default();
+        self.queue_effect_graph_apply_postprocess(
+            generation,
+            path,
+            &channels_for_postprocess,
+            final_sample_rate,
+        );
         self.evict_list_preview_cache_path(path);
         self.lufs_override.remove(path);
         self.push_effect_graph_console(
@@ -4149,14 +4445,111 @@ impl WavesPreviewer {
         );
     }
 
+    fn drain_effect_graph_input_preview(&mut self, ctx: &egui::Context) -> bool {
+        let Some(rx) = self.effect_graph.input_preview_worker_state.rx.take() else {
+            return false;
+        };
+        let mut keep_rx = true;
+        match rx.try_recv() {
+            Ok(result) => {
+                keep_rx = false;
+                let is_current =
+                    result.job_id == self.effect_graph.input_preview_worker_state.active_job_id;
+                if is_current {
+                    if let Some(error) = result.error {
+                        self.effect_graph.tester.last_error = Some(error.clone());
+                        self.push_effect_graph_console(
+                            EffectGraphSeverity::Error,
+                            "input",
+                            format!("{}: {error}", result.target_path.display()),
+                            None,
+                        );
+                    } else {
+                        self.effect_graph.tester.last_input_bus = result.input_bus;
+                        self.effect_graph.tester.last_input_audio = result.input_audio.clone();
+                        if self.effect_graph.input_preview_worker_state.autoplay_requested {
+                            if let Some(audio) = result.input_audio {
+                                self.effect_graph_toggle_playback(
+                                    EffectGraphPlaybackTarget::Input,
+                                    audio,
+                                );
+                            }
+                        }
+                    }
+                    self.effect_graph.input_preview_worker_state.autoplay_requested = false;
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                keep_rx = false;
+                self.effect_graph.input_preview_worker_state.autoplay_requested = false;
+            }
+        }
+        if keep_rx {
+            self.effect_graph.input_preview_worker_state.rx = Some(rx);
+            ctx.request_repaint();
+            true
+        } else {
+            self.effect_graph.input_preview_worker_state.rx = None;
+            false
+        }
+    }
+
+    fn drain_effect_graph_postprocess(&mut self, ctx: &egui::Context) -> bool {
+        let Some(rx) = self.effect_graph.postprocess_rx.take() else {
+            return false;
+        };
+        let mut keep_rx = true;
+        let mut processed = 0usize;
+        while processed < EFFECT_GRAPH_RUNNER_EVENT_BUDGET {
+            match rx.try_recv() {
+                Ok(result) => {
+                    processed = processed.saturating_add(1);
+                    self.apply_effect_graph_postprocess_result(result);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    keep_rx = false;
+                    self.effect_graph.postprocess_tx = None;
+                    break;
+                }
+            }
+        }
+        if keep_rx {
+            self.effect_graph.postprocess_rx = Some(rx);
+            if !self.effect_graph.pending_effect_graph_commits.is_empty() {
+                ctx.request_repaint();
+                return true;
+            }
+            false
+        } else {
+            self.effect_graph.postprocess_rx = None;
+            false
+        }
+    }
+
     pub(super) fn drain_effect_graph_runner(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.effect_graph.runner.rx.take() else {
+            let input_busy = self.drain_effect_graph_input_preview(ctx);
+            let postprocess_busy = self.drain_effect_graph_postprocess(ctx);
+            if input_busy || postprocess_busy {
+                ctx.request_repaint();
+            }
             return;
         };
         let mut keep_rx = true;
+        let started = Instant::now();
+        let mut processed = 0usize;
         loop {
+            if processed >= EFFECT_GRAPH_RUNNER_EVENT_BUDGET
+                || started.elapsed().as_millis() >= EFFECT_GRAPH_RUNNER_DRAIN_BUDGET_MS
+            {
+                break;
+            }
             match rx.try_recv() {
-                Ok(event) => match event {
+                Ok(event) => {
+                    processed = processed.saturating_add(1);
+                    match event {
                     EffectGraphWorkerEvent::RunStarted { mode, total } => {
                         self.effect_graph.runner.mode = Some(mode);
                         self.effect_graph.runner.total = total;
@@ -4228,13 +4621,18 @@ impl WavesPreviewer {
                     EffectGraphWorkerEvent::PathFinished {
                         path,
                         output_bus,
+                        input_bus,
+                        input_monitor_audio,
                         monitor_audio,
+                        rough_waveform,
                         total_elapsed_ms,
                     } => {
                         self.effect_graph.runner.done =
                             self.effect_graph.runner.done.saturating_add(1);
                         match self.effect_graph.runner.mode {
                             Some(EffectGraphRunMode::TestPreview) => {
+                                self.effect_graph.tester.last_input_bus = input_bus;
+                                self.effect_graph.tester.last_input_audio = input_monitor_audio;
                                 self.effect_graph.tester.last_output_bus = Some(output_bus.clone());
                                 self.effect_graph.tester.last_output_audio =
                                     Some(Arc::new(AudioBuffer::from_channels(monitor_audio)));
@@ -4265,6 +4663,8 @@ impl WavesPreviewer {
                                     &path,
                                     output_bus.channels,
                                     output_bus.sample_rate,
+                                    rough_waveform,
+                                    self.effect_graph.run_generation,
                                 );
                             }
                             None => {}
@@ -4309,7 +4709,8 @@ impl WavesPreviewer {
                         keep_rx = false;
                         break;
                     }
-                },
+                }
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     keep_rx = false;
@@ -4317,9 +4718,13 @@ impl WavesPreviewer {
                 }
             }
         }
+        let input_busy = self.drain_effect_graph_input_preview(ctx);
+        let postprocess_busy = self.drain_effect_graph_postprocess(ctx);
         if keep_rx {
             self.effect_graph.runner.rx = Some(rx);
-            ctx.request_repaint();
+            if self.effect_graph.runner.mode.is_some() || input_busy || postprocess_busy {
+                ctx.request_repaint();
+            }
         } else {
             self.effect_graph.runner.rx = None;
             self.effect_graph.runner.cancel_requested = None;
@@ -4327,6 +4732,9 @@ impl WavesPreviewer {
             self.effect_graph.runner.started_at = None;
             self.effect_graph.runner.current_path = None;
             self.effect_graph.runner.template_stamp = None;
+            if input_busy || postprocess_busy {
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -5768,12 +6176,7 @@ mod tests {
             EffectGraphRunMode::TestPreview,
             crate::wave::ResampleQuality::Good,
             |event| {
-                if let EffectGraphRuntimeEvent::NodeLog {
-                    severity: EffectGraphSeverity::Warning,
-                    message,
-                    ..
-                } = event
-                {
+                if let EffectGraphRuntimeEvent::NodeLog { message, .. } = event {
                     warnings.push(message);
                 }
             },
@@ -5899,6 +6302,143 @@ mod tests {
         assert_eq!(out.channels[0], vec![0.1, 0.2]);
         assert_eq!(out.channels[1], vec![0.1, 0.2]);
         assert_eq!(out.channels[2], vec![0.9, 0.8]);
+    }
+
+    #[test]
+    fn duplicate_split_combine_widens_to_five_channels() {
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "dup".to_string(),
+                    ui_pos: [90.0, 0.0],
+                    ui_size: [250.0, 152.0],
+                    data: EffectGraphNodeData::Duplicate,
+                },
+                EffectGraphNode {
+                    id: "split_top".to_string(),
+                    ui_pos: [210.0, -110.0],
+                    ui_size: [260.0, 220.0],
+                    data: EffectGraphNodeData::SplitChannels,
+                },
+                EffectGraphNode {
+                    id: "split_bottom".to_string(),
+                    ui_pos: [210.0, 130.0],
+                    ui_size: [260.0, 220.0],
+                    data: EffectGraphNodeData::SplitChannels,
+                },
+                EffectGraphNode {
+                    id: "combine".to_string(),
+                    ui_pos: [400.0, 0.0],
+                    ui_size: [300.0, 250.0],
+                    data: EffectGraphNodeData::CombineChannels,
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [540.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "dup", "in"),
+                edge("b", "dup", "out1", "split_top", "in"),
+                edge("c", "dup", "out2", "split_bottom", "in"),
+                edge("d", "split_top", "ch1", "combine", "in1"),
+                edge("e", "split_top", "ch2", "combine", "in2"),
+                edge("f", "split_top", "ch3", "combine", "in3"),
+                edge("g", "split_bottom", "ch1", "combine", "in4"),
+                edge("h", "split_bottom", "ch2", "combine", "in5"),
+                edge("i", "combine", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![vec![0.1, 0.2], vec![0.9, 0.8]], 48_000),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        assert_eq!(out.channels.len(), 5);
+        assert_eq!(out.channels[0], vec![0.1, 0.2]);
+        assert_eq!(out.channels[1], vec![0.9, 0.8]);
+        assert_eq!(out.channels[2], vec![0.0, 0.0]);
+        assert_eq!(out.channels[3], vec![0.1, 0.2]);
+        assert_eq!(out.channels[4], vec![0.9, 0.8]);
+    }
+
+    #[test]
+    fn duplicate_split_combine_predicts_five_channel_adaptive_output() {
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "dup".to_string(),
+                    ui_pos: [90.0, 0.0],
+                    ui_size: [250.0, 152.0],
+                    data: EffectGraphNodeData::Duplicate,
+                },
+                EffectGraphNode {
+                    id: "split_top".to_string(),
+                    ui_pos: [210.0, -110.0],
+                    ui_size: [260.0, 220.0],
+                    data: EffectGraphNodeData::SplitChannels,
+                },
+                EffectGraphNode {
+                    id: "split_bottom".to_string(),
+                    ui_pos: [210.0, 130.0],
+                    ui_size: [260.0, 220.0],
+                    data: EffectGraphNodeData::SplitChannels,
+                },
+                EffectGraphNode {
+                    id: "combine".to_string(),
+                    ui_pos: [400.0, 0.0],
+                    ui_size: [300.0, 250.0],
+                    data: EffectGraphNodeData::CombineChannels,
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [540.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "dup", "in"),
+                edge("b", "dup", "out1", "split_top", "in"),
+                edge("c", "dup", "out2", "split_bottom", "in"),
+                edge("d", "split_top", "ch1", "combine", "in1"),
+                edge("e", "split_top", "ch2", "combine", "in2"),
+                edge("f", "split_top", "ch3", "combine", "in3"),
+                edge("g", "split_bottom", "ch1", "combine", "in4"),
+                edge("h", "split_bottom", "ch2", "combine", "in5"),
+                edge("i", "combine", "out", "output", "in"),
+            ],
+        );
+        let predicted = predict_effect_graph_output_format(
+            &doc,
+            &test_bus(vec![vec![0.1, 0.2], vec![0.9, 0.8]], 44_100),
+            crate::wave::ResampleQuality::Good,
+        )
+        .expect("prediction ok");
+        assert_eq!(predicted.channel_count, 5);
+        assert_eq!(predicted.sample_rate, 44_100);
+        assert_eq!(
+            predicted.combine_mode,
+            Some(EffectGraphCombineMode::Adaptive)
+        );
+        assert_eq!(predicted.summary, "Predicted: 5 ch / 44100 Hz / adaptive");
     }
 
     #[test]

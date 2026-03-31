@@ -1344,8 +1344,11 @@ impl crate::app::WavesPreviewer {
         let mut do_preview_unwrap: Option<u32> = None;
         let mut do_commit_markers = false;
         let mut pending_edit_undo: Option<EditorUndoState> = None;
-        // Pre-read audio values to avoid borrowing self while editing tab
-        let sr_ctx = self.audio.shared.out_sample_rate.max(1) as f32;
+        // Use one editor display timebase for playhead, seek, HUD, and time ruler.
+        let sr_ctx = Self::editor_display_sample_rate(
+            &self.tabs[tab_idx],
+            self.audio.shared.out_sample_rate.max(1),
+        ) as f32;
         let pos_audio_now = self
             .audio
             .shared
@@ -1354,65 +1357,38 @@ impl crate::app::WavesPreviewer {
         let tab_samples_len = Self::editor_display_samples_len(&self.tabs[tab_idx]);
         let audio_len = self.audio.current_source_len();
         let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let playback_source = self.playback_session.source.clone();
         let transport = self.playback_session.transport;
         let transport_sr = self.playback_session.transport_sr.max(1);
         let playback_rate = self.playback_session.applied_playback_rate;
         let mode = self.playback_session.applied_mode;
-        let exact_stream_display_mapping = matches!(
-            &self.playback_session.source,
-            crate::app::PlaybackSourceKind::EditorTab(path)
-                if path == &self.tabs[tab_idx].path
-                    && transport == crate::app::PlaybackTransportKind::ExactStreamWav
-        );
-        let map_audio_to_display = |audio_pos: usize| -> usize {
-            if exact_stream_display_mapping {
-                let source_time_sec = Self::playback_source_time_for_output_pos(
-                    mode,
-                    transport,
-                    audio_pos as f64,
-                    transport_sr,
-                    out_sr,
-                    playback_rate,
-                );
-                let mapped = (source_time_sec * transport_sr as f64).round().max(0.0) as usize;
-                return mapped.min(tab_samples_len);
-            }
-            if audio_len == 0 || tab_samples_len == 0 || audio_len == tab_samples_len {
-                return audio_pos.min(tab_samples_len);
-            }
-            let mapped = ((audio_pos as u128)
-                .saturating_mul(tab_samples_len as u128)
-                .saturating_add((audio_len / 2) as u128)
-                / (audio_len as u128)) as usize;
-            mapped.min(tab_samples_len)
+        let map_audio_to_display = |tab: &EditorTab, audio_pos: usize| -> usize {
+            Self::map_audio_to_display_sample_with(
+                tab,
+                audio_pos,
+                audio_len,
+                &playback_source,
+                transport,
+                transport_sr,
+                out_sr,
+                mode,
+                playback_rate,
+            )
         };
-        let map_display_to_audio = |display_pos: usize| -> usize {
-            if exact_stream_display_mapping {
-                let source_time_sec =
-                    display_pos.min(tab_samples_len) as f64 / transport_sr.max(1) as f64;
-                return Self::playback_output_pos_for_source_time(
-                    mode,
-                    transport,
-                    source_time_sec,
-                    transport_sr,
-                    out_sr,
-                    playback_rate,
-                )
-                .min(audio_len.max(1));
-            }
-            if audio_len == 0 {
-                return display_pos;
-            }
-            if tab_samples_len == 0 || audio_len == tab_samples_len {
-                return display_pos.min(audio_len);
-            }
-            let mapped = ((display_pos as u128)
-                .saturating_mul(audio_len as u128)
-                .saturating_add((tab_samples_len / 2) as u128)
-                / (tab_samples_len as u128)) as usize;
-            mapped.min(audio_len)
+        let map_display_to_audio = |tab: &EditorTab, display_pos: usize| -> usize {
+            Self::map_display_to_audio_sample_with(
+                tab,
+                display_pos,
+                audio_len,
+                &playback_source,
+                transport,
+                transport_sr,
+                out_sr,
+                mode,
+                playback_rate,
+            )
         };
-        let playhead_display_now = map_audio_to_display(pos_audio_now);
+        let playhead_display_now = map_audio_to_display(&self.tabs[tab_idx], pos_audio_now);
         let mut request_seek: Option<usize> = None;
         let spec_path = self.tabs[tab_idx].path.clone();
         let current_view = self.tabs[tab_idx].leaf_view_mode();
@@ -1623,7 +1599,7 @@ impl crate::app::WavesPreviewer {
             );
             if pos_resp.changed() {
                 let display_samp = (pos_sec.max(0.0) * sr) as usize;
-                let audio_samp = map_display_to_audio(display_samp);
+                let audio_samp = map_display_to_audio(tab, display_samp);
                 request_seek = Some(audio_samp);
             }
             let pos_samples = (pos_sec.max(0.0) * sr).round() as usize;
@@ -1818,7 +1794,9 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                     if new_display != cur_display {
-                        request_seek = Some(map_display_to_audio(new_display));
+                        if let Some(tab) = self.tabs.get(tab_idx) {
+                            request_seek = Some(map_display_to_audio(tab, new_display));
+                        }
                     }
                     hold_state.last_step_at = now;
                 }
@@ -2153,7 +2131,7 @@ impl crate::app::WavesPreviewer {
             // Time ruler (ticks + labels) across all lanes
             {
                 if end > start {
-                    let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                    let sr = sr_ctx.max(1.0);
                     let t0 = start as f32 / sr;
                     let t1 = end as f32 / sr;
                     let px_per_sec = (1.0 / spp) * sr;
@@ -2797,7 +2775,7 @@ impl crate::app::WavesPreviewer {
                             RightDragMode::Seek
                         }) {
                             RightDragMode::Seek => {
-                                request_seek = Some(map_display_to_audio(samp));
+                                request_seek = Some(map_display_to_audio(tab, samp));
                                 suppress_seek = true;
                             }
                             RightDragMode::SelectRange => {
@@ -2953,7 +2931,8 @@ impl crate::app::WavesPreviewer {
                             .min(display_samples_len);
                         let shift_now = ui.input(|i| i.modifiers.shift);
                         if shift_now {
-                            let anchor = Self::editor_selection_anchor_or(tab, playhead_display_now);
+                            let anchor =
+                                Self::editor_selection_anchor_or(tab, playhead_display_now);
                             Self::editor_set_selection_from_anchor(tab, anchor, pos_samp);
                         } else {
                             if tab.selection.is_some() {
@@ -2962,7 +2941,7 @@ impl crate::app::WavesPreviewer {
                             tab.selection_anchor_sample = None;
                             tab.right_drag_mode = None;
                             tab.selection = None;
-                            request_seek = Some(map_display_to_audio(pos_samp));
+                            request_seek = Some(map_display_to_audio(tab, pos_samp));
                         }
                     }
                 }
@@ -3564,7 +3543,7 @@ impl crate::app::WavesPreviewer {
                     );
                     painter.rect_filled(r, 2.0, col);
                 };
-                let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                let sr = sr_ctx.max(1.0);
 
                 let mut fade_in_handle: Option<f32> = None;
                 let mut fade_out_handle: Option<f32> = None;
@@ -3963,12 +3942,12 @@ impl crate::app::WavesPreviewer {
                         .play_pos
                         .load(std::sync::atomic::Ordering::Relaxed)
                         .min(len);
-                    let pos = map_audio_to_display(pos_audio);
+                    let pos = map_audio_to_display(tab, pos_audio);
                     let spp = tab.samples_per_px.max(0.0001);
                     let x = wave_left + ((pos.saturating_sub(tab.view_offset)) as f32 / spp).clamp(0.0, wave_w);
                     painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())], egui::Stroke::new(2.0, Color32::from_rgb(70,140,255)));
                     // Playhead time label
-                    let sr_f = self.audio.shared.out_sample_rate.max(1) as f32;
+                    let sr_f = sr_ctx.max(1.0);
                     let pos_time = (pos as f32) / sr_f;
                     let label = crate::app::helpers::format_time_s(pos_time);
                     let fid = TextStyle::Monospace.resolve(ui.style());
@@ -4182,7 +4161,7 @@ impl crate::app::WavesPreviewer {
                             request_redo = true;
                         }
                     });
-                    let sr = self.audio.shared.out_sample_rate.max(1) as f32;
+                    let sr = sr_ctx.max(1.0);
                     let range_info = tab
                         .selection
                         .map(|r| ("Selection", r))
@@ -6257,7 +6236,11 @@ impl crate::app::WavesPreviewer {
                 }
                 if let Some(s) = request_seek {
                     self.audio.seek_to_sample(s);
-                    let seek_display = map_audio_to_display(s);
+                    let seek_display = if let Some(tab) = self.tabs.get(tab_idx) {
+                        map_audio_to_display(tab, s)
+                    } else {
+                        0
+                    };
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         let vis = (tab.last_wave_w.max(1.0) * tab.samples_per_px.max(0.0001))
                             .ceil() as usize;

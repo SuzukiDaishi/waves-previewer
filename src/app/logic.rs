@@ -455,7 +455,8 @@ impl super::WavesPreviewer {
         let out_sr = self.audio.shared.out_sample_rate.max(1);
         let job_id = self.next_playback_fx_job_id();
         let path_spec = match &source {
-            super::PlaybackSourceKind::EditorTab(path) | super::PlaybackSourceKind::ListPreview(path) => {
+            super::PlaybackSourceKind::EditorTab(path)
+            | super::PlaybackSourceKind::ListPreview(path) => {
                 Some((path.clone(), self.offline_render_spec_for_path(path)))
             }
             _ => None,
@@ -464,7 +465,13 @@ impl super::WavesPreviewer {
             .playback_base_audio
             .clone()
             .filter(|audio| audio.len() > 0)
-            .or_else(|| self.audio.shared.samples.load_full().filter(|audio| audio.len() > 0));
+            .or_else(|| {
+                self.audio
+                    .shared
+                    .samples
+                    .load_full()
+                    .filter(|audio| audio.len() > 0)
+            });
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel::<super::PlaybackFxResult>();
         let source_for_thread = source.clone();
@@ -475,10 +482,7 @@ impl super::WavesPreviewer {
                 match crate::audio_io::decode_audio_multi(&path) {
                     Ok((channels, in_sr)) => {
                         super::WavesPreviewer::render_channels_offline_with_spec(
-                            channels,
-                            in_sr,
-                            spec,
-                            false,
+                            channels, in_sr, spec, false,
                         )
                     }
                     Err(_) => return,
@@ -642,7 +646,8 @@ impl super::WavesPreviewer {
         }
         if resume_after_restore {
             self.audio.play();
-            if let super::PlaybackSourceKind::ListPreview(path) = self.playback_session.source.clone()
+            if let super::PlaybackSourceKind::ListPreview(path) =
+                self.playback_session.source.clone()
             {
                 self.debug_mark_list_play_start(&path);
             }
@@ -654,7 +659,8 @@ impl super::WavesPreviewer {
         prev_mode: RateMode,
         prev_playback_rate: f32,
     ) {
-        let source_time_sec = self.playback_current_source_time_sec_with(prev_mode, prev_playback_rate);
+        let source_time_sec =
+            self.playback_current_source_time_sec_with(prev_mode, prev_playback_rate);
         let was_playing = self.playback_is_playing_now();
         if self.playback_mode_needs_fx_buffer() {
             let _ = self.spawn_playback_fx_render(was_playing);
@@ -948,7 +954,11 @@ impl super::WavesPreviewer {
     }
 
     fn sync_channel_lengths(channels: &mut Vec<Vec<f32>>) {
-        let max_len = channels.iter().map(|channel| channel.len()).max().unwrap_or(0);
+        let max_len = channels
+            .iter()
+            .map(|channel| channel.len())
+            .max()
+            .unwrap_or(0);
         for channel in channels {
             if channel.len() < max_len {
                 channel.resize(max_len, 0.0);

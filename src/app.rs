@@ -1477,19 +1477,44 @@ impl WavesPreviewer {
         base.to_string()
     }
 
-    fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
-        let audio_len = self.audio.current_source_len();
+    fn editor_display_sample_rate(tab: &EditorTab, fallback_out_sr: u32) -> u32 {
+        if tab.buffer_sample_rate > 0 {
+            tab.buffer_sample_rate
+        } else {
+            fallback_out_sr.max(1)
+        }
+    }
+
+    fn editor_uses_source_time_mapping(
+        playback_source: &PlaybackSourceKind,
+        tab: &EditorTab,
+    ) -> bool {
+        matches!(playback_source, PlaybackSourceKind::EditorTab(path) if path == &tab.path)
+    }
+
+    fn map_audio_to_display_sample_with(
+        tab: &EditorTab,
+        audio_pos: usize,
+        audio_len: usize,
+        playback_source: &PlaybackSourceKind,
+        transport: PlaybackTransportKind,
+        transport_sr: u32,
+        out_sr: u32,
+        mode: RateMode,
+        playback_rate: f32,
+    ) -> usize {
         let display_len = Self::editor_display_samples_len(tab);
-        if let Some(display_sr) = self.editor_transport_display_sample_rate(tab) {
+        if Self::editor_uses_source_time_mapping(playback_source, tab) {
             let source_time_sec = Self::playback_source_time_for_output_pos(
-                self.playback_session.applied_mode,
-                self.playback_session.transport,
+                mode,
+                transport,
                 audio_pos as f64,
-                self.playback_session.transport_sr.max(1),
-                self.audio.shared.out_sample_rate.max(1),
-                self.playback_session.applied_playback_rate,
+                transport_sr.max(1),
+                out_sr.max(1),
+                playback_rate,
             );
-            let mapped = (source_time_sec * display_sr as f64).round().max(0.0) as usize;
+            let display_sr = Self::editor_display_sample_rate(tab, out_sr) as f64;
+            let mapped = (source_time_sec * display_sr).round().max(0.0) as usize;
             return mapped.min(display_len);
         }
         if audio_len == 0 || display_len == 0 || audio_len == display_len {
@@ -1501,18 +1526,29 @@ impl WavesPreviewer {
             / (audio_len as u128)) as usize;
         mapped.min(display_len)
     }
-    fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
-        let audio_len = self.audio.current_source_len();
+
+    fn map_display_to_audio_sample_with(
+        tab: &EditorTab,
+        display_pos: usize,
+        audio_len: usize,
+        playback_source: &PlaybackSourceKind,
+        transport: PlaybackTransportKind,
+        transport_sr: u32,
+        out_sr: u32,
+        mode: RateMode,
+        playback_rate: f32,
+    ) -> usize {
         let display_len = Self::editor_display_samples_len(tab);
-        if let Some(display_sr) = self.editor_transport_display_sample_rate(tab) {
-            let source_time_sec = display_pos.min(display_len) as f64 / display_sr.max(1) as f64;
+        if Self::editor_uses_source_time_mapping(playback_source, tab) {
+            let display_sr = Self::editor_display_sample_rate(tab, out_sr).max(1) as f64;
+            let source_time_sec = display_pos.min(display_len) as f64 / display_sr;
             let mapped = Self::playback_output_pos_for_source_time(
-                self.playback_session.applied_mode,
-                self.playback_session.transport,
+                mode,
+                transport,
                 source_time_sec,
-                self.playback_session.transport_sr.max(1),
-                self.audio.shared.out_sample_rate.max(1),
-                self.playback_session.applied_playback_rate,
+                transport_sr.max(1),
+                out_sr.max(1),
+                playback_rate,
             );
             return mapped.min(audio_len.max(1));
         }
@@ -1529,16 +1565,32 @@ impl WavesPreviewer {
         mapped.min(audio_len)
     }
 
-    fn editor_transport_display_sample_rate(&self, tab: &EditorTab) -> Option<u32> {
-        match &self.playback_session.source {
-            PlaybackSourceKind::EditorTab(path)
-                if path == &tab.path
-                    && self.playback_session.transport == PlaybackTransportKind::ExactStreamWav =>
-            {
-                Some(self.playback_session.transport_sr.max(1))
-            }
-            _ => None,
-        }
+    fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
+        Self::map_audio_to_display_sample_with(
+            tab,
+            audio_pos,
+            self.audio.current_source_len(),
+            &self.playback_session.source,
+            self.playback_session.transport,
+            self.playback_session.transport_sr.max(1),
+            self.audio.shared.out_sample_rate.max(1),
+            self.playback_session.applied_mode,
+            self.playback_session.applied_playback_rate,
+        )
+    }
+
+    fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
+        Self::map_display_to_audio_sample_with(
+            tab,
+            display_pos,
+            self.audio.current_source_len(),
+            &self.playback_session.source,
+            self.playback_session.transport,
+            self.playback_session.transport_sr.max(1),
+            self.audio.shared.out_sample_rate.max(1),
+            self.playback_session.applied_mode,
+            self.playback_session.applied_playback_rate,
+        )
     }
 
     fn export_list_csv(

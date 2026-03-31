@@ -1433,7 +1433,10 @@ mod small_fix_regressions {
                 .expect("tab sample after"),
             sample_before
         );
-        assert_eq!(harness.state().test_active_tab_samples_len_visual(), visual_before);
+        assert_eq!(
+            harness.state().test_active_tab_samples_len_visual(),
+            visual_before
+        );
         assert_eq!(
             harness
                 .state()
@@ -1484,7 +1487,10 @@ mod small_fix_regressions {
                 .expect("tab sample after"),
             sample_before
         );
-        assert_eq!(harness.state().test_active_tab_samples_len_visual(), visual_before);
+        assert_eq!(
+            harness.state().test_active_tab_samples_len_visual(),
+            visual_before
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1524,7 +1530,10 @@ mod small_fix_regressions {
                 .expect("tab sample after"),
             sample_before
         );
-        assert_eq!(harness.state().test_active_tab_samples_len_visual(), visual_before);
+        assert_eq!(
+            harness.state().test_active_tab_samples_len_visual(),
+            visual_before
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1543,7 +1552,7 @@ mod small_fix_regressions {
         harness.run_steps(2);
 
         let summary_before = harness
-            .state()
+            .state_mut()
             .test_effect_graph_predicted_output_summary()
             .expect("predicted summary before");
 
@@ -1555,7 +1564,7 @@ mod small_fix_regressions {
         harness.run_steps(2);
 
         let summary_after = harness
-            .state()
+            .state_mut()
             .test_effect_graph_predicted_output_summary()
             .expect("predicted summary after");
 
@@ -1602,7 +1611,10 @@ mod small_fix_regressions {
         harness.state_mut().test_set_playback_rate(1.0);
         harness
             .state_mut()
-            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::PitchShift, 1.0);
+            .test_refresh_playback_mode_for_current_source(
+                neowaves::app::RateMode::PitchShift,
+                1.0,
+            );
         harness.run_steps(2);
 
         harness.state_mut().test_request_workspace_play_toggle();

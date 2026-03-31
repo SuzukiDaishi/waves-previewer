@@ -393,7 +393,9 @@ impl AudioEngine {
         }
         let mut alias_matches = display_names
             .iter()
-            .filter(|name| Self::legacy_output_device_alias(name).as_deref() == Some(requested_name))
+            .filter(|name| {
+                Self::legacy_output_device_alias(name).as_deref() == Some(requested_name)
+            })
             .cloned()
             .collect::<Vec<_>>();
         if alias_matches.len() == 1 {
@@ -1526,7 +1528,10 @@ mod tests {
             AudioEngine::legacy_output_device_alias("BenQ GW2490 (NVIDIA High Definition Audio)"),
             Some("BenQ GW2490".to_string())
         );
-        assert_eq!(AudioEngine::legacy_output_device_alias("Realtek Digital Output"), None);
+        assert_eq!(
+            AudioEngine::legacy_output_device_alias("Realtek Digital Output"),
+            None
+        );
     }
 
     #[test]
@@ -1544,10 +1549,7 @@ mod tests {
             Some("スピーカー (Realtek(R) Audio)".to_string())
         );
         assert_eq!(
-            AudioEngine::resolve_output_device_name_for_list(
-                "Realtek Digital Output",
-                &devices
-            ),
+            AudioEngine::resolve_output_device_name_for_list("Realtek Digital Output", &devices),
             Some("Realtek Digital Output (Realtek(R) Audio)".to_string())
         );
         assert_eq!(

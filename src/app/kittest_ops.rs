@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app::types::{
-    LoopMode, LoopXfadeShape, MusicAnalysisResult, MusicStemSet, ProcessingResult, ProcessingState,
+    EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, LoopMode,
+    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, ProcessingResult, ProcessingState,
     ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
@@ -1551,6 +1552,38 @@ impl super::WavesPreviewer {
         Some(self.map_audio_to_display_sample(tab, self.test_audio_play_pos()))
     }
 
+    pub fn test_active_editor_display_sample_rate(&self) -> Option<u32> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some(Self::editor_display_sample_rate(
+            tab,
+            self.audio.shared.out_sample_rate.max(1),
+        ))
+    }
+
+    pub fn test_seek_active_editor_display_sample(&mut self, display_sample: usize) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let audio_sample = self.map_display_to_audio_sample(tab, display_sample);
+        self.audio.seek_to_sample(audio_sample);
+        true
+    }
+
+    pub fn test_set_active_tab_buffer_sample_rate(&mut self, sample_rate: u32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.buffer_sample_rate = sample_rate.max(1);
+        true
+    }
+
     pub fn test_force_active_tab_exact_stream_transport(&mut self, sample_rate: u32) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1566,6 +1599,21 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_force_active_tab_buffer_transport(&mut self, sample_rate: u32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        self.audio.set_samples_channels(tab.ch_samples.clone());
+        self.playback_mark_buffer_source(
+            crate::app::PlaybackSourceKind::EditorTab(tab.path.clone()),
+            sample_rate.max(1),
+        );
+        true
+    }
+
     pub fn test_set_active_tab_loading_visual_len(&mut self, visual_len: usize) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1575,6 +1623,18 @@ impl super::WavesPreviewer {
         };
         tab.loading = true;
         tab.samples_len_visual = visual_len.max(1);
+        true
+    }
+
+    pub fn test_finish_active_tab_loading_visual(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.loading = false;
+        tab.samples_len_visual = tab.samples_len;
         true
     }
 
@@ -1809,8 +1869,150 @@ impl super::WavesPreviewer {
         self.open_effect_graph_workspace();
     }
 
-    pub fn test_effect_graph_predicted_output_summary(&self) -> Option<String> {
+    pub fn test_effect_graph_predicted_output_summary(&mut self) -> Option<String> {
         self.effect_graph_predicted_output_summary()
+    }
+
+    pub fn test_start_effect_graph_test_run(&mut self) -> Result<(), String> {
+        self.start_effect_graph_test_run()
+    }
+
+    pub fn test_effect_graph_runner_active(&self) -> bool {
+        self.effect_graph.runner.mode.is_some()
+    }
+
+    pub fn test_effect_graph_last_input_audio_ready(&self) -> bool {
+        self.effect_graph.tester.last_input_audio.is_some()
+    }
+
+    pub fn test_effect_graph_last_input_bus_ready(&self) -> bool {
+        self.effect_graph.tester.last_input_bus.is_some()
+    }
+
+    pub fn test_seed_effect_graph_duplicate_split_five_channel_doc(&mut self) {
+        self.open_effect_graph_workspace();
+        self.effect_graph.active_template_id = None;
+        self.effect_graph.draft = EffectGraphDocument {
+            schema_version: 3,
+            name: "Duplicate Split 5ch".to_string(),
+            nodes: vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "dup".to_string(),
+                    ui_pos: [120.0, 0.0],
+                    ui_size: [250.0, 152.0],
+                    data: EffectGraphNodeData::Duplicate,
+                },
+                EffectGraphNode {
+                    id: "split_top".to_string(),
+                    ui_pos: [280.0, -180.0],
+                    ui_size: [260.0, 220.0],
+                    data: EffectGraphNodeData::SplitChannels,
+                },
+                EffectGraphNode {
+                    id: "split_bottom".to_string(),
+                    ui_pos: [280.0, 120.0],
+                    ui_size: [260.0, 220.0],
+                    data: EffectGraphNodeData::SplitChannels,
+                },
+                EffectGraphNode {
+                    id: "combine".to_string(),
+                    ui_pos: [580.0, 0.0],
+                    ui_size: [300.0, 250.0],
+                    data: EffectGraphNodeData::CombineChannels,
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [900.0, 0.0],
+                    ui_size: [260.0, 136.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            edges: vec![
+                EffectGraphEdge {
+                    id: "a".to_string(),
+                    from_node_id: "input".to_string(),
+                    from_port_id: "out".to_string(),
+                    to_node_id: "dup".to_string(),
+                    to_port_id: "in".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "b".to_string(),
+                    from_node_id: "dup".to_string(),
+                    from_port_id: "out1".to_string(),
+                    to_node_id: "split_top".to_string(),
+                    to_port_id: "in".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "c".to_string(),
+                    from_node_id: "dup".to_string(),
+                    from_port_id: "out2".to_string(),
+                    to_node_id: "split_bottom".to_string(),
+                    to_port_id: "in".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "d".to_string(),
+                    from_node_id: "split_top".to_string(),
+                    from_port_id: "ch1".to_string(),
+                    to_node_id: "combine".to_string(),
+                    to_port_id: "in1".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "e".to_string(),
+                    from_node_id: "split_top".to_string(),
+                    from_port_id: "ch2".to_string(),
+                    to_node_id: "combine".to_string(),
+                    to_port_id: "in2".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "f".to_string(),
+                    from_node_id: "split_top".to_string(),
+                    from_port_id: "ch3".to_string(),
+                    to_node_id: "combine".to_string(),
+                    to_port_id: "in3".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "g".to_string(),
+                    from_node_id: "split_bottom".to_string(),
+                    from_port_id: "ch1".to_string(),
+                    to_node_id: "combine".to_string(),
+                    to_port_id: "in4".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "h".to_string(),
+                    from_node_id: "split_bottom".to_string(),
+                    from_port_id: "ch2".to_string(),
+                    to_node_id: "combine".to_string(),
+                    to_port_id: "in5".to_string(),
+                },
+                EffectGraphEdge {
+                    id: "i".to_string(),
+                    from_node_id: "combine".to_string(),
+                    from_port_id: "out".to_string(),
+                    to_node_id: "output".to_string(),
+                    to_port_id: "in".to_string(),
+                },
+            ],
+            canvas: Default::default(),
+        };
+        self.effect_graph.draft_dirty = false;
+        self.effect_graph.canvas.zoom = self.effect_graph.draft.canvas.zoom;
+        self.effect_graph.canvas.pan = self.effect_graph.draft.canvas.pan;
+        self.effect_graph.canvas.selected_nodes.clear();
+        self.effect_graph.canvas.selected_edge_id = None;
+        self.effect_graph.undo_stack.clear();
+        self.effect_graph.redo_stack.clear();
+        self.effect_graph.debug_previews.clear();
+        self.effect_graph.debug_view_state.clear();
+        self.effect_graph.plugin_runtime.clear();
+        self.effect_graph.plugin_probe_state = None;
+        self.effect_graph.plugin_gui_state = None;
+        self.revalidate_effect_graph_draft();
     }
 
     pub fn test_add_effect_graph_plugin_node(&mut self) -> bool {
