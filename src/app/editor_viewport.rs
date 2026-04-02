@@ -9,10 +9,11 @@ use egui::{Color32, ColorImage, TextureOptions};
 use super::helpers::{db_to_color, lerp_color};
 use super::render::waveform_pyramid as wf_cache;
 use super::types::{
-    EditorTab, EditorViewportCachePayload, EditorViewportJobMsg, EditorViewportPayloadKind,
+    ChromagramData, EditorAnalysisKey, EditorAnalysisKind, EditorFeatureAnalysisData, EditorTab,
+    EditorViewportCachePayload, EditorViewportJobMsg, EditorViewportPayloadKind,
     EditorViewportRenderCache, EditorViewportRenderKey, EditorViewportRenderPayload,
     EditorViewportRenderQuality, EditorViewportWaveLane, EditorViewportWavePayload,
-    SpectrogramConfig, SpectrogramData, SpectrogramScale, ViewMode,
+    SpectrogramConfig, SpectrogramData, SpectrogramScale, TempogramData, ViewMode,
 };
 
 #[derive(Clone, Debug)]
@@ -44,6 +45,38 @@ enum EditorViewportRequest {
         key: EditorViewportRenderKey,
         specs: Arc<Vec<SpectrogramData>>,
         lane_spec_indices: Vec<usize>,
+        wave_width_px: usize,
+        lane_height_px: usize,
+        lane_count: usize,
+        start: usize,
+        end: usize,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        cfg: SpectrogramConfig,
+        view_mode: ViewMode,
+    },
+    Tempogram {
+        tab_path: PathBuf,
+        generation: u64,
+        quality: EditorViewportRenderQuality,
+        key: EditorViewportRenderKey,
+        data: Arc<TempogramData>,
+        wave_width_px: usize,
+        lane_height_px: usize,
+        lane_count: usize,
+        start: usize,
+        end: usize,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        cfg: SpectrogramConfig,
+        view_mode: ViewMode,
+    },
+    Chromagram {
+        tab_path: PathBuf,
+        generation: u64,
+        quality: EditorViewportRenderQuality,
+        key: EditorViewportRenderKey,
+        data: Arc<ChromagramData>,
         wave_width_px: usize,
         lane_height_px: usize,
         lane_count: usize,
@@ -130,6 +163,10 @@ impl super::WavesPreviewer {
         } else {
             (min_frac, max_frac)
         }
+    }
+
+    pub(super) fn editor_viewport_dimension_px(size_pt: f32, pixels_per_point: f32) -> usize {
+        ((size_pt.max(1.0) * pixels_per_point.max(1.0)).round() as usize).max(1)
     }
 
     pub(super) fn invalidate_editor_viewport_cache(tab: &mut EditorTab) {
@@ -363,6 +400,32 @@ impl super::WavesPreviewer {
             })
     }
 
+    pub(super) fn exact_editor_viewport_cache<'a>(
+        tab: &'a EditorTab,
+        key: &EditorViewportRenderKey,
+    ) -> Option<&'a EditorViewportRenderCache> {
+        tab.viewport_render_fine
+            .as_ref()
+            .filter(|cache| cache.key == *key)
+            .or_else(|| {
+                tab.viewport_render_coarse
+                    .as_ref()
+                    .filter(|cache| cache.key == *key)
+            })
+    }
+
+    fn editor_feature_key_for_view(path: &PathBuf, view_mode: ViewMode) -> Option<EditorAnalysisKey> {
+        let kind = match view_mode {
+            ViewMode::Tempogram => EditorAnalysisKind::Tempogram,
+            ViewMode::Chromagram => EditorAnalysisKind::Chromagram,
+            _ => return None,
+        };
+        Some(EditorAnalysisKey {
+            path: path.clone(),
+            kind,
+        })
+    }
+
     fn build_editor_viewport_key(
         &self,
         tab_idx: usize,
@@ -378,7 +441,14 @@ impl super::WavesPreviewer {
                     return None;
                 }
             }
-            _ => return None,
+            ViewMode::Tempogram | ViewMode::Chromagram => {
+                let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
+                if self.editor_feature_cache.contains_key(&analysis_key) {
+                    EditorViewportPayloadKind::Spectral
+                } else {
+                    return None;
+                }
+            }
         };
         Some(EditorViewportRenderKey {
             kind: kind.clone(),
@@ -523,7 +593,52 @@ impl super::WavesPreviewer {
                     view_mode: hint.view_mode,
                 })
             }
-            _ => None,
+            ViewMode::Tempogram => {
+                let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
+                let data = match self.editor_feature_cache.get(&analysis_key)?.as_ref() {
+                    EditorFeatureAnalysisData::Tempogram(data) => Arc::new(data.clone()),
+                    _ => return None,
+                };
+                Some(EditorViewportRequest::Tempogram {
+                    tab_path: tab.path.clone(),
+                    generation,
+                    quality,
+                    key,
+                    data,
+                    wave_width_px: hint.wave_width_px.max(1),
+                    lane_height_px: hint.lane_height_px.max(1),
+                    lane_count: hint.lane_count.max(1),
+                    start: hint.start,
+                    end: hint.end,
+                    vertical_zoom: tab.vertical_zoom,
+                    vertical_view_center: tab.vertical_view_center,
+                    cfg: self.spectro_cfg.clone(),
+                    view_mode: hint.view_mode,
+                })
+            }
+            ViewMode::Chromagram => {
+                let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
+                let data = match self.editor_feature_cache.get(&analysis_key)?.as_ref() {
+                    EditorFeatureAnalysisData::Chromagram(data) => Arc::new(data.clone()),
+                    _ => return None,
+                };
+                Some(EditorViewportRequest::Chromagram {
+                    tab_path: tab.path.clone(),
+                    generation,
+                    quality,
+                    key,
+                    data,
+                    wave_width_px: hint.wave_width_px.max(1),
+                    lane_height_px: hint.lane_height_px.max(1),
+                    lane_count: hint.lane_count.max(1),
+                    start: hint.start,
+                    end: hint.end,
+                    vertical_zoom: tab.vertical_zoom,
+                    vertical_view_center: tab.vertical_view_center,
+                    cfg: self.spectro_cfg.clone(),
+                    view_mode: hint.view_mode,
+                })
+            }
         }
     }
 
@@ -572,6 +687,80 @@ impl super::WavesPreviewer {
                     let image = Arc::new(Self::render_spectral_viewport_image(
                         &specs,
                         &lane_spec_indices,
+                        wave_width_px,
+                        lane_height_px,
+                        lane_count,
+                        start,
+                        end,
+                        vertical_zoom,
+                        vertical_view_center,
+                        &cfg,
+                        view_mode,
+                        quality,
+                    ));
+                    let _ = tx.send(EditorViewportJobMsg::Ready {
+                        tab_path,
+                        generation,
+                        quality,
+                        key,
+                        payload: EditorViewportRenderPayload::Image(image),
+                    });
+                }
+                EditorViewportRequest::Tempogram {
+                    tab_path,
+                    generation,
+                    quality,
+                    key,
+                    data,
+                    wave_width_px,
+                    lane_height_px,
+                    lane_count,
+                    start,
+                    end,
+                    vertical_zoom,
+                    vertical_view_center,
+                    cfg,
+                    view_mode,
+                } => {
+                    let image = Arc::new(Self::render_tempogram_viewport_image(
+                        &data,
+                        wave_width_px,
+                        lane_height_px,
+                        lane_count,
+                        start,
+                        end,
+                        vertical_zoom,
+                        vertical_view_center,
+                        &cfg,
+                        view_mode,
+                        quality,
+                    ));
+                    let _ = tx.send(EditorViewportJobMsg::Ready {
+                        tab_path,
+                        generation,
+                        quality,
+                        key,
+                        payload: EditorViewportRenderPayload::Image(image),
+                    });
+                }
+                EditorViewportRequest::Chromagram {
+                    tab_path,
+                    generation,
+                    quality,
+                    key,
+                    data,
+                    wave_width_px,
+                    lane_height_px,
+                    lane_count,
+                    start,
+                    end,
+                    vertical_zoom,
+                    vertical_view_center,
+                    cfg,
+                    view_mode,
+                } => {
+                    let image = Arc::new(Self::render_chromagram_viewport_image(
+                        &data,
                         wave_width_px,
                         lane_height_px,
                         lane_count,
@@ -709,14 +898,8 @@ impl super::WavesPreviewer {
         view_mode: ViewMode,
         quality: EditorViewportRenderQuality,
     ) -> ColorImage {
-        let target_w = match quality {
-            EditorViewportRenderQuality::Coarse => (wave_width_px / 4).clamp(48, 160),
-            EditorViewportRenderQuality::Fine => (wave_width_px / 2).clamp(96, 384),
-        };
-        let target_lane_h = match quality {
-            EditorViewportRenderQuality::Coarse => (lane_height_px / 4).clamp(32, 96),
-            EditorViewportRenderQuality::Fine => (lane_height_px / 2).clamp(64, 192),
-        };
+        let (target_w, target_lane_h) =
+            Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
         let mut image =
             ColorImage::filled([target_w.max(1), total_h], Color32::from_rgb(12, 14, 18));
@@ -814,6 +997,172 @@ impl super::WavesPreviewer {
         image
     }
 
+    fn feature_viewport_target_size(
+        wave_width_px: usize,
+        lane_height_px: usize,
+        quality: EditorViewportRenderQuality,
+    ) -> (usize, usize) {
+        let target_w = match quality {
+            EditorViewportRenderQuality::Coarse => (wave_width_px / 4).clamp(48, 160),
+            EditorViewportRenderQuality::Fine => (wave_width_px / 2).clamp(96, 384),
+        };
+        let target_lane_h = match quality {
+            EditorViewportRenderQuality::Coarse => (lane_height_px / 4).clamp(32, 96),
+            EditorViewportRenderQuality::Fine => (lane_height_px / 2).clamp(64, 192),
+        };
+        (target_w.max(1), target_lane_h.max(1))
+    }
+
+    fn visible_feature_frame_range(
+        frames: usize,
+        frame_step: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<(usize, usize)> {
+        if frames == 0 {
+            return None;
+        }
+        let frame_step = frame_step.max(1);
+        let f0 = (start / frame_step).min(frames.saturating_sub(1));
+        let mut f1 = (end / frame_step).min(frames);
+        if f1 <= f0 {
+            f1 = (f0 + 1).min(frames);
+        }
+        Some((f0, f1))
+    }
+
+    pub(crate) fn render_tempogram_viewport_image(
+        data: &TempogramData,
+        wave_width_px: usize,
+        lane_height_px: usize,
+        lane_count: usize,
+        start: usize,
+        end: usize,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        cfg: &SpectrogramConfig,
+        view_mode: ViewMode,
+        quality: EditorViewportRenderQuality,
+    ) -> ColorImage {
+        let (target_w, target_lane_h) =
+            Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
+        let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
+        let mut image =
+            ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
+        let Some((f0, f1)) =
+            Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
+        else {
+            return image;
+        };
+        if data.tempo_bins == 0 || data.values.is_empty() {
+            return image;
+        }
+        let frame_count = f1.saturating_sub(f0).max(1);
+        let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+            view_mode,
+            vertical_zoom,
+            vertical_view_center,
+            cfg,
+        );
+        let mut frame_maxima = vec![0.0f32; frame_count];
+        let mut global_max = 0.0f32;
+        for (local_frame, frame_idx) in (f0..f1).enumerate() {
+            let row = &data.values
+                [frame_idx * data.tempo_bins..(frame_idx + 1) * data.tempo_bins];
+            let row_max = row.iter().copied().fold(0.0f32, f32::max);
+            frame_maxima[local_frame] = row_max;
+            global_max = global_max.max(row_max);
+        }
+        let global_floor = (global_max * 0.25).max(1.0e-9);
+        for lane_idx in 0..lane_count.max(1) {
+            let lane_y0 = lane_idx.saturating_mul(target_lane_h);
+            for x in 0..target_w {
+                let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+                let local_frame = frame_idx.saturating_sub(f0).min(frame_count - 1);
+                let base = frame_idx * data.tempo_bins;
+                let frame_den = frame_maxima
+                    .get(local_frame)
+                    .copied()
+                    .unwrap_or(global_floor)
+                    .max(global_floor);
+                for y in 0..target_lane_h {
+                    let frac_local = 1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
+                    let frac = visible_min + frac_local * (visible_max - visible_min);
+                    let bin = (frac.clamp(0.0, 1.0) * data.tempo_bins.saturating_sub(1) as f32)
+                        .round() as usize;
+                    let idx = base + bin.min(data.tempo_bins.saturating_sub(1));
+                    let value = data.values.get(idx).copied().unwrap_or(0.0).max(0.0);
+                    let norm = (value / frame_den).clamp(0.0, 1.0).sqrt();
+                    let pixel_idx = (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
+                    if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
+                        *pixel = db_to_color(-80.0 + norm * 80.0);
+                    }
+                }
+            }
+        }
+        image
+    }
+
+    pub(crate) fn render_chromagram_viewport_image(
+        data: &ChromagramData,
+        wave_width_px: usize,
+        lane_height_px: usize,
+        lane_count: usize,
+        start: usize,
+        end: usize,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        cfg: &SpectrogramConfig,
+        view_mode: ViewMode,
+        quality: EditorViewportRenderQuality,
+    ) -> ColorImage {
+        let (target_w, target_lane_h) =
+            Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
+        let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
+        let mut image =
+            ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
+        let Some((f0, f1)) =
+            Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
+        else {
+            return image;
+        };
+        if data.bins == 0 || data.values.is_empty() {
+            return image;
+        }
+        let frame_count = f1.saturating_sub(f0).max(1);
+        let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+            view_mode,
+            vertical_zoom,
+            vertical_view_center,
+            cfg,
+        );
+        for lane_idx in 0..lane_count.max(1) {
+            let lane_y0 = lane_idx.saturating_mul(target_lane_h);
+            for x in 0..target_w {
+                let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+                let base = frame_idx * data.bins;
+                for y in 0..target_lane_h {
+                    let frac_local = 1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
+                    let frac = visible_min + frac_local * (visible_max - visible_min);
+                    let bin =
+                        (frac.clamp(0.0, 1.0) * data.bins.saturating_sub(1) as f32).round() as usize;
+                    let norm = data
+                        .values
+                        .get(base + bin.min(data.bins.saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(0.0)
+                        .clamp(0.0, 1.0)
+                        .sqrt();
+                    let pixel_idx = (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
+                    if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
+                        *pixel = db_to_color(-80.0 + norm * 80.0);
+                    }
+                }
+            }
+        }
+        image
+    }
+
     pub(crate) fn editor_spectro_cfg_digest(cfg: &SpectrogramConfig) -> u64 {
         let mut hasher = DefaultHasher::new();
         cfg.fft_size.hash(&mut hasher);
@@ -849,19 +1198,19 @@ impl super::WavesPreviewer {
     ) {
         match lane {
             EditorViewportWaveLane::Peaks(peaks) => {
-                let mut shapes = Vec::new();
+                let waveform_columns = crate::app::render::overlay::compute_waveform_device_columns(
+                    lane_rect,
+                    painter.ctx().pixels_per_point(),
+                );
                 super::WavesPreviewer::push_peak_shapes(
-                    &mut shapes,
+                    painter,
                     peaks,
                     lane_rect,
-                    wave_width,
+                    &waveform_columns,
                     scale,
                     vertical_zoom,
                     vertical_view_center,
                 );
-                if !shapes.is_empty() {
-                    painter.extend(shapes);
-                }
             }
             EditorViewportWaveLane::Samples(samples) => {
                 if samples.is_empty() {

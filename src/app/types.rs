@@ -913,7 +913,7 @@ pub struct EditorTab {
     pub primary_view: EditorPrimaryView, // high-level editor view
     pub spec_sub_view: EditorSpecSubView, // Spec subtree selection
     pub other_sub_view: EditorOtherSubView, // Other subtree selection
-    pub show_waveform_overlay: bool,     // draw waveform overlay in Spec/Mel views
+    pub show_waveform_overlay: bool,     // draw waveform overlay in feature views
     pub channel_view: ChannelView,       // Mixdown / All / Custom
     pub bpm_enabled: bool,               // grid toggle in editor
     pub bpm_value: f32,                  // current BPM for grid

@@ -39,6 +39,96 @@ pub fn waveform_y_from_amp(
     lane_rect.center().y - normalized * (lane_rect.height() * 0.48)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct WaveformDeviceColumns {
+    left_device_px: i32,
+    column_count: usize,
+    pixels_per_point: f32,
+}
+
+impl WaveformDeviceColumns {
+    pub fn column_count(&self) -> usize {
+        self.column_count
+    }
+
+    pub fn device_pixel_for_column(&self, idx: usize) -> i32 {
+        self.left_device_px + idx.min(self.column_count.saturating_sub(1)) as i32
+    }
+
+    pub fn x_center_pt(&self, idx: usize) -> f32 {
+        (self.device_pixel_for_column(idx) as f32 + 0.5) / self.pixels_per_point
+    }
+
+    fn min_bar_height_pt(&self) -> f32 {
+        (1.0 / self.pixels_per_point.max(f32::EPSILON)).max(0.5)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AggregatedWaveColumn {
+    pub min: f32,
+    pub max: f32,
+    pub color: Color32,
+    pub stroke: f32,
+}
+
+pub fn compute_waveform_device_columns(
+    span_rect: Rect,
+    pixels_per_point: f32,
+) -> WaveformDeviceColumns {
+    let pixels_per_point = pixels_per_point.max(1.0);
+    let left_device_px = (span_rect.left() * pixels_per_point).round() as i32;
+    let column_count = ((span_rect.width().max(1.0) * pixels_per_point).round()).max(1.0) as usize;
+    WaveformDeviceColumns {
+        left_device_px,
+        column_count,
+        pixels_per_point,
+    }
+}
+
+pub fn draw_aggregated_waveform_columns<F>(
+    painter: &Painter,
+    lane_rect: Rect,
+    columns: &WaveformDeviceColumns,
+    start_column: usize,
+    column_count: usize,
+    vertical_zoom: f32,
+    vertical_view_center: f32,
+    mut column_at: F,
+) where
+    F: FnMut(usize) -> Option<AggregatedWaveColumn>,
+{
+    if columns.column_count() == 0 || column_count == 0 || start_column >= columns.column_count() {
+        return;
+    }
+    let max_count = column_count.min(columns.column_count().saturating_sub(start_column));
+    let min_bar_height = columns.min_bar_height_pt();
+    for local_idx in 0..max_count {
+        let Some(column) = column_at(local_idx) else {
+            continue;
+        };
+        let x = columns.x_center_pt(start_column + local_idx);
+        if !x.is_finite() || !column.min.is_finite() || !column.max.is_finite() {
+            continue;
+        }
+        let mut y0 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.max);
+        let mut y1 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.min);
+        if !y0.is_finite() || !y1.is_finite() {
+            continue;
+        }
+        if (y1 - y0).abs() < min_bar_height {
+            let mid = (y0 + y1) * 0.5;
+            let half = min_bar_height * 0.5;
+            y0 = mid - half;
+            y1 = mid + half;
+        }
+        painter.line_segment(
+            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
+            egui::Stroke::new(column.stroke, column.color),
+        );
+    }
+}
+
 /// Map the visible original window [start, start+visible_len) into overlay domain of length `overlay_total`.
 /// Returns (startb, endb, over_vis).
 pub fn map_visible_overlay(
@@ -100,7 +190,7 @@ pub fn map_ranges_to_overlay(
 pub fn draw_bins_locked(
     painter: &Painter,
     lane_rect: Rect,
-    wave_w: f32,
+    columns: &WaveformDeviceColumns,
     bins_values: &[(f32, f32)],
     scale: f32,
     vertical_zoom: f32,
@@ -108,18 +198,29 @@ pub fn draw_bins_locked(
     color: Color32,
     stroke: f32,
 ) {
-    let n = bins_values.len().max(1) as f32;
-    for (idx, &(mn0, mx0)) in bins_values.iter().enumerate() {
-        let mn = (mn0 * scale).clamp(-1.0, 1.0);
-        let mx = (mx0 * scale).clamp(-1.0, 1.0);
-        let x = lane_rect.left() + (idx as f32 / n) * wave_w;
-        let y0 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mx);
-        let y1 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mn);
-        painter.line_segment(
-            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-            egui::Stroke::new(stroke, color),
-        );
-    }
+    draw_aggregated_waveform_columns(
+        painter,
+        lane_rect,
+        columns,
+        0,
+        bins_values.len(),
+        vertical_zoom,
+        vertical_view_center,
+        |idx| {
+            let &(mn0, mx0) = bins_values.get(idx)?;
+            let mn = (mn0 * scale).clamp(-1.0, 1.0);
+            let mx = (mx0 * scale).clamp(-1.0, 1.0);
+            if !mn.is_finite() || !mx.is_finite() {
+                return None;
+            }
+            Some(AggregatedWaveColumn {
+                min: mn,
+                max: mx,
+                color,
+                stroke,
+            })
+        },
+    );
 }
 
 /// Convenience: compute overlay bins for base px columns using mapping and return min/max per px.
@@ -225,27 +326,78 @@ pub fn overlay_px_range_for_segment(
 
 /// Draw bins into an arbitrary horizontal span within the lane rect.
 /// The span is given as a Rect with the same vertical extent as the lane.
+#[allow(dead_code)]
 pub fn draw_bins_in_rect(
     painter: &Painter,
     span_rect: Rect,
     bins_values: &[(f32, f32)],
+    pixels_per_point: f32,
     scale: f32,
     vertical_zoom: f32,
     vertical_view_center: f32,
     color: Color32,
     stroke: f32,
 ) {
-    let n = bins_values.len().max(1) as f32;
-    let wave_w = span_rect.width().max(1.0);
-    for (idx, &(mn0, mx0)) in bins_values.iter().enumerate() {
-        let mn = (mn0 * scale).clamp(-1.0, 1.0);
-        let mx = (mx0 * scale).clamp(-1.0, 1.0);
-        let x = span_rect.left() + (idx as f32 / n) * wave_w;
-        let y0 = waveform_y_from_amp(span_rect, vertical_zoom, vertical_view_center, mx);
-        let y1 = waveform_y_from_amp(span_rect, vertical_zoom, vertical_view_center, mn);
-        painter.line_segment(
-            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-            egui::Stroke::new(stroke, color),
-        );
+    let columns = compute_waveform_device_columns(span_rect, pixels_per_point);
+    draw_bins_locked(
+        painter,
+        span_rect,
+        &columns,
+        bins_values,
+        scale,
+        vertical_zoom,
+        vertical_view_center,
+        color,
+        stroke,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_waveform_device_columns, WaveformDeviceColumns};
+    use egui::{pos2, vec2, Rect};
+
+    fn assert_monotonic_columns(columns: WaveformDeviceColumns, rect: Rect, ppp: f32) {
+        assert!(columns.column_count() >= 1);
+        let mut prev_device_px = i32::MIN;
+        for idx in 0..columns.column_count() {
+            let device_px = columns.device_pixel_for_column(idx);
+            let x = columns.x_center_pt(idx);
+            assert!(x.is_finite(), "column x must stay finite");
+            assert!(
+                device_px > prev_device_px,
+                "device pixel must strictly increase: idx={idx} prev={prev_device_px} cur={device_px}"
+            );
+            prev_device_px = device_px;
+        }
+        let first = columns.x_center_pt(0);
+        let last = columns.x_center_pt(columns.column_count() - 1);
+        let pad = 1.0 / ppp.max(1.0);
+        assert!(first >= rect.left() - pad);
+        assert!(last <= rect.right() + pad);
+    }
+
+    #[test]
+    fn waveform_device_columns_are_strictly_increasing_without_duplicates() {
+        for (left, width, ppp) in [
+            (0.0, 822.0, 1.0),
+            (12.25, 822.0, 1.25),
+            (7.75, 913.4, 1.5),
+            (31.2, 1101.75, 2.0),
+        ] {
+            let rect = Rect::from_min_size(pos2(left, 20.0), vec2(width, 80.0));
+            let columns = compute_waveform_device_columns(rect, ppp);
+            assert_monotonic_columns(columns, rect, ppp);
+        }
+    }
+
+    #[test]
+    fn waveform_device_columns_follow_rounded_device_width() {
+        let rect = Rect::from_min_size(pos2(10.3, 0.0), vec2(822.4, 50.0));
+        for ppp in [1.0, 1.25, 1.5, 2.0] {
+            let columns = compute_waveform_device_columns(rect, ppp);
+            let expected = ((rect.width() * ppp).round()).max(1.0) as usize;
+            assert_eq!(columns.column_count(), expected);
+        }
     }
 }

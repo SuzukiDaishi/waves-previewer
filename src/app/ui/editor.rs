@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::app::music_onnx;
+use crate::app::render::overlay as ov;
 use crate::app::render::waveform_pyramid as wf_cache;
 use crate::app::{helpers::*, types::*, LIVE_PREVIEW_SAMPLE_LIMIT};
 use crate::wave::build_minmax;
@@ -106,105 +107,6 @@ impl crate::app::WavesPreviewer {
             effective_xfade_samples,
             uses_through_zero: Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape),
         })
-    }
-
-    fn draw_tempogram(
-        painter: &egui::Painter,
-        area: egui::Rect,
-        tab: &EditorTab,
-        data: &TempogramData,
-    ) {
-        if data.frames == 0 || data.tempo_bins == 0 || data.values.is_empty() {
-            return;
-        }
-        let width_px = area.width().max(1.0);
-        let height_px = area.height().max(1.0);
-        let spp = tab.samples_per_px.max(0.0001);
-        let vis = (width_px * spp).ceil() as usize;
-        let start = tab.view_offset.min(tab.samples_len);
-        let end = (start + vis).min(tab.samples_len);
-        let frame_step = data.frame_step.max(1);
-        let f0 = (start / frame_step).min(data.frames.saturating_sub(1));
-        let mut f1 = (end / frame_step).min(data.frames);
-        if f1 <= f0 {
-            f1 = (f0 + 1).min(data.frames);
-        }
-        let frame_count = f1.saturating_sub(f0).max(1);
-        let target_w = (width_px / 3.0).clamp(64.0, 256.0) as usize;
-        let target_h = (height_px / 3.0).clamp(48.0, 160.0) as usize;
-        let cell_w = width_px / target_w as f32;
-        let cell_h = height_px / target_h as f32;
-        let max_value = data
-            .values
-            .iter()
-            .copied()
-            .fold(0.0f32, |acc, value| acc.max(value))
-            .max(1.0e-9);
-        for x in 0..target_w {
-            let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
-            let base = frame_idx * data.tempo_bins;
-            for y in 0..target_h {
-                let frac = y as f32 / (target_h.saturating_sub(1)).max(1) as f32;
-                let bin = (frac * data.tempo_bins.saturating_sub(1) as f32).round() as usize;
-                let idx = base + bin.min(data.tempo_bins.saturating_sub(1));
-                let norm =
-                    (data.values.get(idx).copied().unwrap_or(0.0) / max_value).clamp(0.0, 1.0);
-                let col = db_to_color(-80.0 + norm * 80.0);
-                let x0 = area.left() + x as f32 * cell_w;
-                let y0 = area.bottom() - (y as f32 + 1.0) * cell_h;
-                let r = egui::Rect::from_min_size(
-                    egui::pos2(x0, y0),
-                    egui::vec2(cell_w + 0.5, cell_h + 0.5),
-                );
-                painter.rect_filled(r, 0.0, col);
-            }
-        }
-    }
-
-    fn draw_chromagram(
-        painter: &egui::Painter,
-        area: egui::Rect,
-        tab: &EditorTab,
-        data: &ChromagramData,
-    ) {
-        if data.frames == 0 || data.bins == 0 || data.values.is_empty() {
-            return;
-        }
-        let width_px = area.width().max(1.0);
-        let height_px = area.height().max(1.0);
-        let spp = tab.samples_per_px.max(0.0001);
-        let vis = (width_px * spp).ceil() as usize;
-        let start = tab.view_offset.min(tab.samples_len);
-        let end = (start + vis).min(tab.samples_len);
-        let frame_step = data.frame_step.max(1);
-        let f0 = (start / frame_step).min(data.frames.saturating_sub(1));
-        let mut f1 = (end / frame_step).min(data.frames);
-        if f1 <= f0 {
-            f1 = (f0 + 1).min(data.frames);
-        }
-        let frame_count = f1.saturating_sub(f0).max(1);
-        let target_w = (width_px / 3.0).clamp(64.0, 256.0) as usize;
-        let cell_w = width_px / target_w as f32;
-        let cell_h = height_px / data.bins.max(1) as f32;
-        for x in 0..target_w {
-            let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
-            let base = frame_idx * data.bins;
-            for bin in 0..data.bins {
-                let norm = data
-                    .values
-                    .get(base + bin)
-                    .copied()
-                    .unwrap_or(0.0)
-                    .clamp(0.0, 1.0);
-                let col = db_to_color(-80.0 + norm * 80.0);
-                let y0 = area.bottom() - (bin as f32 + 1.0) * cell_h;
-                let r = egui::Rect::from_min_size(
-                    egui::pos2(area.left() + x as f32 * cell_w, y0),
-                    egui::vec2(cell_w + 0.5, cell_h + 0.5),
-                );
-                painter.rect_filled(r, 0.0, col);
-            }
-        }
     }
 
     fn tempogram_axis_position(data: &TempogramData, bpm: f32) -> Option<f32> {
@@ -1013,35 +915,45 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(crate) fn push_peak_shapes(
-        shapes: &mut Vec<egui::Shape>,
+        painter: &egui::Painter,
         peaks: &[wf_cache::Peak],
         lane_rect: egui::Rect,
-        wave_w: f32,
+        columns: &ov::WaveformDeviceColumns,
         scale: f32,
         vertical_zoom: f32,
         vertical_view_center: f32,
     ) {
-        let n = peaks.len().max(1) as f32;
-        for (idx, peak) in peaks.iter().enumerate() {
-            let mn = (peak.min * scale).clamp(-1.0, 1.0);
-            let mx = (peak.max * scale).clamp(-1.0, 1.0);
-            let x = lane_rect.left() + (idx as f32 / n) * wave_w;
-            let y0 = Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mx);
-            let y1 = Self::waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, mn);
-            let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
-            let col = amp_to_color(amp);
-            shapes.push(egui::Shape::line_segment(
-                [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-                egui::Stroke::new(1.0, col),
-            ));
-        }
+        ov::draw_aggregated_waveform_columns(
+            painter,
+            lane_rect,
+            columns,
+            0,
+            peaks.len(),
+            vertical_zoom,
+            vertical_view_center,
+            |idx| {
+                let peak = peaks.get(idx)?;
+                let mn = (peak.min * scale).clamp(-1.0, 1.0);
+                let mx = (peak.max * scale).clamp(-1.0, 1.0);
+                if !mn.is_finite() || !mx.is_finite() {
+                    return None;
+                }
+                let amp = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
+                Some(ov::AggregatedWaveColumn {
+                    min: mn,
+                    max: mx,
+                    color: amp_to_color(amp),
+                    stroke: 1.0,
+                })
+            },
+        );
     }
 
     fn render_loading_overview_waveform(
         overview: &[(f32, f32)],
         display_samples_len: usize,
         lane_rect: egui::Rect,
-        wave_w: f32,
+        waveform_columns: &ov::WaveformDeviceColumns,
         scale: f32,
         vertical_zoom: f32,
         vertical_view_center: f32,
@@ -1054,9 +966,8 @@ impl crate::app::WavesPreviewer {
             return (WaveformRenderLod::VisibleMinMax, 0.0, 0.0);
         }
         let peaks = &mut scratch.peaks;
-        let shapes = &mut scratch.shapes;
         peaks.clear();
-        let bins = wave_w.round().max(1.0) as usize;
+        let bins = waveform_columns.column_count().max(1);
         peaks.reserve(bins);
         let visible_len = end.saturating_sub(start).max(1);
         let query_started = std::time::Instant::now();
@@ -1084,19 +995,15 @@ impl crate::app::WavesPreviewer {
         }
         let query_ms = query_started.elapsed().as_secs_f32() * 1000.0;
         let draw_started = std::time::Instant::now();
-        shapes.clear();
         Self::push_peak_shapes(
-            shapes,
+            painter,
             peaks,
             lane_rect,
-            wave_w,
+            waveform_columns,
             scale,
             vertical_zoom,
             vertical_view_center,
         );
-        if !shapes.is_empty() {
-            painter.extend(shapes.drain(..));
-        }
         let draw_ms = draw_started.elapsed().as_secs_f32() * 1000.0;
         (WaveformRenderLod::VisibleMinMax, query_ms, draw_ms)
     }
@@ -1106,6 +1013,7 @@ impl crate::app::WavesPreviewer {
         use_mixdown: bool,
         channel_index: Option<usize>,
         lane_rect: egui::Rect,
+        waveform_columns: &ov::WaveformDeviceColumns,
         wave_w: f32,
         scale: f32,
         vertical_zoom: f32,
@@ -1126,7 +1034,7 @@ impl crate::app::WavesPreviewer {
             &mut scratch.shapes,
             &mut scratch.line_points,
         );
-        let bins = wave_w.round().max(1.0) as usize;
+        let bins = waveform_columns.column_count().max(1);
         let mut lod = if spp < 2.0 {
             WaveformRenderLod::Raw
         } else if spp < 32.0 {
@@ -1315,10 +1223,10 @@ impl crate::app::WavesPreviewer {
             }
             WaveformRenderLod::VisibleMinMax | WaveformRenderLod::Pyramid => {
                 Self::push_peak_shapes(
-                    shapes,
+                    painter,
                     peaks,
                     lane_rect,
-                    wave_w,
+                    waveform_columns,
                     scale,
                     vertical_zoom,
                     vertical_view_center,
@@ -1944,6 +1852,7 @@ impl crate::app::WavesPreviewer {
         let mut waveform_scratch = wf_cache::WaveformScratch::default();
         let mut waveform_query_ms_total = 0.0f32;
         let mut waveform_draw_ms_total = 0.0f32;
+        let pixels_per_point = ctx.pixels_per_point();
         // Split canvas and inspector; keep inspector visible on narrow widths.
         let min_canvas_w = 160.0f32;
         let min_inspector_w = 220.0f32;
@@ -2089,23 +1998,37 @@ impl crate::app::WavesPreviewer {
             let visible_samples = (wave_w * spp).ceil() as usize;
             let start = tab.view_offset.min(display_samples_len);
             let end = (start + visible_samples).min(display_samples_len);
+            let wave_width_px =
+                Self::editor_viewport_dimension_px(wave_w, pixels_per_point);
+            let lane_height_px =
+                Self::editor_viewport_dimension_px(lane_h, pixels_per_point);
             pending_viewport_hint = matches!(
                 view_mode,
-                ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+                ViewMode::Spectrogram
+                    | ViewMode::Log
+                    | ViewMode::Mel
+                    | ViewMode::Tempogram
+                    | ViewMode::Chromagram
             )
             .then_some(crate::app::editor_viewport::EditorViewportHint {
                 view_mode,
                 display_samples_len,
                 start,
                 end,
-                wave_width_px: wave_w.round().max(1.0) as usize,
-                lane_height_px: lane_h.round().max(1.0) as usize,
+                wave_width_px,
+                lane_height_px,
                 lane_count,
                 use_mixdown,
                 visible_channels: visible_channels.clone(),
             });
-            let current_spectral_viewport_key =
-                if matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel) {
+            let current_feature_viewport_key = if matches!(
+                view_mode,
+                ViewMode::Spectrogram
+                    | ViewMode::Log
+                    | ViewMode::Mel
+                    | ViewMode::Tempogram
+                    | ViewMode::Chromagram
+            ) {
                     Some(EditorViewportRenderKey {
                         kind: EditorViewportPayloadKind::Spectral,
                         view_mode,
@@ -2114,8 +2037,8 @@ impl crate::app::WavesPreviewer {
                         start,
                         end,
                         lane_count: lane_count.max(1),
-                        lane_height_px: lane_h.max(1.0).round() as usize,
-                        wave_width_px: wave_w.max(1.0).round() as usize,
+                        lane_height_px,
+                        wave_width_px,
                         use_mixdown,
                         visible_channels: visible_channels.clone(),
                         samples_per_px_bits: tab.samples_per_px.to_bits(),
@@ -2221,9 +2144,9 @@ impl crate::app::WavesPreviewer {
                     ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                         if let Some(specs) = spec_cache.as_ref() {
                             touch_spectro_cache = true;
-                            let current_viewport_cache = current_spectral_viewport_key
+                            let current_viewport_cache = current_feature_viewport_key
                                 .as_ref()
-                                .and_then(|key| Self::best_editor_viewport_cache(tab, key));
+                                .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
                             if let Some(crate::app::types::EditorViewportRenderCache {
                                 payload:
                                     crate::app::types::EditorViewportCachePayload::Image {
@@ -2260,8 +2183,8 @@ impl crate::app::WavesPreviewer {
                                 let fallback_image = Self::render_spectral_viewport_image(
                                     specs,
                                     &lane_spec_indices,
-                                    wave_w.max(1.0).round() as usize,
-                                    lane_h.max(1.0).round() as usize,
+                                    wave_width_px,
+                                    lane_height_px,
                                     lane_count.max(1),
                                     start,
                                     end,
@@ -2453,12 +2376,59 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                     ViewMode::Tempogram => {
-                        if let Some(data) = tempogram_data.as_ref() {
-                            let lane_rect = egui::Rect::from_min_size(
-                                egui::pos2(wave_left, rect.top()),
-                                egui::vec2(wave_w, h),
+                        let lane_rect = egui::Rect::from_min_size(
+                            egui::pos2(wave_left, rect.top()),
+                            egui::vec2(wave_w, h),
+                        );
+                        let current_viewport_cache = current_feature_viewport_key
+                            .as_ref()
+                            .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                        if let Some(crate::app::types::EditorViewportRenderCache {
+                            payload:
+                                crate::app::types::EditorViewportCachePayload::Image {
+                                    texture: Some(texture),
+                                    ..
+                                },
+                            ..
+                        }) = current_viewport_cache
+                        {
+                            painter.image(
+                                texture.id(),
+                                lane_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
                             );
-                            Self::draw_tempogram(&painter, lane_rect, tab, data);
+                        } else if let Some(data) = tempogram_data.as_ref() {
+                            let fallback_image = Self::render_tempogram_viewport_image(
+                                data,
+                                wave_width_px,
+                                Self::editor_viewport_dimension_px(h, pixels_per_point),
+                                1,
+                                start,
+                                end,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                                view_mode,
+                                crate::app::types::EditorViewportRenderQuality::Coarse,
+                            );
+                            let fallback_texture = ui.ctx().load_texture(
+                                format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
+                                fallback_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            painter.image(
+                                fallback_texture.id(),
+                                lane_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
                         } else {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let msg = if feature_loading {
@@ -2478,12 +2448,23 @@ impl crate::app::WavesPreviewer {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
                             let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+                                view_mode,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                            );
                             for bpm in [30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 240.0, 300.0] {
                                 let frac = tempogram_data
                                     .as_ref()
                                     .and_then(|data| Self::tempogram_axis_position(data, bpm))
                                     .unwrap_or(((bpm - 30.0) / 270.0).clamp(0.0, 1.0));
-                                let y = rect.bottom() - frac * rect.height();
+                                let visible_frac = if (visible_max - visible_min).abs() < f32::EPSILON {
+                                    0.0
+                                } else {
+                                    ((frac - visible_min) / (visible_max - visible_min)).clamp(0.0, 1.0)
+                                };
+                                let y = lane_rect.bottom() - visible_frac * lane_rect.height();
                                 painter.line_segment(
                                     [
                                         egui::pos2(wave_left - 6.0, y),
@@ -2502,12 +2483,59 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                     ViewMode::Chromagram => {
-                        if let Some(data) = chromagram_data.as_ref() {
-                            let lane_rect = egui::Rect::from_min_size(
-                                egui::pos2(wave_left, rect.top()),
-                                egui::vec2(wave_w, h),
+                        let lane_rect = egui::Rect::from_min_size(
+                            egui::pos2(wave_left, rect.top()),
+                            egui::vec2(wave_w, h),
+                        );
+                        let current_viewport_cache = current_feature_viewport_key
+                            .as_ref()
+                            .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                        if let Some(crate::app::types::EditorViewportRenderCache {
+                            payload:
+                                crate::app::types::EditorViewportCachePayload::Image {
+                                    texture: Some(texture),
+                                    ..
+                                },
+                            ..
+                        }) = current_viewport_cache
+                        {
+                            painter.image(
+                                texture.id(),
+                                lane_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
                             );
-                            Self::draw_chromagram(&painter, lane_rect, tab, data);
+                        } else if let Some(data) = chromagram_data.as_ref() {
+                            let fallback_image = Self::render_chromagram_viewport_image(
+                                data,
+                                wave_width_px,
+                                Self::editor_viewport_dimension_px(h, pixels_per_point),
+                                1,
+                                start,
+                                end,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                                view_mode,
+                                crate::app::types::EditorViewportRenderQuality::Coarse,
+                            );
+                            let fallback_texture = ui.ctx().load_texture(
+                                format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
+                                fallback_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            painter.image(
+                                fallback_texture.id(),
+                                lane_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
                         } else {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let msg = if feature_loading {
@@ -2527,13 +2555,24 @@ impl crate::app::WavesPreviewer {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
                             let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+                                view_mode,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                            );
                             for bin in 0..12 {
                                 let frac = if 11 == 0 {
                                     0.0
                                 } else {
                                     bin as f32 / 11.0
                                 };
-                                let y = rect.bottom() - frac * rect.height();
+                                let visible_frac = if (visible_max - visible_min).abs() < f32::EPSILON {
+                                    0.0
+                                } else {
+                                    ((frac - visible_min) / (visible_max - visible_min)).clamp(0.0, 1.0)
+                                };
+                                let y = lane_rect.bottom() - visible_frac * lane_rect.height();
                                 painter.line_segment(
                                     [
                                         egui::pos2(wave_left - 6.0, y),
@@ -2969,6 +3008,8 @@ impl crate::app::WavesPreviewer {
                 };
                 let lane_top = rect.top() + lane_h * lane_idx as f32;
                 let lane_rect = egui::Rect::from_min_size(egui::pos2(wave_left, lane_top), egui::vec2(wave_w, lane_h));
+                let waveform_columns =
+                    ov::compute_waveform_device_columns(lane_rect, pixels_per_point);
                 // dB lines: -6, -12 dBFS and center line (0 amp)
                 let dbs = [-6.0f32, -12.0f32];
                 // center
@@ -3004,7 +3045,7 @@ impl crate::app::WavesPreviewer {
                             &tab.loading_waveform_minmax,
                             display_samples_len.max(1),
                             lane_rect,
-                            wave_w,
+                            &waveform_columns,
                             scale,
                             tab.vertical_zoom,
                             tab.vertical_view_center,
@@ -3019,6 +3060,7 @@ impl crate::app::WavesPreviewer {
                             use_mixdown,
                             channel_index,
                             lane_rect,
+                            &waveform_columns,
                             wave_w,
                             scale,
                             tab.vertical_zoom,
@@ -3066,7 +3108,6 @@ impl crate::app::WavesPreviewer {
                                         .or_else(|| overlay.channels.get(0).map(|v| v.as_slice()))
                                 };
                                 if let Some(buf) = och {
-                                    use crate::app::render::overlay as ov;
                                     use crate::app::render::colors::{OVERLAY_COLOR, OVERLAY_STROKE_BASE, OVERLAY_STROKE_EMPH};
                                     let base_total = tab.samples_len.max(1);
                                     let overlay_total = overlay.timeline_len.max(1);
@@ -3087,7 +3128,7 @@ impl crate::app::WavesPreviewer {
                                     if vis_scaled == 0 { vis_scaled = 1; }
                                     let (startb, _endb, over_vis) = ov::map_visible_overlay(start_scaled, vis_scaled, overlay_total, buf.len());
                                     if over_vis > 0 {
-                                        let bins = wave_w as usize;
+                                        let bins = waveform_columns.column_count();
                                         let bins_values = if unwrap_preview {
                                             let loop_start = tab.loop_region.map(|(a, _)| a).unwrap_or(0);
                                             ov::compute_overlay_bins_for_unwrap(
@@ -3106,7 +3147,7 @@ impl crate::app::WavesPreviewer {
                                         ov::draw_bins_locked(
                                             &painter,
                                             lane_rect,
-                                            wave_w,
+                                            &waveform_columns,
                                             &bins_values,
                                             scale,
                                             tab.vertical_zoom,
@@ -3138,19 +3179,29 @@ impl crate::app::WavesPreviewer {
                                                     for (s, e) in segs {
                                                         if let Some((p0, p1)) = ov::overlay_px_range_for_segment(startb, over_vis, bins, s, e) {
                                                             if p1 > p0 && p1 <= bins {
-                                                                let span_left = lane_rect.left() + (p0 as f32 / bins as f32) * wave_w;
-                                                                let span_w = ((p1 - p0) as f32 / bins as f32) * wave_w;
-                                                                let span_rect = egui::Rect::from_min_size(egui::pos2(span_left, lane_rect.top()), egui::vec2(span_w, lane_rect.height()));
-                                                                let sub = &bins_values[p0..p1];
-                                                                ov::draw_bins_in_rect(
+                                                                ov::draw_aggregated_waveform_columns(
                                                                     &painter,
-                                                                    span_rect,
-                                                                    sub,
-                                                                    scale,
+                                                                    lane_rect,
+                                                                    &waveform_columns,
+                                                                    p0,
+                                                                    p1 - p0,
                                                                     tab.vertical_zoom,
                                                                     tab.vertical_view_center,
-                                                                    OVERLAY_COLOR,
-                                                                    OVERLAY_STROKE_EMPH,
+                                                                    |local_idx| {
+                                                                        let &(mn0, mx0) =
+                                                                            bins_values.get(p0 + local_idx)?;
+                                                                        let mn = (mn0 * scale).clamp(-1.0, 1.0);
+                                                                        let mx = (mx0 * scale).clamp(-1.0, 1.0);
+                                                                        if !mn.is_finite() || !mx.is_finite() {
+                                                                            return None;
+                                                                        }
+                                                                        Some(ov::AggregatedWaveColumn {
+                                                                            min: mn,
+                                                                            max: mx,
+                                                                            color: OVERLAY_COLOR,
+                                                                            stroke: OVERLAY_STROKE_EMPH,
+                                                                        })
+                                                                    },
                                                                 );
                                                             }
                                                         }
@@ -3194,7 +3245,6 @@ impl crate::app::WavesPreviewer {
                                 .or_else(|| overlay.channels.get(0).map(|v| v.as_slice()))
                         };
                         if let Some(buf) = och {
-                            use crate::app::render::overlay as ov;
                             let base_total = tab.samples_len.max(1);
                             let overlay_total = overlay.timeline_len.max(1);
                             let unwrap_preview = matches!(overlay.source_tool, ToolKind::LoopEdit)
@@ -3203,7 +3253,7 @@ impl crate::app::WavesPreviewer {
                                 && tab.loop_region.is_some();
                             if unwrap_preview {
                                 if let Some((loop_start, _)) = tab.loop_region {
-                                    let bins = wave_w as usize;
+                                    let bins = waveform_columns.column_count();
                                     if bins > 0 {
                                         let values = ov::compute_overlay_bins_for_unwrap(
                                             start,
@@ -3217,7 +3267,7 @@ impl crate::app::WavesPreviewer {
                                         ov::draw_bins_locked(
                                             &painter,
                                             lane_rect,
-                                            wave_w,
+                                            &waveform_columns,
                                             &values,
                                             scale,
                                             tab.vertical_zoom,
@@ -3344,7 +3394,7 @@ impl crate::app::WavesPreviewer {
 
                                 if spp >= 2.0 {
                                     // Aggregated: compute bins via helper and draw pixel-locked bars
-                                    let bins = wave_w as usize;
+                                    let bins = waveform_columns.column_count();
                                     if bins > 0 {
                                         let ratio_approx_1 = (over_vis as i64 - orig_vis as i64).abs() <= 1;
                                             let values = if ratio_approx_1 {
@@ -3363,7 +3413,7 @@ impl crate::app::WavesPreviewer {
                                         crate::app::render::overlay::draw_bins_locked(
                                             &painter,
                                             lane_rect,
-                                            wave_w,
+                                            &waveform_columns,
                                             &values,
                                             scale,
                                             tab.vertical_zoom,
@@ -3374,7 +3424,7 @@ impl crate::app::WavesPreviewer {
                                     }
                                     // Emphasize LoopEdit boundary subranges if present (thicker over the same px columns)
                                     if let Some((s1,e1)) = seg1_opt {
-                                        let bins = wave_w as usize;
+                                        let bins = waveform_columns.column_count();
                                         if bins > 0 {
                                             let step_b = (orig_vis as f32) / (bins as f32);
                                             let mut pos_b = 0.0f32;
@@ -3404,7 +3454,10 @@ impl crate::app::WavesPreviewer {
                                                 }
                                                 let mn = (mn * scale).clamp(-1.0, 1.0);
                                                 let mx = (mx * scale).clamp(-1.0, 1.0);
-                                                let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
+                                                let x = waveform_columns.x_center_pt(px);
+                                                if !x.is_finite() {
+                                                    continue;
+                                                }
                                                 let y0 = Self::waveform_y_from_amp(
                                                     lane_rect,
                                                     tab.vertical_zoom,
@@ -3422,7 +3475,7 @@ impl crate::app::WavesPreviewer {
                                         }
                                     }
                                     if let Some((s2,e2)) = seg2_opt {
-                                        let bins = wave_w as usize;
+                                        let bins = waveform_columns.column_count();
                                         if bins > 0 {
                                             let step_b = (orig_vis as f32) / (bins as f32);
                                             let mut pos_b = 0.0f32;
@@ -3452,7 +3505,10 @@ impl crate::app::WavesPreviewer {
                                                 }
                                                 let mn = (mn * scale).clamp(-1.0, 1.0);
                                                 let mx = (mx * scale).clamp(-1.0, 1.0);
-                                                let x = lane_rect.left() + (px as f32 / bins as f32) * wave_w;
+                                                let x = waveform_columns.x_center_pt(px);
+                                                if !x.is_finite() {
+                                                    continue;
+                                                }
                                                 let y0 = Self::waveform_y_from_amp(
                                                     lane_rect,
                                                     tab.vertical_zoom,

@@ -1695,10 +1695,14 @@ mod kittest_suite {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
+        let active = harness.state().active_tab.expect("active tab");
+        assert!(
+            !harness.state().tabs[active].show_waveform_overlay,
+            "new editor tabs should default waveform overlay off"
+        );
         assert!(harness
             .state_mut()
             .test_set_view_mode(neowaves::ViewMode::Spectrogram));
-        assert!(harness.state_mut().test_set_waveform_overlay(false));
         harness.run_steps(1);
         assert_eq!(
             format!(
@@ -1707,6 +1711,23 @@ mod kittest_suite {
             ),
             "Spectrogram"
         );
+        assert!(
+            !harness.state().tabs[harness.state().active_tab.unwrap()].show_waveform_overlay,
+            "spec should inherit the non-wave default"
+        );
+        for mode in [
+            neowaves::ViewMode::Log,
+            neowaves::ViewMode::Mel,
+            neowaves::ViewMode::Tempogram,
+            neowaves::ViewMode::Chromagram,
+        ] {
+            assert!(harness.state_mut().test_set_view_mode(mode));
+            harness.run_steps(1);
+            assert!(
+                !harness.state().tabs[harness.state().active_tab.unwrap()].show_waveform_overlay,
+                "new tabs should keep waveform overlay off for {mode:?}"
+            );
+        }
         assert!(harness
             .state_mut()
             .test_set_view_mode(neowaves::ViewMode::Mel));
@@ -1718,6 +1739,12 @@ mod kittest_suite {
                 harness.state().tabs[harness.state().active_tab.unwrap()].leaf_view_mode()
             ),
             "Mel"
+        );
+        assert!(harness.state_mut().test_set_view_mode(neowaves::ViewMode::Chromagram));
+        harness.run_steps(1);
+        assert!(
+            harness.state().tabs[harness.state().active_tab.unwrap()].show_waveform_overlay,
+            "explicit overlay choice should survive view switching"
         );
     }
 

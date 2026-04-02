@@ -4412,7 +4412,7 @@ impl WavesPreviewer {
                 tool_state: default_tool_state(),
                 active_tool: ToolKind::LoopEdit,
                 plugin_fx_draft: super::types::PluginFxDraft::default(),
-                show_waveform_overlay: true,
+                show_waveform_overlay: false,
                 applied_effect_graph: template_stamp.clone(),
             }
         };
