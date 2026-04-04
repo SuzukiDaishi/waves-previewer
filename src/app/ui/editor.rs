@@ -1008,6 +1008,64 @@ impl crate::app::WavesPreviewer {
         (WaveformRenderLod::VisibleMinMax, query_ms, draw_ms)
     }
 
+    fn compute_overlay_bins_from_overview(
+        overview: &[(f32, f32)],
+        start: usize,
+        visible_len: usize,
+        base_total: usize,
+        overlay_total: usize,
+        bins: usize,
+        is_time_stretch: bool,
+    ) -> Vec<(f32, f32)> {
+        if overview.is_empty()
+            || visible_len == 0
+            || bins == 0
+            || base_total == 0
+            || overlay_total == 0
+        {
+            return Vec::new();
+        }
+        let ratio = if is_time_stretch {
+            1.0
+        } else {
+            overlay_total as f64 / base_total.max(1) as f64
+        };
+        let start_scaled = ((start as f64) * ratio).round() as usize;
+        let mut visible_scaled = ((visible_len as f64) * ratio).ceil() as usize;
+        if visible_scaled == 0 {
+            visible_scaled = 1;
+        }
+        let overlay_window_end = start_scaled
+            .saturating_add(visible_scaled)
+            .min(overlay_total.max(start_scaled + 1));
+        let overlay_window_len = overlay_window_end.saturating_sub(start_scaled).max(1);
+        let mut out = Vec::with_capacity(bins);
+        for col in 0..bins {
+            let s0 = start_scaled.saturating_add(
+                ((overlay_window_len as u128).saturating_mul(col as u128) / bins as u128) as usize,
+            );
+            let s1 = start_scaled.saturating_add(
+                ((overlay_window_len as u128).saturating_mul((col + 1) as u128) / bins as u128)
+                    as usize,
+            );
+            let mut i0 = ((s0 as u128).saturating_mul(overview.len() as u128)
+                / overlay_total.max(1) as u128) as usize;
+            let mut i1 = (((s1.max(s0 + 1) as u128).saturating_mul(overview.len() as u128))
+                .saturating_add(overlay_total.max(1) as u128 - 1)
+                / overlay_total.max(1) as u128) as usize;
+            i0 = i0.min(overview.len().saturating_sub(1));
+            i1 = i1.clamp(i0 + 1, overview.len());
+            let mut mn = 1.0f32;
+            let mut mx = -1.0f32;
+            for &(lo, hi) in &overview[i0..i1] {
+                mn = mn.min(lo);
+                mx = mx.max(hi);
+            }
+            out.push((mn, mx));
+        }
+        out
+    }
+
     fn render_editor_lane_waveform(
         tab: &EditorTab,
         use_mixdown: bool,
@@ -1869,9 +1927,12 @@ impl crate::app::WavesPreviewer {
         ui.horizontal_top(|ui| {
                 let tab = &mut self.tabs[tab_idx];
                 let preview_ok = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
-                let preview_disabled_reason = if !preview_ok {
-                    Some("Preview disabled for large clips")
-                } else if apply_busy {
+                let simplified_preview_note = if !preview_ok {
+                    Some("Long clip: simplified waveform preview")
+                } else {
+                    None
+                };
+                let preview_disabled_reason = if apply_busy {
                     Some("Preview unavailable while Apply is running")
                 } else if preview_msg.is_some() || plugin_preview_busy {
                     Some("Preview unavailable while another preview is running")
@@ -2713,7 +2774,6 @@ impl crate::app::WavesPreviewer {
                         pointer_x,
                         playhead_display_now,
                     );
-                    let vis = (wave_w * old_spp).ceil() as usize;
                     let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
                     let max_spp_fit =
                         (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
@@ -2725,6 +2785,7 @@ impl crate::app::WavesPreviewer {
                     let new_view = left.min(max_left);
                     #[cfg(debug_assertions)]
                     {
+                        let vis = (wave_w * old_spp).ceil() as usize;
                         let mode = if tab.samples_per_px >= 1.0 { "agg" } else { "line" };
                         let fit_whole = (new_spp - max_spp_fit).abs() < 1e-6;
                         eprintln!(
@@ -3096,7 +3157,18 @@ impl crate::app::WavesPreviewer {
                         // Aggregated mode: also draw overlay here so it shows at widest zoom
                         if tab.active_tool != ToolKind::Trim && tab.preview_overlay.is_some() {
                             if let Some(overlay) = &tab.preview_overlay {
-                                let och: Option<&[f32]> = if use_mixdown {
+                                let overlay_overview: Option<&[(f32, f32)]> = if use_mixdown {
+                                    overlay
+                                        .overview_mixdown
+                                        .as_ref()
+                                        .map(|v| v.as_slice())
+                                        .or_else(|| overlay.overview_channels.get(0).map(|v| v.as_slice()))
+                                } else {
+                                    channel_index
+                                        .and_then(|idx| overlay.overview_channels.get(idx).map(|v| v.as_slice()))
+                                        .or_else(|| overlay.overview_channels.get(0).map(|v| v.as_slice()))
+                                };
+                                let overlay_samples: Option<&[f32]> = if use_mixdown {
                                     overlay
                                         .mixdown
                                         .as_ref()
@@ -3107,8 +3179,39 @@ impl crate::app::WavesPreviewer {
                                         .and_then(|idx| overlay.channels.get(idx).map(|v| v.as_slice()))
                                         .or_else(|| overlay.channels.get(0).map(|v| v.as_slice()))
                                 };
-                                if let Some(buf) = och {
-                                    use crate::app::render::colors::{OVERLAY_COLOR, OVERLAY_STROKE_BASE, OVERLAY_STROKE_EMPH};
+                                use crate::app::render::colors::{
+                                    OVERLAY_COLOR, OVERLAY_STROKE_BASE, OVERLAY_STROKE_EMPH,
+                                };
+                                let base_total = tab.samples_len.max(1);
+                                let overlay_total = overlay.timeline_len.max(1);
+                                let is_time_stretch =
+                                    matches!(overlay.source_tool, ToolKind::TimeStretch);
+                                if overlay.is_overview_only() {
+                                    if let Some(overview) = overlay_overview {
+                                        let bins_values = Self::compute_overlay_bins_from_overview(
+                                            overview,
+                                            start,
+                                            visible_len,
+                                            base_total,
+                                            overlay_total,
+                                            waveform_columns.column_count(),
+                                            is_time_stretch,
+                                        );
+                                        if !bins_values.is_empty() {
+                                            ov::draw_bins_locked(
+                                                &painter,
+                                                lane_rect,
+                                                &waveform_columns,
+                                                &bins_values,
+                                                scale,
+                                                tab.vertical_zoom,
+                                                tab.vertical_view_center,
+                                                OVERLAY_COLOR,
+                                                OVERLAY_STROKE_BASE,
+                                            );
+                                        }
+                                    }
+                                } else if let Some(buf) = overlay_samples {
                                     let base_total = tab.samples_len.max(1);
                                     let overlay_total = overlay.timeline_len.max(1);
                                     let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
@@ -3232,8 +3335,18 @@ impl crate::app::WavesPreviewer {
                 }
                 if tab.active_tool != ToolKind::Trim && tab.preview_overlay.is_some() {
                     if let Some(overlay) = &tab.preview_overlay {
-                        // try channel match, fallback to first channel if overlay is mono
-                        let och: Option<&[f32]> = if use_mixdown {
+                        let overlay_overview: Option<&[(f32, f32)]> = if use_mixdown {
+                            overlay
+                                .overview_mixdown
+                                .as_ref()
+                                .map(|v| v.as_slice())
+                                .or_else(|| overlay.overview_channels.get(0).map(|v| v.as_slice()))
+                        } else {
+                            channel_index
+                                .and_then(|idx| overlay.overview_channels.get(idx).map(|v| v.as_slice()))
+                                .or_else(|| overlay.overview_channels.get(0).map(|v| v.as_slice()))
+                        };
+                        let overlay_samples: Option<&[f32]> = if use_mixdown {
                             overlay
                                 .mixdown
                                 .as_ref()
@@ -3244,9 +3357,35 @@ impl crate::app::WavesPreviewer {
                                 .and_then(|idx| overlay.channels.get(idx).map(|v| v.as_slice()))
                                 .or_else(|| overlay.channels.get(0).map(|v| v.as_slice()))
                         };
-                        if let Some(buf) = och {
-                            let base_total = tab.samples_len.max(1);
-                            let overlay_total = overlay.timeline_len.max(1);
+                        let base_total = tab.samples_len.max(1);
+                        let overlay_total = overlay.timeline_len.max(1);
+                        let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
+                        if overlay.is_overview_only() {
+                            if let Some(overview) = overlay_overview {
+                                let values = Self::compute_overlay_bins_from_overview(
+                                    overview,
+                                    start,
+                                    visible_len.max(1),
+                                    base_total,
+                                    overlay_total,
+                                    waveform_columns.column_count(),
+                                    is_time_stretch,
+                                );
+                                if !values.is_empty() {
+                                    ov::draw_bins_locked(
+                                        &painter,
+                                        lane_rect,
+                                        &waveform_columns,
+                                        &values,
+                                        scale,
+                                        tab.vertical_zoom,
+                                        tab.vertical_view_center,
+                                        egui::Color32::from_rgb(80, 240, 160),
+                                        1.3,
+                                    );
+                                }
+                            }
+                        } else if let Some(buf) = overlay_samples {
                             let unwrap_preview = matches!(overlay.source_tool, ToolKind::LoopEdit)
                                 && overlay_total > base_total
                                 && tab.pending_loop_unwrap.is_some()
@@ -3281,7 +3420,6 @@ impl crate::app::WavesPreviewer {
                                 // Map original-visible [start,end) to overlay domain using length ratio.
                                 // This keeps overlays visible at any zoom, even when length differs (e.g. TimeStretch).
                                 let lenb = buf.len();
-                                let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
                                 let ratio = if is_time_stretch {
                                     1.0
                                 } else if base_total > 0 {
@@ -4846,6 +4984,9 @@ impl crate::app::WavesPreviewer {
                                         if let Some(reason) = preview_disabled_reason {
                                             ui.label(RichText::new(reason).weak());
                                         }
+                                        if let Some(note) = simplified_preview_note {
+                                            ui.label(RichText::new(note).weak());
+                                        }
                                         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                         let shape_label = |shape: crate::app::types::FadeShape| match shape {
                                             crate::app::types::FadeShape::Linear => "Linear",
@@ -4934,8 +5075,14 @@ impl crate::app::WavesPreviewer {
                                                     stop_playback = true;
                                                     tab.preview_audio_tool = Some(ToolKind::Fade);
                                                 } else {
-                                                    tab.preview_audio_tool = None;
-                                                    tab.preview_overlay = None;
+                                                    if tab.tool_state.fade_in_ms > 0.0
+                                                        || tab.tool_state.fade_out_ms > 0.0
+                                                    {
+                                                        request_preview_refresh = true;
+                                                    } else {
+                                                        tab.preview_audio_tool = None;
+                                                        tab.preview_overlay = None;
+                                                    }
                                                 }
                                             }
                                             if ui.add_enabled(secs>0.0, egui::Button::new("Apply")).clicked() {
@@ -5025,8 +5172,14 @@ impl crate::app::WavesPreviewer {
                                                     stop_playback = true;
                                                     tab.preview_audio_tool = Some(ToolKind::Fade);
                                                 } else {
-                                                    tab.preview_audio_tool = None;
-                                                    tab.preview_overlay = None;
+                                                    if tab.tool_state.fade_in_ms > 0.0
+                                                        || tab.tool_state.fade_out_ms > 0.0
+                                                    {
+                                                        request_preview_refresh = true;
+                                                    } else {
+                                                        tab.preview_audio_tool = None;
+                                                        tab.preview_overlay = None;
+                                                    }
                                                 }
                                             }
                                             if ui.add_enabled(secs>0.0, egui::Button::new("Apply")).clicked() {
@@ -5043,7 +5196,7 @@ impl crate::app::WavesPreviewer {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
                                         if !preview_ok {
-                                            ui.label(RichText::new("Large clip: preview runs in background").weak());
+                                            ui.label(RichText::new("Long clip: simplified waveform preview, full preview runs in background").weak());
                                         }
                                         let mut semi = tab.tool_state.pitch_semitones;
                                         if !semi.is_finite() { semi = 0.0; }
@@ -5077,7 +5230,7 @@ impl crate::app::WavesPreviewer {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
                                         if !preview_ok {
-                                            ui.label(RichText::new("Large clip: preview runs in background").weak());
+                                            ui.label(RichText::new("Long clip: simplified waveform preview, full preview runs in background").weak());
                                         }
                                         let mut rate = tab.tool_state.stretch_rate;
                                         if !rate.is_finite() { rate = 1.0; }
@@ -5111,6 +5264,9 @@ impl crate::app::WavesPreviewer {
                                     if let Some(reason) = preview_disabled_reason {
                                         ui.label(RichText::new(reason).weak());
                                     }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
+                                    }
                                     let st = tab.tool_state;
                                     let mut gain_db = st.gain_db;
                                     if !gain_db.is_finite() { gain_db = 0.0; }
@@ -5136,8 +5292,12 @@ impl crate::app::WavesPreviewer {
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::Gain);
                                         } else {
-                                            tab.preview_audio_tool = None;
-                                            tab.preview_overlay = None;
+                                            if gain_db.abs() > 1e-6 {
+                                                request_preview_refresh = true;
+                                            } else {
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
+                                            }
                                         }
                                     }
                                     if ui.button("Apply").clicked() {
@@ -5150,6 +5310,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Normalize => {
                                     if let Some(reason) = preview_disabled_reason {
                                         ui.label(RichText::new(reason).weak());
+                                    }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
                                     }
                                     let st = tab.tool_state;
                                     let mut target_db = st.normalize_target_db;
@@ -5183,7 +5346,14 @@ impl crate::app::WavesPreviewer {
                                     if preview_button_enabled {
                                         let changed = (target_db - st.normalize_target_db).abs() > 1e-6;
                                         if changed {
-                                            preview_normalize(target_db, tab);
+                                            if preview_ok {
+                                                preview_normalize(target_db, tab);
+                                            } else if (target_db + 6.0).abs() > 1e-6 {
+                                                request_preview_refresh = true;
+                                            } else {
+                                                tab.preview_audio_tool = None;
+                                                tab.preview_overlay = None;
+                                            }
                                         }
                                     } else {
                                         tab.preview_audio_tool = None;
@@ -5193,7 +5363,14 @@ impl crate::app::WavesPreviewer {
                                         .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
                                         .clicked()
                                     {
-                                        preview_normalize(target_db, tab);
+                                        if preview_ok {
+                                            preview_normalize(target_db, tab);
+                                        } else if (target_db + 6.0).abs() > 1e-6 {
+                                            request_preview_refresh = true;
+                                        } else {
+                                            tab.preview_audio_tool = None;
+                                            tab.preview_overlay = None;
+                                        }
                                     }
                                     if ui.button("Apply").clicked() {
                                         do_normalize = Some(((0, tab.samples_len), target_db));
@@ -5206,6 +5383,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Loudness => {
                                     if let Some(reason) = preview_disabled_reason {
                                         ui.label(RichText::new(reason).weak());
+                                    }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
                                     }
                                     let st = tab.tool_state;
                                     let mut target_lufs = st.loudness_target_lufs;
@@ -5224,36 +5404,43 @@ impl crate::app::WavesPreviewer {
                                         .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
                                         .clicked()
                                     {
-                                        if let Ok(lufs) = crate::wave::lufs_integrated_from_multi(
-                                            &tab.ch_samples,
-                                            self.audio.shared.out_sample_rate,
-                                        ) {
-                                            if lufs.is_finite() {
-                                                let gain_db = target_lufs - lufs;
-                                                let gain = db_to_amp(gain_db);
-                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                for ch in overlay.iter_mut() {
-                                                    for v in ch.iter_mut() {
+                                        if preview_ok {
+                                            if let Ok(lufs) = crate::wave::lufs_integrated_from_multi(
+                                                &tab.ch_samples,
+                                                self.audio.shared.out_sample_rate,
+                                            ) {
+                                                if lufs.is_finite() {
+                                                    let gain_db = target_lufs - lufs;
+                                                    let gain = db_to_amp(gain_db);
+                                                    let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                    for ch in overlay.iter_mut() {
+                                                        for v in ch.iter_mut() {
+                                                            *v = (*v * gain).clamp(-1.0, 1.0);
+                                                        }
+                                                    }
+                                                    let timeline_len = overlay
+                                                        .get(0)
+                                                        .map(|c| c.len())
+                                                        .unwrap_or(tab.samples_len);
+                                                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                        overlay,
+                                                        ToolKind::Loudness,
+                                                        timeline_len,
+                                                    ));
+                                                    let mut mono = Self::editor_mixdown_mono(tab);
+                                                    for v in &mut mono {
                                                         *v = (*v * gain).clamp(-1.0, 1.0);
                                                     }
+                                                    pending_preview = Some((ToolKind::Loudness, mono));
+                                                    stop_playback = true;
+                                                    tab.preview_audio_tool = Some(ToolKind::Loudness);
                                                 }
-                                                let timeline_len = overlay
-                                                    .get(0)
-                                                    .map(|c| c.len())
-                                                    .unwrap_or(tab.samples_len);
-                                                tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                    overlay,
-                                                    ToolKind::Loudness,
-                                                    timeline_len,
-                                                ));
-                                                let mut mono = Self::editor_mixdown_mono(tab);
-                                                for v in &mut mono {
-                                                    *v = (*v * gain).clamp(-1.0, 1.0);
-                                                }
-                                                pending_preview = Some((ToolKind::Loudness, mono));
-                                                stop_playback = true;
-                                                tab.preview_audio_tool = Some(ToolKind::Loudness);
                                             }
+                                        } else if (target_lufs + 14.0).abs() > 1e-6 {
+                                            request_preview_refresh = true;
+                                        } else {
+                                            tab.preview_audio_tool = None;
+                                            tab.preview_overlay = None;
                                         }
                                     }
                                     if ui.button("Apply").clicked() {
@@ -6060,26 +6247,31 @@ impl crate::app::WavesPreviewer {
                                     if let Some(reason) = preview_disabled_reason {
                                         ui.label(RichText::new(reason).weak());
                                     }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
+                                    }
                                     ui.horizontal_wrapped(|ui| {
                                         if ui
                                             .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
                                             .clicked()
                                         {
-                                            // per-channel overlay
-                                            let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                            for ch in overlay.iter_mut() { ch.reverse(); }
-                                            let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
-                                            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                overlay,
-                                                ToolKind::Reverse,
-                                                timeline_len,
-                                            ));
-                                            // mono audition
-                                            let mut mono = Self::editor_mixdown_mono(tab);
-                                            mono.reverse();
-                                            pending_preview = Some((ToolKind::Reverse, mono));
-                                            stop_playback = true;
-                                            tab.preview_audio_tool = Some(ToolKind::Reverse);
+                                            if preview_ok {
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                for ch in overlay.iter_mut() { ch.reverse(); }
+                                                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                    overlay,
+                                                    ToolKind::Reverse,
+                                                    timeline_len,
+                                                ));
+                                                let mut mono = Self::editor_mixdown_mono(tab);
+                                                mono.reverse();
+                                                pending_preview = Some((ToolKind::Reverse, mono));
+                                                stop_playback = true;
+                                                tab.preview_audio_tool = Some(ToolKind::Reverse);
+                                            } else {
+                                                request_preview_refresh = true;
+                                            }
                                         }
                                         if ui.button("Apply").clicked() { do_reverse = Some((0, tab.samples_len)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
                                         if ui.button("Cancel").clicked() { need_restore_preview = true; }
@@ -6288,6 +6480,8 @@ impl crate::app::WavesPreviewer {
                 if stop_playback { self.audio.stop(); }
                 if need_restore_preview { self.clear_preview_if_any(tab_idx); }
                 if request_preview_refresh {
+                    self.clear_heavy_preview_state();
+                    self.clear_heavy_overlay_state();
                     self.refresh_tool_preview_for_tab(tab_idx);
                 }
                 if let Some(s) = request_seek {

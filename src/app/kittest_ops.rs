@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use crate::app::types::{
     EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, LoopMode,
-    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, ProcessingResult, ProcessingState,
-    ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ToolState, ViewMode,
+    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind, ProcessingResult,
+    ProcessingState, ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ToolState, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -566,6 +566,23 @@ impl super::WavesPreviewer {
             .get(tab_idx)
             .map(|tab| tab.preview_overlay.is_some())
             .unwrap_or(false)
+    }
+
+    pub fn test_preview_overlay_detail_kind(&self) -> Option<PreviewOverlayDetailKind> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).and_then(|tab| {
+            tab.preview_overlay
+                .as_ref()
+                .map(|overlay| overlay.detail_kind)
+        })
+    }
+
+    pub fn test_preview_overlay_is_overview_only(&self) -> bool {
+        self.test_preview_overlay_detail_kind() == Some(PreviewOverlayDetailKind::OverviewOnly)
+    }
+
+    pub fn test_preview_overlay_is_full_sample(&self) -> bool {
+        self.test_preview_overlay_detail_kind() == Some(PreviewOverlayDetailKind::FullSample)
     }
 
     pub fn test_preview_busy_for_active_tab(&self) -> bool {

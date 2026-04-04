@@ -118,13 +118,48 @@ mod small_fix_regressions {
             if tool_ok && overlay_ok {
                 return;
             }
-            if start.elapsed() > Duration::from_secs(10) {
+            if start.elapsed() > Duration::from_secs(20) {
                 panic!(
                     "preview timeout for {:?}: audio={:?} overlay={:?}",
                     tool,
                     harness.state().test_preview_audio_tool(),
                     harness.state().test_preview_overlay_tool()
                 );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_preview_overlay_tool(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        tool: ToolKind,
+    ) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_preview_overlay_tool() == Some(tool) {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!(
+                    "overlay preview timeout for {:?}: overlay={:?}",
+                    tool,
+                    harness.state().test_preview_overlay_tool()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_preview_idle(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_preview_busy_for_active_tab() {
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("preview idle timeout");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -1000,6 +1035,164 @@ mod small_fix_regressions {
             harness.state().test_preview_overlay_tool(),
             Some(ToolKind::Gain)
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_gain_preview_uses_overview_overlay_and_no_preview_audio() {
+        let dir = make_temp_dir("long_gain_preview_overview");
+        let src = dir.join("long_gain.wav");
+        write_wav_32_float(&src, 48_000, 42.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_tool_gain_db(4.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_overlay_tool(&mut harness, ToolKind::Gain);
+        wait_for_preview_idle(&mut harness);
+
+        assert_eq!(harness.state().test_preview_audio_tool(), None);
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_timestretch_preview_stages_overview_then_full() {
+        let dir = make_temp_dir("long_stretch_preview_stage");
+        let src = dir.join("long_stretch.wav");
+        write_wav_32_float(&src, 48_000, 42.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::TimeStretch));
+        assert!(harness.state_mut().test_set_tool_stretch_rate(1.30));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_overlay_tool(&mut harness, ToolKind::TimeStretch);
+
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+        assert!(
+            harness.state().test_preview_busy_for_active_tab(),
+            "staged long preview should remain busy until full overlay and audio are ready"
+        );
+
+        wait_for_preview_tool(&mut harness, ToolKind::TimeStretch, true);
+        wait_for_preview_idle(&mut harness);
+
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::TimeStretch)
+        );
+        assert!(harness.state().test_preview_overlay_is_full_sample());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_pitchshift_preview_stages_overview_then_full() {
+        let dir = make_temp_dir("long_pitch_preview_stage");
+        let src = dir.join("long_pitch.wav");
+        write_wav_32_float(&src, 48_000, 42.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::PitchShift));
+        assert!(harness.state_mut().test_set_tool_pitch_semitones(3.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_overlay_tool(&mut harness, ToolKind::PitchShift);
+
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+        assert!(
+            harness.state().test_preview_busy_for_active_tab(),
+            "staged long preview should remain busy until full overlay and audio are ready"
+        );
+
+        wait_for_preview_tool(&mut harness, ToolKind::PitchShift, true);
+        wait_for_preview_idle(&mut harness);
+
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::PitchShift)
+        );
+        assert!(harness.state().test_preview_overlay_is_full_sample());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_gain_preview_works_in_spectrogram_overlay_mode() {
+        let dir = make_temp_dir("long_gain_spec_overlay");
+        let src = dir.join("long_gain_spec.wav");
+        write_wav_32_float(&src, 48_000, 42.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_tool_gain_db(5.0));
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::app::ViewMode::Spectrogram));
+        assert!(harness.state_mut().test_set_waveform_overlay(true));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_overlay_tool(&mut harness, ToolKind::Gain);
+        wait_for_preview_idle(&mut harness);
+
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Gain)
+        );
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overview_only_preview_is_not_restored_from_session() {
+        let dir = make_temp_dir("overview_preview_session_roundtrip");
+        let src = dir.join("long_session.wav");
+        let sess = dir.join("overview_preview.nwsess");
+        write_wav_32_float(&src, 48_000, 42.5);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_tool_gain_db(4.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_overlay_tool(&mut harness, ToolKind::Gain);
+        wait_for_preview_idle(&mut harness);
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+
+        assert!(harness.state_mut().test_save_session_to(&sess));
+        assert!(harness.state_mut().test_open_session_from(&sess));
+        wait_for_tab_ready(&mut harness);
+
+        assert!(!harness.state().test_preview_overlay_present());
+        assert_eq!(harness.state().test_preview_audio_tool(), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

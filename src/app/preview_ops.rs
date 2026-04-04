@@ -33,44 +33,40 @@ impl super::WavesPreviewer {
 
     pub(super) fn drain_heavy_overlay_results(&mut self) {
         if let Some(rx) = &self.heavy_overlay_rx {
-            match rx.try_recv() {
-                Ok((p, overlay, timeline_len, gen)) => {
-                    let expected_tool = self.overlay_expected_tool;
-                    let expected_path = self.overlay_expected_path.clone();
-                    // Generation guard avoids applying stale overlays after rapid tool changes.
-                    if gen == self.overlay_expected_gen
-                        && expected_path.as_deref() == Some(p.as_path())
-                    {
-                        if let Some(idx) = self.tabs.iter().position(|t| t.path == p) {
-                            if let Some(tab) = self.tabs.get_mut(idx) {
-                                if let Some(tool) = expected_tool {
-                                    // If a tool was requested, only apply when it still matches.
-                                    if tab.preview_audio_tool == Some(tool)
-                                        || tab.active_tool == tool
-                                    {
-                                        tab.preview_overlay =
-                                            Some(Self::preview_overlay_from_channels(
-                                                overlay,
-                                                tool,
-                                                timeline_len,
-                                            ));
+            loop {
+                match rx.try_recv() {
+                    Ok((p, tool, overlay, gen, is_final)) => {
+                        let expected_tool = self.overlay_expected_tool;
+                        let expected_path = self.overlay_expected_path.clone();
+                        if gen == self.overlay_expected_gen
+                            && expected_path.as_deref() == Some(p.as_path())
+                        {
+                            if let Some(idx) = self.tabs.iter().position(|t| t.path == p) {
+                                if let Some(tab) = self.tabs.get_mut(idx) {
+                                    if let Some(expected_tool) = expected_tool {
+                                        if tab.preview_audio_tool == Some(expected_tool)
+                                            || tab.active_tool == expected_tool
+                                            || overlay.is_overview_only()
+                                        {
+                                            tab.preview_overlay = Some(overlay);
+                                        }
+                                    } else {
+                                        let _ = tool;
+                                        tab.preview_overlay = Some(overlay);
                                     }
-                                } else {
-                                    tab.preview_overlay =
-                                        Some(Self::preview_overlay_from_channels(
-                                            overlay,
-                                            tab.active_tool,
-                                            timeline_len,
-                                        ));
                                 }
                             }
                         }
+                        if is_final {
+                            self.clear_heavy_overlay_state();
+                            break;
+                        }
                     }
-                    self.clear_heavy_overlay_state();
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.clear_heavy_overlay_state();
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.clear_heavy_overlay_state();
+                        break;
+                    }
                 }
             }
         }

@@ -111,8 +111,10 @@ pub fn draw_aggregated_waveform_columns<F>(
         if !x.is_finite() || !column.min.is_finite() || !column.max.is_finite() {
             continue;
         }
-        let mut y0 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.max);
-        let mut y1 = waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.min);
+        let mut y0 =
+            waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.max);
+        let mut y1 =
+            waveform_y_from_amp(lane_rect, vertical_zoom, vertical_view_center, column.min);
         if !y0.is_finite() || !y1.is_finite() {
             continue;
         }

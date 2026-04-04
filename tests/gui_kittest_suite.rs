@@ -1740,7 +1740,9 @@ mod kittest_suite {
             ),
             "Mel"
         );
-        assert!(harness.state_mut().test_set_view_mode(neowaves::ViewMode::Chromagram));
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Chromagram));
         harness.run_steps(1);
         assert!(
             harness.state().tabs[harness.state().active_tab.unwrap()].show_waveform_overlay,

@@ -9,18 +9,17 @@ use serde::{Deserialize, Serialize};
 
 use super::helpers::sanitize_filename_component;
 use super::types::{
-    AppliedEffectGraphStamp, CachedEdit, EffectGraphAudioBus, EffectGraphChannelFlowHint,
+    AppliedEffectGraphStamp, CachedEdit, EffectGraphApplyPostprocessJob,
+    EffectGraphApplyPostprocessResult, EffectGraphAudioBus, EffectGraphChannelFlowHint,
     EffectGraphChannelLayout, EffectGraphChannelLayoutEntry, EffectGraphCombineMode,
     EffectGraphDebugPreview, EffectGraphDebugViewState, EffectGraphDocument, EffectGraphEdge,
-    EffectGraphInputPreviewResult, EffectGraphLibraryEntry, EffectGraphNode,
-    EffectGraphNodeData, EffectGraphNodeKind, EffectGraphNodeRunPhase,
-    EffectGraphNodeRunStatus, EffectGraphPendingAction, EffectGraphPlaybackTarget,
-    EffectGraphPluginNodeRuntimeState, EffectGraphPortKey, EffectGraphPredictedFormat,
-    EffectGraphPredictionCacheEntry, EffectGraphRunMode, EffectGraphSeverity,
-    EffectGraphSpectrumMode, EffectGraphTemplateFile, EffectGraphUndoState,
-    EffectGraphValidationIssue, EffectGraphWorkerEvent, EffectGraphApplyPostprocessJob,
-    EffectGraphApplyPostprocessResult, MediaSource, SpectrogramConfig, SpectrogramScale,
-    ToolKind, ToolState, UndoScope, WorkspaceView,
+    EffectGraphInputPreviewResult, EffectGraphLibraryEntry, EffectGraphNode, EffectGraphNodeData,
+    EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphNodeRunStatus,
+    EffectGraphPendingAction, EffectGraphPlaybackTarget, EffectGraphPluginNodeRuntimeState,
+    EffectGraphPortKey, EffectGraphPredictedFormat, EffectGraphPredictionCacheEntry,
+    EffectGraphRunMode, EffectGraphSeverity, EffectGraphSpectrumMode, EffectGraphTemplateFile,
+    EffectGraphUndoState, EffectGraphValidationIssue, EffectGraphWorkerEvent, MediaSource,
+    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, UndoScope, WorkspaceView,
 };
 use super::WavesPreviewer;
 use crate::audio::AudioBuffer;
@@ -3654,7 +3653,9 @@ impl WavesPreviewer {
             .input_preview_worker_state
             .active_job_id
             .wrapping_add(1);
-        self.effect_graph.input_preview_worker_state.autoplay_requested = false;
+        self.effect_graph
+            .input_preview_worker_state
+            .autoplay_requested = false;
         self.effect_graph.input_preview_worker_state.rx = None;
         self.effect_graph.tester.last_input_audio = None;
         self.effect_graph.tester.last_input_bus = None;
@@ -3670,12 +3671,16 @@ impl WavesPreviewer {
             "{target}|{}|{}|{}",
             input_bus.sample_rate.max(1),
             input_bus.channels.len(),
-            input_bus.channel_layout.declared_width.max(input_bus.channels.len())
+            input_bus
+                .channel_layout
+                .declared_width
+                .max(input_bus.channels.len())
         ))
     }
 
     fn ensure_effect_graph_postprocess_worker(&mut self) {
-        if self.effect_graph.postprocess_tx.is_some() && self.effect_graph.postprocess_rx.is_some() {
+        if self.effect_graph.postprocess_tx.is_some() && self.effect_graph.postprocess_rx.is_some()
+        {
             return;
         }
         use std::sync::mpsc;
@@ -3739,10 +3744,7 @@ impl WavesPreviewer {
         }
     }
 
-    fn apply_effect_graph_postprocess_result(
-        &mut self,
-        result: EffectGraphApplyPostprocessResult,
-    ) {
+    fn apply_effect_graph_postprocess_result(&mut self, result: EffectGraphApplyPostprocessResult) {
         let is_current = self
             .effect_graph
             .pending_effect_graph_commits
@@ -3887,20 +3889,21 @@ impl WavesPreviewer {
                             input.monitor_sr,
                             input.resample_quality,
                         );
-                        let rough_waveform = effect_graph_build_rough_waveform(&output_bus.channels);
+                        let rough_waveform =
+                            effect_graph_build_rough_waveform(&output_bus.channels);
                         let _ = tx.send(EffectGraphWorkerEvent::PathFinished {
                             path: input.path,
                             output_bus,
                             input_bus: input_bus_for_summary.clone(),
-                            input_monitor_audio: input_bus_for_summary
-                                .as_ref()
-                                .map(|bus| Arc::new(AudioBuffer::from_channels(
+                            input_monitor_audio: input_bus_for_summary.as_ref().map(|bus| {
+                                Arc::new(AudioBuffer::from_channels(
                                     monitor_channels_from_bus_at_rate(
                                         bus,
                                         input.monitor_sr,
                                         input.resample_quality,
                                     ),
-                                ))),
+                                ))
+                            }),
                             monitor_audio,
                             rough_waveform,
                             total_elapsed_ms: started.elapsed().as_secs_f32() * 1000.0,
@@ -4069,7 +4072,10 @@ impl WavesPreviewer {
         }
     }
 
-    pub(super) fn start_effect_graph_input_preview(&mut self, autoplay: bool) -> Result<(), String> {
+    pub(super) fn start_effect_graph_input_preview(
+        &mut self,
+        autoplay: bool,
+    ) -> Result<(), String> {
         if let Some(audio) = self.effect_graph.tester.last_input_audio.clone() {
             if autoplay {
                 self.effect_graph_toggle_playback(EffectGraphPlaybackTarget::Input, audio);
@@ -4103,7 +4109,9 @@ impl WavesPreviewer {
             .active_job_id
             .wrapping_add(1);
         let job_id = self.effect_graph.input_preview_worker_state.active_job_id;
-        self.effect_graph.input_preview_worker_state.autoplay_requested = autoplay;
+        self.effect_graph
+            .input_preview_worker_state
+            .autoplay_requested = autoplay;
         self.effect_graph.input_preview_worker_state.rx = Some(rx);
         let bit_depth = self.bit_depth_override.get(&target_path).copied();
         let monitor_sr = self.audio.shared.out_sample_rate.max(1);
@@ -4116,11 +4124,7 @@ impl WavesPreviewer {
                     }
                     let input_bus = dense_audio_bus(channels, sample_rate.max(1));
                     let input_audio = Arc::new(AudioBuffer::from_channels(
-                        monitor_channels_from_bus_at_rate(
-                            &input_bus,
-                            monitor_sr,
-                            resample_quality,
-                        ),
+                        monitor_channels_from_bus_at_rate(&input_bus, monitor_sr, resample_quality),
                     ));
                     EffectGraphInputPreviewResult {
                         job_id,
@@ -4150,7 +4154,8 @@ impl WavesPreviewer {
         }
         self.effect_graph.debug_previews.clear();
         self.invalidate_effect_graph_input_preview();
-        let (input_bus, target_path, worker_path) = self.effect_graph_resolve_test_input_source()?;
+        let (input_bus, target_path, worker_path) =
+            self.effect_graph_resolve_test_input_source()?;
         self.effect_graph.tester.target_path = target_path.clone();
         if let Some(path) = target_path {
             self.effect_graph.tester.target_path_input = path.display().to_string();
@@ -4467,7 +4472,11 @@ impl WavesPreviewer {
                     } else {
                         self.effect_graph.tester.last_input_bus = result.input_bus;
                         self.effect_graph.tester.last_input_audio = result.input_audio.clone();
-                        if self.effect_graph.input_preview_worker_state.autoplay_requested {
+                        if self
+                            .effect_graph
+                            .input_preview_worker_state
+                            .autoplay_requested
+                        {
                             if let Some(audio) = result.input_audio {
                                 self.effect_graph_toggle_playback(
                                     EffectGraphPlaybackTarget::Input,
@@ -4476,13 +4485,17 @@ impl WavesPreviewer {
                             }
                         }
                     }
-                    self.effect_graph.input_preview_worker_state.autoplay_requested = false;
+                    self.effect_graph
+                        .input_preview_worker_state
+                        .autoplay_requested = false;
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 keep_rx = false;
-                self.effect_graph.input_preview_worker_state.autoplay_requested = false;
+                self.effect_graph
+                    .input_preview_worker_state
+                    .autoplay_requested = false;
             }
         }
         if keep_rx {
@@ -4550,166 +4563,169 @@ impl WavesPreviewer {
                 Ok(event) => {
                     processed = processed.saturating_add(1);
                     match event {
-                    EffectGraphWorkerEvent::RunStarted { mode, total } => {
-                        self.effect_graph.runner.mode = Some(mode);
-                        self.effect_graph.runner.total = total;
-                        self.effect_graph.runner.done = 0;
-                        if mode == EffectGraphRunMode::TestPreview {
-                            self.effect_graph.debug_previews.clear();
-                        }
-                    }
-                    EffectGraphWorkerEvent::PathStarted { path, index, total } => {
-                        self.effect_graph.runner.current_path = Some(path.clone());
-                        for status in self.effect_graph.runner.node_status.values_mut() {
-                            status.phase = EffectGraphNodeRunPhase::Idle;
-                            status.elapsed_ms = None;
-                            status.error = None;
-                        }
-                        self.push_effect_graph_console(
-                            EffectGraphSeverity::Info,
-                            "run",
-                            format!("start {}/{} {}", index, total, path.display()),
-                            None,
-                        );
-                    }
-                    EffectGraphWorkerEvent::NodeStarted { node_id } => {
-                        let status = self
-                            .effect_graph
-                            .runner
-                            .node_status
-                            .entry(node_id.clone())
-                            .or_default();
-                        status.phase = EffectGraphNodeRunPhase::Running;
-                        status.error = None;
-                    }
-                    EffectGraphWorkerEvent::NodeFinished {
-                        node_id,
-                        elapsed_ms,
-                    } => {
-                        let status = self
-                            .effect_graph
-                            .runner
-                            .node_status
-                            .entry(node_id.clone())
-                            .or_default();
-                        status.phase = EffectGraphNodeRunPhase::Success;
-                        status.elapsed_ms = Some(elapsed_ms);
-                        self.push_effect_graph_console(
-                            EffectGraphSeverity::Info,
-                            "node",
-                            format!("{node_id}: {elapsed_ms:.1} ms"),
-                            Some(node_id),
-                        );
-                    }
-                    EffectGraphWorkerEvent::NodeLog {
-                        node_id,
-                        severity,
-                        message,
-                    } => {
-                        self.push_effect_graph_console(
-                            severity,
-                            "node",
-                            format!("{node_id}: {message}"),
-                            Some(node_id),
-                        );
-                    }
-                    EffectGraphWorkerEvent::NodeDebugPreview { node_id, preview } => {
-                        self.effect_graph
-                            .debug_previews
-                            .insert(node_id, Arc::new(preview));
-                    }
-                    EffectGraphWorkerEvent::PathFinished {
-                        path,
-                        output_bus,
-                        input_bus,
-                        input_monitor_audio,
-                        monitor_audio,
-                        rough_waveform,
-                        total_elapsed_ms,
-                    } => {
-                        self.effect_graph.runner.done =
-                            self.effect_graph.runner.done.saturating_add(1);
-                        match self.effect_graph.runner.mode {
-                            Some(EffectGraphRunMode::TestPreview) => {
-                                self.effect_graph.tester.last_input_bus = input_bus;
-                                self.effect_graph.tester.last_input_audio = input_monitor_audio;
-                                self.effect_graph.tester.last_output_bus = Some(output_bus.clone());
-                                self.effect_graph.tester.last_output_audio =
-                                    Some(Arc::new(AudioBuffer::from_channels(monitor_audio)));
-                                self.effect_graph.tester.last_run_ms = Some(total_elapsed_ms);
-                                self.effect_graph.tester.last_output_summary = format!(
-                                    "{} ch / {:.2}s @ {} Hz",
-                                    output_bus.channels.len().max(1),
-                                    output_bus
-                                        .channels
-                                        .get(0)
-                                        .map(|channel| channel.len() as f32
-                                            / output_bus.sample_rate.max(1) as f32)
-                                        .unwrap_or(0.0),
-                                    output_bus.sample_rate.max(1),
-                                );
-                                self.push_effect_graph_console(
-                                    EffectGraphSeverity::Info,
-                                    "test",
-                                    format!(
-                                        "test finished: {} ({total_elapsed_ms:.1} ms)",
-                                        path.display()
-                                    ),
-                                    None,
-                                );
+                        EffectGraphWorkerEvent::RunStarted { mode, total } => {
+                            self.effect_graph.runner.mode = Some(mode);
+                            self.effect_graph.runner.total = total;
+                            self.effect_graph.runner.done = 0;
+                            if mode == EffectGraphRunMode::TestPreview {
+                                self.effect_graph.debug_previews.clear();
                             }
-                            Some(EffectGraphRunMode::ApplyToListSelection) => {
-                                self.apply_effect_graph_result_to_path(
-                                    &path,
-                                    output_bus.channels,
-                                    output_bus.sample_rate,
-                                    rough_waveform,
-                                    self.effect_graph.run_generation,
-                                );
-                            }
-                            None => {}
                         }
-                    }
-                    EffectGraphWorkerEvent::Failed {
-                        path,
-                        node_id,
-                        message,
-                    } => {
-                        if let Some(node_id) = node_id.clone() {
+                        EffectGraphWorkerEvent::PathStarted { path, index, total } => {
+                            self.effect_graph.runner.current_path = Some(path.clone());
+                            for status in self.effect_graph.runner.node_status.values_mut() {
+                                status.phase = EffectGraphNodeRunPhase::Idle;
+                                status.elapsed_ms = None;
+                                status.error = None;
+                            }
+                            self.push_effect_graph_console(
+                                EffectGraphSeverity::Info,
+                                "run",
+                                format!("start {}/{} {}", index, total, path.display()),
+                                None,
+                            );
+                        }
+                        EffectGraphWorkerEvent::NodeStarted { node_id } => {
                             let status = self
                                 .effect_graph
                                 .runner
                                 .node_status
                                 .entry(node_id.clone())
                                 .or_default();
-                            status.phase = EffectGraphNodeRunPhase::Failed;
-                            status.error = Some(message.clone());
+                            status.phase = EffectGraphNodeRunPhase::Running;
+                            status.error = None;
                         }
-                        if self.effect_graph.runner.mode == Some(EffectGraphRunMode::TestPreview) {
-                            self.effect_graph.tester.last_error = Some(message.clone());
-                        }
-                        let scope = if self.effect_graph.runner.mode
-                            == Some(EffectGraphRunMode::TestPreview)
-                        {
-                            "test"
-                        } else {
-                            "apply"
-                        };
-                        let prefix = path
-                            .map(|value| value.display().to_string())
-                            .unwrap_or_else(|| "effect graph".to_string());
-                        self.push_effect_graph_console(
-                            EffectGraphSeverity::Error,
-                            scope,
-                            format!("{prefix}: {message}"),
+                        EffectGraphWorkerEvent::NodeFinished {
                             node_id,
-                        );
+                            elapsed_ms,
+                        } => {
+                            let status = self
+                                .effect_graph
+                                .runner
+                                .node_status
+                                .entry(node_id.clone())
+                                .or_default();
+                            status.phase = EffectGraphNodeRunPhase::Success;
+                            status.elapsed_ms = Some(elapsed_ms);
+                            self.push_effect_graph_console(
+                                EffectGraphSeverity::Info,
+                                "node",
+                                format!("{node_id}: {elapsed_ms:.1} ms"),
+                                Some(node_id),
+                            );
+                        }
+                        EffectGraphWorkerEvent::NodeLog {
+                            node_id,
+                            severity,
+                            message,
+                        } => {
+                            self.push_effect_graph_console(
+                                severity,
+                                "node",
+                                format!("{node_id}: {message}"),
+                                Some(node_id),
+                            );
+                        }
+                        EffectGraphWorkerEvent::NodeDebugPreview { node_id, preview } => {
+                            self.effect_graph
+                                .debug_previews
+                                .insert(node_id, Arc::new(preview));
+                        }
+                        EffectGraphWorkerEvent::PathFinished {
+                            path,
+                            output_bus,
+                            input_bus,
+                            input_monitor_audio,
+                            monitor_audio,
+                            rough_waveform,
+                            total_elapsed_ms,
+                        } => {
+                            self.effect_graph.runner.done =
+                                self.effect_graph.runner.done.saturating_add(1);
+                            match self.effect_graph.runner.mode {
+                                Some(EffectGraphRunMode::TestPreview) => {
+                                    self.effect_graph.tester.last_input_bus = input_bus;
+                                    self.effect_graph.tester.last_input_audio = input_monitor_audio;
+                                    self.effect_graph.tester.last_output_bus =
+                                        Some(output_bus.clone());
+                                    self.effect_graph.tester.last_output_audio =
+                                        Some(Arc::new(AudioBuffer::from_channels(monitor_audio)));
+                                    self.effect_graph.tester.last_run_ms = Some(total_elapsed_ms);
+                                    self.effect_graph.tester.last_output_summary = format!(
+                                        "{} ch / {:.2}s @ {} Hz",
+                                        output_bus.channels.len().max(1),
+                                        output_bus
+                                            .channels
+                                            .get(0)
+                                            .map(|channel| channel.len() as f32
+                                                / output_bus.sample_rate.max(1) as f32)
+                                            .unwrap_or(0.0),
+                                        output_bus.sample_rate.max(1),
+                                    );
+                                    self.push_effect_graph_console(
+                                        EffectGraphSeverity::Info,
+                                        "test",
+                                        format!(
+                                            "test finished: {} ({total_elapsed_ms:.1} ms)",
+                                            path.display()
+                                        ),
+                                        None,
+                                    );
+                                }
+                                Some(EffectGraphRunMode::ApplyToListSelection) => {
+                                    self.apply_effect_graph_result_to_path(
+                                        &path,
+                                        output_bus.channels,
+                                        output_bus.sample_rate,
+                                        rough_waveform,
+                                        self.effect_graph.run_generation,
+                                    );
+                                }
+                                None => {}
+                            }
+                        }
+                        EffectGraphWorkerEvent::Failed {
+                            path,
+                            node_id,
+                            message,
+                        } => {
+                            if let Some(node_id) = node_id.clone() {
+                                let status = self
+                                    .effect_graph
+                                    .runner
+                                    .node_status
+                                    .entry(node_id.clone())
+                                    .or_default();
+                                status.phase = EffectGraphNodeRunPhase::Failed;
+                                status.error = Some(message.clone());
+                            }
+                            if self.effect_graph.runner.mode
+                                == Some(EffectGraphRunMode::TestPreview)
+                            {
+                                self.effect_graph.tester.last_error = Some(message.clone());
+                            }
+                            let scope = if self.effect_graph.runner.mode
+                                == Some(EffectGraphRunMode::TestPreview)
+                            {
+                                "test"
+                            } else {
+                                "apply"
+                            };
+                            let prefix = path
+                                .map(|value| value.display().to_string())
+                                .unwrap_or_else(|| "effect graph".to_string());
+                            self.push_effect_graph_console(
+                                EffectGraphSeverity::Error,
+                                scope,
+                                format!("{prefix}: {message}"),
+                                node_id,
+                            );
+                        }
+                        EffectGraphWorkerEvent::Finished => {
+                            keep_rx = false;
+                            break;
+                        }
                     }
-                    EffectGraphWorkerEvent::Finished => {
-                        keep_rx = false;
-                        break;
-                    }
-                }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {

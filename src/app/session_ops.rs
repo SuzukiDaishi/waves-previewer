@@ -534,7 +534,7 @@ impl super::WavesPreviewer {
                 }
             }
             if let Some(overlay) = tab.preview_overlay.as_ref() {
-                if !overlay.channels.is_empty() {
+                if overlay.is_full_sample() {
                     match save_sidecar_preview_audio(
                         &path,
                         idx,

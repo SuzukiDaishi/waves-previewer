@@ -742,13 +742,33 @@ pub struct PluginProcessState {
     pub undo: Option<EditorUndoState>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PreviewOverlayDetailKind {
+    FullSample,
+    OverviewOnly,
+}
+
 #[derive(Clone)]
 pub struct PreviewOverlay {
     pub channels: Vec<Vec<f32>>,
     pub mixdown: Option<Vec<f32>>,
+    pub overview_channels: Vec<Vec<(f32, f32)>>,
+    pub overview_mixdown: Option<Vec<(f32, f32)>>,
     #[allow(dead_code)]
     pub source_tool: ToolKind,
     pub timeline_len: usize,
+    pub detail_kind: PreviewOverlayDetailKind,
+}
+
+impl PreviewOverlay {
+    pub fn is_full_sample(&self) -> bool {
+        self.detail_kind == PreviewOverlayDetailKind::FullSample && !self.channels.is_empty()
+    }
+
+    pub fn is_overview_only(&self) -> bool {
+        self.detail_kind == PreviewOverlayDetailKind::OverviewOnly
+            && (!self.overview_channels.is_empty() || self.overview_mixdown.is_some())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

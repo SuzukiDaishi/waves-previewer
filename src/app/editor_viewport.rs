@@ -414,7 +414,10 @@ impl super::WavesPreviewer {
             })
     }
 
-    fn editor_feature_key_for_view(path: &PathBuf, view_mode: ViewMode) -> Option<EditorAnalysisKey> {
+    fn editor_feature_key_for_view(
+        path: &PathBuf,
+        view_mode: ViewMode,
+    ) -> Option<EditorAnalysisKey> {
         let kind = match view_mode {
             ViewMode::Tempogram => EditorAnalysisKind::Tempogram,
             ViewMode::Chromagram => EditorAnalysisKind::Chromagram,
@@ -1047,8 +1050,7 @@ impl super::WavesPreviewer {
         let (target_w, target_lane_h) =
             Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
-        let mut image =
-            ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
+        let mut image = ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
         let Some((f0, f1)) =
             Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
         else {
@@ -1067,8 +1069,7 @@ impl super::WavesPreviewer {
         let mut frame_maxima = vec![0.0f32; frame_count];
         let mut global_max = 0.0f32;
         for (local_frame, frame_idx) in (f0..f1).enumerate() {
-            let row = &data.values
-                [frame_idx * data.tempo_bins..(frame_idx + 1) * data.tempo_bins];
+            let row = &data.values[frame_idx * data.tempo_bins..(frame_idx + 1) * data.tempo_bins];
             let row_max = row.iter().copied().fold(0.0f32, f32::max);
             frame_maxima[local_frame] = row_max;
             global_max = global_max.max(row_max);
@@ -1086,14 +1087,16 @@ impl super::WavesPreviewer {
                     .unwrap_or(global_floor)
                     .max(global_floor);
                 for y in 0..target_lane_h {
-                    let frac_local = 1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
+                    let frac_local =
+                        1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
                     let frac = visible_min + frac_local * (visible_max - visible_min);
                     let bin = (frac.clamp(0.0, 1.0) * data.tempo_bins.saturating_sub(1) as f32)
                         .round() as usize;
                     let idx = base + bin.min(data.tempo_bins.saturating_sub(1));
                     let value = data.values.get(idx).copied().unwrap_or(0.0).max(0.0);
                     let norm = (value / frame_den).clamp(0.0, 1.0).sqrt();
-                    let pixel_idx = (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
+                    let pixel_idx =
+                        (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
                         *pixel = db_to_color(-80.0 + norm * 80.0);
                     }
@@ -1119,8 +1122,7 @@ impl super::WavesPreviewer {
         let (target_w, target_lane_h) =
             Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
-        let mut image =
-            ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
+        let mut image = ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
         let Some((f0, f1)) =
             Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
         else {
@@ -1142,10 +1144,11 @@ impl super::WavesPreviewer {
                 let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
                 let base = frame_idx * data.bins;
                 for y in 0..target_lane_h {
-                    let frac_local = 1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
+                    let frac_local =
+                        1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
                     let frac = visible_min + frac_local * (visible_max - visible_min);
-                    let bin =
-                        (frac.clamp(0.0, 1.0) * data.bins.saturating_sub(1) as f32).round() as usize;
+                    let bin = (frac.clamp(0.0, 1.0) * data.bins.saturating_sub(1) as f32).round()
+                        as usize;
                     let norm = data
                         .values
                         .get(base + bin.min(data.bins.saturating_sub(1)))
@@ -1153,7 +1156,8 @@ impl super::WavesPreviewer {
                         .unwrap_or(0.0)
                         .clamp(0.0, 1.0)
                         .sqrt();
-                    let pixel_idx = (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
+                    let pixel_idx =
+                        (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
                         *pixel = db_to_color(-80.0 + norm * 80.0);
                     }

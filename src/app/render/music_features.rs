@@ -124,9 +124,9 @@ pub fn compute_chromagram(
         (sr * 0.5).min(MAX_CHROMA_FREQ_HZ)
     };
     let chroma_bins_per_octave = CHROMA_BINS_PER_OCTAVE;
-    let chroma_input_bins =
-        (((max_freq / CHROMA_FMIN_HZ).log2().ceil().max(1.0) as usize) * chroma_bins_per_octave)
-            .max(chroma_bins_per_octave);
+    let chroma_input_bins = (((max_freq / CHROMA_FMIN_HZ).log2().ceil().max(1.0) as usize)
+        * chroma_bins_per_octave)
+        .max(chroma_bins_per_octave);
     let chroma_basis = build_cq_to_chroma_basis(chroma_input_bins, chroma_bins_per_octave, 12);
     let mut raw_values = vec![0.0f32; stft.frames * 12];
     for frame in 0..stft.frames {
@@ -421,7 +421,8 @@ fn compute_chroma_subbin_energy(
     n_input: usize,
 ) -> Vec<f32> {
     let mut energy = vec![0.0f32; n_input.max(1)];
-    if power_row.is_empty() || sample_rate <= 0.0 || fft_size == 0 || max_freq <= MIN_CHROMA_FREQ_HZ {
+    if power_row.is_empty() || sample_rate <= 0.0 || fft_size == 0 || max_freq <= MIN_CHROMA_FREQ_HZ
+    {
         return energy;
     }
     let bins_per_octave = CHROMA_BINS_PER_OCTAVE as f32;
@@ -468,11 +469,7 @@ fn compute_chroma_subbin_energy(
     }
 }
 
-fn build_cq_to_chroma_basis(
-    n_input: usize,
-    bins_per_octave: usize,
-    n_chroma: usize,
-) -> Vec<f32> {
+fn build_cq_to_chroma_basis(n_input: usize, bins_per_octave: usize, n_chroma: usize) -> Vec<f32> {
     let mut basis = vec![0.0f32; n_input.saturating_mul(n_chroma)];
     if n_input == 0 || n_chroma == 0 || bins_per_octave == 0 {
         return basis;
@@ -507,7 +504,12 @@ fn quantize_chroma_levels(raw_values: &[f32], frames: usize, bins: usize) -> Vec
     quantized
 }
 
-fn apply_cens_smoothing(raw_values: &[f32], frames: usize, bins: usize, win_len: usize) -> Vec<f32> {
+fn apply_cens_smoothing(
+    raw_values: &[f32],
+    frames: usize,
+    bins: usize,
+    win_len: usize,
+) -> Vec<f32> {
     if frames == 0 || bins == 0 || raw_values.is_empty() {
         return Vec::new();
     }
@@ -588,7 +590,11 @@ fn sample_stft_magnitude_at_freq(
     sample_rate: f32,
     fft_size: usize,
 ) -> f32 {
-    if power_row.is_empty() || fft_size == 0 || sample_rate <= 0.0 || !freq.is_finite() || freq <= 0.0
+    if power_row.is_empty()
+        || fft_size == 0
+        || sample_rate <= 0.0
+        || !freq.is_finite()
+        || freq <= 0.0
     {
         return 0.0;
     }
@@ -869,7 +875,10 @@ mod tests {
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .unwrap();
-            assert_eq!(best_idx, expected_idx, "freq {freq} should map to {expected_idx}");
+            assert_eq!(
+                best_idx, expected_idx,
+                "freq {freq} should map to {expected_idx}"
+            );
         }
     }
 
@@ -922,7 +931,11 @@ mod tests {
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .unwrap();
-            assert_ne!(best_idx, 3, "case {case_idx} should not bias D# profile: {:?}", profile);
+            assert_ne!(
+                best_idx, 3,
+                "case {case_idx} should not bias D# profile: {:?}",
+                profile
+            );
         }
     }
 
@@ -947,7 +960,11 @@ mod tests {
         let data = compute_tempogram(&mono, sample_rate, &cfg);
         assert!(data.bpm_values.len() > 8);
         for pair in data.bpm_values.windows(2) {
-            assert!(pair[0] <= pair[1], "bpm axis should stay monotonic ascending: {:?}", pair);
+            assert!(
+                pair[0] <= pair[1],
+                "bpm axis should stay monotonic ascending: {:?}",
+                pair
+            );
         }
     }
 }

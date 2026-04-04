@@ -570,8 +570,9 @@ impl crate::app::WavesPreviewer {
                     Some("preview audio is not ready".to_string());
                 return;
             };
-            if overlay.channels.is_empty() {
-                tab.music_analysis_draft.preview_error = Some("preview audio is empty".to_string());
+            if overlay.is_overview_only() || overlay.channels.is_empty() {
+                tab.music_analysis_draft.preview_error =
+                    Some("preview audio is not ready".to_string());
                 return;
             }
             let undo_state = Self::capture_undo_state(tab);

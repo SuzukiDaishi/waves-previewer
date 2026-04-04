@@ -23,8 +23,14 @@ Repository Layout
 - `src/`: Rust sources (app + engine).
   - `src/app/`: WavesPreviewer implementation split by feature.
     - `ui/`: UI panels/windows (top bar, list, editor, debug, export settings).
+      - `ui/topbar/`: top bar sections (`menus`, `transport`, `status`).
+      - `ui/list/`: list focus/keyboard and table-building helpers.
     - `render/`: waveform/spectrogram rendering helpers.
     - `*_ops.rs`: operation logic split by domain (input, clipboard, session, loading, editor apply, loudnorm, resample, meta, preview, export, external load).
+    - `app_init.rs`: startup/build orchestration for `WavesPreviewer`.
+    - `frame_ops.rs`: per-frame `eframe::App::update` orchestration.
+    - `tab_ops.rs`: open/activate tab helpers.
+    - `editor_decode_ops.rs`: background editor decode spawn/drain helpers.
     - `logic.rs`: per-frame update logic.
     - `types.rs`: shared app state and enums.
     - `project.rs`: session (nwsess) serialization helpers (legacy naming).
@@ -40,7 +46,8 @@ Repository Layout
     - `audio_ops.rs`: output volume + per-file gain application.
   - `src/mcp/`: MCP server/client glue for automation (stdio/http).
   - `src/bin/`: extra binaries/utilities (if present).
-  - `src/main.rs`: CLI entry + arg parsing.
+  - `src/main.rs`: native startup entry.
+  - `src/cli.rs`: CLI arg parsing and startup config helpers.
   - `src/lib.rs`: crate entry.
   - `src/audio*.rs`, `src/wave.rs`, `src/markers.rs`, `src/loop_markers.rs`: audio I/O and DSP utilities.
   - `src/ipc.rs`: IPC message definitions.
@@ -129,3 +136,8 @@ When Changing Audio/Editor Logic
 - Update both waveform visuals and playback buffers.
 - If adding background work, wire progress + cancel and log to Debug.
 - For large clips, consider using file-based preview paths to avoid UI stalls.
+
+Current staged large-file exceptions
+- `src/app/ui/editor.rs`: still the largest UI surface; split by canvas/timeline/tool-panel responsibilities in stages.
+- `src/app/ui/effect_graph.rs`: keep behavior stable while peeling canvas/input/inspector helpers apart.
+- `src/app/effect_graph_ops.rs`: large but cohesive runtime; split by validation / runner / drain paths instead of arbitrary slices.

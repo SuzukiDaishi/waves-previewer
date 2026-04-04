@@ -4,6 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Refactor: Large File / Large Function Split
+- Split app startup and frame orchestration out of `src/app.rs` into `src/app/app_init.rs` and `src/app/frame_ops.rs`.
+- Moved tab open/activate and editor decode orchestration into `src/app/tab_ops.rs` and `src/app/editor_decode_ops.rs`.
+- Split top bar UI into `src/app/ui/topbar/{menus,transport,status}.rs` and reduced the large status-row renderer into smaller activity helpers.
+- Split CLI parsing out of `src/main.rs` into `src/cli.rs`, keeping `main.rs` focused on native startup.
+- Split list UI support code into `src/app/ui/list/navigation.rs` and `src/app/ui/list/table.rs`; `ui_list_view` now acts as the main orchestration entry instead of carrying focus logic and table definition inline.
+- Documented current staged large-file exceptions in `README.md` and `AGENTS.md` so remaining big files are explicit rather than implicit.
+
 ### Settings/Theme + Undo/Redo + List UX (Latest)
 - Added Appearance setting (Dark/Light), default Dark; preference persists across restarts.
 - Fixed initial theme application so startup respects the saved theme.
