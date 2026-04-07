@@ -923,6 +923,80 @@ mod kittest_suite {
     }
 
     #[test]
+    fn l_applies_current_loop_markers() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+
+        assert!(harness.state_mut().test_set_loop_region_frac(0.20, 0.40));
+        let applied = harness
+            .state()
+            .test_loop_region()
+            .expect("applied loop region");
+        {
+            let tab = &mut harness.state_mut().tabs[tab_idx];
+            tab.loop_region_applied = Some(applied);
+            tab.loop_region_committed = Some(applied);
+            tab.loop_markers_saved = Some(applied);
+            tab.loop_mode = neowaves::LoopMode::Off;
+        }
+
+        assert!(harness.state_mut().test_set_loop_region_frac(0.55, 0.75));
+        {
+            let tab = &mut harness.state_mut().tabs[tab_idx];
+            tab.pending_loop_unwrap = Some(3);
+        }
+        let editing = harness
+            .state()
+            .test_loop_region()
+            .expect("editing loop region");
+
+        harness.key_press(Key::L);
+        harness.run_steps(2);
+
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(tab.loop_region, Some(editing));
+        assert_eq!(tab.loop_region_applied, Some(editing));
+        assert_eq!(tab.loop_region_committed, Some(editing));
+        assert_eq!(tab.loop_mode, neowaves::LoopMode::Marker);
+        assert_eq!(tab.pending_loop_unwrap, None);
+        assert!(tab.loop_markers_dirty);
+    }
+
+    #[test]
+    fn editor_loop_visual_ranges_distinguish_applied_and_editing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+
+        assert!(harness.state_mut().test_set_loop_region_frac(0.20, 0.40));
+        let applied = harness.state().test_loop_region().expect("applied loop");
+        {
+            let tab = &mut harness.state_mut().tabs[tab_idx];
+            tab.loop_region_applied = Some(applied);
+        }
+        assert_eq!(harness.state().test_loop_visual_applied_region(), None);
+        assert_eq!(
+            harness.state().test_loop_visual_editing_region(),
+            Some(applied)
+        );
+
+        assert!(harness.state_mut().test_set_loop_region_frac(0.55, 0.75));
+        let editing = harness.state().test_loop_region().expect("editing loop");
+        assert_eq!(
+            harness.state().test_loop_visual_applied_region(),
+            Some(applied)
+        );
+        assert_eq!(
+            harness.state().test_loop_visual_editing_region(),
+            Some(editing)
+        );
+        assert!(harness.state().test_loop_preview_pending());
+    }
+
+    #[test]
     fn mode_buttons_switch() {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);
@@ -1652,6 +1726,123 @@ mod kittest_suite {
         harness.run_steps(2);
         let region = harness.state().test_loop_region();
         assert!(matches!(region, Some((s, e)) if e > s));
+    }
+
+    #[test]
+    fn list_wave_overlay_prefers_open_tab_live_state() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let path = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active tab path");
+
+        assert!(harness.state_mut().test_set_list_wave_meta_annotations(
+            &path,
+            vec![0.05, 0.95],
+            Some((0.10, 0.90)),
+        ));
+        assert!(harness.state_mut().test_add_marker_frac(0.25));
+        assert!(harness.state_mut().test_add_marker_frac(0.75));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.20, 0.40));
+
+        let loop_frac = harness
+            .state()
+            .test_list_wave_loop_frac(&path)
+            .expect("resolved live loop frac");
+        assert_eq!(
+            harness.state().test_list_wave_marker_frac_count(&path),
+            Some(2)
+        );
+        assert!(
+            (loop_frac.0 - 0.20).abs() < 0.03 && (loop_frac.1 - 0.40).abs() < 0.03,
+            "expected live loop frac, got {:?}",
+            loop_frac
+        );
+        assert!(harness.state().test_list_wave_overlay_dirty(&path));
+    }
+
+    #[test]
+    fn list_wave_overlay_empty_live_state_hides_baseline_annotations() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let path = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active tab path");
+
+        assert!(harness.state_mut().test_set_list_wave_meta_annotations(
+            &path,
+            vec![0.15, 0.50, 0.85],
+            Some((0.20, 0.80)),
+        ));
+
+        assert_eq!(
+            harness.state().test_list_wave_marker_frac_count(&path),
+            Some(0)
+        );
+        assert_eq!(harness.state().test_list_wave_loop_frac(&path), None);
+    }
+
+    #[test]
+    fn list_wave_overlay_prefers_cached_edits_over_baseline() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let path = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active tab path");
+
+        assert!(harness.state_mut().test_set_list_wave_meta_annotations(
+            &path,
+            vec![0.05, 0.95],
+            Some((0.10, 0.90)),
+        ));
+        assert!(harness.state_mut().test_add_marker_frac(0.30));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.35, 0.65));
+        assert!(harness.state_mut().test_close_tab_for_path(&path));
+        harness.run_steps(2);
+
+        let loop_frac = harness
+            .state()
+            .test_list_wave_loop_frac(&path)
+            .expect("resolved cached loop frac");
+        assert_eq!(
+            harness.state().test_list_wave_marker_frac_count(&path),
+            Some(1)
+        );
+        assert!(
+            (loop_frac.0 - 0.35).abs() < 0.03 && (loop_frac.1 - 0.65).abs() < 0.03,
+            "expected cached loop frac, got {:?}",
+            loop_frac
+        );
+        assert!(harness.state().test_list_wave_overlay_dirty(&path));
+    }
+
+    #[test]
+    fn list_wave_overlay_marker_coalescing_is_pixel_bounded() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        let path = first_wav_file(&wav_dir()).expect("wav fixture");
+        assert!(harness.state_mut().test_set_list_wave_meta_annotations(
+            &path,
+            (0..256).map(|i| i as f32 / 255.0).collect(),
+            Some((0.10, 0.90)),
+        ));
+
+        let raw = harness
+            .state()
+            .test_list_wave_marker_frac_count(&path)
+            .expect("raw overlay");
+        let coalesced = harness
+            .state()
+            .test_list_wave_coalesced_marker_count(&path, 12.0)
+            .expect("coalesced overlay");
+        assert!(raw > 12);
+        assert!(coalesced <= 12, "coalesced marker count should fit width");
     }
 
     #[test]

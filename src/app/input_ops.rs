@@ -209,22 +209,24 @@ impl super::WavesPreviewer {
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L)) {
-                    if self.has_selected_range(tab_idx) {
-                        self.apply_loop_from_selection(tab_idx);
-                    } else {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.loop_mode = if tab.loop_region.is_some() {
-                                LoopMode::Marker
-                            } else {
-                                match tab.loop_mode {
-                                    LoopMode::Off => LoopMode::OnWhole,
-                                    LoopMode::OnWhole => LoopMode::Marker,
-                                    LoopMode::Marker => LoopMode::Off,
-                                }
-                            };
-                        }
-                        if let Some(tab_ro) = self.tabs.get(tab_idx) {
-                            self.apply_loop_mode_for_tab(tab_ro);
+                    if !self.apply_current_loop_region(tab_idx) {
+                        if self.has_selected_range(tab_idx) {
+                            self.apply_loop_from_selection(tab_idx);
+                        } else {
+                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                                tab.loop_mode = if tab.loop_region.is_some() {
+                                    LoopMode::Marker
+                                } else {
+                                    match tab.loop_mode {
+                                        LoopMode::Off => LoopMode::OnWhole,
+                                        LoopMode::OnWhole => LoopMode::Marker,
+                                        LoopMode::Marker => LoopMode::Off,
+                                    }
+                                };
+                            }
+                            if let Some(tab_ro) = self.tabs.get(tab_idx) {
+                                self.apply_loop_mode_for_tab(tab_ro);
+                            }
                         }
                     }
                 }
@@ -376,6 +378,50 @@ impl super::WavesPreviewer {
         if let Some(tab_ro) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab_ro);
         }
+    }
+
+    fn apply_current_loop_region(&mut self, tab_idx: usize) -> bool {
+        let mut undo_state = None;
+        let Some(current) = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.loop_region)
+        else {
+            return false;
+        };
+        let should_apply = self
+            .tabs
+            .get(tab_idx)
+            .map(|tab| {
+                tab.loop_region_committed != Some(current)
+                    || tab.loop_region_applied != Some(current)
+                    || tab.pending_loop_unwrap.is_some()
+            })
+            .unwrap_or(false);
+        if !should_apply {
+            return false;
+        }
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let will_change = tab.loop_region_committed != Some(current)
+                || tab.loop_region_applied != Some(current)
+                || tab.loop_mode != LoopMode::Marker
+                || tab.pending_loop_unwrap.is_some();
+            if will_change {
+                undo_state = Some(Self::capture_undo_state(tab));
+            }
+            tab.loop_region_committed = Some(current);
+            tab.loop_region_applied = Some(current);
+            tab.loop_mode = LoopMode::Marker;
+            tab.pending_loop_unwrap = None;
+            Self::update_loop_markers_dirty(tab);
+        }
+        if let Some(state) = undo_state {
+            self.push_editor_undo_state(tab_idx, state, true);
+        }
+        if let Some(tab_ro) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab_ro);
+        }
+        true
     }
 
     fn seek_to_fraction_in_active_tab(&mut self, numer: usize, denom: usize) {

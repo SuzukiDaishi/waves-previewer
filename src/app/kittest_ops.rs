@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app::types::{
-    EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, LoopMode,
+    EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, FileMeta, LoopMode,
     LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind, ProcessingResult,
-    ProcessingState, ProcessingTarget, RateMode, SortDir, SortKey, ToolKind, ToolState, ViewMode,
+    ProcessingState, ProcessingTarget, RateMode, SampleValueKind, SortDir, SortKey, ToolKind,
+    ToolState, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -1058,6 +1059,20 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).and_then(|t| t.loop_region)
     }
 
+    pub fn test_loop_visual_applied_region(&self) -> Option<(usize, usize)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let (applied, _) = Self::resolve_editor_loop_visual_ranges(tab);
+        applied
+    }
+
+    pub fn test_loop_visual_editing_region(&self) -> Option<(usize, usize)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let (_, editing) = Self::resolve_editor_loop_visual_ranges(tab);
+        editing
+    }
+
     pub fn test_write_markers(&mut self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1356,8 +1371,84 @@ impl super::WavesPreviewer {
         };
         self.tabs
             .get(tab_idx)
-            .map(|t| t.loop_region != t.loop_region_committed)
+            .map(|t| {
+                let effective_cf = t
+                    .loop_region
+                    .map(|(a, b)| {
+                        Self::effective_loop_xfade_samples(
+                            a,
+                            b,
+                            t.samples_len,
+                            t.loop_xfade_samples,
+                        )
+                    })
+                    .unwrap_or(0);
+                Self::normalized_loop_range(t.loop_region)
+                    != Self::normalized_loop_range(t.loop_region_applied)
+                    || t.pending_loop_unwrap.is_some()
+                    || effective_cf > 0
+            })
             .unwrap_or(false)
+    }
+
+    pub fn test_set_list_wave_meta_annotations(
+        &mut self,
+        path: &Path,
+        marker_fracs: Vec<f32>,
+        loop_frac: Option<(f32, f32)>,
+    ) -> bool {
+        let Some(item) = self.item_for_path(path) else {
+            return false;
+        };
+        let mut meta = item.meta.clone().unwrap_or(FileMeta {
+            channels: 1,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_value_kind: SampleValueKind::Unknown,
+            bit_rate_bps: None,
+            duration_secs: None,
+            total_frames: None,
+            rms_db: None,
+            peak_db: None,
+            lufs_i: None,
+            bpm: None,
+            created_at: None,
+            modified_at: None,
+            cover_art: None,
+            thumb: Vec::new(),
+            marker_fracs: Vec::new(),
+            loop_frac: None,
+            decode_error: None,
+        });
+        meta.marker_fracs = marker_fracs;
+        meta.loop_frac = loop_frac;
+        self.set_meta_for_path(path, meta)
+    }
+
+    pub fn test_list_wave_marker_frac_count(&self, path: &Path) -> Option<usize> {
+        self.resolve_list_wave_overlay_info(path)
+            .map(|overlay| overlay.marker_fracs.len())
+    }
+
+    pub fn test_list_wave_loop_frac(&self, path: &Path) -> Option<(f32, f32)> {
+        self.resolve_list_wave_overlay_info(path)
+            .and_then(|overlay| overlay.loop_frac)
+    }
+
+    pub fn test_list_wave_overlay_dirty(&self, path: &Path) -> bool {
+        self.resolve_list_wave_overlay_info(path)
+            .map(|overlay| overlay.dirty)
+            .unwrap_or(false)
+    }
+
+    pub fn test_list_wave_coalesced_marker_count(
+        &self,
+        path: &Path,
+        width_px: f32,
+    ) -> Option<usize> {
+        self.resolve_list_wave_overlay_info(path).map(|overlay| {
+            Self::coalesce_list_wave_marker_fracs(&overlay.marker_fracs, width_px).len()
+        })
     }
 
     pub fn test_audio_loop_xfade_samples(&self) -> usize {

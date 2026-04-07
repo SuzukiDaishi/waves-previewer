@@ -121,7 +121,7 @@ View → Tools (MVP and planned)
 - WORLD: F0 edit, spectral envelope warp (planned).
 
 Shared interactions
-- Space: Play/Pause. A/B: set markers. L: Loop toggle. Ctrl+Wheel: Zoom.
+- Space: Play/Pause. A/B: set markers. L: use applied loop markers when available, otherwise loop toggle. Ctrl+Wheel: Zoom.
 - Shift+Wheel / Middle/Right drag: Pan. Double‑click: fit/restore.
 - Tools may require a selection; if none exists they use A–B, otherwise Whole.
 

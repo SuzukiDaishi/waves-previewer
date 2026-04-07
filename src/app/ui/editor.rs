@@ -38,6 +38,19 @@ struct AmplitudeNavDragState {
 }
 
 impl crate::app::WavesPreviewer {
+    pub(crate) fn normalized_loop_range(range: Option<(usize, usize)>) -> Option<(usize, usize)> {
+        range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+    }
+
+    pub(crate) fn resolve_editor_loop_visual_ranges(
+        tab: &EditorTab,
+    ) -> (Option<(usize, usize)>, Option<(usize, usize)>) {
+        let editing = Self::normalized_loop_range(tab.loop_region);
+        let applied = Self::normalized_loop_range(tab.loop_region_applied)
+            .filter(|applied| Some(*applied) != editing);
+        (applied, editing)
+    }
+
     fn build_loop_seam_preview(tab: &EditorTab, sample_rate: u32) -> Option<LoopSeamPreview> {
         if tab.active_tool != ToolKind::LoopEdit {
             return None;
@@ -3830,8 +3843,51 @@ impl crate::app::WavesPreviewer {
                 }
 
                 // Loop overlay
-                if let Some((a0, b0)) = tab.loop_region {
-                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                let (applied_loop, editing_loop) = Self::resolve_editor_loop_visual_ranges(tab);
+                if let Some((a, b)) = applied_loop {
+                    let fid = TextStyle::Monospace.resolve(ui.style());
+                    let ax = to_x(a);
+                    let bx = to_x(b);
+                    let line =
+                        Color32::from_rgba_unmultiplied(110, 190, 200, 120);
+                    let shade =
+                        Color32::from_rgba_unmultiplied(110, 190, 200, 18);
+                    if a == b {
+                        painter.line_segment(
+                            [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
+                            egui::Stroke::new(1.5, line),
+                        );
+                        painter.text(
+                            egui::pos2(ax + 6.0, rect.top() + 2.0),
+                            egui::Align2::LEFT_TOP,
+                            "Applied",
+                            fid,
+                            Color32::from_rgb(150, 210, 216),
+                        );
+                    } else {
+                        let applied_rect = egui::Rect::from_min_max(
+                            egui::pos2(ax, rect.top()),
+                            egui::pos2(bx, rect.bottom()),
+                        );
+                        painter.rect_filled(applied_rect, 0.0, shade);
+                        painter.line_segment(
+                            [egui::pos2(ax, rect.top()), egui::pos2(ax, rect.bottom())],
+                            egui::Stroke::new(1.5, line),
+                        );
+                        painter.line_segment(
+                            [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
+                            egui::Stroke::new(1.5, line),
+                        );
+                        painter.text(
+                            egui::pos2(ax + 6.0, rect.top() + 2.0),
+                            egui::Align2::LEFT_TOP,
+                            "Applied",
+                            fid,
+                            Color32::from_rgb(150, 210, 216),
+                        );
+                    }
+                }
+                if let Some((a, b)) = editing_loop {
                     let active = tab.active_tool == ToolKind::LoopEdit;
                     let line_alpha = if active { 220 } else { 160 };
                     let line = Color32::from_rgba_unmultiplied(60, 160, 255, line_alpha);
@@ -3924,9 +3980,11 @@ impl crate::app::WavesPreviewer {
                             painter.rect_filled(r_out, 0.0, col_out);
 
                             let curve_alpha = if active { 220 } else { 140 };
-                            let curve_col = Color32::from_rgba_unmultiplied(255, 170, 60, curve_alpha);
+                            let curve_col =
+                                Color32::from_rgba_unmultiplied(255, 170, 60, curve_alpha);
                             let steps = 36;
-                            let uses_dip = Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
+                            let uses_dip =
+                                Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
                             let mut last_in_up: Option<egui::Pos2> = None;
                             let mut last_in_down: Option<egui::Pos2> = None;
                             let mut last_out_up: Option<egui::Pos2> = None;
@@ -3935,7 +3993,8 @@ impl crate::app::WavesPreviewer {
                             let y_of = |w: f32| rect.bottom() - w * h;
                             for i in 0..=steps {
                                 let t = (i as f32) / (steps as f32);
-                                let (w_out, w_in) = Self::loop_xfade_weights(tab.loop_xfade_shape, t);
+                                let (w_out, w_in) =
+                                    Self::loop_xfade_weights(tab.loop_xfade_shape, t);
                                 let x_in = egui::lerp(xs0..=xs1, t);
                                 let p_in_up = egui::pos2(x_in, y_of(w_in));
                                 let p_in_down = egui::pos2(x_in, y_of(w_out));
@@ -4415,8 +4474,9 @@ impl crate::app::WavesPreviewer {
                                     }
                                 }
                                 if matches!(tab.active_tool, ToolKind::LoopEdit) {
-                                    if tab.loop_region != tab.loop_region_committed {
-                                        tab.loop_region = tab.loop_region_committed;
+                                    if tab.loop_region != tab.loop_region_applied {
+                                        tab.loop_region =
+                                            tab.loop_region_applied.or(tab.loop_region_committed);
                                     }
                                     tab.pending_loop_unwrap = None;
                                     if tab.markers != tab.markers_committed {
@@ -4456,15 +4516,42 @@ impl crate::app::WavesPreviewer {
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
                                         ui.label("Loop marker range");
-                                        if let Some((a0, b0)) = tab.loop_region {
+                                        if let Some((a0, b0)) =
+                                            Self::normalized_loop_range(tab.loop_region_applied)
+                                        {
+                                            let (a, b) = (a0, b0);
+                                            let len = b.saturating_sub(a);
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Applied Loop: {a}..{b} ({len} smp)"
+                                                ))
+                                                .monospace()
+                                                .weak(),
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new("Applied Loop: -")
+                                                    .monospace()
+                                                    .weak(),
+                                            );
+                                        }
+                                        if let Some((a0, b0)) =
+                                            Self::normalized_loop_range(tab.loop_region)
+                                        {
                                             let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                                             let len = b.saturating_sub(a);
                                             ui.label(
-                                                RichText::new(format!("Loop: {a}..{b} ({len} smp)"))
+                                                RichText::new(format!(
+                                                    "Editing Loop: {a}..{b} ({len} smp)"
+                                                ))
                                                     .monospace(),
                                             );
                                         } else {
-                                            ui.label(RichText::new("Loop: -").monospace().weak());
+                                            ui.label(
+                                                RichText::new("Editing Loop: -")
+                                                    .monospace()
+                                                    .weak(),
+                                            );
                                         }
                                         if let Some((a0, b0)) = tab.selection {
                                             let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
@@ -4488,10 +4575,17 @@ impl crate::app::WavesPreviewer {
                                                 )
                                             })
                                             .unwrap_or(0);
-                                        let loop_preview_pending = tab.loop_region != tab.loop_region_committed
+                                        let editing_loop =
+                                            Self::normalized_loop_range(tab.loop_region);
+                                        let applied_loop = Self::normalized_loop_range(
+                                            tab.loop_region_applied.or(tab.loop_region_committed),
+                                        );
+                                        let saved_loop =
+                                            Self::normalized_loop_range(tab.loop_markers_saved);
+                                        let loop_preview_pending = editing_loop != applied_loop
                                             || tab.pending_loop_unwrap.is_some()
                                             || effective_cf > 0;
-                                        let loop_saved_pending = tab.loop_region != tab.loop_markers_saved;
+                                        let loop_saved_pending = applied_loop != saved_loop;
                                         let (loop_status_color, loop_status_text, loop_status_hint) =
                                             if !loop_preview_pending && !loop_saved_pending {
                                                 (
@@ -4651,7 +4745,11 @@ impl crate::app::WavesPreviewer {
                                                     )
                                                 })
                                                 .unwrap_or(0);
-                                            let is_loop_dirty = tab.loop_region != tab.loop_region_committed;
+                                            let is_loop_dirty = Self::normalized_loop_range(
+                                                tab.loop_region,
+                                            ) != Self::normalized_loop_range(
+                                                tab.loop_region_applied,
+                                            );
                                             let unwrap_pending = tab.pending_loop_unwrap.is_some();
                                             let can_apply = (is_loop_dirty || effective_cf > 0 || unwrap_pending) && !apply_busy;
                                             if ui

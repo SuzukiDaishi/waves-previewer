@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -35,6 +35,63 @@ fn decode_cover_art_thumbnail(path: &PathBuf) -> Option<Arc<egui::ColorImage>> {
         [width, height],
         rgba.as_raw(),
     )))
+}
+
+fn annotation_total_frames(
+    total_frames: Option<u64>,
+    duration_secs: Option<f32>,
+    sample_rate: u32,
+) -> Option<u64> {
+    if let Some(frames) = total_frames.filter(|frames| *frames > 0) {
+        return Some(frames);
+    }
+    let secs = duration_secs.filter(|secs| secs.is_finite() && *secs > 0.0)?;
+    let sr = sample_rate.max(1) as f32;
+    Some((secs * sr).round().max(1.0) as u64)
+}
+
+fn normalized_frac(sample: u64, total_frames: u64) -> Option<f32> {
+    if total_frames == 0 {
+        return None;
+    }
+    Some((sample as f32 / total_frames as f32).clamp(0.0, 1.0))
+}
+
+fn read_wave_annotation_fracs(
+    path: &Path,
+    file_sr: u32,
+    total_frames: Option<u64>,
+    duration_secs: Option<f32>,
+) -> (Vec<f32>, Option<(f32, f32)>) {
+    let total_frames = annotation_total_frames(total_frames, duration_secs, file_sr);
+    let loop_frac = total_frames.and_then(|frames| {
+        let (start, end) = crate::loop_markers::read_loop_markers(path)?;
+        let start_frac = normalized_frac(start, frames)?;
+        let end_frac = normalized_frac(end, frames)?;
+        Some(if start_frac <= end_frac {
+            (start_frac, end_frac)
+        } else {
+            (end_frac, start_frac)
+        })
+    });
+    let marker_fracs = if file_sr > 0 {
+        total_frames
+            .map(|frames| {
+                let mut fracs: Vec<f32> = crate::markers::read_markers(path, file_sr, file_sr)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|marker| normalized_frac(marker.sample as u64, frames))
+                    .filter(|frac| frac.is_finite())
+                    .collect();
+                fracs.sort_by(|a, b| a.total_cmp(b));
+                fracs.dedup_by(|a, b| (*a - *b).abs() <= f32::EPSILON);
+                fracs
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    (marker_fracs, loop_frac)
 }
 
 #[derive(Clone, Debug)]
@@ -127,24 +184,34 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
     }
 
     match audio_io::read_audio_info(path) {
-        Ok(info) => Ok(FileMeta {
-            channels: info.channels,
-            sample_rate: info.sample_rate,
-            bits_per_sample: info.bits_per_sample,
-            sample_value_kind: map_sample_value_kind(info.sample_value_kind),
-            bit_rate_bps: info.bit_rate_bps,
-            duration_secs: info.duration_secs,
-            total_frames: info.total_frames,
-            rms_db: None,
-            peak_db: quick_peak_db(path),
-            lufs_i: None,
-            bpm: audio_io::read_audio_bpm(path),
-            created_at: info.created_at,
-            modified_at: info.modified_at,
-            cover_art: decode_cover_art_thumbnail(path),
-            thumb: Vec::new(),
-            decode_error: None,
-        }),
+        Ok(info) => {
+            let (marker_fracs, loop_frac) = read_wave_annotation_fracs(
+                path,
+                info.sample_rate,
+                info.total_frames,
+                info.duration_secs,
+            );
+            Ok(FileMeta {
+                channels: info.channels,
+                sample_rate: info.sample_rate,
+                bits_per_sample: info.bits_per_sample,
+                sample_value_kind: map_sample_value_kind(info.sample_value_kind),
+                bit_rate_bps: info.bit_rate_bps,
+                duration_secs: info.duration_secs,
+                total_frames: info.total_frames,
+                rms_db: None,
+                peak_db: quick_peak_db(path),
+                lufs_i: None,
+                bpm: audio_io::read_audio_bpm(path),
+                created_at: info.created_at,
+                modified_at: info.modified_at,
+                cover_art: decode_cover_art_thumbnail(path),
+                thumb: Vec::new(),
+                marker_fracs,
+                loop_frac,
+                decode_error: None,
+            })
+        }
         Err(_) => Err(FileMeta {
             channels: 0,
             sample_rate: 0,
@@ -161,6 +228,8 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             modified_at: None,
             cover_art: None,
             thumb: Vec::new(),
+            marker_fracs: Vec::new(),
+            loop_frac: None,
             decode_error: Some("Decode failed".to_string()),
         }),
     }
@@ -237,6 +306,13 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         } else {
             f32::NAN
         };
+        let total_frames = Some(
+            info.as_ref()
+                .and_then(|i| i.total_frames)
+                .unwrap_or(mono.len() as u64),
+        );
+        let (marker_fracs, loop_frac) =
+            read_wave_annotation_fracs(path, sr, total_frames, Some(length_secs));
         return Some(FileMeta {
             channels: ch,
             sample_rate: sr,
@@ -244,7 +320,7 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             sample_value_kind,
             bit_rate_bps: info.as_ref().and_then(|i| i.bit_rate_bps),
             duration_secs: Some(length_secs),
-            total_frames: Some(mono.len() as u64),
+            total_frames,
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i,
@@ -253,6 +329,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             modified_at: info.as_ref().and_then(|i| i.modified_at),
             cover_art: decode_cover_art_thumbnail(path),
             thumb,
+            marker_fracs,
+            loop_frac,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors}"))
             } else {
@@ -290,21 +368,26 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         let mut thumb = Vec::new();
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let bpm = audio_io::read_audio_bpm(path);
+        let resolved_sr = if sr > 0 {
+            sr
+        } else {
+            info.as_ref().map(|i| i.sample_rate).unwrap_or(0)
+        };
+        let total_frames = info.as_ref().and_then(|i| i.total_frames);
+        let duration_secs = info.as_ref().and_then(|i| i.duration_secs);
+        let (marker_fracs, loop_frac) =
+            read_wave_annotation_fracs(path, resolved_sr, total_frames, duration_secs);
         return Some(FileMeta {
             channels: info.as_ref().map(|i| i.channels).unwrap_or(0),
-            sample_rate: if sr > 0 {
-                sr
-            } else {
-                info.as_ref().map(|i| i.sample_rate).unwrap_or(0)
-            },
+            sample_rate: resolved_sr,
             bits_per_sample: info.as_ref().map(|i| i.bits_per_sample).unwrap_or(0),
             sample_value_kind: info
                 .as_ref()
                 .map(|i| map_sample_value_kind(i.sample_value_kind))
                 .unwrap_or(SampleValueKind::Unknown),
             bit_rate_bps: info.as_ref().and_then(|i| i.bit_rate_bps),
-            duration_secs: info.as_ref().and_then(|i| i.duration_secs),
-            total_frames: info.as_ref().and_then(|i| i.total_frames),
+            duration_secs,
+            total_frames,
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
             lufs_i: None,
@@ -313,6 +396,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             modified_at: info.as_ref().and_then(|i| i.modified_at),
             cover_art: decode_cover_art_thumbnail(path),
             thumb,
+            marker_fracs,
+            loop_frac,
             decode_error: if decode_errors > 0 {
                 Some(format!("DecodeError x{decode_errors} (prefix)"))
             } else {
@@ -407,4 +492,133 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
         });
     }
     (MetaPool { shared }, rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_wave_annotation_fracs;
+    use crate::markers::MarkerEntry;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "neowaves_meta_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ms,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp meta dir");
+        dir
+    }
+
+    fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
+        let frames = ((sr as f32) * secs).max(1.0) as usize;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let t = i as f32 / sr as f32;
+            left.push((t * 220.0 * std::f32::consts::TAU).sin() * 0.30);
+            right.push((t * 330.0 * std::f32::consts::TAU).sin() * 0.25);
+        }
+        vec![left, right]
+    }
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 0.03
+    }
+
+    fn write_annotations_and_read(
+        path: &Path,
+        sr: u32,
+        frames: u64,
+        require_loop: bool,
+    ) -> (Vec<f32>, Option<(f32, f32)>) {
+        let markers = vec![
+            MarkerEntry {
+                label: "M01".to_string(),
+                sample: (frames as f32 * 0.10) as usize,
+            },
+            MarkerEntry {
+                label: "M02".to_string(),
+                sample: (frames as f32 * 0.80) as usize,
+            },
+        ];
+        crate::markers::write_markers(path, sr, sr, &markers).expect("write markers");
+        let loop_write = crate::loop_markers::write_loop_markers(
+            path,
+            Some(((frames as f32 * 0.25) as u64, (frames as f32 * 0.65) as u64)),
+        );
+        if require_loop {
+            loop_write.expect("write loop markers");
+        } else if let Err(err) = loop_write {
+            eprintln!("warning: skipping m4a loop tag assertion: {err}");
+        }
+        let (marker_fracs, loop_frac) =
+            read_wave_annotation_fracs(path, sr, Some(frames), Some(frames as f32 / sr as f32));
+        (marker_fracs, loop_frac)
+    }
+
+    #[test]
+    fn read_wave_annotation_fracs_reads_unopened_wav_annotations() {
+        let dir = make_temp_dir("wav_annotations");
+        let path = dir.join("fixture.wav");
+        let sr = 44_100;
+        let chans = synth_stereo(sr, 1.0);
+        crate::wave::export_channels_audio(&chans, sr, &path).expect("export wav");
+        let frames = chans[0].len() as u64;
+
+        let (marker_fracs, loop_frac) = write_annotations_and_read(&path, sr, frames, true);
+        assert_eq!(marker_fracs.len(), 2);
+        assert!(approx_eq(marker_fracs[0], 0.10));
+        assert!(approx_eq(marker_fracs[1], 0.80));
+        let loop_frac = loop_frac.expect("loop frac");
+        assert!(approx_eq(loop_frac.0, 0.25));
+        assert!(approx_eq(loop_frac.1, 0.65));
+    }
+
+    #[test]
+    fn read_wave_annotation_fracs_reads_unopened_mp3_annotations() {
+        let dir = make_temp_dir("mp3_annotations");
+        let path = dir.join("fixture.mp3");
+        let sr = 44_100;
+        let chans = synth_stereo(sr, 1.0);
+        crate::wave::export_channels_audio(&chans, sr, &path).expect("export mp3");
+        let frames = chans[0].len() as u64;
+
+        let (marker_fracs, loop_frac) = write_annotations_and_read(&path, sr, frames, true);
+        assert_eq!(marker_fracs.len(), 2);
+        assert!(approx_eq(marker_fracs[0], 0.10));
+        assert!(approx_eq(marker_fracs[1], 0.80));
+        let loop_frac = loop_frac.expect("loop frac");
+        assert!(approx_eq(loop_frac.0, 0.25));
+        assert!(approx_eq(loop_frac.1, 0.65));
+    }
+
+    #[test]
+    fn read_wave_annotation_fracs_reads_unopened_m4a_annotations() {
+        let dir = make_temp_dir("m4a_annotations");
+        let path = dir.join("fixture.m4a");
+        let sr = 44_100;
+        let chans = synth_stereo(sr, 1.0);
+        crate::wave::export_channels_audio(&chans, sr, &path).expect("export m4a");
+        let frames = chans[0].len() as u64;
+
+        let (marker_fracs, loop_frac) = write_annotations_and_read(&path, sr, frames, false);
+        assert_eq!(marker_fracs.len(), 2);
+        assert!(approx_eq(marker_fracs[0], 0.10));
+        assert!(approx_eq(marker_fracs[1], 0.80));
+        if let Some(loop_frac) = loop_frac {
+            assert!(approx_eq(loop_frac.0, 0.25));
+            assert!(approx_eq(loop_frac.1, 0.65));
+        }
+    }
 }

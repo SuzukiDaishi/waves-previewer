@@ -14,7 +14,8 @@ impl WavesPreviewer {
         let list_focus_id = crate::app::WavesPreviewer::list_focus_id();
         let list_focus_now = ctx.memory(|m| m.has_focus(list_focus_id));
         let focused_id = ctx.memory(|m| m.focused());
-        let search_focused = ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
+        let search_focused =
+            ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
         let has_non_list_focus = focused_id.is_some() && focused_id != Some(list_focus_id);
         let rename_modal_open = self.list_modal_open();
         let allow_focus_reclaim = !rename_modal_open && !search_focused && !has_non_list_focus;
@@ -197,7 +198,11 @@ impl WavesPreviewer {
             }
             if pressed_home || pressed_end {
                 let len = self.files.len();
-                let target = if pressed_home { 0 } else { len.saturating_sub(1) };
+                let target = if pressed_home {
+                    0
+                } else {
+                    len.saturating_sub(1)
+                };
                 let mods = ctx.input(|i| i.modifiers);
                 self.update_selection_on_click(target, mods);
                 self.select_and_load(target, true);

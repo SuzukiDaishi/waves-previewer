@@ -128,7 +128,10 @@ impl WavesPreviewer {
                 .map(|p| !p.items.is_empty())
                 .unwrap_or(false)
                 || !self.get_clipboard_files().is_empty();
-            if ui.add_enabled(can_paste, egui::Button::new("Paste")).clicked() {
+            if ui
+                .add_enabled(can_paste, egui::Button::new("Paste"))
+                .clicked()
+            {
                 self.paste_clipboard_to_list();
                 ui.close();
             }

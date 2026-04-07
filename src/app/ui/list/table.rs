@@ -1,11 +1,7 @@
 use egui::{Align, Color32, RichText};
 use egui_extras::{TableBuilder, TableRow};
 
-use crate::app::{
-    helpers::sortable_header,
-    types::SortKey,
-    WavesPreviewer,
-};
+use crate::app::{helpers::sortable_header, types::SortKey, WavesPreviewer};
 
 use super::{ListInteractionState, ListRenderState, ListViewMetrics};
 
@@ -412,7 +408,10 @@ impl WavesPreviewer {
                 .or(self.selected)
                 .unwrap_or(0)
                 .min(self.files.len() - 1);
-            let end = render.visible_last_row.unwrap_or(start).min(self.files.len() - 1);
+            let end = render
+                .visible_last_row
+                .unwrap_or(start)
+                .min(self.files.len() - 1);
             let look_back = 8usize;
             let look_ahead = if self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD {
                 16usize
@@ -435,7 +434,10 @@ impl WavesPreviewer {
                 }
             }
         }
-        self.queue_list_preview_prefetch_for_rows(render.visible_first_row, render.visible_last_row);
+        self.queue_list_preview_prefetch_for_rows(
+            render.visible_first_row,
+            render.visible_last_row,
+        );
         if !render.missing_paths.is_empty() {
             for path in render.missing_paths {
                 self.remove_missing_path(&path);

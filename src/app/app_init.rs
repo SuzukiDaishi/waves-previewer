@@ -267,6 +267,7 @@ impl WavesPreviewer {
             saving_virtual: Vec::new(),
             saving_format_targets: Vec::new(),
             saving_edit_sources: Vec::new(),
+            saving_edit_annotations: HashMap::new(),
             saving_mode: None,
             overwrite_undo_stack: Vec::new(),
 

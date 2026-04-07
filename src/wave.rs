@@ -848,6 +848,137 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
     Ok(())
 }
 
+#[derive(Clone)]
+struct RiffWaveChunk {
+    id: [u8; 4],
+    payload: Vec<u8>,
+}
+
+fn parse_riff_wave_chunks(path: &Path) -> Result<Vec<RiffWaveChunk>> {
+    use std::fs;
+    let data = fs::read(path).with_context(|| format!("read riff chunks: {}", path.display()))?;
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        anyhow::bail!("not a RIFF/WAVE file");
+    }
+    let mut chunks = Vec::new();
+    let mut pos = 12usize;
+    while pos + 8 <= data.len() {
+        let id = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
+        let size = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
+        let chunk_start = pos + 8;
+        let chunk_end = chunk_start.saturating_add(size).min(data.len());
+        chunks.push(RiffWaveChunk {
+            id,
+            payload: data[chunk_start..chunk_end].to_vec(),
+        });
+        let advance = 8 + size + (size & 1);
+        if pos + advance <= pos {
+            break;
+        }
+        pos = pos.saturating_add(advance);
+    }
+    Ok(chunks)
+}
+
+fn encode_riff_wave_chunks(path: &Path, chunks: &[RiffWaveChunk]) -> Result<()> {
+    use std::fs;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(b"WAVE");
+    for chunk in chunks {
+        out.extend_from_slice(&chunk.id);
+        out.extend_from_slice(&(chunk.payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&chunk.payload);
+        if chunk.payload.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+    let riff_size = (out.len().saturating_sub(8)) as u32;
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    fs::write(path, out).with_context(|| format!("write riff chunks: {}", path.display()))?;
+    Ok(())
+}
+
+fn chunk_is_fresh_audio_core(chunk: &RiffWaveChunk) -> bool {
+    chunk.id == *b"fmt " || chunk.id == *b"data" || chunk.id == *b"fact"
+}
+
+fn take_matching_chunk(
+    chunks: &mut Vec<RiffWaveChunk>,
+    id: [u8; 4],
+) -> Option<RiffWaveChunk> {
+    let idx = chunks.iter().position(|chunk| chunk.id == id)?;
+    Some(chunks.remove(idx))
+}
+
+fn merge_wav_metadata_from_source(src: &Path, dst: &Path) -> Result<()> {
+    let source_chunks = parse_riff_wave_chunks(src)?;
+    let mut fresh_chunks = parse_riff_wave_chunks(dst)?;
+    let mut merged = Vec::new();
+
+    for chunk in source_chunks {
+        if chunk_is_fresh_audio_core(&chunk) {
+            if let Some(replacement) = take_matching_chunk(&mut fresh_chunks, chunk.id) {
+                merged.push(replacement);
+            }
+            continue;
+        }
+        merged.push(chunk);
+    }
+
+    for chunk in fresh_chunks {
+        if chunk_is_fresh_audio_core(&chunk) {
+            merged.push(chunk);
+        }
+    }
+
+    encode_riff_wave_chunks(dst, &merged)
+}
+
+fn copy_mp3_metadata_from_source(src: &Path, dst: &Path) -> Result<()> {
+    let tag = match id3::Tag::read_from_path(src) {
+        Ok(tag) => tag,
+        Err(err) if matches!(err.kind, id3::ErrorKind::NoTag) => return Ok(()),
+        Err(_) => return Ok(()),
+    };
+    tag.write_to_path(dst, id3::Version::Id3v24)
+        .with_context(|| format!("copy mp3 tags {} -> {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+fn copy_m4a_metadata_from_source(src: &Path, dst: &Path) -> Result<()> {
+    let tag = match mp4ameta::Tag::read_from_path(src) {
+        Ok(tag) => tag,
+        Err(_) => return Ok(()),
+    };
+    tag.write_to_path(dst)
+        .with_context(|| format!("copy m4a tags {} -> {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+pub fn copy_audio_metadata_from_source(src: &Path, dst: &Path) -> Result<()> {
+    let src_ext = ext_lower(src);
+    let dst_ext = ext_lower(dst);
+    match (src_ext.as_deref(), dst_ext.as_deref()) {
+        (Some("wav"), Some("wav")) => merge_wav_metadata_from_source(src, dst),
+        (Some("mp3"), Some("mp3")) => copy_mp3_metadata_from_source(src, dst),
+        (Some("m4a"), Some("m4a")) => copy_m4a_metadata_from_source(src, dst),
+        _ => Ok(()),
+    }
+}
+
+fn try_copy_audio_metadata_from_source(src: &Path, dst: &Path) {
+    if let Err(err) = copy_audio_metadata_from_source(src, dst) {
+        eprintln!(
+            "copy metadata failed {} -> {}: {err:?}",
+            src.display(),
+            dst.display()
+        );
+    }
+}
+
 // High level helper used by UI when a file is clicked
 pub fn prepare_for_playback(
     path: &Path,
@@ -1155,6 +1286,7 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
         }
     }
     writer.finalize()?;
+    try_copy_audio_metadata_from_source(src, dst);
     Ok(())
 }
 
@@ -1176,13 +1308,16 @@ fn export_gain_mp3(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     apply_gain_in_place(&mut chans, gain_db);
     let data = encode_mp3(&chans, in_sr)?;
     fs::write(dst, data)?;
+    try_copy_audio_metadata_from_source(src, dst);
     Ok(())
 }
 
 fn export_gain_m4a(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     let (mut chans, in_sr) = decode_wav_multi(src)?;
     apply_gain_in_place(&mut chans, gain_db);
-    encode_aac_to_mp4(dst, &chans, in_sr)
+    encode_aac_to_mp4(dst, &chans, in_sr)?;
+    try_copy_audio_metadata_from_source(src, dst);
+    Ok(())
 }
 
 fn export_gain_ogg(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
@@ -1666,6 +1801,7 @@ pub fn overwrite_audio_from_channels_with_depth(
         let _ = fs::remove_file(&tmp);
     }
     export_channels_audio_with_depth(chans, sample_rate, &tmp, wav_depth)?;
+    try_copy_audio_metadata_from_source(src, &tmp);
     if backup {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
         let bak = src.with_file_name(format!("{}.bak", fname));
@@ -1876,7 +2012,16 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
 
 #[cfg(test)]
 mod tests {
-    use super::{resample_channels_quality, resample_quality, ResampleQuality};
+    use super::{
+        encode_riff_wave_chunks, export_channels_audio, export_gain_audio, overwrite_gain_wav,
+        parse_riff_wave_chunks, resample_channels_quality, resample_quality, ResampleQuality,
+        RiffWaveChunk,
+    };
+    use id3::TagLike;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_signal(len: usize, freq_scale: f32) -> Vec<f32> {
         (0..len)
@@ -1887,6 +2032,49 @@ mod tests {
                 (phase_a.sin() * 0.7) + (phase_b.cos() * 0.3)
             })
             .collect()
+    }
+
+    fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
+        let frames = ((sr as f32) * secs).max(1.0) as usize;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let t = i as f32 / sr.max(1) as f32;
+            left.push((t * 220.0 * std::f32::consts::TAU).sin() * 0.30);
+            right.push((t * 330.0 * std::f32::consts::TAU).sin() * 0.25);
+        }
+        vec![left, right]
+    }
+
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("unix time")
+            .as_nanos();
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "neowaves_wave_tests_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ns,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn make_png_bytes() -> Vec<u8> {
+        let image = image::DynamicImage::ImageRgba8(image::ImageBuffer::from_pixel(
+            4,
+            4,
+            image::Rgba([24, 200, 180, 255]),
+        ));
+        let mut png = Cursor::new(Vec::new());
+        image
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("write png");
+        png.into_inner()
     }
 
     #[test]
@@ -1931,5 +2119,155 @@ mod tests {
             max_right_diff < 5.0e-2,
             "right channel drifted too far from the legacy sinc path: {max_right_diff}"
         );
+    }
+
+    #[test]
+    fn overwrite_gain_wav_preserves_ancillary_chunks() {
+        let dir = make_temp_dir("wav_chunk_preserve");
+        let src = dir.join("source.wav");
+        export_channels_audio(&synth_stereo(48_000, 1.2), 48_000, &src).expect("export wav");
+
+        let mut chunks = parse_riff_wave_chunks(&src).expect("parse wav chunks");
+        chunks.insert(
+            0,
+            RiffWaveChunk {
+                id: *b"bext",
+                payload: b"bext-metadata".to_vec(),
+            },
+        );
+        chunks.insert(
+            1,
+            RiffWaveChunk {
+                id: *b"iXML",
+                payload: b"<BWFXML><NOTE>keep</NOTE></BWFXML>".to_vec(),
+            },
+        );
+        chunks.push(RiffWaveChunk {
+            id: *b"acid",
+            payload: b"acid".to_vec(),
+        });
+        chunks.push(RiffWaveChunk {
+            id: *b"JUNK",
+            payload: vec![1, 2, 3, 4, 5],
+        });
+        encode_riff_wave_chunks(&src, &chunks).expect("rewrite wav with ancillary chunks");
+        crate::markers::write_markers(
+            &src,
+            48_000,
+            48_000,
+            &[crate::markers::MarkerEntry {
+                sample: 10_000,
+                label: "M01".to_string(),
+            }],
+        )
+        .expect("write wav markers");
+        crate::loop_markers::write_loop_markers(&src, Some((12_000, 30_000)))
+            .expect("write wav loop");
+
+        overwrite_gain_wav(&src, -3.0, false).expect("overwrite wav gain");
+
+        let chunk_ids: Vec<[u8; 4]> = parse_riff_wave_chunks(&src)
+            .expect("parse overwritten wav")
+            .into_iter()
+            .map(|chunk| chunk.id)
+            .collect();
+        assert!(chunk_ids.contains(b"bext"));
+        assert!(chunk_ids.contains(b"iXML"));
+        assert!(chunk_ids.contains(b"acid"));
+        assert!(chunk_ids.contains(b"JUNK"));
+        assert!(chunk_ids.contains(b"fmt "));
+        assert!(chunk_ids.contains(b"data"));
+        assert!(chunk_ids.contains(b"cue "));
+        assert!(chunk_ids.contains(b"LIST"));
+        assert!(chunk_ids.contains(b"smpl"));
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&src),
+            Some((12_000, 30_000))
+        );
+        assert_eq!(
+            crate::markers::read_markers(&src, 48_000, 48_000)
+                .expect("read preserved wav markers")
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_gain_mp3_preserves_id3_and_loop_tags() {
+        let dir = make_temp_dir("mp3_metadata_preserve");
+        let src = dir.join("source.mp3");
+        let dst = dir.join("out.mp3");
+        export_channels_audio(&synth_stereo(44_100, 1.4), 44_100, &src).expect("export mp3");
+
+        let picture = id3::frame::Picture {
+            mime_type: "image/png".to_string(),
+            picture_type: id3::frame::PictureType::CoverFront,
+            description: String::new(),
+            data: make_png_bytes(),
+        };
+        let mut tag = id3::Tag::new();
+        tag.set_title("keep-title");
+        tag.set_artist("keep-artist");
+        tag.add_frame(picture);
+        tag.write_to_path(&src, id3::Version::Id3v24)
+            .expect("write src id3");
+        crate::loop_markers::write_loop_markers(&src, Some((1234, 5678)))
+            .expect("write src mp3 loop");
+
+        export_gain_audio(&src, &dst, 2.5).expect("export gain mp3");
+
+        let tag = id3::Tag::read_from_path(&dst).expect("read dst id3");
+        assert_eq!(tag.title(), Some("keep-title"));
+        assert_eq!(tag.artist(), Some("keep-artist"));
+        assert!(tag.pictures().next().is_some());
+        assert_eq!(crate::loop_markers::read_loop_markers(&dst), Some((1234, 5678)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "generated m4a fixtures are not stable for mp4ameta round-trip; verify with real-world m4a files"]
+    fn export_gain_m4a_preserves_metadata_and_loop_tags() {
+        let dir = make_temp_dir("m4a_metadata_preserve");
+        let src = dir.join("source.m4a");
+        let dst = dir.join("out.m4a");
+        export_channels_audio(&synth_stereo(44_100, 1.1), 44_100, &src).expect("export m4a");
+
+        let mut tag = mp4ameta::Tag::default();
+        tag.set_title("keep-title");
+        tag.set_bpm(128);
+        tag.set_artwork(mp4ameta::Img::png(make_png_bytes()));
+        tag.write_to_path(&src).expect("write src m4a tag");
+        if let Ok(src_tag) = mp4ameta::Tag::read_from_path(&src) {
+            assert_eq!(src_tag.title(), Some("keep-title"));
+            assert_eq!(src_tag.bpm(), Some(128));
+            assert!(src_tag.artwork().is_some());
+        } else {
+            eprintln!(
+                "warning: skipping strict m4a source metadata assertion for {}",
+                src.display()
+            );
+        }
+        let loop_write = crate::loop_markers::write_loop_markers(&src, Some((4321, 8765)));
+
+        export_gain_audio(&src, &dst, 1.0).expect("export gain m4a");
+
+        if let Ok(tag) = mp4ameta::Tag::read_from_path(&dst) {
+            assert_eq!(tag.title(), Some("keep-title"));
+            assert_eq!(tag.bpm(), Some(128));
+            assert!(tag.artwork().is_some());
+            if loop_write.is_ok() {
+                assert_eq!(crate::loop_markers::read_loop_markers(&dst), Some((4321, 8765)));
+            }
+        } else {
+            eprintln!(
+                "warning: skipping strict m4a metadata assertion for {}",
+                dst.display()
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

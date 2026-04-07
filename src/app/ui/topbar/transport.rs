@@ -12,11 +12,7 @@ impl WavesPreviewer {
         });
     }
 
-    fn ui_topbar_playback_mode_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-    ) {
+    fn ui_topbar_playback_mode_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.scope(|ui| {
             let s = ui.style_mut();
             s.spacing.item_spacing.x = 6.0;
@@ -109,9 +105,7 @@ impl WavesPreviewer {
             self.ui_topbar_release_focus_to_list(ctx, response, Some(delta));
         }
         if response.has_focus()
-            && ctx.input(|i| {
-                i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)
-            })
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
         {
             self.ui_topbar_release_focus_to_list(ctx, response, None);
         }
@@ -123,7 +117,11 @@ impl WavesPreviewer {
             .shared
             .playing
             .load(std::sync::atomic::Ordering::Relaxed);
-        let play_text = if playing { "Pause (Space)" } else { "Play (Space)" };
+        let play_text = if playing {
+            "Pause (Space)"
+        } else {
+            "Play (Space)"
+        };
         let play_enabled =
             !self.is_editor_workspace_active() || self.active_editor_exact_audio_ready() || playing;
         if ui

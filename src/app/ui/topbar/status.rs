@@ -56,9 +56,7 @@ impl WavesPreviewer {
             self.ui_topbar_release_focus_to_list(ctx, &vol_resp, Some(delta));
         }
         if vol_resp.has_focus()
-            && ctx.input(|i| {
-                i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)
-            })
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
         {
             self.ui_topbar_release_focus_to_list(ctx, &vol_resp, None);
         }
@@ -191,7 +189,8 @@ impl WavesPreviewer {
             .unwrap_or_default();
         EffectGraphApplyStatus {
             elapsed,
-            visible: self.effect_graph.runner.mode == Some(EffectGraphRunMode::ApplyToListSelection)
+            visible: self.effect_graph.runner.mode
+                == Some(EffectGraphRunMode::ApplyToListSelection)
                 && elapsed >= Duration::from_millis(120),
         }
     }
@@ -206,8 +205,11 @@ impl WavesPreviewer {
             .unwrap_or(0.0);
         ui.add(egui::Spinner::new());
         ui.label(
-            RichText::new(format!("Scanning: {} files ({:.1}s)", self.scan_found_count, elapsed))
-                .weak(),
+            RichText::new(format!(
+                "Scanning: {} files ({:.1}s)",
+                self.scan_found_count, elapsed
+            ))
+            .weak(),
         );
     }
 
@@ -395,14 +397,21 @@ impl WavesPreviewer {
         let total = state.targets.len().max(1);
         let (label, pct) = if state.finalizing {
             let pct = (state.after_index as f32 / total as f32).clamp(0.0, 1.0);
-            (format!("Resample finalize: {}/{}", state.after_index, total), pct)
+            (
+                format!("Resample finalize: {}/{}", state.after_index, total),
+                pct,
+            )
         } else {
             let pct = (state.index as f32 / total as f32).clamp(0.0, 1.0);
             (format!("Resample: {}/{}", state.index, total), pct)
         };
         ui.add(egui::Spinner::new());
         ui.label(RichText::new(label).weak());
-        ui.add(egui::ProgressBar::new(pct).desired_width(60.0).show_percentage());
+        ui.add(
+            egui::ProgressBar::new(pct)
+                .desired_width(60.0)
+                .show_percentage(),
+        );
         if ui.button("Cancel").clicked() {
             state.cancel_requested = true;
         }
@@ -443,7 +452,9 @@ impl WavesPreviewer {
             ui.add(egui::Spinner::new());
             let total = state.total.max(1);
             let done = state.done.min(total);
-            ui.label(RichText::new(format!("Downloading transcript model... {done}/{total}")).weak());
+            ui.label(
+                RichText::new(format!("Downloading transcript model... {done}/{total}")).weak(),
+            );
             ui.add(
                 egui::ProgressBar::new(done as f32 / total as f32)
                     .desired_width(80.0)
@@ -452,8 +463,7 @@ impl WavesPreviewer {
         }
         if let Some(err) = &self.transcript_ai_last_error {
             ui.label(
-                RichText::new(format!("Transcript: {err}"))
-                    .color(Color32::from_rgb(255, 120, 120)),
+                RichText::new(format!("Transcript: {err}")).color(Color32::from_rgb(255, 120, 120)),
             );
         }
     }
@@ -471,8 +481,11 @@ impl WavesPreviewer {
                 "Music Analyze"
             };
             ui.label(
-                RichText::new(format!("{prefix}: {}/{} ({elapsed:.1}s)", state.done, state.total))
-                    .weak(),
+                RichText::new(format!(
+                    "{prefix}: {}/{} ({elapsed:.1}s)",
+                    state.done, state.total
+                ))
+                .weak(),
             );
             if ui.button("Cancel").clicked() {
                 self.cancel_music_analysis_run();
@@ -507,7 +520,10 @@ impl WavesPreviewer {
         let (done, total) = self.total_editor_analysis_progress();
         let label = if total > 0 {
             let pct = ((done as f32 / total as f32) * 100.0).clamp(0.0, 100.0);
-            format!("Analysis: {} ({pct:.0}%)", self.total_editor_analysis_inflight())
+            format!(
+                "Analysis: {} ({pct:.0}%)",
+                self.total_editor_analysis_inflight()
+            )
         } else {
             format!("Analysis: {}", self.total_editor_analysis_inflight())
         };

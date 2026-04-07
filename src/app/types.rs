@@ -1003,6 +1003,8 @@ pub struct FileMeta {
     pub modified_at: Option<SystemTime>,
     pub cover_art: Option<Arc<egui::ColorImage>>,
     pub thumb: Vec<(f32, f32)>,
+    pub marker_fracs: Vec<f32>,
+    pub loop_frac: Option<(f32, f32)>,
     pub decode_error: Option<String>,
 }
 

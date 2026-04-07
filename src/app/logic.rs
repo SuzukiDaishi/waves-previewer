@@ -874,9 +874,7 @@ impl super::WavesPreviewer {
         vec![(0.0, 0.0); 128]
     }
 
-    pub(super) fn build_loading_overview_from_channels(
-        channels: &[Vec<f32>],
-    ) -> Vec<(f32, f32)> {
+    pub(super) fn build_loading_overview_from_channels(channels: &[Vec<f32>]) -> Vec<(f32, f32)> {
         crate::wave::build_waveform_minmax_from_channels(
             channels,
             channels.first().map(|ch| ch.len()).unwrap_or(0),
@@ -1820,14 +1818,23 @@ impl super::WavesPreviewer {
         true
     }
 
-    pub(super) fn mark_edit_saved_for_path(&mut self, path: &Path) {
+    pub(super) fn mark_edit_saved_for_path(
+        &mut self,
+        path: &Path,
+        saved_markers: &[crate::markers::MarkerEntry],
+        saved_loop_region: Option<(usize, usize)>,
+    ) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.path.as_path() == path) {
             tab.dirty = false;
-            tab.markers_saved = tab.markers_committed.clone();
-            tab.markers_applied = tab.markers_committed.clone();
+            tab.markers = saved_markers.to_vec();
+            tab.markers_committed = saved_markers.to_vec();
+            tab.markers_saved = saved_markers.to_vec();
+            tab.markers_applied = saved_markers.to_vec();
             tab.markers_dirty = false;
-            tab.loop_markers_saved = tab.loop_region_committed;
-            tab.loop_region_applied = tab.loop_region_committed;
+            tab.loop_region = saved_loop_region;
+            tab.loop_region_committed = saved_loop_region;
+            tab.loop_markers_saved = saved_loop_region;
+            tab.loop_region_applied = saved_loop_region;
             tab.loop_markers_dirty = false;
         }
         self.edited_cache.remove(path);
@@ -2169,10 +2176,6 @@ impl super::WavesPreviewer {
         false
     }
 
-
-
-
-
     pub(super) fn nudge_list_selection(&mut self, delta: isize, auto_scroll: bool) -> bool {
         if !self.is_list_workspace_active() || self.files.is_empty() {
             return false;
@@ -2414,10 +2417,6 @@ impl super::WavesPreviewer {
             self.apply_sort();
         }
     }
-
-
-
-
 
     pub(super) fn apply_filter_from_search(&mut self) {
         // Preserve selection index if possible

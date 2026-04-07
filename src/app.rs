@@ -1,12 +1,12 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use crate::audio::{AudioBuffer, AudioEngine};
 use crate::ipc;
 use crate::mcp;
 use crate::wave::build_minmax;
 use anyhow::Result;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 // use walkdir::WalkDir; // unused here (used in logic.rs)
 
 type HeavyPreviewMessage = (std::path::PathBuf, ToolKind, Vec<f32>, u64);
@@ -18,8 +18,8 @@ type HeavyOverlayMessage = (
     bool,
 );
 
-mod audio_ops;
 mod app_init;
+mod audio_ops;
 mod capture;
 mod clipboard_ops;
 mod debug_ops;
@@ -29,12 +29,12 @@ mod editor_features;
 mod editor_ops;
 mod editor_viewport;
 mod effect_graph_ops;
-mod frame_ops;
 mod export_ops;
 mod external;
 mod external_load_jobs;
 mod external_load_ops;
 mod external_ops;
+mod frame_ops;
 mod gain_ops;
 mod helpers;
 mod hf_cache;
@@ -66,10 +66,10 @@ mod session_ops;
 mod spectrogram;
 mod spectrogram_jobs;
 mod startup;
+mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
 mod threading;
-mod tab_ops;
 mod tool_ops;
 mod tooling;
 mod transcript;
@@ -84,11 +84,11 @@ use self::dialogs::TestDialogQueue;
 use self::render::waveform_pyramid::WaveformScratch;
 use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
+use self::types::*;
 pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
     StartupConfig, ToolKind, ViewMode, WorkspaceView,
 };
-use self::types::*;
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
 const UNDO_STACK_LIMIT: usize = 20;
@@ -594,6 +594,8 @@ pub struct WavesPreviewer {
     saving_virtual: Vec<(PathBuf, PathBuf)>,
     saving_format_targets: Vec<(PathBuf, PathBuf)>,
     saving_edit_sources: Vec<PathBuf>,
+    saving_edit_annotations:
+        HashMap<PathBuf, (Vec<crate::markers::MarkerEntry>, Option<(usize, usize)>)>,
     saving_mode: Option<SaveMode>,
     overwrite_undo_stack: Vec<Vec<(PathBuf, PathBuf)>>,
 
@@ -1409,6 +1411,8 @@ impl WavesPreviewer {
             modified_at: None,
             cover_art: None,
             thumb,
+            marker_fracs: Vec::new(),
+            loop_frac: None,
             decode_error: None,
         }
     }

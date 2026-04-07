@@ -5,6 +5,12 @@ use super::types::{
     ConflictPolicy, ExportResult, ExportState, MediaSource, SaveMode, VirtualSourceRef,
 };
 
+#[derive(Clone)]
+struct EditAnnotationSnapshot {
+    markers: Vec<crate::markers::MarkerEntry>,
+    loop_region: Option<(usize, usize)>,
+}
+
 impl super::WavesPreviewer {
     fn resolve_virtual_export_parent(&self, item: &super::types::MediaItem) -> Option<PathBuf> {
         let mut current = item.virtual_state.as_ref().map(|v| v.source.clone())?;
@@ -36,6 +42,19 @@ impl super::WavesPreviewer {
     fn overwrite_backup_path(src: &Path) -> PathBuf {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
         src.with_file_name(format!("{}.bak", fname))
+    }
+
+    fn current_edit_annotation_snapshot(&self, path: &Path) -> Option<EditAnnotationSnapshot> {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.path.as_path() == path) {
+            return Some(EditAnnotationSnapshot {
+                markers: tab.markers.clone(),
+                loop_region: tab.loop_region,
+            });
+        }
+        self.edited_cache.get(path).map(|cached| EditAnnotationSnapshot {
+            markers: cached.markers.clone(),
+            loop_region: cached.loop_region,
+        })
     }
 
     pub(super) fn spawn_export_gains(&mut self, _overwrite: bool) {
@@ -119,6 +138,10 @@ impl super::WavesPreviewer {
         let mut items: Vec<(PathBuf, f32)> = Vec::new();
         let mut edit_tasks: Vec<EditSaveTask> = Vec::new();
         let mut edit_sources: Vec<PathBuf> = Vec::new();
+        let mut edit_annotation_snapshots: HashMap<
+            PathBuf,
+            (Vec<crate::markers::MarkerEntry>, Option<(usize, usize)>),
+        > = HashMap::new();
         let mut virtual_tasks: Vec<(
             PathBuf,
             PathBuf,
@@ -239,8 +262,8 @@ impl super::WavesPreviewer {
                     dirty_audio = tab.dirty;
                     markers_dirty = tab.markers_dirty;
                     loop_markers_dirty = tab.loop_markers_dirty;
-                    markers = tab.markers_committed.clone();
-                    loop_region = tab.loop_region_committed;
+                    markers = tab.markers.clone();
+                    loop_region = tab.loop_region;
                     if dirty_audio
                         || markers_dirty
                         || loop_markers_dirty
@@ -289,8 +312,8 @@ impl super::WavesPreviewer {
                     dirty_audio = cached.dirty;
                     markers_dirty = cached.markers_dirty;
                     loop_markers_dirty = cached.loop_markers_dirty;
-                    markers = cached.markers_committed.clone();
-                    loop_region = cached.loop_region_committed;
+                    markers = cached.markers.clone();
+                    loop_region = cached.loop_region;
                     if dirty_audio
                         || markers_dirty
                         || loop_markers_dirty
@@ -343,6 +366,12 @@ impl super::WavesPreviewer {
                     || bit_override.is_some()
                     || path_format_override.is_some();
                 if has_edits {
+                    if let Some(snapshot) = self.current_edit_annotation_snapshot(&p) {
+                        edit_annotation_snapshots.insert(
+                            p.clone(),
+                            (snapshot.markers.clone(), snapshot.loop_region),
+                        );
+                    }
                     let write_audio = cfg.save_mode == SaveMode::NewFile
                         || dirty_audio
                         || db.abs() > 0.0001
@@ -420,6 +449,7 @@ impl super::WavesPreviewer {
         self.saving_sources = items.iter().map(|(p, _)| p.clone()).collect();
         self.saving_sources.extend(edit_sources.clone());
         self.saving_edit_sources = edit_sources;
+        self.saving_edit_annotations = edit_annotation_snapshots;
         self.saving_virtual = virtual_tasks
             .iter()
             .map(|(src, dst, _, _, _, _)| (src.clone(), dst.clone()))
@@ -715,6 +745,17 @@ impl super::WavesPreviewer {
                     }
                     max_file_samples =
                         max_file_samples.or_else(|| channels.get(0).map(|c| c.len() as u64));
+                    if matches!(save_mode, SaveMode::NewFile) {
+                        if let Err(err) =
+                            crate::wave::copy_audio_metadata_from_source(&task.src, &dst)
+                        {
+                            eprintln!(
+                                "copy metadata failed {} -> {}: {err:?}",
+                                task.src.display(),
+                                dst.display()
+                            );
+                        }
+                    }
                 } else if !task.src.is_file() {
                     failed += 1;
                     failed_paths.push(task.src.clone());
@@ -942,7 +983,16 @@ impl super::WavesPreviewer {
                 if matches!(self.saving_mode, Some(SaveMode::Overwrite)) {
                     for p in &edit_sources {
                         if success_set.contains(p) {
-                            self.mark_edit_saved_for_path(p);
+                            let (saved_markers, saved_loop_region) = self
+                                .saving_edit_annotations
+                                .get(p)
+                                .cloned()
+                                .unwrap_or_else(|| (Vec::new(), None));
+                            self.mark_edit_saved_for_path(
+                                p,
+                                &saved_markers,
+                                saved_loop_region,
+                            );
                         }
                     }
                 }
@@ -953,7 +1003,12 @@ impl super::WavesPreviewer {
                     }
                 }
                 for (src, dst) in &format_success {
-                    self.mark_edit_saved_for_path(src);
+                    let (saved_markers, saved_loop_region) = self
+                        .saving_edit_annotations
+                        .get(src)
+                        .cloned()
+                        .unwrap_or_else(|| (Vec::new(), None));
+                    self.mark_edit_saved_for_path(src, &saved_markers, saved_loop_region);
                     self.replace_path_in_state(src, dst);
                     self.sample_rate_override.remove(dst);
                     self.sample_rate_probe_cache.remove(dst);
@@ -1039,6 +1094,7 @@ impl super::WavesPreviewer {
                 self.saving_virtual.clear();
                 self.saving_format_targets.clear();
                 self.saving_edit_sources.clear();
+                self.saving_edit_annotations.clear();
                 self.saving_mode = None;
             }
             self.export_state = None;

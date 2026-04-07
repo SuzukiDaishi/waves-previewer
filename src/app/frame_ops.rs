@@ -437,8 +437,8 @@ impl WavesPreviewer {
                     if let Some(path) = self.rename_target.as_ref() {
                         ui.label(path.display().to_string());
                     }
-                    let resp =
-                        ui.add(egui::TextEdit::singleline(&mut self.rename_input).id(rename_edit_id));
+                    let resp = ui
+                        .add(egui::TextEdit::singleline(&mut self.rename_input).id(rename_edit_id));
                     if self.rename_focus_next {
                         resp.request_focus();
                         self.rename_focus_next = false;
@@ -517,7 +517,11 @@ impl WavesPreviewer {
                     let preview_count = 4usize;
                     ui.separator();
                     ui.label("Preview:");
-                    for (i, src) in self.batch_rename_targets.iter().take(preview_count).enumerate()
+                    for (i, src) in self
+                        .batch_rename_targets
+                        .iter()
+                        .take(preview_count)
+                        .enumerate()
                     {
                         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                         let num = self.batch_rename_start.saturating_add(i as u32);

@@ -986,6 +986,8 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         modified_at: None,
         cover_art: None,
         thumb: Vec::new(),
+        marker_fracs: Vec::new(),
+        loop_frac: None,
         decode_error: Some(format!("Missing: {}", path.display())),
     }
 }
