@@ -210,7 +210,7 @@ impl WavesPreviewer {
             zoo_use_bpm: true,
             zoo_gif_path: None,
             zoo_voice_path: None,
-            zoo_scale: 1.0,
+            zoo_scale: 0.5,
             zoo_opacity: 1.0,
             zoo_speed: 140.0,
             zoo_flip_manual: false,
@@ -309,8 +309,6 @@ impl WavesPreviewer {
             debug: debug_state,
             debug_summary_seq: 0,
             ipc_rx,
-            mcp_cmd_rx: None,
-            mcp_resp_tx: None,
             #[cfg(feature = "kittest")]
             test_dialogs: TestDialogQueue::default(),
         };
@@ -328,7 +326,6 @@ impl WavesPreviewer {
         app.revalidate_effect_graph_draft();
         app.apply_startup_paths();
         app.setup_debug_automation();
-        app.setup_mcp_server(&startup);
         app
     }
 }

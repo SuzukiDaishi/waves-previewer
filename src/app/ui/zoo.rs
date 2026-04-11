@@ -8,7 +8,7 @@ impl crate::app::WavesPreviewer {
                 prefs_dirty = true;
             }
             if ui
-                .checkbox(&mut self.zoo_walk_enabled, "Walk in Editor")
+                .checkbox(&mut self.zoo_walk_enabled, "Auto Walk")
                 .changed()
             {
                 prefs_dirty = true;
@@ -23,7 +23,7 @@ impl crate::app::WavesPreviewer {
                 prefs_dirty = true;
             }
             if ui
-                .checkbox(&mut self.zoo_flip_manual, "Flip Image")
+                .checkbox(&mut self.zoo_flip_manual, "Flip Image (Manual)")
                 .changed()
             {
                 prefs_dirty = true;
@@ -34,7 +34,7 @@ impl crate::app::WavesPreviewer {
                 .zoo_gif_path
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(none)".to_string());
+                .unwrap_or_else(|| "(embedded default)".to_string());
             ui.add(
                 egui::Label::new(egui::RichText::new(gif_label).monospace())
                     .truncate()
@@ -50,7 +50,7 @@ impl crate::app::WavesPreviewer {
                         prefs_dirty = true;
                     }
                 }
-                if ui.button("Clear").clicked() {
+                if ui.button("Use Default").clicked() {
                     self.set_zoo_gif_path(None);
                     prefs_dirty = true;
                 }
@@ -61,7 +61,7 @@ impl crate::app::WavesPreviewer {
                 .zoo_voice_path
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(none)".to_string());
+                .unwrap_or_else(|| "(embedded default)".to_string());
             ui.add(
                 egui::Label::new(egui::RichText::new(voice_label).monospace())
                     .truncate()
@@ -77,7 +77,7 @@ impl crate::app::WavesPreviewer {
                         prefs_dirty = true;
                     }
                 }
-                if ui.button("Clear").clicked() {
+                if ui.button("Use Default").clicked() {
                     self.set_zoo_voice_path(None);
                     prefs_dirty = true;
                 }
@@ -104,6 +104,11 @@ impl crate::app::WavesPreviewer {
             {
                 prefs_dirty = true;
             }
+            ui.separator();
+            if ui.button("Reset Zoo Settings").clicked() {
+                self.reset_zoo_settings_to_default();
+                prefs_dirty = true;
+            }
             if let Some(err) = self.zoo_last_error.as_deref() {
                 ui.separator();
                 ui.label(egui::RichText::new(err).color(egui::Color32::LIGHT_RED));
@@ -123,7 +128,7 @@ impl crate::app::WavesPreviewer {
         if !self.zoo_enabled {
             return;
         }
-        if self.zoo_frames_raw.is_empty() && self.zoo_gif_path.is_some() {
+        if self.zoo_frames_raw.is_empty() {
             self.reload_zoo_gif_frames();
         }
         self.ensure_zoo_textures(ctx);
@@ -179,19 +184,12 @@ impl crate::app::WavesPreviewer {
         let base_h = source_size.y * scale;
         let min_x = editor_rect.min.x + 8.0;
         let max_x = (editor_rect.max.x - base_w - 8.0).max(min_x);
-        if self.zoo_pos_x < min_x || self.zoo_pos_x > max_x {
-            self.zoo_pos_x = min_x;
-        }
+        self.zoo_dir = normalized_zoo_dir(self.zoo_dir);
+        clamp_zoo_motion(&mut self.zoo_pos_x, &mut self.zoo_dir, min_x, max_x);
         if self.zoo_walk_enabled {
             let move_px = self.zoo_speed.max(40.0) * walk_mul * bpm_mul * dt;
             self.zoo_pos_x += self.zoo_dir * move_px;
-            if self.zoo_pos_x <= min_x {
-                self.zoo_pos_x = min_x;
-                self.zoo_dir = 1.0;
-            } else if self.zoo_pos_x >= max_x {
-                self.zoo_pos_x = max_x;
-                self.zoo_dir = -1.0;
-            }
+            clamp_zoo_motion(&mut self.zoo_pos_x, &mut self.zoo_dir, min_x, max_x);
         }
         let mut draw_w = base_w;
         let mut draw_h = base_h;
@@ -219,7 +217,8 @@ impl crate::app::WavesPreviewer {
                     self.play_zoo_voice();
                 }
                 let alpha = (self.zoo_opacity.clamp(0.3, 1.0) * 255.0).round() as u8;
-                let auto_flip = self.zoo_walk_enabled && self.zoo_dir < 0.0;
+                // The bundled turtle faces right by default, so flip it only when moving left.
+                let auto_flip = self.zoo_walk_enabled && zoo_sprite_needs_flip_for_motion(self.zoo_dir);
                 let flip_x = self.zoo_flip_manual ^ auto_flip;
                 let uv = if flip_x {
                     egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
@@ -233,5 +232,66 @@ impl crate::app::WavesPreviewer {
                     egui::Color32::from_white_alpha(alpha),
                 );
             });
+    }
+}
+
+fn normalized_zoo_dir(dir: f32) -> f32 {
+    if dir.is_finite() && dir < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+fn clamp_zoo_motion(pos_x: &mut f32, dir: &mut f32, min_x: f32, max_x: f32) {
+    if max_x <= min_x {
+        *pos_x = min_x;
+        *dir = 1.0;
+        return;
+    }
+    if *pos_x <= min_x {
+        *pos_x = min_x;
+        if *dir < 0.0 {
+            *dir = 1.0;
+        }
+    } else if *pos_x >= max_x {
+        *pos_x = max_x;
+        if *dir > 0.0 {
+            *dir = -1.0;
+        }
+    }
+}
+
+fn zoo_sprite_needs_flip_for_motion(dir: f32) -> bool {
+    normalized_zoo_dir(dir) < 0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_zoo_motion, normalized_zoo_dir, zoo_sprite_needs_flip_for_motion};
+
+    #[test]
+    fn clamp_zoo_motion_turns_at_left_edge() {
+        let mut pos_x = 8.0;
+        let mut dir = -1.0;
+        clamp_zoo_motion(&mut pos_x, &mut dir, 8.0, 120.0);
+        assert_eq!(pos_x, 8.0);
+        assert_eq!(dir, 1.0);
+    }
+
+    #[test]
+    fn clamp_zoo_motion_turns_at_right_edge() {
+        let mut pos_x = 120.0;
+        let mut dir = 1.0;
+        clamp_zoo_motion(&mut pos_x, &mut dir, 8.0, 120.0);
+        assert_eq!(pos_x, 120.0);
+        assert_eq!(dir, -1.0);
+    }
+
+    #[test]
+    fn turtle_sprite_flips_only_for_leftward_motion() {
+        assert!(zoo_sprite_needs_flip_for_motion(-1.0));
+        assert!(!zoo_sprite_needs_flip_for_motion(1.0));
+        assert!(!zoo_sprite_needs_flip_for_motion(normalized_zoo_dir(0.0)));
     }
 }

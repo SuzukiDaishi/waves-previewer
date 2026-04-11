@@ -1,19 +1,30 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod cli;
-
-use neowaves::{app, ipc};
+use neowaves::{app, cli, ipc};
 
 fn main() -> eframe::Result<()> {
-    let mut startup = cli::parse_startup_config();
+    let mut startup = match cli::parse_runtime_mode() {
+        cli::ParseOutcome::Run(cli::RuntimeMode::Gui(startup)) => startup,
+        cli::ParseOutcome::Run(cli::RuntimeMode::Cli(command)) => {
+            if app::run_cli(command).is_err() {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        cli::ParseOutcome::Exit(code) => {
+            std::process::exit(code);
+        }
+    };
     let mut request = ipc::IpcRequest::empty();
     request.project = startup.open_project.clone();
     request.files = startup.open_files.clone();
-    if request.has_payload() && ipc::try_send_request(&request) {
+    if !startup.no_ipc_forward && request.has_payload() && ipc::try_send_request(&request) {
         return Ok(());
     }
-    if let Ok(rx) = ipc::start_listener() {
-        startup.ipc_rx = Some(std::sync::Arc::new(std::sync::Mutex::new(rx)));
+    if !startup.no_ipc_forward {
+        if let Ok(rx) = ipc::start_listener() {
+            startup.ipc_rx = Some(std::sync::Arc::new(std::sync::Mutex::new(rx)));
+        }
     }
     let mut viewport = egui::ViewportBuilder::default()
         .with_min_inner_size([960.0, 600.0])

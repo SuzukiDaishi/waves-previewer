@@ -47,7 +47,6 @@ impl WavesPreviewer {
         self.process_scan_messages();
         self.pump_list_meta_prefetch();
         self.process_ipc_requests();
-        self.process_mcp_commands(ctx);
         self.apply_pending_transcript_seek();
         self.process_tool_results();
         self.process_tool_queue();

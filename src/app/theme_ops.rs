@@ -18,6 +18,28 @@ impl WavesPreviewer {
         self.save_prefs();
     }
 
+    pub(super) fn reset_zoo_settings_to_default(&mut self) {
+        self.zoo_enabled = false;
+        self.zoo_walk_enabled = true;
+        self.zoo_voice_enabled = false;
+        self.zoo_use_bpm = true;
+        self.zoo_gif_path = None;
+        self.zoo_voice_path = None;
+        self.zoo_scale = 0.5;
+        self.zoo_opacity = 1.0;
+        self.zoo_speed = 140.0;
+        self.zoo_flip_manual = false;
+        self.zoo_anim_clock = 0.0;
+        self.zoo_pos_x = 0.0;
+        self.zoo_dir = 1.0;
+        self.zoo_last_tick = std::time::Instant::now();
+        self.zoo_squish_until = None;
+        self.zoo_last_error = None;
+        self.zoo_voice_cache_path = None;
+        self.zoo_voice_cache = None;
+        self.reload_zoo_gif_frames();
+    }
+
     pub(super) fn reset_settings_window_to_default(&mut self, ctx: &egui::Context) {
         self.export_cfg = ExportConfig {
             first_prompt: true,
@@ -40,6 +62,7 @@ impl WavesPreviewer {
         self.sanitize_transcript_ai_config();
         self.refresh_transcript_ai_status();
         self.transcript_ai_last_error = None;
+        self.reset_zoo_settings_to_default();
         self.reset_plugin_search_paths_to_default();
         self.ensure_sort_key_visible();
         self.apply_sort();

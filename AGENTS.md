@@ -9,7 +9,7 @@ Terminology
 - Legacy code/file naming still uses `project*` to mean session persistence.
 
 Repository Layout
-- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, MCP smoke tests).
+- `commands/`: PowerShell helper scripts (e.g., Whisper model download, SRT generation, installer build).
 - `debug/`: Debug fixtures and automation outputs (e.g., gui_test audio, summary text).
 - `docs/`: Design/refactor plans and specs.
   - `REFACTOR_PLAN.md`: app.rs / logic.rs refactor plan and progress map.
@@ -38,13 +38,12 @@ Repository Layout
     - `theme_ops.rs`: theme + prefs load/save.
     - `scan_ops.rs`: folder scan job orchestration + results apply.
     - `transcript_ops.rs`: transcript seek handling.
-    - `mcp_ops.rs`: MCP command processing + list query helper.
+    - `cli_ops.rs`: `--cli` headless command handlers and JSON/render helpers.
     - `gain_ops.rs`: pending gain lookup/set helpers for list items.
     - `list_state_ops.rs`: list accessors, selection helpers, and sort-key visibility guard.
     - `temp_audio_ops.rs`: clipboard temp wav export + virtual audio decode helpers.
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.
     - `audio_ops.rs`: output volume + per-file gain application.
-  - `src/mcp/`: MCP server/client glue for automation (stdio/http).
   - `src/bin/`: extra binaries/utilities (if present).
   - `src/main.rs`: native startup entry.
   - `src/cli.rs`: CLI arg parsing and startup config helpers.
@@ -62,7 +61,12 @@ Console Quick Start (PowerShell)
 - Tests: `cargo test`
 - Release build: `cargo build --release`
 
-CLI Arguments (src/main.rs)
+CLI Arguments / Modes
+- `neowaves` or `cargo run`: GUI startup
+- `neowaves --help`: GUI startup flags + `--cli` entry
+- `neowaves --cli --help`: headless CLI command tree
+
+Legacy GUI flags
 - `--open-session <session.nwsess>`
 - `--open-project <project.nwproj>` (legacy)
 - `--open-folder <dir>`
@@ -101,19 +105,22 @@ CLI Arguments (src/main.rs)
 - `--auto-run-delay <frames>`
 - `--auto-run-no-exit`
 - `--debug-check-interval <frames>`
-- `--mcp-stdio`
-- `--mcp-http`
-- `--mcp-http-addr <addr>`
-- `--mcp-allow-path <path>` (repeatable)
-- `--mcp-allow-write`
-- `--mcp-allow-export`
-- `--mcp-readwrite`
 - `--help` / `-h`
+
+Headless CLI examples
+- `--cli session inspect --session <session.nwsess>`
+- `--cli list query --folder <dir>`
+- `--cli editor inspect --input <audio>`
+- `--cli render waveform --input <audio> --output <png>`
+- `--cli render spectrum --input <audio> --output <png>`
+- `--cli render editor --input <audio> --output <png>`
+- `--cli render list --folder <dir> --output <png>`
+- `--cli export file --input <audio> --output <audio>`
 
 Useful Scripts
 - `commands\\download_whisper.ps1` (model download)
 - `commands\\generate_srt.ps1` (transcript utility)
-- `commands\\mcp_smoke.ps1` (MCP smoke tests)
+- `commands\\build_installer.ps1` (installer build)
 
 Debugging Tips (App UI)
 - Debug Window: Tools → Debug Window or `F12`

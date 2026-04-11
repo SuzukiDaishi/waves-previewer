@@ -183,8 +183,6 @@ impl WavesPreviewer {
             ui.separator();
             self.ui_zoo_menu(ui, ctx);
             ui.separator();
-            self.ui_topbar_mcp_menu(ui);
-            ui.separator();
             if ui.button("External Data...").clicked() {
                 self.show_external_dialog = true;
                 ui.close();
@@ -262,21 +260,5 @@ impl WavesPreviewer {
                 ui.close();
             }
         });
-    }
-
-    fn ui_topbar_mcp_menu(&mut self, ui: &mut egui::Ui) {
-        let mcp_on = self.mcp_cmd_rx.is_some();
-        if !mcp_on {
-            if ui.button("Start MCP (stdio)").clicked() {
-                self.start_mcp_from_ui();
-                ui.close();
-            }
-            if ui.button("Start MCP (HTTP)").clicked() {
-                self.start_mcp_http_from_ui();
-                ui.close();
-            }
-        } else {
-            ui.label(RichText::new("MCP: On").color(Color32::from_rgb(120, 220, 140)));
-        }
     }
 }

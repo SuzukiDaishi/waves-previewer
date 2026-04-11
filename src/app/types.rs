@@ -2330,12 +2330,7 @@ pub struct StartupConfig {
     pub debug_summary_path: Option<PathBuf>,
     pub debug_summary_delay_frames: u32,
     pub debug: DebugConfig,
-    pub mcp_stdio: bool,
-    pub mcp_allow_paths: Vec<PathBuf>,
-    pub mcp_allow_write: bool,
-    pub mcp_allow_export: bool,
-    pub mcp_read_only: bool,
-    pub mcp_http_addr: Option<String>,
+    pub no_ipc_forward: bool,
     pub ipc_rx: Option<Arc<Mutex<std::sync::mpsc::Receiver<crate::ipc::IpcRequest>>>>,
 }
 
@@ -2371,12 +2366,7 @@ impl Default for StartupConfig {
             debug_summary_path: None,
             debug_summary_delay_frames: 10,
             debug: DebugConfig::default(),
-            mcp_stdio: false,
-            mcp_allow_paths: Vec::new(),
-            mcp_allow_write: false,
-            mcp_allow_export: false,
-            mcp_read_only: true,
-            mcp_http_addr: None,
+            no_ipc_forward: false,
             ipc_rx: None,
         }
     }

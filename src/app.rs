@@ -1,6 +1,5 @@
 use crate::audio::{AudioBuffer, AudioEngine};
 use crate::ipc;
-use crate::mcp;
 use crate::wave::build_minmax;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -22,6 +21,8 @@ mod app_init;
 mod audio_ops;
 mod capture;
 mod clipboard_ops;
+mod cli_workspace;
+mod cli_ops;
 mod debug_ops;
 mod dialogs;
 mod editor_decode_ops;
@@ -48,7 +49,6 @@ mod list_undo;
 mod loading_ops;
 mod logic;
 mod loudnorm_ops;
-mod mcp_ops;
 mod meta;
 mod meta_ops;
 mod music_ai_ops;
@@ -78,6 +78,7 @@ mod transcript_onnx;
 mod transcript_ops;
 mod types;
 mod ui;
+mod zoo_assets;
 mod zoo_ops;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
@@ -89,6 +90,7 @@ pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
     StartupConfig, ToolKind, ViewMode, WorkspaceView,
 };
+pub use self::cli_ops::run_cli;
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
 const UNDO_STACK_LIMIT: usize = 20;
@@ -644,8 +646,6 @@ pub struct WavesPreviewer {
     debug: DebugState,
     debug_summary_seq: u64,
     ipc_rx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ipc::IpcRequest>>>>,
-    mcp_cmd_rx: Option<std::sync::mpsc::Receiver<crate::mcp::UiCommand>>,
-    mcp_resp_tx: Option<std::sync::mpsc::Sender<crate::mcp::UiCommandResult>>,
     #[cfg(feature = "kittest")]
     test_dialogs: TestDialogQueue,
 }
@@ -2052,61 +2052,6 @@ impl WavesPreviewer {
         self.debug_log(format!("dummy list populated: {count}"));
     }
 
-    fn setup_mcp_server(&mut self, cfg: &StartupConfig) {
-        let http_addr = cfg.mcp_http_addr.clone();
-        let use_stdio = cfg.mcp_stdio && http_addr.is_none();
-        if http_addr.is_none() && !use_stdio {
-            return;
-        }
-        use std::sync::mpsc;
-        let (cmd_tx, cmd_rx) = mpsc::channel::<mcp::UiCommand>();
-        let (resp_tx, resp_rx) = mpsc::channel::<mcp::UiCommandResult>();
-        self.mcp_cmd_rx = Some(cmd_rx);
-        self.mcp_resp_tx = Some(resp_tx);
-        let mut state = mcp::McpState::new();
-        state.allow_paths = cfg.mcp_allow_paths.clone();
-        state.allow_write = cfg.mcp_allow_write;
-        state.allow_export = cfg.mcp_allow_export;
-        state.read_only = cfg.mcp_read_only;
-        let bridge = mcp::UiBridge::new(cmd_tx, resp_rx);
-        std::thread::spawn(move || {
-            let server = mcp::McpServer::new(state, bridge);
-            if let Some(addr) = http_addr {
-                let _ = server.run_http(&addr);
-            } else {
-                let _ = server.run_stdio();
-            }
-        });
-    }
-
-    fn start_mcp_from_ui(&mut self) {
-        if self.mcp_cmd_rx.is_some() {
-            return;
-        }
-        let mut cfg = self.startup.cfg.clone();
-        cfg.mcp_stdio = true;
-        if cfg.mcp_allow_paths.is_empty() {
-            if let Some(root) = self.root.clone() {
-                cfg.mcp_allow_paths = vec![root];
-            }
-        }
-        self.setup_mcp_server(&cfg);
-    }
-
-    fn start_mcp_http_from_ui(&mut self) {
-        if self.mcp_cmd_rx.is_some() {
-            return;
-        }
-        let mut cfg = self.startup.cfg.clone();
-        cfg.mcp_http_addr = Some(mcp::DEFAULT_HTTP_ADDR.to_string());
-        if cfg.mcp_allow_paths.is_empty() {
-            if let Some(root) = self.root.clone() {
-                cfg.mcp_allow_paths = vec![root];
-            }
-        }
-        self.setup_mcp_server(&cfg);
-    }
-
     pub(super) fn open_new_window(&mut self) {
         // Spawn a fresh process of the current executable (no args) to open a new window.
         // This keeps state isolated and avoids blocking the current UI thread.
@@ -2337,6 +2282,11 @@ impl WavesPreviewer {
         let app = Self::build_app(startup, audio);
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
+    }
+
+    pub fn new_headless(startup: StartupConfig) -> Result<Self> {
+        let audio = AudioEngine::new_for_test();
+        Ok(Self::build_app(startup, audio))
     }
 
     #[cfg(any(test, feature = "kittest"))]

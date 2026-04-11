@@ -4,6 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### CLI Replacement / MCP Removal
+- Added docs-first CLI replacement specs under `docs/CLI_*.md`.
+- Default startup remains GUI; headless automation now enters through `--cli`.
+- Replaced the handwritten startup parser with `clap`, including richer `--help` output for GUI mode and CLI subcommands.
+- Added Phase 1 headless commands for session/item/list/editor/render/export/debug with JSON stdout envelopes.
+- Added direct waveform/spectrum PNG rendering and GUI-backed list/editor screenshot rendering for CLI workflows.
+- Removed runtime MCP wiring from the app shell and menus; repo/docs now point to `--cli` as the supported automation surface.
+
 ### Refactor: Large File / Large Function Split
 - Split app startup and frame orchestration out of `src/app.rs` into `src/app/app_init.rs` and `src/app/frame_ops.rs`.
 - Moved tab open/activate and editor decode orchestration into `src/app/tab_ops.rs` and `src/app/editor_decode_ops.rs`.

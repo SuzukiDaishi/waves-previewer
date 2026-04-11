@@ -107,17 +107,27 @@ cargo run
 
 ## CLI / 自動化
 
-CLI 引数は `AGENTS.md` に最新一覧があります。
-例:
+通常起動は GUI です。
+
 ```bash
-cargo run -- --open-folder "C:\\path\\to\\wav" --open-first --screenshot screenshots\\shot.png --exit-after-screenshot
+cargo run
+cargo run -- --open-folder "C:\\path\\to\\wav" --open-first
 ```
 
----
+headless CLI は `--cli` で入ります。`stdout` は JSON、画像系は PNG を保存して絶対パスを返します。
 
-## MCP (stdio/http)
+```bash
+cargo run -- --cli --help
+cargo run -- --cli list query --folder "C:\\path\\to\\wav"
+cargo run -- --cli item inspect --input ".\\debug\\gui_test_440.wav"
+cargo run -- --cli render waveform --input ".\\debug\\gui_test_440.wav" --output ".\\debug\\cli-renders\\wave.png"
+```
 
-MCP サーバ機能を内蔵しています。起動方法・許可パスなどは README 内の MCP セクションまたは `AGENTS.md` を参照してください。
+CLI の仕様書:
+- `docs/CLI_MASTER_PLAN.md`
+- `docs/CLI_COMMAND_REFERENCE.md`
+- `docs/CLI_MIGRATION_MATRIX.md`
+- `docs/CLI_HELP_SPEC.md`
 
 ---
 
