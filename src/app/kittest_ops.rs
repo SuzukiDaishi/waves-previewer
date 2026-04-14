@@ -1660,6 +1660,64 @@ impl super::WavesPreviewer {
         Some(self.map_audio_to_display_sample(tab, self.test_audio_play_pos()))
     }
 
+    pub fn test_editor_display_samples_len(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some(Self::editor_display_samples_len(tab))
+    }
+
+    pub fn test_editor_playhead_x_offset(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let display_len = Self::editor_display_samples_len(tab);
+        let display_sample = self.map_audio_to_display_sample(tab, self.test_audio_play_pos());
+        Some(Self::editor_display_sample_x_for_tab(
+            tab,
+            0.0,
+            tab.last_wave_w.max(1.0),
+            display_len,
+            display_sample,
+        ))
+    }
+
+    pub fn test_editor_display_sample_x_offset(&self, display_sample: usize) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let display_len = Self::editor_display_samples_len(tab);
+        Some(Self::editor_display_sample_x_for_tab(
+            tab,
+            0.0,
+            tab.last_wave_w.max(1.0),
+            display_len,
+            display_sample,
+        ))
+    }
+
+    pub fn test_editor_x_offset_to_display_sample(&self, x_offset: f32) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let display_len = Self::editor_display_samples_len(tab);
+        Some(Self::editor_display_sample_at_x_for_tab(
+            tab,
+            0.0,
+            tab.last_wave_w.max(1.0),
+            display_len,
+            x_offset,
+        ))
+    }
+
+    pub fn test_editor_visible_display_range(&self) -> Option<(usize, usize)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let display_len = Self::editor_display_samples_len(tab);
+        Some(Self::editor_visible_display_range_for_tab(
+            tab,
+            0.0,
+            tab.last_wave_w.max(1.0),
+            display_len,
+        ))
+    }
+
     pub fn test_active_editor_display_sample_rate(&self) -> Option<u32> {
         let tab_idx = self.active_tab?;
         let tab = self.tabs.get(tab_idx)?;

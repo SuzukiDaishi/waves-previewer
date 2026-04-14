@@ -9,18 +9,27 @@ const ROOT_AFTER_HELP: &str = r#"Examples:
   neowaves --open-file .\demo.wav
   neowaves --open-session .\work.nwsess
   neowaves --cli list query --folder .\assets\audio
+  neowaves --cli batch loudness plan --session .\work.nwsess --query _BGM --target-lufs -24
   neowaves --cli editor inspect --input .\demo.wav
-  neowaves --cli render waveform --input .\demo.wav --output .\out\wave.png
+  neowaves --cli effect-graph list
+  neowaves --cli external inspect --session .\work.nwsess
+  neowaves --cli transcript generate --session .\work.nwsess --write-srt
+  neowaves --cli music-ai analyze --session .\work.nwsess --report .\music_analysis.md
+  neowaves --cli plugin scan
 
 See docs/CLI_MASTER_PLAN.md and docs/CLI_COMMAND_REFERENCE.md for the full CLI contract."#;
 
 const CLI_AFTER_HELP: &str = r#"Examples:
   neowaves --cli session inspect --session .\work.nwsess
   neowaves --cli list query --folder .\assets\audio --columns file,length,sample_rate
-  neowaves --cli render list --folder .\assets\audio --output .\out\list.png
-  neowaves --cli editor inspect --input .\demo.wav
+  neowaves --cli batch loudness plan --session .\work.nwsess --query _BGM --target-lufs -24
   neowaves --cli editor playback play --session .\work.nwsess --selection
-  neowaves --cli render spectrum --input .\demo.wav --view-mode mel
+  neowaves --cli export verify-loop-tags --input .\out\music_loop.mp3
+  neowaves --cli effect-graph test --graph convert_2ch_to_5ch --input .\stereo.wav
+  neowaves --cli external source add --session .\work.nwsess --input .\table.xlsx
+  neowaves --cli transcript generate --session .\work.nwsess --write-srt --overwrite-existing
+  neowaves --cli music-ai apply-markers --session .\work.nwsess --beats --downbeats --sections --replace
+  neowaves --cli plugin session apply --session .\work.nwsess
 
 stdout is JSON. Human-readable diagnostics are written to stderr."#;
 
@@ -50,9 +59,15 @@ const EDITOR_TOOL_SET_AFTER_HELP: &str = r#"Examples:
   neowaves --cli editor tool set --session .\work.nwsess --tool pitch --pitch-semitones 2.5
   neowaves --cli editor tool set --session .\work.nwsess --tool fade --fade-in-ms 250"#;
 
+const EDITOR_CURSOR_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli editor cursor get --session .\work.nwsess
+  neowaves --cli editor cursor set --session .\work.nwsess --sample 44100
+  neowaves --cli editor cursor nudge --session .\work.nwsess --samples 512 --snap zero-cross"#;
+
 const RENDER_WAVEFORM_AFTER_HELP: &str = r#"Examples:
   neowaves --cli render waveform --input .\demo.wav --output .\out\wave.png
-  neowaves --cli render waveform --input .\demo.wav --mixdown"#;
+  neowaves --cli render waveform --input .\demo.wav --mixdown
+  neowaves --cli render waveform --session .\work.nwsess --path .\demo.wav --loop"#;
 
 const RENDER_SPECTRUM_AFTER_HELP: &str = r#"Examples:
   neowaves --cli render spectrum --input .\demo.wav --output .\out\spec.png
@@ -69,7 +84,71 @@ const RENDER_LIST_AFTER_HELP: &str = r#"Examples:
 const EXPORT_FILE_AFTER_HELP: &str = r#"Examples:
   neowaves --cli export file --input .\demo.wav --output .\demo_copy.wav
   neowaves --cli export file --input .\demo.wav --output .\demo_gain.wav --gain-db -3.0
-  neowaves --cli export file --session .\work.nwsess --overwrite"#;
+  neowaves --cli export file --session .\work.nwsess --overwrite
+  neowaves --cli export file --session .\work.nwsess --output .\music_loop.mp3 --format mp3"#;
+
+const EXPORT_VERIFY_LOOP_TAGS_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli export verify-loop-tags --input .\music_loop.mp3
+  neowaves --cli export verify-loop-tags --input .\battle_loop.wav"#;
+
+const BATCH_LOUDNESS_PLAN_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli batch loudness plan --session .\work.nwsess --query _BGM --target-lufs -24
+  neowaves --cli batch loudness plan --session .\work.nwsess --query-id <id> --target-lufs -24 --report .\bgm_plan.md"#;
+
+const BATCH_LOUDNESS_APPLY_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli batch loudness apply --session .\work.nwsess --query _BGM --target-lufs -24
+  neowaves --cli batch loudness apply --session .\work.nwsess --query-id <id> --target-lufs -24"#;
+
+const BATCH_EXPORT_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli batch export --session .\work.nwsess --query _BGM --overwrite
+  neowaves --cli batch export --session .\work.nwsess --query-id <id> --output-dir .\out --report .\export.md"#;
+
+const EFFECT_GRAPH_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli effect-graph list
+  neowaves --cli effect-graph new --name convert_2ch_to_5ch
+  neowaves --cli effect-graph validate --graph convert_2ch_to_5ch
+  neowaves --cli effect-graph test --graph convert_2ch_to_5ch --input .\stereo.wav"#;
+
+const EXTERNAL_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli external inspect --session .\work.nwsess
+  neowaves --cli external source add --session .\work.nwsess --input .\table.xlsx --sheet Sheet1
+  neowaves --cli external config set --session .\work.nwsess --key-rule regex --regex-input stem --regex "(.*)_BGM" --replace "$1"
+  neowaves --cli external rows --session .\work.nwsess"#;
+
+const TRANSCRIPT_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli transcript inspect --input .\voice.wav
+  neowaves --cli transcript config set --session .\work.nwsess --language ja --task transcribe
+  neowaves --cli transcript generate --session .\work.nwsess --path .\voice.wav --overwrite-existing
+  neowaves --cli transcript batch generate --session .\work.nwsess --query _VO"#;
+
+const TRANSCRIPT_GENERATE_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli transcript generate --session .\work.nwsess --write-srt
+  neowaves --cli transcript generate --session .\work.nwsess --path .\voice.wav --write-srt --overwrite-existing
+  neowaves --cli transcript batch generate --session .\work.nwsess --query _VO --write-srt"#;
+
+const MUSIC_AI_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli music-ai inspect --session .\work.nwsess --path .\music.wav
+  neowaves --cli music-ai analyze --session .\work.nwsess --path .\music.wav --stems-dir .\stems
+  neowaves --cli music-ai apply-markers --session .\work.nwsess --beats --downbeats --replace
+  neowaves --cli music-ai export-stems --session .\work.nwsess --output-dir .\out\stems"#;
+
+const MUSIC_AI_ANALYZE_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli music-ai analyze --session .\work.nwsess --report .\music_analysis.md
+  neowaves --cli music-ai analyze --session .\work.nwsess --path .\music.wav --stems-dir .\stems --prefer-demucs"#;
+
+const PLUGIN_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli plugin search-path list
+  neowaves --cli plugin scan
+  neowaves --cli plugin probe --plugin my_fx
+  neowaves --cli plugin session set --session .\work.nwsess --plugin my_fx --param mix=0.5
+  neowaves --cli plugin session apply --session .\work.nwsess"#;
+
+const PLUGIN_SESSION_APPLY_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli plugin session apply --session .\work.nwsess
+  neowaves --cli plugin session set --session .\work.nwsess --plugin my_fx --param mix=0.5
+  neowaves --cli plugin session preview --session .\work.nwsess
+
+This command mutates the current session target and requires --session."#;
 
 pub enum RuntimeMode {
     Gui(app::StartupConfig),
@@ -293,7 +372,19 @@ pub enum CliCommand {
     #[command(subcommand)]
     List(ListCommand),
     #[command(subcommand)]
+    Batch(BatchCommand),
+    #[command(subcommand)]
     Editor(EditorCommand),
+    #[command(subcommand, after_help = EXTERNAL_AFTER_HELP)]
+    External(ExternalCommand),
+    #[command(subcommand, after_help = TRANSCRIPT_AFTER_HELP)]
+    Transcript(TranscriptCommand),
+    #[command(subcommand, name = "music-ai", after_help = MUSIC_AI_AFTER_HELP)]
+    MusicAi(MusicAiCommand),
+    #[command(subcommand, after_help = PLUGIN_AFTER_HELP)]
+    Plugin(PluginCommand),
+    #[command(subcommand, name = "effect-graph", after_help = EFFECT_GRAPH_AFTER_HELP)]
+    EffectGraph(EffectGraphCommand),
     #[command(subcommand)]
     Render(RenderCommand),
     #[command(subcommand)]
@@ -359,6 +450,11 @@ pub struct ItemArtworkArgs {
 pub enum ListCommand {
     Columns(ListColumnsArgs),
     Query(ListQueryArgs),
+    Sort(ListSortArgs),
+    Search(ListSearchArgs),
+    Select(ListSelectArgs),
+    #[command(name = "save-query")]
+    SaveQuery(ListSaveQueryArgs),
     Render(ListRenderArgs),
 }
 
@@ -373,6 +469,18 @@ pub struct ListSourceArgs {
     pub session: Option<PathBuf>,
 }
 
+#[derive(Debug, Args, Clone, Default)]
+pub struct CliQueryFilterArgs {
+    #[arg(long)]
+    pub query: Option<String>,
+    #[arg(long = "sort-key")]
+    pub sort_key: Option<String>,
+    #[arg(long = "sort-dir")]
+    pub sort_dir: Option<String>,
+    #[arg(long = "query-id")]
+    pub query_id: Option<String>,
+}
+
 #[derive(Debug, Args)]
 #[command(after_help = LIST_QUERY_AFTER_HELP)]
 pub struct ListQueryArgs {
@@ -380,8 +488,44 @@ pub struct ListQueryArgs {
     pub source: ListSourceArgs,
     #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
     pub columns: String,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_overlays: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListSortArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long = "sort-key")]
+    pub sort_key: String,
+    #[arg(long = "sort-dir", default_value = "asc")]
+    pub sort_dir: String,
+    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    pub columns: String,
     #[arg(long)]
     pub query: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_overlays: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListSearchArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long)]
+    pub query: String,
+    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    pub columns: String,
     #[arg(long = "sort-key")]
     pub sort_key: Option<String>,
     #[arg(long = "sort-dir")]
@@ -392,6 +536,26 @@ pub struct ListQueryArgs {
     pub limit: Option<usize>,
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_overlays: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ListSelectArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO", conflicts_with = "query")]
+    pub path: Option<PathBuf>,
+    #[arg(long, conflicts_with = "path")]
+    pub query: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    pub index: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ListSaveQueryArgs {
+    #[command(flatten)]
+    pub source: ListSourceArgs,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
 }
 
 #[derive(Debug, Args)]
@@ -413,12 +577,494 @@ pub struct ListRenderArgs {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum ExternalCommand {
+    Inspect(ExternalInspectArgs),
+    Render(ExternalRenderArgs),
+    Rows(ExternalRowsArgs),
+    #[command(subcommand)]
+    Source(ExternalSourceCommand),
+    #[command(subcommand)]
+    Config(ExternalConfigCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalInspectArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalRenderArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "PNG")]
+    pub output: Option<PathBuf>,
+    #[arg(long, default_value_t = 1280)]
+    pub width: u32,
+    #[arg(long, default_value_t = 720)]
+    pub height: u32,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalRowsArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, default_value_t = 0)]
+    pub offset: usize,
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_unmatched: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExternalSourceCommand {
+    List(ExternalSourceListArgs),
+    Add(ExternalSourceAddArgs),
+    Reload(ExternalSourceReloadArgs),
+    Remove(ExternalSourceRemoveArgs),
+    Clear(ExternalSourceClearArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalSourceListArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalSourceAddArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long = "input", value_name = "PATH")]
+    pub input: PathBuf,
+    #[arg(long = "sheet")]
+    pub sheet_name: Option<String>,
+    #[arg(long = "has-header")]
+    pub has_header: Option<CliToggle>,
+    #[arg(long = "header-row")]
+    pub header_row: Option<usize>,
+    #[arg(long = "data-row")]
+    pub data_row: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalSourceReloadArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long)]
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalSourceRemoveArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long)]
+    pub index: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalSourceClearArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExternalConfigCommand {
+    Get(ExternalConfigGetArgs),
+    Set(ExternalConfigSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalConfigGetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ExternalConfigSetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long = "active-source")]
+    pub active_source: Option<usize>,
+    #[arg(long = "key-column")]
+    pub key_column: Option<String>,
+    #[arg(long = "key-rule")]
+    pub key_rule: Option<CliExternalKeyRule>,
+    #[arg(long = "regex-input")]
+    pub regex_input: Option<CliExternalRegexInput>,
+    #[arg(long = "regex")]
+    pub regex: Option<String>,
+    #[arg(long = "replace")]
+    pub replace: Option<String>,
+    #[arg(long = "scope-regex")]
+    pub scope_regex: Option<String>,
+    #[arg(long = "visible-column")]
+    pub visible_columns: Vec<String>,
+    #[arg(long = "show-unmatched")]
+    pub show_unmatched: Option<CliToggle>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TranscriptCommand {
+    Inspect(TranscriptInspectArgs),
+    #[command(subcommand)]
+    Model(TranscriptModelCommand),
+    #[command(subcommand)]
+    Config(TranscriptConfigCommand),
+    Generate(TranscriptGenerateArgs),
+    #[command(subcommand)]
+    Batch(TranscriptBatchCommand),
+    #[command(name = "export-srt")]
+    ExportSrt(TranscriptExportSrtArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TranscriptInspectArgs {
+    #[arg(long, value_name = "AUDIO", conflicts_with = "session")]
+    pub input: Option<PathBuf>,
+    #[arg(long, value_name = "SESSION", conflicts_with = "input")]
+    pub session: Option<PathBuf>,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TranscriptModelCommand {
+    Status(TranscriptModelStatusArgs),
+    Download(TranscriptModelDownloadArgs),
+    Uninstall(TranscriptModelUninstallArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct TranscriptModelStatusArgs {}
+
+#[derive(Debug, Args, Default)]
+pub struct TranscriptModelDownloadArgs {}
+
+#[derive(Debug, Args, Default)]
+pub struct TranscriptModelUninstallArgs {}
+
+#[derive(Debug, Subcommand)]
+pub enum TranscriptConfigCommand {
+    Get(TranscriptConfigGetArgs),
+    Set(TranscriptConfigSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TranscriptConfigGetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct TranscriptConfigSetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long)]
+    pub language: Option<String>,
+    #[arg(long)]
+    pub task: Option<String>,
+    #[arg(long = "max-new-tokens")]
+    pub max_new_tokens: Option<usize>,
+    #[arg(long = "overwrite-existing-srt")]
+    pub overwrite_existing_srt: Option<CliToggle>,
+    #[arg(long = "perf-mode")]
+    pub perf_mode: Option<CliTranscriptPerfMode>,
+    #[arg(long = "model-variant")]
+    pub model_variant: Option<CliTranscriptModelVariant>,
+    #[arg(long = "omit-language-token")]
+    pub omit_language_token: Option<CliToggle>,
+    #[arg(long = "omit-notimestamps-token")]
+    pub omit_notimestamps_token: Option<CliToggle>,
+    #[arg(long = "vad-enabled")]
+    pub vad_enabled: Option<CliToggle>,
+    #[arg(long = "vad-model-path")]
+    pub vad_model_path: Option<PathBuf>,
+    #[arg(long = "clear-vad-model-path", action = ArgAction::SetTrue)]
+    pub clear_vad_model_path: bool,
+    #[arg(long = "vad-threshold")]
+    pub vad_threshold: Option<f32>,
+    #[arg(long = "vad-min-speech-ms")]
+    pub vad_min_speech_ms: Option<usize>,
+    #[arg(long = "vad-min-silence-ms")]
+    pub vad_min_silence_ms: Option<usize>,
+    #[arg(long = "vad-speech-pad-ms")]
+    pub vad_speech_pad_ms: Option<usize>,
+    #[arg(long = "max-window-ms")]
+    pub max_window_ms: Option<usize>,
+    #[arg(long = "no-speech-threshold")]
+    pub no_speech_threshold: Option<f32>,
+    #[arg(long = "clear-no-speech-threshold", action = ArgAction::SetTrue)]
+    pub clear_no_speech_threshold: bool,
+    #[arg(long = "logprob-threshold")]
+    pub logprob_threshold: Option<f32>,
+    #[arg(long = "clear-logprob-threshold", action = ArgAction::SetTrue)]
+    pub clear_logprob_threshold: bool,
+    #[arg(long = "compute-target")]
+    pub compute_target: Option<CliTranscriptComputeTarget>,
+    #[arg(long = "dml-device-id")]
+    pub dml_device_id: Option<i32>,
+    #[arg(long = "cpu-intra-threads")]
+    pub cpu_intra_threads: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = TRANSCRIPT_GENERATE_AFTER_HELP,
+    after_long_help = TRANSCRIPT_GENERATE_AFTER_HELP
+)]
+pub struct TranscriptGenerateArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "write-srt", action = ArgAction::SetTrue)]
+    pub write_srt: bool,
+    #[arg(long = "overwrite-existing", action = ArgAction::SetTrue)]
+    pub overwrite_existing: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TranscriptBatchCommand {
+    Generate(TranscriptBatchGenerateArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = TRANSCRIPT_GENERATE_AFTER_HELP,
+    after_long_help = TRANSCRIPT_GENERATE_AFTER_HELP
+)]
+pub struct TranscriptBatchGenerateArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    #[arg(long = "write-srt", action = ArgAction::SetTrue)]
+    pub write_srt: bool,
+    #[arg(long = "overwrite-existing", action = ArgAction::SetTrue)]
+    pub overwrite_existing: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TranscriptExportSrtArgs {
+    #[arg(long, value_name = "AUDIO", conflicts_with = "session")]
+    pub input: Option<PathBuf>,
+    #[arg(long, value_name = "SESSION", conflicts_with = "input")]
+    pub session: Option<PathBuf>,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long, value_name = "SRT")]
+    pub output: PathBuf,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MusicAiCommand {
+    Inspect(MusicAiInspectArgs),
+    #[command(subcommand)]
+    Model(MusicAiModelCommand),
+    Analyze(MusicAiAnalyzeArgs),
+    #[command(name = "apply-markers")]
+    ApplyMarkers(MusicAiApplyMarkersArgs),
+    #[command(name = "export-stems")]
+    ExportStems(MusicAiExportStemsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct MusicAiInspectArgs {
+    #[command(flatten)]
+    pub source: EditorSourceArgs,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MusicAiModelCommand {
+    Status(MusicAiModelStatusArgs),
+    Download(MusicAiModelDownloadArgs),
+    Uninstall(MusicAiModelUninstallArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct MusicAiModelStatusArgs {}
+
+#[derive(Debug, Args, Default)]
+pub struct MusicAiModelDownloadArgs {}
+
+#[derive(Debug, Args, Default)]
+pub struct MusicAiModelUninstallArgs {}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = MUSIC_AI_ANALYZE_AFTER_HELP,
+    after_long_help = MUSIC_AI_ANALYZE_AFTER_HELP
+)]
+pub struct MusicAiAnalyzeArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "stems-dir")]
+    pub stems_dir: Option<PathBuf>,
+    #[arg(long = "prefer-demucs", action = ArgAction::SetTrue)]
+    pub prefer_demucs: bool,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct MusicAiApplyMarkersArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub beats: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub downbeats: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub sections: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub replace: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct MusicAiExportStemsArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "output-dir", value_name = "DIR")]
+    pub output_dir: PathBuf,
+    #[arg(long = "naming-template")]
+    pub naming_template: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    #[command(subcommand, name = "search-path")]
+    SearchPath(PluginSearchPathCommand),
+    Scan(PluginScanArgs),
+    List(PluginListArgs),
+    Probe(PluginProbeArgs),
+    #[command(subcommand)]
+    Session(PluginSessionCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginSearchPathCommand {
+    List(PluginSearchPathListArgs),
+    Add(PluginSearchPathAddArgs),
+    Remove(PluginSearchPathRemoveArgs),
+    Reset(PluginSearchPathResetArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct PluginSearchPathListArgs {}
+
+#[derive(Debug, Args)]
+pub struct PluginSearchPathAddArgs {
+    #[arg(long, value_name = "DIR")]
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSearchPathRemoveArgs {
+    #[arg(long)]
+    pub index: Option<usize>,
+    #[arg(long, value_name = "DIR")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Default)]
+pub struct PluginSearchPathResetArgs {}
+
+#[derive(Debug, Args, Default)]
+pub struct PluginScanArgs {}
+
+#[derive(Debug, Args)]
+pub struct PluginListArgs {
+    #[arg(long)]
+    pub filter: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginProbeArgs {
+    #[arg(long = "plugin")]
+    pub plugin: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginSessionCommand {
+    Inspect(PluginSessionInspectArgs),
+    Set(PluginSessionSetArgs),
+    Preview(PluginSessionPreviewArgs),
+    Apply(PluginSessionApplyArgs),
+    Clear(PluginSessionClearArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionInspectArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionSetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "plugin")]
+    pub plugin: Option<String>,
+    #[arg(long)]
+    pub enabled: Option<CliToggle>,
+    #[arg(long)]
+    pub bypass: Option<CliToggle>,
+    #[arg(long = "param")]
+    pub params: Vec<String>,
+    #[arg(long = "state-blob-b64")]
+    pub state_blob_b64: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionPreviewArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = PLUGIN_SESSION_APPLY_AFTER_HELP,
+    after_long_help = PLUGIN_SESSION_APPLY_AFTER_HELP
+)]
+pub struct PluginSessionApplyArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionClearArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
 pub enum EditorCommand {
     Inspect(EditorInspectArgs),
     #[command(subcommand)]
     View(EditorViewCommand),
     #[command(subcommand)]
     Selection(EditorSelectionCommand),
+    #[command(subcommand)]
+    Cursor(EditorCursorCommand),
     #[command(subcommand)]
     Playback(EditorPlaybackCommand),
     #[command(subcommand)]
@@ -483,6 +1129,13 @@ pub enum EditorSelectionCommand {
     Clear(EditorSelectionClearArgs),
 }
 
+#[derive(Debug, Subcommand)]
+pub enum EditorCursorCommand {
+    Get(EditorCursorGetArgs),
+    Set(EditorCursorSetArgs),
+    Nudge(EditorCursorNudgeArgs),
+}
+
 #[derive(Debug, Args)]
 pub struct EditorSelectionGetArgs {
     #[command(flatten)]
@@ -507,6 +1160,35 @@ pub struct EditorSelectionSetArgs {
 pub struct EditorSelectionClearArgs {
     #[command(flatten)]
     pub source: EditorSourceArgs,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = EDITOR_CURSOR_AFTER_HELP)]
+pub struct EditorCursorGetArgs {
+    #[command(flatten)]
+    pub source: EditorSourceArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct EditorCursorSetArgs {
+    #[command(flatten)]
+    pub source: EditorSourceArgs,
+    #[arg(long)]
+    pub sample: Option<usize>,
+    #[arg(long)]
+    pub frac: Option<f32>,
+    #[arg(long, default_value = "none")]
+    pub snap: CliCursorSnap,
+}
+
+#[derive(Debug, Args)]
+pub struct EditorCursorNudgeArgs {
+    #[command(flatten)]
+    pub source: EditorSourceArgs,
+    #[arg(long = "samples", allow_hyphen_values = true)]
+    pub samples: i64,
+    #[arg(long, default_value = "none")]
+    pub snap: CliCursorSnap,
 }
 
 #[derive(Debug, Subcommand)]
@@ -717,8 +1399,12 @@ pub enum RenderCommand {
 #[derive(Debug, Args)]
 #[command(after_help = RENDER_WAVEFORM_AFTER_HELP)]
 pub struct RenderWaveformArgs {
+    #[arg(long, value_name = "AUDIO", conflicts_with = "session")]
+    pub input: Option<PathBuf>,
+    #[arg(long, value_name = "SESSION", conflicts_with = "input")]
+    pub session: Option<PathBuf>,
     #[arg(long, value_name = "AUDIO")]
-    pub input: PathBuf,
+    pub path: Option<PathBuf>,
     #[arg(long, value_name = "PNG")]
     pub output: Option<PathBuf>,
     #[arg(long, default_value_t = 1280)]
@@ -727,6 +1413,22 @@ pub struct RenderWaveformArgs {
     pub height: u32,
     #[arg(long, action = ArgAction::SetTrue)]
     pub mixdown: bool,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub selection: bool,
+    #[arg(long = "loop", action = ArgAction::SetTrue)]
+    pub loop_range: bool,
+    #[arg(long)]
+    pub start_sample: Option<usize>,
+    #[arg(long)]
+    pub end_sample: Option<usize>,
+    #[arg(long)]
+    pub start_frac: Option<f32>,
+    #[arg(long)]
+    pub end_frac: Option<f32>,
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub show_markers: bool,
+    #[arg(long, action = ArgAction::SetTrue, default_value_t = true)]
+    pub show_loop: bool,
 }
 
 #[derive(Debug, Args)]
@@ -777,6 +1479,8 @@ pub struct RenderListArgs {
 #[derive(Debug, Subcommand)]
 pub enum ExportCommand {
     File(ExportFileArgs),
+    #[command(name = "verify-loop-tags")]
+    VerifyLoopTags(ExportVerifyLoopTagsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -804,10 +1508,296 @@ pub struct ExportFileArgs {
     pub markers: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+#[command(after_help = EXPORT_VERIFY_LOOP_TAGS_AFTER_HELP)]
+pub struct ExportVerifyLoopTagsArgs {
+    #[arg(long, value_name = "AUDIO")]
+    pub input: PathBuf,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BatchCommand {
+    #[command(subcommand)]
+    Loudness(BatchLoudnessCommand),
+    Export(BatchExportArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum BatchLoudnessCommand {
+    Plan(BatchLoudnessPlanArgs),
+    Apply(BatchLoudnessApplyArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = BATCH_LOUDNESS_PLAN_AFTER_HELP)]
+pub struct BatchLoudnessPlanArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    #[arg(long = "target-lufs", allow_hyphen_values = true)]
+    pub target_lufs: f32,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = BATCH_LOUDNESS_APPLY_AFTER_HELP)]
+pub struct BatchLoudnessApplyArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    #[arg(long = "target-lufs", allow_hyphen_values = true)]
+    pub target_lufs: f32,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = BATCH_EXPORT_AFTER_HELP)]
+pub struct BatchExportArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub overwrite: bool,
+    #[arg(long = "output-dir", value_name = "DIR")]
+    pub output_dir: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EffectGraphCommand {
+    List(EffectGraphListArgs),
+    New(EffectGraphNewArgs),
+    Inspect(EffectGraphInspectArgs),
+    Render(EffectGraphRenderArgs),
+    Validate(EffectGraphValidateArgs),
+    Test(EffectGraphTestArgs),
+    Save(EffectGraphSaveArgs),
+    Import(EffectGraphImportArgs),
+    Export(EffectGraphExportArgs),
+    #[command(subcommand)]
+    Node(EffectGraphNodeCommand),
+    #[command(subcommand)]
+    Edge(EffectGraphEdgeCommand),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct EffectGraphListArgs {}
+
+#[derive(Debug, Args, Clone)]
+pub struct EffectGraphRefArgs {
+    #[arg(long = "graph", value_name = "GRAPH")]
+    pub graph: String,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphNewArgs {
+    #[arg(long)]
+    pub name: String,
+    #[arg(long = "output", value_name = "JSON")]
+    pub output: Option<PathBuf>,
+    #[arg(long = "template", value_name = "GRAPH")]
+    pub template: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphInspectArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphRenderArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long, value_name = "PNG")]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphValidateArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphTestArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long, value_name = "AUDIO")]
+    pub input: Option<PathBuf>,
+    #[arg(long, value_name = "PNG")]
+    pub output: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphSaveArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphImportArgs {
+    #[arg(long, value_name = "JSON")]
+    pub input: PathBuf,
+    #[arg(long, value_name = "JSON")]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphExportArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long, value_name = "JSON")]
+    pub output: PathBuf,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EffectGraphNodeCommand {
+    Add(EffectGraphNodeAddArgs),
+    Remove(EffectGraphNodeRemoveArgs),
+    Set(EffectGraphNodeSetArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EffectGraphEdgeCommand {
+    Connect(EffectGraphEdgeConnectArgs),
+    Disconnect(EffectGraphEdgeDisconnectArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphNodeAddArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long)]
+    pub kind: CliEffectGraphNodeKind,
+    #[arg(long = "node-id")]
+    pub node_id: Option<String>,
+    #[arg(long, default_value_t = 160.0)]
+    pub x: f32,
+    #[arg(long, default_value_t = 160.0)]
+    pub y: f32,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphNodeRemoveArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long = "node-id")]
+    pub node_id: String,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphNodeSetArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long = "node-id")]
+    pub node_id: String,
+    #[arg(long)]
+    pub x: Option<f32>,
+    #[arg(long)]
+    pub y: Option<f32>,
+    #[arg(long)]
+    pub width: Option<f32>,
+    #[arg(long)]
+    pub height: Option<f32>,
+    #[arg(long = "gain-db", allow_hyphen_values = true)]
+    pub gain_db: Option<f32>,
+    #[arg(long = "target-lufs", allow_hyphen_values = true)]
+    pub target_lufs: Option<f32>,
+    #[arg(long = "rate")]
+    pub rate: Option<f32>,
+    #[arg(long = "semitones", allow_hyphen_values = true)]
+    pub semitones: Option<f32>,
+    #[arg(long = "spectrum-mode")]
+    pub spectrum_mode: Option<CliEffectGraphSpectrumMode>,
+    #[arg(long = "ignore-channel")]
+    pub ignore_channels: Vec<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphEdgeConnectArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long = "from-node")]
+    pub from_node: String,
+    #[arg(long = "from-port", default_value = "out")]
+    pub from_port: String,
+    #[arg(long = "to-node")]
+    pub to_node: String,
+    #[arg(long = "to-port", default_value = "in")]
+    pub to_port: String,
+    #[arg(long = "edge-id")]
+    pub edge_id: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct EffectGraphEdgeDisconnectArgs {
+    #[command(flatten)]
+    pub graph: EffectGraphRefArgs,
+    #[arg(long = "edge-id")]
+    pub edge_id: Option<String>,
+    #[arg(long = "from-node")]
+    pub from_node: Option<String>,
+    #[arg(long = "from-port")]
+    pub from_port: Option<String>,
+    #[arg(long = "to-node")]
+    pub to_node: Option<String>,
+    #[arg(long = "to-port")]
+    pub to_port: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DebugCommand {
     Summary(DebugSummaryArgs),
     Screenshot(DebugScreenshotArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliCursorSnap {
+    None,
+    #[value(name = "zero-cross")]
+    ZeroCross,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliEffectGraphNodeKind {
+    Input,
+    Output,
+    Gain,
+    Loudness,
+    #[value(name = "mono-mix")]
+    MonoMix,
+    Pitch,
+    Stretch,
+    Speed,
+    #[value(name = "plugin-fx")]
+    PluginFx,
+    Duplicate,
+    #[value(name = "split-channels")]
+    SplitChannels,
+    #[value(name = "combine-channels")]
+    CombineChannels,
+    #[value(name = "debug-waveform")]
+    DebugWaveform,
+    #[value(name = "debug-spectrum")]
+    DebugSpectrum,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliEffectGraphSpectrumMode {
+    Spec,
+    Log,
+    Mel,
 }
 
 #[derive(Debug, Args)]
@@ -981,6 +1971,59 @@ impl From<CliExternalRegexInput> for app::ExternalRegexInput {
     }
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliTranscriptPerfMode {
+    Stable,
+    Balanced,
+    Boost,
+}
+
+impl From<CliTranscriptPerfMode> for app::TranscriptPerfMode {
+    fn from(value: CliTranscriptPerfMode) -> Self {
+        match value {
+            CliTranscriptPerfMode::Stable => app::TranscriptPerfMode::Stable,
+            CliTranscriptPerfMode::Balanced => app::TranscriptPerfMode::Balanced,
+            CliTranscriptPerfMode::Boost => app::TranscriptPerfMode::Boost,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliTranscriptModelVariant {
+    Auto,
+    Fp16,
+    Quantized,
+}
+
+impl From<CliTranscriptModelVariant> for app::TranscriptModelVariant {
+    fn from(value: CliTranscriptModelVariant) -> Self {
+        match value {
+            CliTranscriptModelVariant::Auto => app::TranscriptModelVariant::Auto,
+            CliTranscriptModelVariant::Fp16 => app::TranscriptModelVariant::Fp16,
+            CliTranscriptModelVariant::Quantized => app::TranscriptModelVariant::Quantized,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliTranscriptComputeTarget {
+    Auto,
+    Cpu,
+    Gpu,
+    Npu,
+}
+
+impl From<CliTranscriptComputeTarget> for app::TranscriptComputeTarget {
+    fn from(value: CliTranscriptComputeTarget) -> Self {
+        match value {
+            CliTranscriptComputeTarget::Auto => app::TranscriptComputeTarget::Auto,
+            CliTranscriptComputeTarget::Cpu => app::TranscriptComputeTarget::Cpu,
+            CliTranscriptComputeTarget::Gpu => app::TranscriptComputeTarget::Gpu,
+            CliTranscriptComputeTarget::Npu => app::TranscriptComputeTarget::Npu,
+        }
+    }
+}
+
 fn is_session_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -1030,7 +2073,13 @@ mod tests {
         let help = cli_help_text();
         assert!(help.contains("editor"));
         assert!(help.contains("editor playback play"));
-        assert!(help.contains("render spectrum"));
+        assert!(help.contains("batch"));
+        assert!(help.contains("effect-graph"));
+        assert!(help.contains("verify-loop-tags"));
+        assert!(help.contains("external"));
+        assert!(help.contains("transcript"));
+        assert!(help.contains("music-ai"));
+        assert!(help.contains("plugin"));
     }
 
     #[test]
@@ -1104,6 +2153,56 @@ mod tests {
                 assert_eq!(args.session.as_deref(), Some(std::path::Path::new("work.nwsess")));
                 assert!(args.overwrite);
                 assert!(args.output.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_batch_loudness_plan() {
+        let cli = CliRoot::try_parse_from([
+            "neowaves",
+            "batch",
+            "loudness",
+            "plan",
+            "--session",
+            "work.nwsess",
+            "--query",
+            "_BGM",
+            "--target-lufs",
+            "-24",
+        ])
+        .expect("parse batch loudness plan");
+        match cli.command {
+            CliCommand::Batch(BatchCommand::Loudness(BatchLoudnessCommand::Plan(args))) => {
+                assert_eq!(args.session, PathBuf::from("work.nwsess"));
+                assert_eq!(args.filter.query.as_deref(), Some("_BGM"));
+                assert_eq!(args.target_lufs, -24.0);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parses_effect_graph_node_add() {
+        let cli = CliRoot::try_parse_from([
+            "neowaves",
+            "effect-graph",
+            "node",
+            "add",
+            "--graph",
+            "convert_2ch_to_5ch",
+            "--kind",
+            "gain",
+            "--node-id",
+            "gain_l",
+        ])
+        .expect("parse effect graph node add");
+        match cli.command {
+            CliCommand::EffectGraph(EffectGraphCommand::Node(EffectGraphNodeCommand::Add(args))) => {
+                assert_eq!(args.graph.graph, "convert_2ch_to_5ch");
+                assert!(matches!(args.kind, CliEffectGraphNodeKind::Gain));
+                assert_eq!(args.node_id.as_deref(), Some("gain_l"));
             }
             _ => panic!("unexpected command"),
         }

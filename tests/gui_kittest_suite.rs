@@ -452,6 +452,20 @@ mod kittest_suite {
         harness.run_steps(3);
     }
 
+    fn editor_zoom_out_once(harness: &mut Harness<'static, WavesPreviewer>) {
+        let hover_pos = editor_canvas_hover_pos(harness);
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -120.0),
+                modifiers: Modifiers::COMMAND,
+            },
+            Modifiers::COMMAND,
+        );
+        harness.run_steps(3);
+    }
+
     fn editor_shift_pan_once(harness: &mut Harness<'static, WavesPreviewer>) {
         let hover_pos = editor_canvas_hover_pos(harness);
         harness.hover_at(hover_pos);
@@ -2211,6 +2225,230 @@ mod kittest_suite {
             after >= before.saturating_add(8),
             "ctrl+arrow should keep advancing under exact-stream display mapping: before={before} after={after}"
         );
+    }
+
+    #[test]
+    fn editor_loading_visual_len_and_final_ready_keep_playhead_x_alignment() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let len = harness.state().test_tab_samples_len().max(1);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(48_000));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_loading_visual_len(len.saturating_mul(2)));
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_exact_stream_transport(44_100));
+        harness.state_mut().test_set_mode_speed();
+        harness.state_mut().test_set_playback_rate(1.0);
+        harness
+            .state_mut()
+            .test_refresh_playback_mode_for_current_source(neowaves::app::RateMode::Speed, 1.0);
+
+        let display_sr = harness
+            .state()
+            .test_active_editor_display_sample_rate()
+            .expect("display sample rate");
+        let target_display = (display_sr as usize).min(len.saturating_sub(1));
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(target_display));
+        harness.run_steps(2);
+
+        let before_display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display before final ready");
+        let before_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("playhead x before final ready");
+
+        assert!(harness.state_mut().test_finish_active_tab_loading_visual());
+        harness.run_steps(2);
+
+        let after_display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display after final ready");
+        let after_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("playhead x after final ready");
+        assert!(
+            after_display.abs_diff(before_display) <= 1,
+            "final ready should not move display playhead: before={before_display} after={after_display}"
+        );
+        assert!(
+            (after_x - before_x).abs() <= 0.51,
+            "final ready should not move playhead x: before={before_x:.3} after={after_x:.3}"
+        );
+    }
+
+    #[test]
+    fn editor_max_zoom_playhead_x_matches_sample_center_and_roundtrips() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_editor_pref_horizontal_zoom_anchor("playhead"));
+        for _ in 0..12 {
+            editor_zoom_in_once(&mut harness);
+        }
+        let (visible_start, visible_end) = harness
+            .state()
+            .test_editor_visible_display_range()
+            .expect("visible range");
+        let target = ((visible_start + visible_end) / 2).max(visible_start);
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(target));
+        harness.run_steps(2);
+
+        let display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("playhead display");
+        let playhead_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("playhead x");
+        let sample_x = harness
+            .state()
+            .test_editor_display_sample_x_offset(display)
+            .expect("sample x");
+        let roundtrip = harness
+            .state()
+            .test_editor_x_offset_to_display_sample(sample_x)
+            .expect("sample roundtrip");
+        assert!(
+            (playhead_x - sample_x).abs() <= 0.01,
+            "playhead x should sit on the same sample-center line: playhead={playhead_x:.4} sample={sample_x:.4}"
+        );
+        assert_eq!(
+            roundtrip, display,
+            "sample-center x should roundtrip to the same display sample: sample={display} roundtrip={roundtrip}"
+        );
+    }
+
+    #[test]
+    fn editor_zoom_in_out_keeps_playhead_sample_and_x_stable() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_editor_pref_horizontal_zoom_anchor("playhead"));
+        let len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display len")
+            .max(2);
+        let target = (len / 2).min(len.saturating_sub(2));
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(target));
+        harness.run_steps(2);
+
+        let before_display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display before zoom");
+        let before_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("x before zoom");
+        editor_zoom_in_once(&mut harness);
+        editor_zoom_out_once(&mut harness);
+        let after_display = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("display after zoom");
+        let after_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("x after zoom");
+        assert!(
+            after_display.abs_diff(before_display) <= 1,
+            "zoom roundtrip should keep playhead sample stable: before={before_display} after={after_display}"
+        );
+        assert!(
+            (after_x - before_x).abs() <= 0.51,
+            "zoom roundtrip should keep playhead x stable: before={before_x:.3} after={after_x:.3}"
+        );
+    }
+
+    #[test]
+    fn editor_high_zoom_ctrl_arrow_reaches_edges_for_wav_mp3_m4a() {
+        let dir = make_temp_dir("editor_step_formats");
+        let fixtures = build_format_fixtures(&dir, 0.75);
+        let mut harness = harness_with_folder(dir);
+        wait_for_scan(&mut harness);
+
+        for path in fixtures.into_iter().filter(|path| {
+            path.extension()
+                .and_then(|s| s.to_str())
+                .map(|ext| matches!(ext, "wav" | "mp3" | "m4a"))
+                .unwrap_or(false)
+        }) {
+            assert!(harness.state_mut().test_select_path(&path));
+            harness.run_steps(2);
+            ensure_editor_ready(&mut harness);
+            let display_sr = harness
+                .state()
+                .test_active_editor_display_sample_rate()
+                .expect("display sample rate");
+            assert!(harness
+                .state_mut()
+                .test_force_active_tab_buffer_transport(display_sr));
+            for _ in 0..12 {
+                editor_zoom_in_once(&mut harness);
+            }
+            let len = harness
+                .state()
+                .test_editor_display_samples_len()
+                .expect("display len")
+                .max(2);
+            harness
+                .state_mut()
+                .test_audio_seek_to_sample(len.saturating_sub(3));
+            harness.run_steps(2);
+            for _ in 0..8 {
+                harness.key_press_modifiers(Modifiers::CTRL, Key::ArrowRight);
+                harness.run_steps(1);
+            }
+            let at_right = harness
+                .state()
+                .test_audio_play_pos_display()
+                .expect("display at right");
+            assert_eq!(
+                at_right.min(len.saturating_sub(1)),
+                len.saturating_sub(1),
+                "ctrl+arrow should reach the right edge for {}",
+                path.display()
+            );
+
+            harness.state_mut().test_audio_seek_to_sample(2);
+            harness.run_steps(2);
+            for _ in 0..8 {
+                harness.key_press_modifiers(Modifiers::CTRL, Key::ArrowLeft);
+                harness.run_steps(1);
+            }
+            let at_left = harness
+                .state()
+                .test_audio_play_pos_display()
+                .expect("display at left");
+            assert_eq!(
+                at_left,
+                0,
+                "ctrl+arrow should reach the left edge for {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

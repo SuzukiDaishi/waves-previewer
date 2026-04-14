@@ -65,6 +65,17 @@ struct AdaptivePlacementBlock {
     socket_order: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct EffectGraphCliTestReport {
+    pub output_channel_count: usize,
+    pub output_sample_rate: u32,
+    pub per_channel_peak_db: Vec<Option<f32>>,
+    pub silent_outputs: Vec<usize>,
+    pub rough_waveform: Vec<(f32, f32)>,
+    pub debug_preview: Option<EffectGraphDebugPreview>,
+    pub used_embedded_sample: bool,
+}
+
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2967,6 +2978,68 @@ where
         on_event,
     )
     .map_err(|err| err.message)
+}
+
+pub(crate) fn effect_graph_validate_for_cli(
+    document: &EffectGraphDocument,
+) -> Vec<EffectGraphValidationIssue> {
+    validate_effect_graph_document(document)
+}
+
+pub(crate) fn effect_graph_templates_dir_for_cli() -> Result<PathBuf, String> {
+    WavesPreviewer::effect_graph_templates_dir()
+        .ok_or_else(|| "Could not resolve effect graph template directory".to_string())
+}
+
+pub(crate) fn effect_graph_test_document_for_cli(
+    document: &EffectGraphDocument,
+    input_path: Option<&Path>,
+) -> Result<EffectGraphCliTestReport, String> {
+    let input_bus = if let Some(path) = input_path {
+        let (channels, sample_rate) = crate::audio_io::decode_audio_multi(path)
+            .map_err(|err| format!("decode failed: {err}"))?;
+        dense_audio_bus(channels, sample_rate.max(1))
+    } else {
+        let (channels, sample_rate) = embedded_effect_graph_sample_channels()?;
+        dense_audio_bus(channels, sample_rate.max(1))
+    };
+    let mut debug_preview = None;
+    let output_bus = run_effect_graph_document(
+        document,
+        input_bus,
+        EffectGraphRunMode::TestPreview,
+        crate::wave::ResampleQuality::Good,
+        |event| {
+            if let EffectGraphRuntimeEvent::NodeDebugPreview { preview, .. } = event {
+                debug_preview = Some(preview);
+            }
+        },
+    )?;
+    let per_channel_peak_db = output_bus
+        .channels
+        .iter()
+        .map(|channel| {
+            let peak = channel
+                .iter()
+                .copied()
+                .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
+            (peak > 0.0).then_some(20.0 * peak.log10())
+        })
+        .collect::<Vec<_>>();
+    let silent_outputs = per_channel_peak_db
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, peak)| peak.is_none().then_some(idx))
+        .collect::<Vec<_>>();
+    Ok(EffectGraphCliTestReport {
+        output_channel_count: output_bus.channels.len().max(1),
+        output_sample_rate: output_bus.sample_rate.max(1),
+        per_channel_peak_db,
+        silent_outputs,
+        rough_waveform: effect_graph_build_rough_waveform(&output_bus.channels),
+        debug_preview,
+        used_embedded_sample: input_path.is_none(),
+    })
 }
 
 fn combine_mode_label(mode: EffectGraphCombineMode) -> &'static str {

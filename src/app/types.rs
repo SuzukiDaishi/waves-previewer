@@ -453,7 +453,7 @@ impl MusicStemSet {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MusicAnalysisResult {
     pub beats: Vec<usize>,
     pub downbeats: Vec<usize>,
@@ -461,7 +461,7 @@ pub struct MusicAnalysisResult {
     pub estimated_bpm: Option<f32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum MusicAnalysisSourceKind {
     #[default]
     StemsDir,
@@ -2226,7 +2226,7 @@ pub struct ExportConfig {
     pub export_srt: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TranscriptAiConfig {
     pub language: String,
     pub task: String,
@@ -2250,7 +2250,7 @@ pub struct TranscriptAiConfig {
     pub cpu_intra_threads: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptComputeTarget {
     Auto,
     Cpu,
@@ -2258,14 +2258,14 @@ pub enum TranscriptComputeTarget {
     Npu,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptPerfMode {
     Stable,
     Balanced,
     Boost,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptModelVariant {
     Auto,
     Fp16,

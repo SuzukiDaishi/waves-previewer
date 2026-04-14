@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{
     ChannelView, ChannelViewMode, EditorOtherSubView, EditorPrimaryView, EditorSpecSubView,
-    FadeShape, FileMeta, LoopMode, LoopXfadeShape, PluginFxDraft, PluginParamUiState,
-    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, ViewMode,
+    FadeShape, FileMeta, LoopMode, LoopXfadeShape, MusicAnalysisDraft, MusicAnalysisResult,
+    MusicAnalysisSourceKind, PluginFxDraft, PluginParamUiState, SpectrogramConfig,
+    SpectrogramScale, ToolKind, ToolState, TranscriptAiConfig, ViewMode,
 };
 use crate::markers::MarkerEntry;
 
@@ -146,6 +147,8 @@ pub struct ProjectEdit {
     pub plugin_fx_draft: ProjectPluginFxDraft,
     #[serde(default)]
     pub applied_effect_graph: Option<ProjectAppliedEffectGraph>,
+    #[serde(default)]
+    pub music_analysis: Option<ProjectMusicAnalysisDraft>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -166,6 +169,8 @@ pub struct ProjectApp {
     pub external_state: Option<ProjectExternalState>,
     #[serde(default)]
     pub effect_graph_ui: Option<ProjectEffectGraphUi>,
+    #[serde(default)]
+    pub transcript_ai_config: Option<TranscriptAiConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -318,6 +323,8 @@ pub struct ProjectTab {
     pub loop_xfade_shape: String,
     pub trim_range: Option<[usize; 2]>,
     pub selection: Option<[usize; 2]>,
+    #[serde(default)]
+    pub cursor_sample: Option<usize>,
     pub markers: Vec<ProjectMarker>,
     pub markers_dirty: bool,
     pub loop_markers_dirty: bool,
@@ -338,6 +345,28 @@ pub struct ProjectTab {
     pub edited_audio: Option<String>,
     #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
+    #[serde(default)]
+    pub music_analysis: Option<ProjectMusicAnalysisDraft>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectMusicAnalysisDraft {
+    #[serde(default)]
+    pub result: Option<MusicAnalysisResult>,
+    #[serde(default = "default_music_analysis_visible")]
+    pub show_beat: bool,
+    #[serde(default = "default_music_analysis_visible")]
+    pub show_downbeat: bool,
+    #[serde(default = "default_music_analysis_visible")]
+    pub show_section: bool,
+    #[serde(default)]
+    pub stems_dir_override: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub analysis_source_len: usize,
+    #[serde(default)]
+    pub analysis_source_kind: MusicAnalysisSourceKind,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -370,6 +399,10 @@ fn default_vertical_zoom() -> f32 {
 
 fn default_vertical_view_center() -> f32 {
     0.0
+}
+
+fn default_music_analysis_visible() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -720,6 +753,7 @@ pub fn project_tab_from_tab(
         .to_string(),
         trim_range: tab.trim_range.map(|(a, b)| [a, b]),
         selection: tab.selection.map(|(a, b)| [a, b]),
+        cursor_sample: tab.preview_offset_samples,
         markers: tab
             .markers
             .iter()
@@ -743,7 +777,55 @@ pub fn project_tab_from_tab(
         buffer_sample_rate: Some(tab.buffer_sample_rate.max(1)),
         edited_audio: edited_audio.map(|p| rel_path(&p, base)),
         plugin_fx_draft: project_plugin_fx_draft_from_draft(&tab.plugin_fx_draft),
+        music_analysis: project_music_analysis_from_draft(&tab.music_analysis_draft, base),
     }
+}
+
+pub fn project_music_analysis_from_draft(
+    draft: &MusicAnalysisDraft,
+    base: &Path,
+) -> Option<ProjectMusicAnalysisDraft> {
+    if draft.result.is_none()
+        && draft.stems_dir_override.is_none()
+        && draft.last_error.is_none()
+        && draft.show_beat
+        && draft.show_downbeat
+        && draft.show_section
+    {
+        return None;
+    }
+    Some(ProjectMusicAnalysisDraft {
+        result: draft.result.clone(),
+        show_beat: draft.show_beat,
+        show_downbeat: draft.show_downbeat,
+        show_section: draft.show_section,
+        stems_dir_override: draft
+            .stems_dir_override
+            .as_ref()
+            .map(|path| rel_path(path, base)),
+        last_error: draft.last_error.clone(),
+        analysis_source_len: draft.analysis_source_len,
+        analysis_source_kind: draft.analysis_source_kind,
+    })
+}
+
+pub fn project_music_analysis_to_draft(
+    draft: &ProjectMusicAnalysisDraft,
+    base: &Path,
+) -> MusicAnalysisDraft {
+    let mut out = MusicAnalysisDraft::default();
+    out.result = draft.result.clone();
+    out.show_beat = draft.show_beat;
+    out.show_downbeat = draft.show_downbeat;
+    out.show_section = draft.show_section;
+    out.stems_dir_override = draft
+        .stems_dir_override
+        .as_deref()
+        .map(|raw| resolve_path(raw, base));
+    out.last_error = draft.last_error.clone();
+    out.analysis_source_len = draft.analysis_source_len;
+    out.analysis_source_kind = draft.analysis_source_kind;
+    out
 }
 
 pub fn project_plugin_fx_draft_from_draft(draft: &PluginFxDraft) -> ProjectPluginFxDraft {

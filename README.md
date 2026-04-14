@@ -119,8 +119,10 @@ headless CLI は `--cli` で入ります。`stdout` は JSON、画像系は PNG 
 ```bash
 cargo run -- --cli --help
 cargo run -- --cli list query --folder "C:\\path\\to\\wav"
+cargo run -- --cli batch loudness plan --session ".\\work.nwsess" --query "_BGM" --target-lufs -24
 cargo run -- --cli item inspect --input ".\\debug\\gui_test_440.wav"
 cargo run -- --cli render waveform --input ".\\debug\\gui_test_440.wav" --output ".\\debug\\cli-renders\\wave.png"
+cargo run -- --cli effect-graph list
 ```
 
 CLI の仕様書:

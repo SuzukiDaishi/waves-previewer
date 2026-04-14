@@ -88,7 +88,8 @@ use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
-    StartupConfig, ToolKind, ViewMode, WorkspaceView,
+    StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant,
+    TranscriptPerfMode, ViewMode, WorkspaceView,
 };
 pub use self::cli_ops::run_cli;
 

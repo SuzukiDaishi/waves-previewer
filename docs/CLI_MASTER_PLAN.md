@@ -2,99 +2,115 @@
 
 ## Goal
 
-NeoWaves keeps its GUI as the default user experience, but also gains a first-class CLI mode.
+NeoWaves keeps its GUI as the default user experience and grows `--cli` into the primary automation surface for LLM agents and human operators.
 
 - `neowaves` starts the GUI.
 - `neowaves --cli ...` runs headless commands.
-- CLI is the replacement for MCP automation.
-- CLI stdout is machine-readable JSON.
-- Image-producing commands save PNG files and return absolute paths.
+- `stdout` is machine-readable JSON.
+- image-producing commands save PNG files and return absolute paths.
+- mutating commands are session-backed and non-destructive until export.
 
-This document is the source of truth for the rollout order and the steady-state architecture.
+Related docs:
+
+- `docs/CLI_AGENT_HUMAN_DESIGN.md`
+- `docs/CLI_AGENT_WORKFLOWS.md`
+- `docs/CLI_COMMAND_REFERENCE.md`
+- `docs/CLI_HELP_SPEC.md`
+
+## Current Position
+
+Implemented now:
+
+- `session`
+- `item`
+- `list`
+- `batch`
+- `editor`
+- `render`
+- `export`
+- `effect-graph`
+- `external`
+- `transcript`
+- `music-ai`
+- `plugin`
+- `debug`
+
+Still in progress:
+
+- broader report-format unification
+- deeper plugin/effect-graph session integration
+- more task-oriented help/examples
 
 ## Principles
 
-- GUI is not removed.
-- Existing GUI startup flags stay supported.
-- New automation capability is added only under `--cli`.
-- MCP runtime, flags, menus, and scripts are removed after the equivalent CLI surface exists.
-- CLI commands are non-interactive by default and safe for scripting.
-- `stdout` is reserved for JSON output. Human-readable logs go to `stderr`.
-- Stateful editing remains non-destructive until explicit save/export commands run.
-
-These choices follow the repo's non-destructive editing model and the Unix-style CLI guidance referenced during planning.
-
-## Invocation Model
-
-### GUI mode
-
-Default invocation:
-
-```powershell
-neowaves
-neowaves --open-file demo.wav
-neowaves --open-session work.nwsess
-```
-
-Behavior:
-
-- Starts the GUI window.
-- Accepts the existing startup/debug flags.
-- Does not require a subcommand.
-
-### CLI mode
-
-Headless invocation:
-
-```powershell
-neowaves --cli list query --folder .\assets\audio
-neowaves --cli editor inspect --input .\demo.wav
-neowaves --cli render waveform --input .\demo.wav
-```
-
-Behavior:
-
-- Requires a subcommand tree after `--cli`.
-- Returns JSON on stdout.
-- Uses exit code `0` for success and non-zero for failure.
+- GUI is preserved and remains the default launch mode.
+- New automation capability is added under `--cli`; GUI startup flags remain GUI-only compatibility flags.
+- `stdout` is reserved for JSON output; human-readable diagnostics belong on `stderr`.
+- Images are first-class evidence and are returned as saved PNG paths, not embedded blobs.
+- Session-backed commands operate on current session state rather than only source-file baseline metadata.
+- Export is the boundary where current session edits become real files.
+- `--input` is read-only; mutation belongs to `--session`.
 
 ## Command Tree
-
-Phase 1 command tree:
 
 ```text
 neowaves --cli session {new,inspect}
 neowaves --cli item {inspect,meta,artwork}
-neowaves --cli list {columns,query,render}
-neowaves --cli editor {inspect,view,selection,markers,loop}
+neowaves --cli list {columns,query,sort,search,select,save-query,render}
+neowaves --cli batch {loudness {plan,apply},export}
+neowaves --cli editor {
+  inspect,
+  view {get,set},
+  selection {get,set,clear},
+  cursor {get,set,nudge},
+  playback {play},
+  tool {get,set,apply},
+  markers {list,add,set,remove,clear,apply},
+  loop {get,set,clear,apply,mode,xfade,repeat}
+}
 neowaves --cli render {waveform,spectrum,editor,list}
-neowaves --cli export {file}
+neowaves --cli export {file,verify-loop-tags}
+neowaves --cli effect-graph {
+  list,new,inspect,render,validate,test,save,import,export,
+  node {add,remove,set},
+  edge {connect,disconnect}
+}
+neowaves --cli external {
+  inspect,render,rows,
+  source {list,add,reload,remove,clear},
+  config {get,set}
+}
+neowaves --cli transcript {
+  inspect,
+  model {status,download,uninstall},
+  config {get,set},
+  generate,
+  batch {generate},
+  export-srt
+}
+neowaves --cli music-ai {
+  inspect,
+  model {status,download,uninstall},
+  analyze,
+  apply-markers,
+  export-stems
+}
+neowaves --cli plugin {
+  search-path {list,add,remove,reset},
+  scan,list,probe,
+  session {inspect,set,preview,apply,clear}
+}
 neowaves --cli debug {summary,screenshot}
-```
-
-Phase 2 adds:
-
-```text
-neowaves --cli external ...
-neowaves --cli transcript ...
-neowaves --cli music-ai ...
-```
-
-Phase 3 adds:
-
-```text
-neowaves --cli plugin ...
-neowaves --cli effect-graph ...
 ```
 
 ## Output Contract
 
-All CLI commands return the same envelope:
+All commands return the same envelope:
 
 ```json
 {
   "ok": true,
-  "command": "render waveform",
+  "command": "batch.loudness.plan",
   "result": {},
   "warnings": [],
   "errors": []
@@ -103,73 +119,129 @@ All CLI commands return the same envelope:
 
 Rules:
 
-- `ok` is `true` only on successful completion.
-- `command` is a stable command identifier.
-- `result` contains command-specific structured output.
-- `warnings` contains non-fatal issues.
-- `errors` contains user-facing error strings when `ok` is `false`.
-- Paths returned in JSON are absolute paths.
+- `command` is a stable dotted identifier.
+- `result` is structured and machine-readable.
+- warnings are non-fatal.
+- errors are user-facing strings when `ok` is `false`.
+- returned paths are absolute.
+
+## Session-backed Mutation Model
+
+- `--input` is read-only.
+- `--session` is required for mutation.
+- `--path` optionally selects a target row inside the session.
+- if `--path` is omitted, the active tab is preferred, then the first tab, then the first session item.
+
+This model is critical for:
+
+- batch loudness planning and apply
+- loop and marker editing
+- tool parameter editing and apply
+- external-source configuration
+- transcript/music analysis state
+- plugin draft editing and apply
+- export from current editor state
+
+## Milestone Breakdown
+
+### Milestone 1: Batch Loudness + Loop Export
+
+Completed surface:
+
+- `list sort`
+- `list search`
+- `list select`
+- `list save-query`
+- `batch loudness plan`
+- `batch loudness apply`
+- `batch export`
+- `editor cursor`
+- session-backed `render waveform`
+- session-backed `export file`
+- `export verify-loop-tags`
+
+Acceptance goals:
+
+- `_BGM` style folder/query workflows are scriptable
+- loop setup, render, export, and verify work without GUI fallback
+- batch reports can be emitted as files
+
+### Milestone 2: Effect Graph Hybrid CLI
+
+Completed surface:
+
+- `effect-graph list`
+- `effect-graph new`
+- `effect-graph inspect`
+- `effect-graph render`
+- `effect-graph validate`
+- `effect-graph test`
+- `effect-graph save`
+- `effect-graph import`
+- `effect-graph export`
+- `effect-graph node {add,remove,set}`
+- `effect-graph edge {connect,disconnect}`
+
+Acceptance goals:
+
+- graph JSON remains the single source of truth
+- graph rendering and validation are machine-readable
+- graph test returns enough evidence for agent review
+
+### Milestone 3: Extended Namespaces
+
+Completed surface:
+
+- `external`
+- `transcript`
+- `music-ai`
+- `plugin`
+
+Acceptance goals:
+
+- external table merge and render are session-backed and automatable
+- transcript read/generate/export flows are headless
+- music analysis can generate markers and stems without GUI
+- plugin catalog, probe, draft preview, and apply work from CLI
+
+### Milestone 4: Agent Ergonomics
+
+Partially implemented:
+
+- `query_id`
+- `row_id`
+- report output on selected workflows
+
+Still to improve:
+
+- broader report format unification
+- richer row/selection handles
+- more task-oriented examples in help
+- human-friendly troubleshooting and workflow docs
 
 ## Architecture
 
-The final architecture has three layers:
+The steady-state CLI architecture is:
 
-1. Root CLI parser
-   - Decides between default GUI mode and `--cli`.
-   - Owns global help text.
-2. CLI command layer
-   - Maps clap subcommands to typed command structs.
-   - Validates arguments.
-   - Emits JSON envelopes.
-3. Headless service layer
-   - Reads audio/session metadata.
-   - Loads list/editor state without relying on live UI interactions.
-   - Produces waveform/spectrum/list/editor images.
-   - Reuses existing audio/session/export logic where practical.
+1. Root parser
+   - decides between GUI default mode and `--cli`
+2. Typed CLI command layer
+   - clap-based subcommands and argument validation
+3. Headless execution layer
+   - session loading
+   - editor/list/query mutation
+   - waveform/spectrum rendering
+   - export and verification
+   - effect-graph validation and testing
+   - external merge/configuration
+   - transcript/music-ai pipelines
+   - plugin catalog/probe/session draft control
 
 GUI remains on the existing `WavesPreviewer` path.
 
-## Delivery Order
+## Immediate Next Work
 
-### Phase 0: Docs First
-
-- Add CLI spec docs.
-- Lock command names, help policy, and JSON conventions.
-- Update repo docs to point to the new CLI spec.
-
-### Phase 1: Root Parser and Core CLI
-
-- Replace the manual parser with `clap`.
-- Keep GUI startup flags working.
-- Add `--cli`.
-- Implement `session`, `item`, `list`, `editor`, `render`, `export`, and `debug`.
-- Add rich layered help.
-
-### Phase 2: MCP Removal
-
-- Remove MCP flags.
-- Remove MCP runtime modules and app wiring.
-- Remove MCP menu entries from the GUI.
-- Remove `commands/mcp_smoke.ps1`.
-- Archive old MCP design docs.
-
-### Phase 3: Extended Domains
-
-- Add `external`, `transcript`, and `music-ai`.
-- Add `plugin` and `effect-graph`.
-
-## Compatibility
-
-- `.nwsess` remains the session format.
-- Existing startup flags remain GUI-only compatibility flags.
-- Root positional file/folder/session arguments continue to open the GUI.
-- CLI state-changing commands must preserve current loop/marker semantics.
-- Export behavior remains non-destructive by default and follows the current overwrite/new-file policy.
-
-## Acceptance Criteria
-
-- `cargo run -- --help` explains both GUI and CLI usage.
-- `cargo run -- --cli --help` shows the CLI command tree.
-- Phase 1 CLI commands work without MCP.
-- GUI can still open files, folders, and sessions with legacy flags.
-- No runtime MCP code remains once the migration finishes.
+- unify `--report` behavior across more commands
+- improve task-oriented help examples for game-audio pipelines
+- normalize returned absolute paths where `..` segments remain
+- deepen plugin/effect-graph session integration and verification

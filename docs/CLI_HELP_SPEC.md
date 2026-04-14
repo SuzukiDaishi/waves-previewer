@@ -2,14 +2,11 @@
 
 ## Objective
 
-Help output must make the split between GUI mode and CLI mode obvious.
+Help output must make three things obvious:
 
-The user should understand:
-
-- default invocation opens the GUI
-- `--cli` switches to headless command mode
-- GUI startup flags still exist
-- CLI is organized as subcommands
+- default invocation starts the GUI
+- `--cli` switches into headless JSON mode
+- agent-first commands are still copy-pasteable for humans
 
 ## Help Layers
 
@@ -21,21 +18,27 @@ Command:
 neowaves --help
 ```
 
-Must include:
+Must explain:
 
-- one-line product description
-- GUI default behavior
-- the `--cli` entrypoint
-- legacy GUI startup flags
-- 3 to 6 short examples
+- NeoWaves is GUI-first by default
+- `--cli` is the headless automation entrypoint
+- legacy GUI startup flags still work
+- where to find the CLI docs
 
-Root help structure:
+Root help should include examples for:
 
-1. Synopsis
-2. GUI mode
-3. CLI mode
-4. Legacy GUI options
-5. Examples
+```powershell
+neowaves
+neowaves --open-file .\demo.wav
+neowaves --open-session .\work.nwsess
+neowaves --cli list query --folder .\assets\audio
+neowaves --cli batch loudness plan --session .\work.nwsess --query _BGM --target-lufs -24
+neowaves --cli effect-graph list
+neowaves --cli external inspect --session .\work.nwsess
+neowaves --cli transcript generate --session .\work.nwsess --write-srt
+neowaves --cli music-ai analyze --session .\work.nwsess --report .\music_analysis.md
+neowaves --cli plugin scan
+```
 
 ### 2. CLI top help
 
@@ -45,78 +48,84 @@ Command:
 neowaves --cli --help
 ```
 
-Must include:
+Must explain:
 
-- CLI-only synopsis
 - command tree
-- shared JSON output rule
-- path/output conventions
-- short examples
+- stdout JSON rule
+- stderr diagnostic rule
+- session-backed mutation rule
+- representative examples from list, batch, editor, render, export, effect-graph, external, transcript, music-ai, and plugin
 
-### 3. Subcommand help
-
-Command examples:
-
-```powershell
-neowaves --cli list query --help
-neowaves --cli render waveform --help
-neowaves --cli editor playback play --help
-neowaves --cli editor tool set --help
-```
-
-Must include:
-
-- purpose sentence
-- required vs optional arguments
-- supported value sets
-- 2 to 5 concrete examples
-- short output description
-- session mutation rules when the command changes `.nwsess`
-
-## Style Rules
-
-- Use plain English command names.
-- Keep examples copy-pasteable.
-- Prefer explicit option names over positional ambiguity.
-- Mention defaults in help text when they matter.
-- Do not describe JSON schemas inline in full; summarize the main fields and point to docs.
-
-## Required Root Examples
-
-Root help must show examples equivalent to:
-
-```powershell
-neowaves
-neowaves --open-file .\demo.wav
-neowaves --cli list query --folder .\assets\audio
-neowaves --cli editor inspect --input .\demo.wav
-neowaves --cli render waveform --input .\demo.wav --output .\out\wave.png
-```
-
-## Required CLI Examples
-
-CLI top help must show examples equivalent to:
+CLI top help should include examples for:
 
 ```powershell
 neowaves --cli session inspect --session .\work.nwsess
-neowaves --cli list query --folder .\assets\audio --columns file,length,sr
-neowaves --cli render list --folder .\assets\audio --output .\out\list.png
-neowaves --cli editor playback play --session .\work.nwsess
-neowaves --cli export file --session .\work.nwsess --overwrite
+neowaves --cli list query --session .\work.nwsess --query _BGM
+neowaves --cli batch loudness plan --session .\work.nwsess --query _BGM --target-lufs -24
+neowaves --cli editor playback play --session .\work.nwsess --selection
+neowaves --cli export verify-loop-tags --input .\out\music_interactive.mp3
+neowaves --cli effect-graph test --graph convert_2ch_to_5ch --input .\stereo.wav
+neowaves --cli external source add --session .\work.nwsess --input .\meta.xlsx
+neowaves --cli transcript generate --session .\work.nwsess --write-srt --overwrite-existing
+neowaves --cli music-ai apply-markers --session .\work.nwsess --beats --downbeats --sections --replace
+neowaves --cli plugin session apply --session .\work.nwsess
 ```
 
-## Snapshot Policy
+### 3. Subcommand help
 
-The following help outputs must have stable snapshot tests:
+Representative commands:
+
+```powershell
+neowaves --cli list query --help
+neowaves --cli batch loudness plan --help
+neowaves --cli editor cursor set --help
+neowaves --cli editor playback play --help
+neowaves --cli render waveform --help
+neowaves --cli export file --help
+neowaves --cli export verify-loop-tags --help
+neowaves --cli effect-graph --help
+neowaves --cli external --help
+neowaves --cli transcript generate --help
+neowaves --cli music-ai analyze --help
+neowaves --cli plugin session apply --help
+```
+
+Each subcommand help should include:
+
+- one-sentence purpose
+- required versus optional arguments
+- supported value sets where relevant
+- 2 to 5 concrete examples
+- short explanation of the main JSON fields
+- explicit note when the command mutates `.nwsess`
+
+## Style Rules
+
+- Prefer explicit option names over positional arguments.
+- Keep examples copy-pasteable in PowerShell.
+- Mention defaults in help text when they matter.
+- Mention when commands are read-only versus session-backed mutation.
+- Avoid embedding full JSON schemas in help output; summarize the important fields and point to docs.
+- Prefer task-oriented examples over synthetic parser-only examples.
+
+## Required Snapshot Coverage
+
+Stable help snapshots are required for:
 
 - root `--help`
 - `--cli --help`
 - `--cli list query --help`
-- `--cli editor inspect --help`
-- `--cli render waveform --help`
+- `--cli batch loudness plan --help`
+- `--cli editor cursor set --help`
 - `--cli editor playback play --help`
-- `--cli editor tool set --help`
+- `--cli render waveform --help`
 - `--cli export file --help`
+- `--cli export verify-loop-tags --help`
+- `--cli effect-graph --help`
+- `--cli external --help`
+- `--cli transcript generate --help`
+- `--cli music-ai analyze --help`
+- `--cli plugin session apply --help`
 
 ## Error Messaging
 
@@ -130,3 +139,13 @@ If the user passes an unknown root flag:
 
 - preserve clap's standard unknown-argument error
 - do not silently fall back to GUI behavior
+
+If a mutating command is invoked without `--session`:
+
+- exit non-zero
+- clearly state that session-backed mutation is required
+
+If a batch command receives both `--query` and `--query-id` semantics that conflict:
+
+- prefer the explicit validation error over silent fallback
+- tell the user which selector was invalid

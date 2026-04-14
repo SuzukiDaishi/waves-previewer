@@ -9,6 +9,7 @@ use super::project::{
     describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
+    project_music_analysis_to_draft,
     project_plugin_fx_draft_from_draft, project_plugin_fx_draft_to_draft,
     project_spectrogram_from_cfg, project_tab_from_tab, project_tool_state_to_tool_state, rel_path,
     resolve_path, save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio,
@@ -514,6 +515,7 @@ impl super::WavesPreviewer {
                 tab_open: self.effect_graph.workspace_open,
                 active_template_id: self.effect_graph.active_template_id.clone(),
             }),
+            transcript_ai_config: Some(self.transcript_ai_cfg.clone()),
         };
         let spectrogram = project_spectrogram_from_cfg(&self.spectro_cfg);
 
@@ -625,6 +627,7 @@ impl super::WavesPreviewer {
                         template_updated_at_unix_ms: stamp.template_updated_at_unix_ms,
                     }
                 }),
+                music_analysis: None,
             });
         }
 
@@ -756,6 +759,11 @@ impl super::WavesPreviewer {
         if let Some(effect_graph_ui) = project.app.effect_graph_ui.as_ref() {
             self.effect_graph.workspace_open = effect_graph_ui.tab_open;
             self.effect_graph.active_template_id = effect_graph_ui.active_template_id.clone();
+        }
+        if let Some(cfg) = project.app.transcript_ai_config.clone() {
+            self.transcript_ai_cfg = cfg;
+            self.sanitize_transcript_ai_config();
+            self.refresh_transcript_ai_status();
         }
         self.apply_spectro_config(spectro_config_from_project(&project.spectrogram));
 
@@ -1263,6 +1271,11 @@ impl super::WavesPreviewer {
                     t.active_tool = tool_kind_from_str(&tab.active_tool);
                     t.tool_state = project_tool_state_to_tool_state(&tab.tool_state);
                     t.plugin_fx_draft = project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft);
+                    t.music_analysis_draft = tab
+                        .music_analysis
+                        .as_ref()
+                        .map(|draft| project_music_analysis_to_draft(draft, &base_dir))
+                        .unwrap_or_default();
                     t.loop_mode = loop_mode_from_str(&tab.loop_mode);
                     t.loop_region = tab.loop_region.map(|v| (v[0], v[1]));
                     t.loop_xfade_samples = tab.loop_xfade_samples;

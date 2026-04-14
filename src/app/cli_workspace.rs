@@ -1,14 +1,19 @@
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
+use serde_json::{Map, Value};
 
 use anyhow::{bail, Context, Result};
 
-use super::types::{EditorTab, ToolKind};
+use super::types::{
+    FadeShape, LoopMode, LoopXfadeShape, ToolKind, ToolState,
+};
 use super::WavesPreviewer;
+use crate::markers::MarkerEntry;
 
 const CLI_DECODE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_APPLY_TIMEOUT: Duration = Duration::from_secs(60);
+const CLI_JOB_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PlaybackRangeSource {
@@ -27,17 +32,72 @@ pub(super) struct PlaybackRangeSpec {
 pub(super) struct CliWorkspace {
     pub(super) session_path: PathBuf,
     pub(super) app: WavesPreviewer,
+    session_tab_snapshots: std::collections::HashMap<String, SessionTabSnapshot>,
+}
+
+#[derive(Clone)]
+struct SessionTabSnapshot {
+    show_waveform_overlay: bool,
+    snap_zero_cross: bool,
+    active_tool: ToolKind,
+    tool_state: ToolState,
+    loop_mode: LoopMode,
+    preview_offset_samples: Option<usize>,
+    selection: Option<(usize, usize)>,
+    loop_region: Option<(usize, usize)>,
+    loop_region_committed: Option<(usize, usize)>,
+    loop_region_applied: Option<(usize, usize)>,
+    loop_markers_saved: Option<(usize, usize)>,
+    trim_range: Option<(usize, usize)>,
+    loop_xfade_samples: usize,
+    loop_xfade_shape: LoopXfadeShape,
+    fade_in_range: Option<(usize, usize)>,
+    fade_out_range: Option<(usize, usize)>,
+    fade_in_shape: FadeShape,
+    fade_out_shape: FadeShape,
+    dirty: bool,
+    markers: Vec<MarkerEntry>,
+    markers_committed: Vec<MarkerEntry>,
+    markers_applied: Vec<MarkerEntry>,
+    markers_dirty: bool,
+    loop_markers_dirty: bool,
+    view_offset: usize,
+    samples_per_px: f32,
+    vertical_zoom: f32,
+    vertical_view_center: f32,
 }
 
 impl CliWorkspace {
     pub(super) fn load(session_path: &Path) -> Result<Self> {
         let session_path = absolute_existing_path(session_path)?;
+        let session_text = std::fs::read_to_string(&session_path)
+            .with_context(|| format!("read session file: {}", session_path.display()))?;
+        let session_project = super::project::deserialize_project(&session_text)
+            .with_context(|| format!("parse session file: {}", session_path.display()))?;
+        let session_base = session_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         let mut app = WavesPreviewer::new_headless(super::StartupConfig::default())
             .context("create headless workspace")?;
         app.open_project_file(session_path.clone())
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("open session: {}", session_path.display()))?;
-        Ok(Self { session_path, app })
+        let session_tab_snapshots = session_project
+            .tabs
+            .iter()
+            .map(|tab| {
+                (
+                    workspace_path_key(&super::project::resolve_path(&tab.path, &session_base)),
+                    SessionTabSnapshot::from_project_tab(tab),
+                )
+            })
+            .collect();
+        Ok(Self {
+            session_path,
+            app,
+            session_tab_snapshots,
+        })
     }
 
     pub(super) fn save(&mut self) -> Result<()> {
@@ -70,6 +130,7 @@ impl CliWorkspace {
         if let Some(idx) = self.find_tab_index(&target) {
             self.app.active_tab = Some(idx);
             self.wait_for_decode(idx, &target)?;
+            self.restore_session_snapshot(idx, &target);
             return Ok(idx);
         }
         self.app.open_or_activate_tab(&target);
@@ -78,6 +139,7 @@ impl CliWorkspace {
             .context("failed to open target tab")?;
         self.app.active_tab = Some(idx);
         self.wait_for_decode(idx, &target)?;
+        self.restore_session_snapshot(idx, &target);
         Ok(idx)
     }
 
@@ -91,6 +153,118 @@ impl CliWorkspace {
             }
             if started.elapsed() > CLI_APPLY_TIMEOUT {
                 bail!("editor apply timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_for_external_loads(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        loop {
+            self.app.drain_external_load_results(&ctx);
+            if !self.app.external_load_inflight
+                && self.app.external_load_rx.is_none()
+                && self.app.external_load_queue.is_empty()
+            {
+                return Ok(());
+            }
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("external load timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn wait_for_transcript_model_download(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.transcript_model_download_state.is_some() {
+            self.app.drain_transcript_model_download_results(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("transcript model download timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_for_transcript_ai(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.transcript_ai_state.is_some() {
+            self.app.drain_transcript_ai_results(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("transcript generate timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn wait_for_music_model_download(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.music_model_download_state.is_some() {
+            self.app.drain_music_model_download_results(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("music model download timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_for_music_analysis(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.music_ai_state.is_some() {
+            self.app.drain_music_ai_results(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("music analysis timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_for_plugin_scan(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.plugin_scan_state.is_some() {
+            self.app.drain_plugin_jobs(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("plugin scan timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn wait_for_plugin_probe(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.plugin_probe_state.is_some() {
+            self.app.drain_plugin_jobs(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("plugin probe timed out");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub(super) fn wait_for_plugin_process(&mut self) -> Result<()> {
+        let ctx = egui::Context::default();
+        let started = Instant::now();
+        while self.app.plugin_process_state.is_some() {
+            self.app.drain_plugin_jobs(&ctx);
+            if started.elapsed() > CLI_JOB_TIMEOUT {
+                bail!("plugin processing timed out");
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -168,38 +342,6 @@ impl CliWorkspace {
             ToolKind::LoopEdit | ToolKind::Markers | ToolKind::PluginFx | ToolKind::MusicAnalyze => {
                 bail!("tool apply is not supported for {:?}", active_tool)
             }
-        }
-        Ok(())
-    }
-
-    pub(super) fn apply_loop_for_target(&mut self, requested: Option<&Path>) -> Result<()> {
-        let tab_idx = self.ensure_target_tab_loaded(requested)?;
-        let (apply_xfade, pending_repeat) = {
-            let tab = self
-                .app
-                .tabs
-                .get_mut(tab_idx)
-                .context("missing target tab")?;
-            tab.loop_region_committed = tab.loop_region;
-            tab.loop_region_applied = tab.loop_region;
-            let apply_xfade = tab.loop_xfade_samples > 0;
-            let pending_repeat = if tab.pending_loop_unwrap.is_some() {
-                tab.pending_loop_unwrap.take()
-            } else {
-                None
-            };
-            Self::update_loop_dirty(tab);
-            (apply_xfade, pending_repeat)
-        };
-        if let Some(repeats) = pending_repeat {
-            self.app.editor_apply_loop_unwrap(tab_idx, repeats);
-        } else if apply_xfade {
-            self.app.editor_apply_loop_xfade(tab_idx);
-        }
-        if let Some(tab) = self.app.tabs.get_mut(tab_idx) {
-            tab.loop_xfade_samples = 0;
-            tab.tool_state.loop_repeat = 2;
-            Self::update_loop_dirty(tab);
         }
         Ok(())
     }
@@ -290,6 +432,18 @@ impl CliWorkspace {
         self.app.tabs.iter().position(|tab| tab.path.as_path() == path)
     }
 
+    pub(super) fn set_pending_gain_db_for_path(&mut self, path: &Path, db: f32) {
+        self.app.set_pending_gain_db_for_path(path, db);
+    }
+
+    pub(super) fn pending_gain_map(&self) -> Value {
+        let mut map = Map::new();
+        for item in &self.app.items {
+            map.insert(item.path.display().to_string(), Value::from(item.pending_gain_db));
+        }
+        Value::Object(map)
+    }
+
     fn wait_for_decode(&mut self, tab_idx: usize, target: &Path) -> Result<()> {
         let started = Instant::now();
         loop {
@@ -359,8 +513,98 @@ impl CliWorkspace {
         Ok(())
     }
 
-    fn update_loop_dirty(tab: &mut EditorTab) {
-        tab.loop_markers_dirty = tab.loop_region != tab.loop_markers_saved;
+    fn restore_session_snapshot(&mut self, tab_idx: usize, target: &Path) {
+        let key = workspace_path_key(target);
+        let Some(snapshot) = self.session_tab_snapshots.get(&key).cloned() else {
+            return;
+        };
+        let Some(tab) = self.app.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        tab.show_waveform_overlay = snapshot.show_waveform_overlay;
+        tab.snap_zero_cross = snapshot.snap_zero_cross;
+        tab.active_tool = snapshot.active_tool;
+        tab.tool_state = snapshot.tool_state;
+        tab.loop_mode = snapshot.loop_mode;
+        tab.preview_offset_samples = snapshot.preview_offset_samples;
+        tab.selection = snapshot.selection;
+        tab.loop_region = snapshot.loop_region;
+        tab.loop_region_committed = snapshot.loop_region_committed;
+        tab.loop_region_applied = snapshot.loop_region_applied;
+        tab.loop_markers_saved = snapshot.loop_markers_saved;
+        tab.trim_range = snapshot.trim_range;
+        tab.loop_xfade_samples = snapshot.loop_xfade_samples;
+        tab.loop_xfade_shape = snapshot.loop_xfade_shape;
+        tab.fade_in_range = snapshot.fade_in_range;
+        tab.fade_out_range = snapshot.fade_out_range;
+        tab.fade_in_shape = snapshot.fade_in_shape;
+        tab.fade_out_shape = snapshot.fade_out_shape;
+        tab.dirty = snapshot.dirty;
+        tab.markers = snapshot.markers;
+        tab.markers_committed = snapshot.markers_committed;
+        tab.markers_applied = snapshot.markers_applied;
+        tab.markers_dirty = snapshot.markers_dirty;
+        tab.loop_markers_dirty = snapshot.loop_markers_dirty;
+        tab.view_offset = snapshot.view_offset;
+        tab.samples_per_px = snapshot.samples_per_px;
+        tab.vertical_zoom = snapshot.vertical_zoom;
+        tab.vertical_view_center = snapshot.vertical_view_center;
+    }
+}
+
+impl SessionTabSnapshot {
+    fn from_project_tab(tab: &super::project::ProjectTab) -> Self {
+        Self {
+            show_waveform_overlay: tab.show_waveform_overlay,
+            snap_zero_cross: tab.snap_zero_cross,
+            active_tool: super::project::tool_kind_from_str(&tab.active_tool),
+            tool_state: super::project::project_tool_state_to_tool_state(&tab.tool_state),
+            loop_mode: super::project::loop_mode_from_str(&tab.loop_mode),
+            preview_offset_samples: tab.cursor_sample,
+            selection: tab.selection.map(|range| (range[0], range[1])),
+            loop_region: tab.loop_region.map(|range| (range[0], range[1])),
+            loop_region_committed: tab.loop_region.map(|range| (range[0], range[1])),
+            loop_region_applied: tab.loop_region.map(|range| (range[0], range[1])),
+            loop_markers_saved: tab.loop_region.map(|range| (range[0], range[1])),
+            trim_range: tab.trim_range.map(|range| (range[0], range[1])),
+            loop_xfade_samples: tab.loop_xfade_samples,
+            loop_xfade_shape: super::project::loop_shape_from_str(&tab.loop_xfade_shape),
+            fade_in_range: tab.fade_in_range.map(|range| (range[0], range[1])),
+            fade_out_range: tab.fade_out_range.map(|range| (range[0], range[1])),
+            fade_in_shape: super::project::fade_shape_from_str(&tab.fade_in_shape),
+            fade_out_shape: super::project::fade_shape_from_str(&tab.fade_out_shape),
+            dirty: tab.dirty,
+            markers: tab
+                .markers
+                .iter()
+                .map(|marker| MarkerEntry {
+                    sample: marker.sample,
+                    label: marker.label.clone(),
+                })
+                .collect(),
+            markers_committed: tab
+                .markers
+                .iter()
+                .map(|marker| MarkerEntry {
+                    sample: marker.sample,
+                    label: marker.label.clone(),
+                })
+                .collect(),
+            markers_applied: tab
+                .markers
+                .iter()
+                .map(|marker| MarkerEntry {
+                    sample: marker.sample,
+                    label: marker.label.clone(),
+                })
+                .collect(),
+            markers_dirty: tab.markers_dirty,
+            loop_markers_dirty: tab.loop_markers_dirty,
+            view_offset: tab.view_offset,
+            samples_per_px: tab.samples_per_px,
+            vertical_zoom: tab.vertical_zoom,
+            vertical_view_center: tab.vertical_view_center,
+        }
     }
 }
 
@@ -399,6 +643,10 @@ pub(super) fn resolve_playback_range(
         range: whole,
         source: PlaybackRangeSource::Whole,
     }
+}
+
+fn workspace_path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
 }
 
 fn normalize_range(range: Option<(usize, usize)>, total_samples: usize) -> Option<(usize, usize)> {
