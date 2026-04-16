@@ -1822,7 +1822,8 @@ impl crate::app::WavesPreviewer {
                     }
                 };
                 if should_step {
-                    let cur_display = playhead_display_now;
+                    let max_display = tab_samples_len.saturating_sub(1);
+                    let cur_display = playhead_display_now.min(max_display);
                     let spp = self.tabs[tab_idx].samples_per_px.max(0.0001);
                     let sr_u32 = self.audio.shared.out_sample_rate.max(1);
                     let sr = sr_u32 as f32;
@@ -1906,7 +1907,7 @@ impl crate::app::WavesPreviewer {
                             (target / step_samples) * step_samples
                         }
                     };
-                    let mut new_display = raw_target.min(tab_samples_len);
+                    let mut new_display = raw_target.min(max_display);
                     new_display = Self::stop_with_marker_if_needed(
                         &self.tabs[tab_idx],
                         cur_display,

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Loop Authoring"
+  short_description: "Set and verify WAV or MP3 loop points with NeoWaves CLI"
+  default_prompt: "Use NeoWaves CLI to create a session, inspect and render the waveform, move the cursor with zero-cross snapping, set and apply the loop, export WAV or MP3, and verify loop tag persistence."

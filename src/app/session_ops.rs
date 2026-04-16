@@ -9,16 +9,15 @@ use super::project::{
     describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
-    project_music_analysis_to_draft,
-    project_plugin_fx_draft_from_draft, project_plugin_fx_draft_to_draft,
-    project_spectrogram_from_cfg, project_tab_from_tab, project_tool_state_to_tool_state, rel_path,
-    resolve_path, save_sidecar_audio, save_sidecar_cached_audio, save_sidecar_preview_audio,
-    serialize_project, spectro_config_from_project, tool_kind_from_str, ProjectApp,
-    ProjectAppliedEffectGraph, ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi,
-    ProjectExportPolicy, ProjectExternalSource, ProjectExternalState, ProjectFile,
-    ProjectFormatOverride, ProjectList, ProjectListColumns, ProjectListItem,
-    ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage, ProjectVirtualItem,
-    ProjectVirtualOp, ProjectVirtualSource,
+    project_music_analysis_to_draft, project_plugin_fx_draft_from_draft,
+    project_plugin_fx_draft_to_draft, project_spectrogram_from_cfg, project_tab_from_tab,
+    project_tool_state_to_tool_state, rel_path, resolve_path, save_sidecar_audio,
+    save_sidecar_cached_audio, save_sidecar_preview_audio, serialize_project,
+    spectro_config_from_project, tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph,
+    ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy,
+    ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
+    ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectToolState,
+    ProjectTranscriptLanguage, ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -1395,6 +1394,7 @@ impl super::WavesPreviewer {
                 if added > 0 {
                     self.after_add_refresh();
                 }
+                self.open_shell_target_in_editor(&req.files, true);
             }
         }
     }
@@ -1446,6 +1446,7 @@ impl super::WavesPreviewer {
                 if added > 0 {
                     self.after_add_refresh();
                 }
+                self.select_open_target_path(&paths, true);
             }
         }
     }

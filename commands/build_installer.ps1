@@ -254,6 +254,25 @@ function Invoke-IsccCommand {
     }
 }
 
+function Show-UpdateSmokeGuidance {
+    param(
+        [string]$InstallerPath,
+        [string]$Version
+    )
+    Write-Host ""
+    Write-Host "Update smoke checklist:"
+    Write-Host "1. Install an older NeoWaves build first, then close NeoWaves completely."
+    Write-Host "2. Run the new installer over the existing install:"
+    Write-Host "   $InstallerPath"
+    Write-Host "3. Verify the installer reuses the previous install directory and closes running NeoWaves processes if needed."
+    Write-Host "4. Launch NeoWaves and confirm:"
+    Write-Host "   - Help/About or title bar reports version $Version"
+    Write-Host "   - %APPDATA%\\NeoWaves\\prefs.txt is still present and settings are preserved"
+    Write-Host "   - Existing file associations (.wav/.mp3/.m4a/.nwsess) still open NeoWaves if association task was enabled"
+    Write-Host "   - Shell-open still appends to the list and opens the target file in Editor"
+    Write-Host "5. Uninstall/reinstall only if you are explicitly testing clean-install behavior."
+}
+
 if (-not $BuildId) {
     $BuildId = New-BuildId
 }
@@ -327,4 +346,14 @@ if ($usedTempOutputFallback) {
     Write-Host "Installer output fallback used. Final OutputDir: $OutputDir"
 }
 
+$installerBaseName = "NeoWaves-Setup-$version"
+if ($BuildId) {
+    $installerBaseName += "-$BuildId"
+}
+$installerPath = Join-Path $OutputDir ($installerBaseName + ".exe")
+
 Write-Host "Done."
+if (Test-Path $installerPath) {
+    Write-Host "InstallerPath: $installerPath"
+}
+Show-UpdateSmokeGuidance -InstallerPath $installerPath -Version $version

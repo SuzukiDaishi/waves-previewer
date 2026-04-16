@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plugin Search Paths"
+  short_description: "Inspect and manage NeoWaves plugin discovery directories"
+  default_prompt: "Use NeoWaves CLI to inspect current plugin search paths, add or remove directories safely, reset to defaults when needed, and run a plugin scan after path changes."

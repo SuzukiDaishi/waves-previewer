@@ -1,0 +1,4 @@
+interface:
+  display_name: "Transcript Batch Generate"
+  short_description: "Inspect, generate, and export subtitles with NeoWaves CLI"
+  default_prompt: "Use NeoWaves CLI to inspect transcript state, verify model availability, configure transcription options, generate transcripts for one file or a batch, and export SRT outputs explicitly when needed."

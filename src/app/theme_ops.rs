@@ -330,6 +330,8 @@ impl WavesPreviewer {
                 } else {
                     Some(v.to_string())
                 };
+            } else if let Some(rest) = line.strip_prefix("auto_play_list_nav=") {
+                self.auto_play_list_nav = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("transcript_ai_opt_in=") {
                 self.transcript_ai_opt_in = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("transcript_language=") {
@@ -543,6 +545,7 @@ impl WavesPreviewer {
             SrcQuality::Best => "best",
         };
         let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
+        let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
         let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
         let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
             "1"
@@ -624,6 +627,7 @@ spectro_note_labels={}\n\
 item_bg_mode={}\n\
 src_quality={}\n\
 audio_output_device={}\n\
+auto_play_list_nav={}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -673,6 +677,7 @@ zoo_flip_manual={}\n",
             item_bg_mode,
             src_quality,
             audio_output_device,
+            auto_play_list_nav,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,

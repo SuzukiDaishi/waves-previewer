@@ -1,0 +1,4 @@
+interface:
+  display_name: "Render Editor Review"
+  short_description: "Render NeoWaves editor PNG evidence for waveform or spectrogram review"
+  default_prompt: "Use NeoWaves CLI to render the editor view from either a raw input file or a session-backed target, and save a PNG that can be reviewed by a human or reused in a later step."

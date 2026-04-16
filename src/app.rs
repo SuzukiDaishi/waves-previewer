@@ -624,6 +624,7 @@ pub struct WavesPreviewer {
     pending_activate_path: Option<PathBuf>,
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
+    pending_editor_autoplay_path: Option<PathBuf>,
     // Heavy preview worker for Pitch/Stretch (mono) with path/generation guard
     heavy_preview_rx: Option<std::sync::mpsc::Receiver<HeavyPreviewMessage>>,
     heavy_preview_gen_counter: u64,

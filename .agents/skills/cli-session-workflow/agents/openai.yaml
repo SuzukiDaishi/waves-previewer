@@ -1,0 +1,4 @@
+interface:
+  display_name: "CLI Session Workflow"
+  short_description: "Compose NeoWaves CLI commands into a safe session-backed workflow"
+  default_prompt: "Use NeoWaves CLI in a session-backed workflow: inspect first, narrow targets, render evidence when useful, mutate only through --session, export explicitly, and verify outputs when persistence matters."

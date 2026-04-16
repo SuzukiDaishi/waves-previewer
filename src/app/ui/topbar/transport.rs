@@ -133,7 +133,12 @@ impl WavesPreviewer {
         {
             self.request_workspace_play_toggle();
         }
-        ui.checkbox(&mut self.auto_play_list_nav, "Auto Play");
+        if ui
+            .checkbox(&mut self.auto_play_list_nav, "Auto Play")
+            .changed()
+        {
+            self.save_prefs();
+        }
     }
 
     fn ui_topbar_search_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {

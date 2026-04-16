@@ -69,6 +69,7 @@ impl WavesPreviewer {
                 if let Some(files) = self.pick_files_dialog() {
                     self.replace_with_files(&files);
                     self.after_add_refresh();
+                    self.select_open_target_path(&files, true);
                 }
                 ui.close();
             }

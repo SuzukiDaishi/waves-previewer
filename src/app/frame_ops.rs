@@ -18,6 +18,7 @@ impl WavesPreviewer {
         if let Some(tab_idx) = activated_tab_idx {
             self.refresh_tool_preview_for_tab(tab_idx);
         }
+        self.run_frame_pending_editor_autoplay(ctx);
         self.run_frame_overlays(ctx);
         self.run_frame_modal_windows(ctx);
         self.run_frame_finish(ctx, frame_started);
@@ -106,6 +107,7 @@ impl WavesPreviewer {
                         self.clear_preview_if_any(idx);
                     }
                     self.workspace_view = WorkspaceView::List;
+                    self.pending_editor_autoplay_path = None;
                     self.pending_activate_path = None;
                     self.pending_activate_kind = None;
                     self.pending_activate_ready = false;
@@ -312,6 +314,48 @@ impl WavesPreviewer {
             self.ui_editor_zoo_overlay(ctx, None, ctx.content_rect());
         }
         self.ui_busy_overlay(ctx);
+    }
+
+    fn run_frame_pending_editor_autoplay(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.pending_editor_autoplay_path.clone() else {
+            return;
+        };
+        if !self.auto_play_list_nav {
+            self.pending_editor_autoplay_path = None;
+            return;
+        }
+        if !self.is_editor_workspace_active() {
+            ctx.request_repaint();
+            return;
+        }
+        let Some(tab_idx) = self.active_tab else {
+            ctx.request_repaint();
+            return;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            self.pending_editor_autoplay_path = None;
+            return;
+        };
+        if tab.path != path {
+            ctx.request_repaint();
+            return;
+        }
+        if !self.active_editor_exact_audio_ready() {
+            ctx.request_repaint();
+            return;
+        }
+        self.pending_editor_autoplay_path = None;
+        let already_playing = self
+            .audio
+            .shared
+            .playing
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if already_playing {
+            self.audio.stop();
+            self.playback_return_editor_to_last_start_if_needed();
+            self.playback_sync_state_snapshot();
+        }
+        self.request_workspace_play_toggle();
     }
 
     fn run_frame_modal_windows(&mut self, ctx: &egui::Context) {

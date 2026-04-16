@@ -1,0 +1,4 @@
+interface:
+  display_name: "External Merge Review"
+  short_description: "Attach and review CSV or Excel metadata in NeoWaves sessions"
+  default_prompt: "Use NeoWaves CLI to add external CSV or Excel sources to a session, inspect merge state, adjust merge rules, review unmatched rows, and render evidence when the merge needs human review."

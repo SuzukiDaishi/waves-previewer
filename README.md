@@ -71,8 +71,12 @@ NeoWaves は「加工済み音は offline render、未加工の pristine WAV は
 ```bash
 git submodule update --init --recursive
 cargo build
-cargo run
 ```
+
+ビルド後の実行ファイル:
+
+- `.\target\debug\neowaves.exe`
+- `.\target\release\neowaves.exe`
 
 ### Windows ビルド前提
 - Rust toolchain (`stable-x86_64-pc-windows-msvc`)
@@ -102,6 +106,7 @@ cargo run
 補足:
 - `build_installer.ps1` は `ISCC` の `Resource update error ... EndUpdateResource failed (110)` を検知した場合、再試行します。
 - 再試行中に失敗が続く場合は出力先を `%TEMP%` 配下へ切り替えて継続します（最終 `OutputDir` はログに表示）。
+- スクリプトの最後に更新 smoke checklist を出します。既存版の上書きインストール、設定保持、関連付け、shell-open の確認に使ってください。
 
 ---
 
@@ -110,19 +115,25 @@ cargo run
 通常起動は GUI です。
 
 ```bash
-cargo run
-cargo run -- --open-folder "C:\\path\\to\\wav" --open-first
+neowaves.exe
+neowaves.exe --open-folder "C:\\path\\to\\wav" --open-first
 ```
 
 headless CLI は `--cli` で入ります。`stdout` は JSON、画像系は PNG を保存して絶対パスを返します。
 
 ```bash
-cargo run -- --cli --help
-cargo run -- --cli list query --folder "C:\\path\\to\\wav"
-cargo run -- --cli batch loudness plan --session ".\\work.nwsess" --query "_BGM" --target-lufs -24
-cargo run -- --cli item inspect --input ".\\debug\\gui_test_440.wav"
-cargo run -- --cli render waveform --input ".\\debug\\gui_test_440.wav" --output ".\\debug\\cli-renders\\wave.png"
-cargo run -- --cli effect-graph list
+neowaves.exe --cli --help
+neowaves.exe --cli list query --folder "C:\\path\\to\\wav"
+neowaves.exe --cli batch loudness plan --session ".\\work.nwsess" --query "_BGM" --target-lufs -24
+neowaves.exe --cli item inspect --input ".\\debug\\gui_test_440.wav"
+neowaves.exe --cli render waveform --input ".\\debug\\gui_test_440.wav" --output ".\\debug\\cli-renders\\wave.png"
+neowaves.exe --cli effect-graph list
+```
+
+repo 内から直接使う場合:
+
+```powershell
+.\target\release\neowaves.exe --cli --help
 ```
 
 CLI の仕様書:
@@ -130,6 +141,26 @@ CLI の仕様書:
 - `docs/CLI_COMMAND_REFERENCE.md`
 - `docs/CLI_MIGRATION_MATRIX.md`
 - `docs/CLI_HELP_SPEC.md`
+
+## Repo-Local Skills
+
+repo には NeoWaves CLI を LLM と人間の両方で扱いやすくする repo-local skill を `.agents/skills/` 配下に同梱しています。
+
+- `cli-session-workflow`
+- `batch-loudness`
+- `effect-graph-authoring`
+- `loop-authoring`
+- `list-query-review`
+- `external-merge-review`
+- `transcript-batch-generate`
+- `music-analysis-markers`
+- `plugin-draft-preview`
+- `render-editor-review`
+- `verify-loop-tags`
+- `effect-graph-test`
+- `plugin-search-paths`
+
+これらの skill も `neowaves.exe` 前提で書かれており、詳細な command surface は `docs/CLI_COMMAND_REFERENCE.md` と `docs/CLI_AGENT_WORKFLOWS.md` を参照します。
 
 ---
 

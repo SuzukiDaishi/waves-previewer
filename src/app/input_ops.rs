@@ -74,6 +74,7 @@ impl super::WavesPreviewer {
                         self.clear_preview_if_any(prev);
                     }
                     self.workspace_view = super::types::WorkspaceView::List;
+                    self.pending_editor_autoplay_path = None;
                     self.pending_activate_path = None;
                     self.pending_activate_kind = None;
                     self.pending_activate_ready = false;
@@ -158,6 +159,7 @@ impl super::WavesPreviewer {
         if allow_list_shortcuts {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
                 self.auto_play_list_nav = !self.auto_play_list_nav;
+                self.save_prefs();
             }
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
                 self.search_use_regex = !self.search_use_regex;
@@ -382,11 +384,7 @@ impl super::WavesPreviewer {
 
     fn apply_current_loop_region(&mut self, tab_idx: usize) -> bool {
         let mut undo_state = None;
-        let Some(current) = self
-            .tabs
-            .get(tab_idx)
-            .and_then(|tab| tab.loop_region)
-        else {
+        let Some(current) = self.tabs.get(tab_idx).and_then(|tab| tab.loop_region) else {
             return false;
         };
         let should_apply = self

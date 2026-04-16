@@ -1,0 +1,4 @@
+interface:
+  display_name: "Effect Graph Authoring"
+  short_description: "Create and verify NeoWaves effect graphs, including channel-routing graphs"
+  default_prompt: "Use NeoWaves CLI to create or inspect an effect graph, edit nodes and edges, validate it, render evidence, test it with real audio, and save only after validation and non-silent output checks pass."

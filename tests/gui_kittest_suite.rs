@@ -102,6 +102,32 @@ mod kittest_suite {
         None
     }
 
+    fn first_n_audio_files(dir: &Path, count: usize) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for entry in WalkDir::new(dir).follow_links(false) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let supported = entry
+                .path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(neowaves::audio_io::is_supported_extension)
+                .unwrap_or(false);
+            if supported {
+                out.push(entry.into_path());
+                if out.len() >= count {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     fn try_ffmpeg_convert(src: &Path, dst: &Path) -> bool {
         Command::new("ffmpeg")
             .arg("-y")
@@ -1321,6 +1347,117 @@ mod kittest_suite {
         harness.run_steps(2);
         let after = harness.state().test_auto_play_list_nav();
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn auto_play_pref_roundtrip_persists() {
+        let mut harness = harness_empty();
+        let prefs = make_temp_dir("prefs_autoplay").join("prefs.txt");
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert!(harness.state().test_auto_play_list_nav());
+
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert!(!harness.state().test_auto_play_list_nav());
+    }
+
+    #[test]
+    fn startup_open_files_selects_last_target_and_sets_autoplay() {
+        let files = first_n_audio_files(&wav_dir(), 3);
+        assert!(files.len() >= 3, "expected at least 3 audio files");
+        let mut harness = harness_empty();
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        harness.state_mut().test_apply_startup_open_files(&files);
+        wait_for_tab(&mut harness);
+        harness.run_steps(2);
+
+        let selected = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("selected startup path");
+        let active_tab = harness
+            .state()
+            .test_active_tab_path()
+            .expect("startup active editor path");
+        assert_eq!(
+            selected, files[2],
+            "startup should select the last opened file"
+        );
+        assert_eq!(
+            active_tab, files[2],
+            "startup shell-open should open the last file in editor"
+        );
+        assert!(
+            harness.state().test_is_editor_workspace_active(),
+            "startup shell-open should switch to editor workspace"
+        );
+        assert!(
+            harness.state().test_pending_editor_autoplay_path() == Some(files[2].clone())
+                || harness.state().test_audio_is_playing(),
+            "startup open with autoplay should schedule or start editor playback"
+        );
+    }
+
+    #[test]
+    fn append_open_files_opens_last_target_in_editor_and_duplicate_reselects_existing_row() {
+        let files = first_n_audio_files(&wav_dir(), 3);
+        assert!(files.len() >= 3, "expected at least 3 audio files");
+        let mut harness = harness_empty();
+        harness.state_mut().test_set_auto_play_list_nav(true);
+        let added = harness
+            .state_mut()
+            .test_append_open_files_and_open_editor(&files[..2], true);
+        assert_eq!(added, 2);
+        wait_for_tab(&mut harness);
+        harness.run_steps(2);
+
+        let selected = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("selected appended path");
+        let active_tab = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active tab after append");
+        assert_eq!(
+            selected, files[1],
+            "append should select the last opened file"
+        );
+        assert_eq!(
+            active_tab, files[1],
+            "append shell-open should open the last file in editor"
+        );
+
+        harness.state_mut().test_set_auto_play_list_nav(false);
+        let added_dup = harness
+            .state_mut()
+            .test_append_open_files_and_open_editor(&[files[0].clone()], true);
+        assert_eq!(added_dup, 0, "duplicate reopen should not append a new row");
+        harness.run_steps(2);
+        let reselection = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("selected duplicate path");
+        let reactivated_tab = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active tab after duplicate reopen");
+        assert_eq!(
+            reselection, files[0],
+            "duplicate reopen should reselect the existing row"
+        );
+        assert_eq!(
+            reactivated_tab, files[0],
+            "duplicate reopen should reactivate the existing editor tab"
+        );
     }
 
     #[test]

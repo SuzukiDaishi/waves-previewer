@@ -1,0 +1,4 @@
+interface:
+  display_name: "List Query Review"
+  short_description: "Filter, sort, save queries, and render NeoWaves list evidence"
+  default_prompt: "Use NeoWaves CLI to inspect or filter list rows, save a stable query when later commands will reuse the target set, and render a list image when visual review matters."

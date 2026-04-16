@@ -1146,6 +1146,7 @@ impl super::WavesPreviewer {
         self.edited_cache.clear();
         self.effect_graph = super::types::EffectGraphState::default();
         self.pending_activate_path = None;
+        self.pending_editor_autoplay_path = None;
         self.pending_activate_kind = None;
         self.leave_intent = None;
         self.show_leave_prompt = false;

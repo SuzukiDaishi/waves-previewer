@@ -18,6 +18,7 @@ impl WavesPreviewer {
         if !cfg.open_files.is_empty() {
             self.replace_with_files(&cfg.open_files);
             self.after_add_refresh();
+            self.open_shell_target_in_editor(&cfg.open_files, true);
             self.apply_startup_external(&cfg);
             return;
         }

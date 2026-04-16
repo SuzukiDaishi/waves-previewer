@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plugin Draft Preview"
+  short_description: "Scan, probe, preview, and apply plugin drafts with NeoWaves CLI"
+  default_prompt: "Use NeoWaves CLI to refresh the plugin catalog, inspect a candidate plugin, set the session draft safely, preview it headlessly, and apply it only after the draft looks correct."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Batch Loudness"
+  short_description: "Normalize many files to a target LUFS with reviewable NeoWaves CLI steps"
+  default_prompt: "Use NeoWaves CLI to create a session, save a stable query, run batch loudness plan and apply, export the filtered set, and leave evidence with reports or rendered list images."

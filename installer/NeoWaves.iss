@@ -23,7 +23,7 @@ AppId={{8E0A3D0A-6A1B-4E2E-8C5A-2D6D9A6A0A11}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=NeoWaves
-DefaultDirName={commonappdata}\{#MyAppShort}
+DefaultDirName={autopf}\{#MyAppShort}
 DefaultGroupName={#MyAppShort}
 OutputDir=..\target\installer
 OutputBaseFilename={#MyAppShort}-Setup-{#MyAppVersion}{#MyAppBuildSuffix}
@@ -32,6 +32,14 @@ SolidCompression=yes
 Uninstallable=yes
 PrivilegesRequired=admin
 ChangesAssociations=yes
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+UsePreviousTasks=yes
+UsePreviousLanguage=yes
+CloseApplications=yes
+CloseApplicationsFilter={#MyAppExeName},neowaves_plugin_worker.exe,neowaves_plugin_gui_worker.exe
+RestartApplications=no
+SetupLogging=yes
 
 ; Setup icon
 SetupIconFile=..\icons\icon.ico

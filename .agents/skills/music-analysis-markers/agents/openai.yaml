@@ -1,0 +1,4 @@
+interface:
+  display_name: "Music Analysis Markers"
+  short_description: "Analyze music, write markers, and export stems with NeoWaves CLI"
+  default_prompt: "Use NeoWaves CLI to inspect music analysis state, verify models, run analysis, convert beats or sections into markers, and export stems when the task needs downstream assets."

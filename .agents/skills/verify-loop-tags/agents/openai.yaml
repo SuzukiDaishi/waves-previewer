@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Loop Tags"
+  short_description: "Confirm that exported WAV or MP3 files contain loop metadata"
+  default_prompt: "Use NeoWaves CLI to verify loop markers or loop tag persistence on exported WAV or MP3 files, and rely on the JSON result rather than guessing from the export step alone."

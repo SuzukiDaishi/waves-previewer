@@ -121,6 +121,10 @@ impl super::WavesPreviewer {
         self.auto_play_list_nav
     }
 
+    pub fn test_list_play_pending(&self) -> bool {
+        self.list_play_pending
+    }
+
     pub fn test_volume_db(&self) -> f32 {
         self.volume_db
     }
@@ -172,6 +176,45 @@ impl super::WavesPreviewer {
         }
         self.select_and_load(row, false);
         true
+    }
+
+    pub fn test_activate_open_target_path(&mut self, paths: &[PathBuf], auto_scroll: bool) -> bool {
+        self.select_open_target_path(paths, auto_scroll)
+    }
+
+    pub fn test_append_open_files_and_activate(
+        &mut self,
+        paths: &[PathBuf],
+        auto_scroll: bool,
+    ) -> usize {
+        let added = self.add_files_merge(paths);
+        if added > 0 {
+            self.after_add_refresh();
+        }
+        self.select_open_target_path(paths, auto_scroll);
+        added
+    }
+
+    pub fn test_append_open_files_and_open_editor(
+        &mut self,
+        paths: &[PathBuf],
+        auto_scroll: bool,
+    ) -> usize {
+        let added = self.add_files_merge(paths);
+        if added > 0 {
+            self.after_add_refresh();
+        }
+        self.open_shell_target_in_editor(paths, auto_scroll);
+        added
+    }
+
+    pub fn test_apply_startup_open_files(&mut self, paths: &[PathBuf]) {
+        self.startup.cfg.open_files = paths.to_vec();
+        self.apply_startup_paths();
+    }
+
+    pub fn test_pending_editor_autoplay_path(&self) -> Option<PathBuf> {
+        self.pending_editor_autoplay_path.clone()
     }
 
     pub fn test_force_load_selected_list_preview_for_play(&mut self) -> bool {

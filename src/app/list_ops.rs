@@ -5,6 +5,72 @@ use crate::audio_io;
 use walkdir::WalkDir;
 
 impl super::WavesPreviewer {
+    fn is_open_target_audio_path(&self, path: &Path) -> bool {
+        if !path.is_file() || self.should_skip_path(path) {
+            return false;
+        }
+        path.extension()
+            .and_then(|s| s.to_str())
+            .map(audio_io::is_supported_extension)
+            .unwrap_or(false)
+    }
+
+    pub(super) fn resolve_last_open_target_path<'a>(
+        &self,
+        paths: &'a [PathBuf],
+    ) -> Option<&'a PathBuf> {
+        paths
+            .iter()
+            .rev()
+            .find(|path| self.is_open_target_audio_path(path))
+    }
+
+    pub(super) fn select_open_target_path(
+        &mut self,
+        paths: &[PathBuf],
+        auto_scroll: bool,
+    ) -> bool {
+        let Some(target_path) = self.resolve_last_open_target_path(paths).cloned() else {
+            return false;
+        };
+        let Some(row) = self.row_for_path(&target_path) else {
+            return false;
+        };
+        self.select_and_load(row, auto_scroll);
+        self.selected_multi.clear();
+        self.selected_multi.insert(row);
+        self.select_anchor = Some(row);
+        if self.auto_play_list_nav {
+            self.request_list_autoplay();
+        }
+        true
+    }
+
+    pub(super) fn open_shell_target_in_editor(
+        &mut self,
+        paths: &[PathBuf],
+        auto_scroll: bool,
+    ) -> bool {
+        let Some(target_path) = self.resolve_last_open_target_path(paths).cloned() else {
+            return false;
+        };
+        let Some(row) = self.row_for_path(&target_path) else {
+            return false;
+        };
+        self.selected = Some(row);
+        self.scroll_to_selected = auto_scroll;
+        self.selected_multi.clear();
+        self.selected_multi.insert(row);
+        self.select_anchor = Some(row);
+        self.open_or_activate_tab(&target_path);
+        self.pending_editor_autoplay_path = if self.auto_play_list_nav {
+            Some(target_path)
+        } else {
+            None
+        };
+        true
+    }
+
     // Merge helper: add a folder recursively (supported audio only)
     pub(super) fn add_folder_merge(&mut self, dir: &Path) -> usize {
         let mut added = 0usize;

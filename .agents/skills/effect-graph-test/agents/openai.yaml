@@ -1,0 +1,4 @@
+interface:
+  display_name: "Effect Graph Test"
+  short_description: "Test a NeoWaves effect graph with real audio and inspect output health"
+  default_prompt: "Use NeoWaves CLI to validate and test an existing effect graph with a real input file, then confirm output channel count, per-channel peaks, and the absence of unintended silent outputs."
