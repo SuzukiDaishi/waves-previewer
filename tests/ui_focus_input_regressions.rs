@@ -9,6 +9,7 @@ mod ui_focus_input_regressions {
         kittest::{NodeT, Queryable},
         Harness,
     };
+    use neowaves::app::RateMode;
     use neowaves::kittest::harness_with_startup;
     use neowaves::{StartupConfig, WavesPreviewer};
 
@@ -124,6 +125,78 @@ mod ui_focus_input_regressions {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn topbar_playback_mode_reset_restores_speed_rate() {
+        let mut harness = harness_with_startup(StartupConfig::default());
+        harness.state_mut().test_set_rate_mode(RateMode::Speed);
+        harness.state_mut().test_set_playback_rate(1.5);
+
+        assert!(harness.state().test_topbar_playback_mode_reset_enabled());
+        assert!(harness.state_mut().test_reset_topbar_playback_mode_value());
+        let actual = harness.state().test_playback_rate();
+        assert!(
+            (actual - 1.0).abs() <= 0.0001,
+            "speed reset should restore 1.00x: got {actual}"
+        );
+        assert!(!harness.state().test_topbar_playback_mode_reset_enabled());
+    }
+
+    #[test]
+    fn topbar_playback_mode_reset_restores_stretch_rate() {
+        let mut harness = harness_with_startup(StartupConfig::default());
+        harness
+            .state_mut()
+            .test_set_rate_mode(RateMode::TimeStretch);
+        harness.state_mut().test_set_playback_rate(0.5);
+
+        assert!(harness.state().test_topbar_playback_mode_reset_enabled());
+        assert!(harness.state_mut().test_reset_topbar_playback_mode_value());
+        let actual = harness.state().test_playback_rate();
+        assert!(
+            (actual - 1.0).abs() <= 0.0001,
+            "stretch reset should restore 1.00x: got {actual}"
+        );
+        assert!(!harness.state().test_topbar_playback_mode_reset_enabled());
+    }
+
+    #[test]
+    fn topbar_playback_mode_reset_restores_pitch_semitones() {
+        let mut harness = harness_with_startup(StartupConfig::default());
+        harness.state_mut().test_set_rate_mode(RateMode::PitchShift);
+        harness.state_mut().test_set_pitch_semitones(5.0);
+
+        assert!(harness.state().test_topbar_playback_mode_reset_enabled());
+        assert!(harness.state_mut().test_reset_topbar_playback_mode_value());
+        let actual = harness.state().test_pitch_semitones();
+        assert!(
+            actual.abs() <= 0.0001,
+            "pitch reset should restore 0.0 st: got {actual}"
+        );
+        assert!(!harness.state().test_topbar_playback_mode_reset_enabled());
+    }
+
+    #[test]
+    fn topbar_playback_mode_reset_disabled_at_defaults() {
+        let mut harness = harness_with_startup(StartupConfig::default());
+
+        harness.state_mut().test_set_rate_mode(RateMode::Speed);
+        harness.state_mut().test_set_playback_rate(1.0);
+        assert!(!harness.state().test_topbar_playback_mode_reset_enabled());
+        assert!(!harness.state_mut().test_reset_topbar_playback_mode_value());
+
+        harness
+            .state_mut()
+            .test_set_rate_mode(RateMode::TimeStretch);
+        harness.state_mut().test_set_playback_rate(1.0);
+        assert!(!harness.state().test_topbar_playback_mode_reset_enabled());
+        assert!(!harness.state_mut().test_reset_topbar_playback_mode_value());
+
+        harness.state_mut().test_set_rate_mode(RateMode::PitchShift);
+        harness.state_mut().test_set_pitch_semitones(0.0);
+        assert!(!harness.state().test_topbar_playback_mode_reset_enabled());
+        assert!(!harness.state_mut().test_reset_topbar_playback_mode_value());
     }
 
     #[test]

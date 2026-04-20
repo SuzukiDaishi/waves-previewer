@@ -288,6 +288,18 @@ impl super::WavesPreviewer {
         self.playback_rate
     }
 
+    pub fn test_pitch_semitones(&self) -> f32 {
+        self.pitch_semitones
+    }
+
+    pub fn test_topbar_playback_mode_reset_enabled(&self) -> bool {
+        self.topbar_playback_mode_reset_enabled()
+    }
+
+    pub fn test_reset_topbar_playback_mode_value(&mut self) -> bool {
+        self.reset_topbar_playback_mode_value()
+    }
+
     pub fn test_audio_rate(&self) -> f32 {
         self.audio
             .shared

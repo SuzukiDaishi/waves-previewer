@@ -46,6 +46,7 @@ impl WavesPreviewer {
                         self.refresh_playback_mode_for_current_source(RateMode::Speed, prev_rate);
                     }
                     self.ui_topbar_handle_numeric_drag_response(ctx, &resp);
+                    self.ui_topbar_playback_mode_reset_button(ui);
                 }
                 RateMode::PitchShift => {
                     let prev_rate = self.playback_rate;
@@ -63,6 +64,7 @@ impl WavesPreviewer {
                         );
                     }
                     self.ui_topbar_handle_numeric_drag_response(ctx, &resp);
+                    self.ui_topbar_playback_mode_reset_button(ui);
                 }
                 RateMode::TimeStretch => {
                     let prev_rate = self.playback_rate;
@@ -80,9 +82,52 @@ impl WavesPreviewer {
                         );
                     }
                     self.ui_topbar_handle_numeric_drag_response(ctx, &resp);
+                    self.ui_topbar_playback_mode_reset_button(ui);
                 }
             }
         });
+    }
+
+    pub(crate) fn topbar_playback_mode_reset_enabled(&self) -> bool {
+        const EPS: f32 = 0.0001;
+        match self.mode {
+            RateMode::Speed | RateMode::TimeStretch => (self.playback_rate - 1.0).abs() > EPS,
+            RateMode::PitchShift => self.pitch_semitones.abs() > EPS,
+        }
+    }
+
+    pub(crate) fn reset_topbar_playback_mode_value(&mut self) -> bool {
+        if !self.topbar_playback_mode_reset_enabled() {
+            return false;
+        }
+        let prev_rate = self.playback_rate;
+        let mode = self.mode;
+        match mode {
+            RateMode::Speed | RateMode::TimeStretch => {
+                self.playback_rate = 1.0;
+            }
+            RateMode::PitchShift => {
+                self.pitch_semitones = 0.0;
+            }
+        }
+        self.refresh_playback_mode_for_current_source(mode, prev_rate);
+        true
+    }
+
+    fn ui_topbar_playback_mode_reset_button(&mut self, ui: &mut egui::Ui) {
+        let tooltip = match self.mode {
+            RateMode::Speed | RateMode::TimeStretch => "Reset playback rate to 1.00x",
+            RateMode::PitchShift => "Reset pitch shift to 0.0 st",
+        };
+        let resp = ui
+            .add_enabled(
+                self.topbar_playback_mode_reset_enabled(),
+                egui::Button::new("Reset"),
+            )
+            .on_hover_text(tooltip);
+        if resp.clicked() {
+            self.reset_topbar_playback_mode_value();
+        }
     }
 
     fn ui_topbar_handle_numeric_drag_response(
