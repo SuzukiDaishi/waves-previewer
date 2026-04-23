@@ -1179,8 +1179,34 @@ pub struct SpectrogramProgress {
     pub started_at: std::time::Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListLoadKind {
+    Folder,
+    Files,
+}
+
+#[derive(Clone, Debug)]
+pub enum ScanRequestKind {
+    Folder { root: PathBuf },
+    Explicit { paths: Vec<PathBuf> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingListLoadTargetKind {
+    Select,
+    OpenEditor,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingListLoadTarget {
+    pub path: PathBuf,
+    pub kind: PendingListLoadTargetKind,
+    pub auto_scroll: bool,
+}
+
 pub enum ScanMessage {
     Batch(Vec<PathBuf>),
+    Progress { visited: usize, matched: usize },
     Done,
 }
 

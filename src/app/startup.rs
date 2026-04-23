@@ -16,9 +16,12 @@ impl WavesPreviewer {
             return;
         }
         if !cfg.open_files.is_empty() {
-            self.replace_with_files(&cfg.open_files);
-            self.after_add_refresh();
-            self.open_shell_target_in_editor(&cfg.open_files, true);
+            self.start_explicit_file_load(
+                cfg.open_files.clone(),
+                true,
+                Some(crate::app::types::PendingListLoadTargetKind::OpenEditor),
+                true,
+            );
             self.apply_startup_external(&cfg);
             return;
         }

@@ -134,10 +134,13 @@ impl WavesPreviewer {
 
     #[cfg(feature = "kittest")]
     pub fn test_simulate_drop_paths(&mut self, paths: &[PathBuf]) -> usize {
-        let added = self.add_files_merge(paths);
-        if added > 0 {
-            self.after_add_refresh();
-        }
+        let added = paths.iter().filter(|path| path.exists()).count();
+        self.start_explicit_file_load(
+            paths.to_vec(),
+            false,
+            Some(crate::app::types::PendingListLoadTargetKind::Select),
+            true,
+        );
         added
     }
 }

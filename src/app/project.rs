@@ -1184,8 +1184,7 @@ impl super::WavesPreviewer {
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
         self.reset_all_feature_analysis_state();
-        self.scan_rx = None;
-        self.scan_in_progress = false;
+        self.clear_scan_state();
         for raw in raw_paths {
             let p = resolve_path(raw, base_dir);
             let mut item = self.make_media_item(p.clone());

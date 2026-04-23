@@ -1390,11 +1390,12 @@ impl super::WavesPreviewer {
                 continue;
             }
             if !req.files.is_empty() {
-                let added = self.add_files_merge(&req.files);
-                if added > 0 {
-                    self.after_add_refresh();
-                }
-                self.open_shell_target_in_editor(&req.files, true);
+                self.start_explicit_file_load(
+                    req.files,
+                    false,
+                    Some(super::types::PendingListLoadTargetKind::OpenEditor),
+                    true,
+                );
             }
         }
     }
@@ -1442,11 +1443,12 @@ impl super::WavesPreviewer {
                 self.begin_external_load(data_path);
             }
             if !paths.is_empty() {
-                let added = self.add_files_merge(&paths);
-                if added > 0 {
-                    self.after_add_refresh();
-                }
-                self.select_open_target_path(&paths, true);
+                self.start_explicit_file_load(
+                    paths,
+                    false,
+                    Some(super::types::PendingListLoadTargetKind::Select),
+                    true,
+                );
             }
         }
     }

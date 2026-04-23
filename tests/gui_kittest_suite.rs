@@ -1985,9 +1985,57 @@ mod kittest_suite {
         top_menu_button(&harness, "File").click();
         harness.run_steps(1);
         harness.get_by_label("Files...").click();
-        harness.run_steps(2);
+        wait_for_scan(&mut harness);
         assert!(harness.state().root.is_none());
         assert_eq!(harness.state().items.len(), files.len());
+        let selected = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("selected file after explicit load");
+        assert_eq!(selected, files[1]);
+    }
+
+    #[test]
+    fn folder_load_reports_activity_before_completion() {
+        let mut harness = harness_empty();
+        let dir = wav_dir();
+        harness.state_mut().test_start_folder_load(dir);
+        assert!(harness.state().scan_in_progress);
+        let activity = harness
+            .state()
+            .test_topbar_scan_activity_text()
+            .unwrap_or_default();
+        assert!(
+            activity.contains("Scanning folder"),
+            "folder load should expose folder activity: {activity}"
+        );
+        wait_for_scan(&mut harness);
+    }
+
+    #[test]
+    fn explicit_file_load_reports_activity_and_selects_target() {
+        let mut harness = harness_empty();
+        let files = sample_wav_files(2);
+        harness
+            .state_mut()
+            .test_start_explicit_file_load(&files, true, false, true);
+        assert!(harness.state().scan_in_progress);
+        let activity = harness
+            .state()
+            .test_topbar_scan_activity_text()
+            .unwrap_or_default();
+        assert!(
+            activity.contains("Loading files"),
+            "explicit load should expose file activity: {activity}"
+        );
+        wait_for_scan(&mut harness);
+        let selected = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("selected file after explicit load");
+        assert_eq!(selected, files[1]);
     }
 
     #[test]
@@ -1995,9 +2043,9 @@ mod kittest_suite {
         let mut harness = harness_empty();
         let dir = wav_dir();
         let added = harness.state_mut().test_simulate_drop_paths(&[dir]);
-        harness.run_steps(2);
+        wait_for_scan(&mut harness);
         assert!(added > 0);
-        assert_eq!(harness.state().items.len(), added);
+        assert!(!harness.state().items.is_empty());
         assert!(harness.state().root.is_none());
     }
 

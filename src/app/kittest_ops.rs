@@ -200,11 +200,24 @@ impl super::WavesPreviewer {
         paths: &[PathBuf],
         auto_scroll: bool,
     ) -> usize {
-        let added = self.add_files_merge(paths);
-        if added > 0 {
-            self.after_add_refresh();
-        }
-        self.open_shell_target_in_editor(paths, auto_scroll);
+        let added = paths
+            .iter()
+            .filter(|path| {
+                path.is_file()
+                    && !self.path_index.contains_key(path.as_path())
+                    && path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(crate::audio_io::is_supported_extension)
+                        .unwrap_or(false)
+            })
+            .count();
+        self.start_explicit_file_load(
+            paths.to_vec(),
+            false,
+            Some(crate::app::types::PendingListLoadTargetKind::OpenEditor),
+            auto_scroll,
+        );
         added
     }
 
@@ -215,6 +228,30 @@ impl super::WavesPreviewer {
 
     pub fn test_pending_editor_autoplay_path(&self) -> Option<PathBuf> {
         self.pending_editor_autoplay_path.clone()
+    }
+
+    pub fn test_topbar_scan_activity_text(&self) -> Option<String> {
+        self.topbar_scan_activity_text()
+    }
+
+    pub fn test_start_folder_load(&mut self, dir: PathBuf) {
+        self.root = Some(dir.clone());
+        self.start_scan_folder(dir);
+    }
+
+    pub fn test_start_explicit_file_load(
+        &mut self,
+        paths: &[PathBuf],
+        replace: bool,
+        open_in_editor: bool,
+        auto_scroll: bool,
+    ) {
+        let target_kind = if open_in_editor {
+            crate::app::types::PendingListLoadTargetKind::OpenEditor
+        } else {
+            crate::app::types::PendingListLoadTargetKind::Select
+        };
+        self.start_explicit_file_load(paths.to_vec(), replace, Some(target_kind), auto_scroll);
     }
 
     pub fn test_force_load_selected_list_preview_for_play(&mut self) -> bool {

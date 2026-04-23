@@ -67,9 +67,12 @@ impl WavesPreviewer {
             }
             if ui.button("Files...").clicked() {
                 if let Some(files) = self.pick_files_dialog() {
-                    self.replace_with_files(&files);
-                    self.after_add_refresh();
-                    self.select_open_target_path(&files, true);
+                    self.start_explicit_file_load(
+                        files,
+                        true,
+                        Some(crate::app::types::PendingListLoadTargetKind::Select),
+                        true,
+                    );
                 }
                 ui.close();
             }

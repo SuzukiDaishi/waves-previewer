@@ -459,9 +459,14 @@ pub struct WavesPreviewer {
     pub editor_feature_tx: Option<std::sync::mpsc::Sender<EditorFeatureAnalysisJobMsg>>,
     pub editor_feature_rx: Option<std::sync::mpsc::Receiver<EditorFeatureAnalysisJobMsg>>,
     pub scan_rx: Option<std::sync::mpsc::Receiver<ScanMessage>>,
+    pub scan_pending_batches: VecDeque<Vec<PathBuf>>,
     pub scan_in_progress: bool,
+    pub scan_worker_done: bool,
     pub scan_started_at: Option<std::time::Instant>,
     pub scan_found_count: usize,
+    pub scan_visited_count: usize,
+    pub scan_load_kind: Option<ListLoadKind>,
+    scan_pending_target: Option<PendingListLoadTarget>,
     // dynamic row height for wave thumbnails (list view)
     pub wave_row_h: f32,
     pub list_columns: ListColumnConfig,
@@ -2022,8 +2027,7 @@ impl WavesPreviewer {
         self.active_tab = None;
         self.playing_path = None;
         self.root = None;
-        self.scan_rx = None;
-        self.scan_in_progress = false;
+        self.clear_scan_state();
         self.items.clear();
         self.item_index.clear();
         self.path_index.clear();

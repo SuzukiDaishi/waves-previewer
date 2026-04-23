@@ -196,21 +196,11 @@ impl WavesPreviewer {
     }
 
     fn ui_topbar_scan_activity(&mut self, ui: &mut egui::Ui) {
-        if !self.scan_in_progress {
+        let Some(label) = self.topbar_scan_activity_text() else {
             return;
-        }
-        let elapsed = self
-            .scan_started_at
-            .map(|t| t.elapsed().as_secs_f32())
-            .unwrap_or(0.0);
+        };
         ui.add(egui::Spinner::new());
-        ui.label(
-            RichText::new(format!(
-                "Scanning: {} files ({:.1}s)",
-                self.scan_found_count, elapsed
-            ))
-            .weak(),
-        );
+        ui.label(RichText::new(label).weak());
     }
 
     fn ui_topbar_sort_activity(&mut self, ui: &mut egui::Ui, visible: bool) {

@@ -9,7 +9,8 @@ use walkdir::WalkDir;
 
 use super::types::{
     EditorDecodeStage, EditorDecodeStrategy, EditorDecodeUiStatus, EditorTab, OfflineRenderSpec,
-    ProcessingResult, ProcessingState, ProcessingTarget, RateMode, ScanMessage, SortDir, SortKey,
+    ProcessingResult, ProcessingState, ProcessingTarget, RateMode, ScanMessage,
+    ScanRequestKind, SortDir, SortKey,
 };
 
 const LIST_PREVIEW_PREFIX_SECS: f32 = 0.35;
@@ -2417,8 +2418,7 @@ impl super::WavesPreviewer {
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
         self.reset_all_feature_analysis_state();
-        self.scan_rx = None;
-        self.scan_in_progress = false;
+        self.clear_scan_state();
         self.sample_rate_override.clear();
         self.sample_rate_probe_cache.clear();
         self.bit_depth_override.clear();
@@ -3004,32 +3004,143 @@ impl super::WavesPreviewer {
 
     pub(super) fn spawn_scan_worker(
         &self,
-        root: PathBuf,
+        request: ScanRequestKind,
         skip_dotfiles: bool,
     ) -> std::sync::mpsc::Receiver<ScanMessage> {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let mut batch: Vec<PathBuf> = Vec::with_capacity(512);
-            for entry in WalkDir::new(root)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
-            {
-                if let Ok(e) = entry {
-                    if e.file_type().is_file() {
-                        if let Some(ext) = e.path().extension().and_then(|s| s.to_str()) {
-                            if audio_io::is_supported_extension(ext) {
-                                if skip_dotfiles && Self::is_dotfile_path(e.path()) {
-                                    continue;
-                                }
-                                batch.push(e.into_path());
-                                if batch.len() >= 512 {
-                                    if tx
-                                        .send(ScanMessage::Batch(std::mem::take(&mut batch)))
+            let mut batch: Vec<PathBuf> = Vec::with_capacity(128);
+            let mut seen = HashSet::new();
+            let mut visited = 0usize;
+            let mut matched = 0usize;
+            let progress_interval = 256usize;
+
+            let send_progress =
+                |tx: &std::sync::mpsc::Sender<ScanMessage>, visited: usize, matched: usize| {
+                    tx.send(ScanMessage::Progress { visited, matched })
+                };
+            let flush_batch = |tx: &std::sync::mpsc::Sender<ScanMessage>, batch: &mut Vec<PathBuf>| {
+                if batch.is_empty() {
+                    return Ok(());
+                }
+                tx.send(ScanMessage::Batch(std::mem::take(batch)))
+            };
+            let push_file = |tx: &std::sync::mpsc::Sender<ScanMessage>,
+                             path: PathBuf,
+                             seen: &mut HashSet<PathBuf>,
+                             matched: &mut usize,
+                             batch: &mut Vec<PathBuf>|
+             -> Result<(), ()> {
+                if !seen.insert(path.clone()) {
+                    return Ok(());
+                }
+                *matched = (*matched).saturating_add(1);
+                batch.push(path);
+                if batch.len() >= 128 {
+                    flush_batch(tx, batch).map_err(|_| ())?;
+                }
+                Ok(())
+            };
+
+            let _ = send_progress(&tx, visited, matched);
+            match request {
+                ScanRequestKind::Folder { root } => {
+                    for entry in WalkDir::new(root)
+                        .follow_links(false)
+                        .into_iter()
+                        .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
+                    {
+                        if let Ok(e) = entry {
+                            visited = visited.saturating_add(1);
+                            if visited % progress_interval == 0
+                                && send_progress(&tx, visited, matched).is_err()
+                            {
+                                return;
+                            }
+                            if e.file_type().is_file() {
+                                if let Some(ext) = e.path().extension().and_then(|s| s.to_str()) {
+                                    if audio_io::is_supported_extension(ext) {
+                                        if skip_dotfiles && Self::is_dotfile_path(e.path()) {
+                                            continue;
+                                        }
+                                        if push_file(
+                                            &tx,
+                                            e.into_path(),
+                                            &mut seen,
+                                            &mut matched,
+                                            &mut batch,
+                                        )
                                         .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ScanRequestKind::Explicit { paths } => {
+                    for path in paths {
+                        if path.is_file() {
+                            visited = visited.saturating_add(1);
+                            if visited % progress_interval == 0
+                                && send_progress(&tx, visited, matched).is_err()
+                            {
+                                return;
+                            }
+                            if (!skip_dotfiles || !Self::is_dotfile_path(&path))
+                                && path
+                                    .extension()
+                                    .and_then(|s| s.to_str())
+                                    .map(audio_io::is_supported_extension)
+                                    .unwrap_or(false)
+                                && push_file(
+                                    &tx,
+                                    path,
+                                    &mut seen,
+                                    &mut matched,
+                                    &mut batch,
+                                )
+                                .is_err()
+                            {
+                                return;
+                            }
+                        } else if path.is_dir() {
+                            for entry in WalkDir::new(path)
+                                .follow_links(false)
+                                .into_iter()
+                                .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
+                            {
+                                if let Ok(e) = entry {
+                                    visited = visited.saturating_add(1);
+                                    if visited % progress_interval == 0
+                                        && send_progress(&tx, visited, matched).is_err()
                                     {
                                         return;
+                                    }
+                                    if e.file_type().is_file() {
+                                        if let Some(ext) =
+                                            e.path().extension().and_then(|s| s.to_str())
+                                        {
+                                            if audio_io::is_supported_extension(ext) {
+                                                if skip_dotfiles && Self::is_dotfile_path(e.path()) {
+                                                    continue;
+                                                }
+                                                if push_file(
+                                                    &tx,
+                                                    e.into_path(),
+                                                    &mut seen,
+                                                    &mut matched,
+                                                    &mut batch,
+                                                )
+                                                .is_err()
+                                                {
+                                                    return;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3037,9 +3148,10 @@ impl super::WavesPreviewer {
                     }
                 }
             }
-            if !batch.is_empty() {
-                let _ = tx.send(ScanMessage::Batch(batch));
+            if flush_batch(&tx, &mut batch).is_err() {
+                return;
             }
+            let _ = send_progress(&tx, visited, matched);
             let _ = tx.send(ScanMessage::Done);
         });
         rx

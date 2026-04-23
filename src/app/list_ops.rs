@@ -25,11 +25,23 @@ impl super::WavesPreviewer {
             .find(|path| self.is_open_target_audio_path(path))
     }
 
-    pub(super) fn select_open_target_path(&mut self, paths: &[PathBuf], auto_scroll: bool) -> bool {
-        let Some(target_path) = self.resolve_last_open_target_path(paths).cloned() else {
-            return false;
-        };
-        let Some(row) = self.row_for_path(&target_path) else {
+    pub(super) fn resolve_pending_list_load_target(
+        &self,
+        paths: &[PathBuf],
+        kind: crate::app::types::PendingListLoadTargetKind,
+        auto_scroll: bool,
+    ) -> Option<crate::app::types::PendingListLoadTarget> {
+        self.resolve_last_open_target_path(paths)
+            .cloned()
+            .map(|path| crate::app::types::PendingListLoadTarget {
+                path,
+                kind,
+                auto_scroll,
+            })
+    }
+
+    pub(super) fn select_loaded_target_path(&mut self, path: &Path, auto_scroll: bool) -> bool {
+        let Some(row) = self.row_for_path(path) else {
             return false;
         };
         self.select_and_load(row, auto_scroll);
@@ -42,6 +54,33 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub(super) fn open_loaded_target_in_editor(&mut self, path: &Path, auto_scroll: bool) -> bool {
+        let Some(row) = self.row_for_path(path) else {
+            return false;
+        };
+        self.selected = Some(row);
+        self.scroll_to_selected = auto_scroll;
+        self.selected_multi.clear();
+        self.selected_multi.insert(row);
+        self.select_anchor = Some(row);
+        self.open_or_activate_tab(path);
+        self.pending_editor_autoplay_path = if self.auto_play_list_nav {
+            Some(path.to_path_buf())
+        } else {
+            None
+        };
+        true
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn select_open_target_path(&mut self, paths: &[PathBuf], auto_scroll: bool) -> bool {
+        let Some(target_path) = self.resolve_last_open_target_path(paths).cloned() else {
+            return false;
+        };
+        self.select_loaded_target_path(&target_path, auto_scroll)
+    }
+
+    #[allow(dead_code)]
     pub(super) fn open_shell_target_in_editor(
         &mut self,
         paths: &[PathBuf],
@@ -50,21 +89,7 @@ impl super::WavesPreviewer {
         let Some(target_path) = self.resolve_last_open_target_path(paths).cloned() else {
             return false;
         };
-        let Some(row) = self.row_for_path(&target_path) else {
-            return false;
-        };
-        self.selected = Some(row);
-        self.scroll_to_selected = auto_scroll;
-        self.selected_multi.clear();
-        self.selected_multi.insert(row);
-        self.select_anchor = Some(row);
-        self.open_or_activate_tab(&target_path);
-        self.pending_editor_autoplay_path = if self.auto_play_list_nav {
-            Some(target_path)
-        } else {
-            None
-        };
-        true
+        self.open_loaded_target_in_editor(&target_path, auto_scroll)
     }
 
     // Merge helper: add a folder recursively (supported audio only)
@@ -157,8 +182,7 @@ impl super::WavesPreviewer {
         self.spectro_cache_sizes.clear();
         self.spectro_cache_bytes = 0;
         self.reset_all_feature_analysis_state();
-        self.scan_rx = None;
-        self.scan_in_progress = false;
+        self.clear_scan_state();
         let mut set: HashSet<PathBuf> = HashSet::new();
         for p in paths {
             if p.is_file() {
