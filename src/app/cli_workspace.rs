@@ -1,13 +1,11 @@
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
-use serde_json::{Map, Value};
 
 use anyhow::{bail, Context, Result};
 
-use super::types::{
-    FadeShape, LoopMode, LoopXfadeShape, ToolKind, ToolState,
-};
+use super::types::{FadeShape, LoopMode, LoopXfadeShape, ToolKind, ToolState};
 use super::WavesPreviewer;
 use crate::markers::MarkerEntry;
 
@@ -339,7 +337,10 @@ impl CliWorkspace {
                 let len = self.tab_len(tab_idx)?;
                 self.app.editor_apply_reverse_range(tab_idx, (0, len));
             }
-            ToolKind::LoopEdit | ToolKind::Markers | ToolKind::PluginFx | ToolKind::MusicAnalyze => {
+            ToolKind::LoopEdit
+            | ToolKind::Markers
+            | ToolKind::PluginFx
+            | ToolKind::MusicAnalyze => {
                 bail!("tool apply is not supported for {:?}", active_tool)
             }
         }
@@ -354,7 +355,12 @@ impl CliWorkspace {
         gain_db: Option<f32>,
         marker_override: Option<Vec<crate::markers::MarkerEntry>>,
         loop_override: Option<(usize, usize)>,
-    ) -> Result<(PathBuf, PathBuf, Vec<crate::markers::MarkerEntry>, Option<(usize, usize)>)> {
+    ) -> Result<(
+        PathBuf,
+        PathBuf,
+        Vec<crate::markers::MarkerEntry>,
+        Option<(usize, usize)>,
+    )> {
         let tab_idx = self.ensure_target_tab_loaded(requested)?;
         let (src, mut channels, buffer_sr, bit_depth, current_markers, current_loop) = {
             let tab = self.app.tabs.get(tab_idx).context("missing target tab")?;
@@ -388,8 +394,9 @@ impl CliWorkspace {
             ensure_parent_dir(&dst)?;
             crate::wave::export_channels_audio_with_depth(&channels, buffer_sr, &dst, bit_depth)
                 .with_context(|| format!("export audio: {} -> {}", src.display(), dst.display()))?;
-            crate::wave::copy_audio_metadata_from_source(&src, &dst)
-                .with_context(|| format!("copy metadata: {} -> {}", src.display(), dst.display()))?;
+            crate::wave::copy_audio_metadata_from_source(&src, &dst).with_context(|| {
+                format!("copy metadata: {} -> {}", src.display(), dst.display())
+            })?;
         } else {
             crate::wave::overwrite_audio_from_channels_with_depth(
                 &channels,
@@ -429,7 +436,10 @@ impl CliWorkspace {
     }
 
     pub(super) fn find_tab_index(&self, path: &Path) -> Option<usize> {
-        self.app.tabs.iter().position(|tab| tab.path.as_path() == path)
+        self.app
+            .tabs
+            .iter()
+            .position(|tab| tab.path.as_path() == path)
     }
 
     pub(super) fn set_pending_gain_db_for_path(&mut self, path: &Path, db: f32) {
@@ -439,7 +449,10 @@ impl CliWorkspace {
     pub(super) fn pending_gain_map(&self) -> Value {
         let mut map = Map::new();
         for item in &self.app.items {
-            map.insert(item.path.display().to_string(), Value::from(item.pending_gain_db));
+            map.insert(
+                item.path.display().to_string(),
+                Value::from(item.pending_gain_db),
+            );
         }
         Value::Object(map)
     }
@@ -498,13 +511,19 @@ impl CliWorkspace {
         }
         if fade_in_ms > 0.0 {
             let frames = ((fade_in_ms / 1000.0) * sample_rate).round() as usize;
-            self.app
-                .editor_apply_fade_in_explicit(tab_idx, (0, frames.min(samples_len)), fade_in_shape);
+            self.app.editor_apply_fade_in_explicit(
+                tab_idx,
+                (0, frames.min(samples_len)),
+                fade_in_shape,
+            );
         }
         if fade_out_ms > 0.0 {
             let frames = ((fade_out_ms / 1000.0) * sample_rate).round() as usize;
-            self.app
-                .editor_apply_fade_out_explicit(tab_idx, (0, frames.min(samples_len)), fade_out_shape);
+            self.app.editor_apply_fade_out_explicit(
+                tab_idx,
+                (0, frames.min(samples_len)),
+                fade_out_shape,
+            );
         }
         if let Some(tab) = self.app.tabs.get_mut(tab_idx) {
             tab.tool_state.fade_in_ms = 0.0;
@@ -697,14 +716,8 @@ mod tests {
         assert_eq!(spec.source, PlaybackRangeSource::Selection);
         assert_eq!(spec.range, (100, 200));
 
-        let spec = resolve_playback_range(
-            1_000,
-            true,
-            None,
-            true,
-            Some((300, 400)),
-            Some((500, 600)),
-        );
+        let spec =
+            resolve_playback_range(1_000, true, None, true, Some((300, 400)), Some((500, 600)));
         assert_eq!(spec.source, PlaybackRangeSource::Loop);
         assert_eq!(spec.range, (300, 400));
 

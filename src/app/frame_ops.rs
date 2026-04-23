@@ -65,6 +65,7 @@ impl WavesPreviewer {
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
         self.drain_editor_apply_jobs(ctx);
+        self.tick_virtual_trim_state(ctx);
         self.drain_plugin_jobs(ctx);
         self.drain_transcript_model_download_results(ctx);
         self.drain_transcript_ai_results(ctx);

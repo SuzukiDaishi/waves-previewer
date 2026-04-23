@@ -221,6 +221,29 @@ mod kittest_suite {
         vec![left, right]
     }
 
+    fn synth_dynamic_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
+        let frames = ((sr as f32) * secs).max(1.0) as usize;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let t = (i as f32) / (sr as f32);
+            let phase = (t / secs.max(0.001)).clamp(0.0, 1.0);
+            let envelope: f32 = if phase < 0.20 {
+                0.08
+            } else if phase < 0.45 {
+                0.75
+            } else if phase < 0.70 {
+                0.25
+            } else {
+                0.55
+            };
+            let pulse: f32 = if (t * 7.0).fract() < 0.12 { 0.35 } else { 0.0 };
+            left.push((t * 180.0 * std::f32::consts::TAU).sin() * (envelope + pulse).min(0.95));
+            right.push((t * 360.0 * std::f32::consts::TAU).sin() * envelope.min(0.85));
+        }
+        vec![left, right]
+    }
+
     fn build_format_fixtures(dir: &Path, secs: f32) -> Vec<PathBuf> {
         let sr = 44_100;
         let chans = synth_stereo(sr, secs);
@@ -248,6 +271,16 @@ mod kittest_suite {
         let path = dir.join("editor_fixture.wav");
         neowaves::wave::export_channels_audio(&chans, sr, &path)
             .unwrap_or_else(|e| panic!("export editor fixture failed: {e}"));
+        harness_with_folder(dir)
+    }
+
+    fn harness_with_dynamic_editor_fixture() -> Harness<'static, WavesPreviewer> {
+        let dir = make_temp_dir("dynamic_editor_fixture");
+        let sr = 48_000;
+        let chans = synth_dynamic_stereo(sr, 6.0);
+        let path = dir.join("dynamic_editor_fixture.wav");
+        neowaves::wave::export_channels_audio(&chans, sr, &path)
+            .unwrap_or_else(|e| panic!("export dynamic editor fixture failed: {e}"));
         harness_with_folder(dir)
     }
 
@@ -356,6 +389,23 @@ mod kittest_suite {
                 panic!("editor apply timeout");
             }
             std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
+    fn wait_for_virtual_trim_done(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_virtual_trim_active() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!(
+                    "virtual trim timeout progress={:?}",
+                    harness.state().test_virtual_trim_progress()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -506,16 +556,66 @@ mod kittest_suite {
         harness.run_steps(3);
     }
 
+    fn editor_horizontal_pan_once(harness: &mut Harness<'static, WavesPreviewer>, delta_x: f32) {
+        let hover_pos = editor_canvas_hover_pos(harness);
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(delta_x, 0.0),
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(3);
+    }
+
+    fn editor_plain_vertical_wheel_once(harness: &mut Harness<'static, WavesPreviewer>) {
+        let hover_pos = editor_canvas_hover_pos(harness);
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 120.0),
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(3);
+    }
+
     fn editor_canvas_pos_at_frac(
         harness: &Harness<'static, WavesPreviewer>,
         frac: f32,
     ) -> egui::Pos2 {
+        let wave_left = editor_wave_left(harness);
+        let wave_w = editor_wave_width(harness).max(64.0);
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        egui::pos2(
+            wave_left + (wave_w - 12.0) * frac.clamp(0.0, 1.0),
+            inspector_rect.center().y,
+        )
+    }
+
+    fn editor_wave_left(harness: &Harness<'static, WavesPreviewer>) -> f32 {
+        if let Some(nav_rect) = harness.state().test_tab_amplitude_nav_rect() {
+            return nav_rect.left()
+                - editor_wave_width(harness).max(64.0)
+                - EDITOR_AMPLITUDE_NAV_GAP;
+        }
         let inspector_rect = harness.get_by_label("Inspector").rect();
         let wave_w = editor_wave_width(harness).max(64.0);
         let wave_right = (inspector_rect.left() - 4.0 - EDITOR_AMPLITUDE_NAV_RESERVED_W).max(48.0);
-        let wave_left = (wave_right - wave_w + 8.0).max(8.0);
+        (wave_right - wave_w + 8.0).max(8.0)
+    }
+
+    fn editor_canvas_pos_at_x_offset(
+        harness: &Harness<'static, WavesPreviewer>,
+        x_offset: f32,
+    ) -> egui::Pos2 {
+        let inspector_rect = harness.get_by_label("Inspector").rect();
         egui::pos2(
-            wave_left + (wave_w - 12.0) * frac.clamp(0.0, 1.0),
+            editor_wave_left(harness) + x_offset,
             inspector_rect.center().y,
         )
     }
@@ -565,7 +665,16 @@ mod kittest_suite {
     ) {
         let start = editor_canvas_pos_at_frac(harness, start_frac);
         let end = editor_canvas_pos_at_frac(harness, end_frac);
+        editor_shift_right_drag_between(harness, start, end);
+    }
+
+    fn editor_shift_right_drag_between(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        start: egui::Pos2,
+        end: egui::Pos2,
+    ) {
         harness.hover_at(start);
+        harness.run_steps(1);
         harness.event_modifiers(
             egui::Event::PointerButton {
                 pos: start,
@@ -575,12 +684,36 @@ mod kittest_suite {
             },
             Modifiers::SHIFT,
         );
+        harness.run_steps(1);
         harness.event_modifiers(egui::Event::PointerMoved(end), Modifiers::SHIFT);
         harness.run_steps(2);
         harness.event_modifiers(
             egui::Event::PointerButton {
                 pos: end,
                 button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: Modifiers::SHIFT,
+            },
+            Modifiers::SHIFT,
+        );
+        harness.run_steps(2);
+    }
+
+    fn editor_shift_click_at_pos(harness: &mut Harness<'static, WavesPreviewer>, pos: egui::Pos2) {
+        harness.hover_at(pos);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::SHIFT,
+            },
+            Modifiers::SHIFT,
+        );
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
                 pressed: false,
                 modifiers: Modifiers::SHIFT,
             },
@@ -635,6 +768,48 @@ mod kittest_suite {
     fn editor_wave_width(harness: &Harness<'static, WavesPreviewer>) -> f32 {
         let tab_idx = harness.state().active_tab.expect("active tab");
         harness.state().tabs[tab_idx].last_wave_w.max(64.0)
+    }
+
+    fn editor_center_display_sample(harness: &Harness<'static, WavesPreviewer>) -> usize {
+        let (start, end) = harness
+            .state()
+            .test_editor_visible_display_range()
+            .expect("visible display range");
+        start + end.saturating_sub(start) / 2
+    }
+
+    fn assert_editor_whole_fit(harness: &Harness<'static, WavesPreviewer>, label: &str) {
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let tab = &harness.state().tabs[tab_idx];
+        let display_len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display length");
+        let wave_w = editor_wave_width(harness);
+        let expected_spp = (display_len as f32 / wave_w.max(1.0)).max(0.0025);
+        let tolerance = expected_spp.max(1.0) * 0.01;
+        assert!(
+            (tab.samples_per_px - expected_spp).abs() <= tolerance,
+            "{label}: samples_per_px should fit whole file: actual={} expected={} tolerance={}",
+            tab.samples_per_px,
+            expected_spp,
+            tolerance
+        );
+        assert_eq!(tab.view_offset, 0, "{label}: view_offset should be 0");
+        assert!(
+            tab.view_offset_exact.abs() <= 0.5,
+            "{label}: view_offset_exact should be near 0, got {}",
+            tab.view_offset_exact
+        );
+        let (start, end) = harness
+            .state()
+            .test_editor_visible_display_range()
+            .expect("visible display range");
+        assert_eq!(start, 0, "{label}: visible start should be 0");
+        assert_eq!(
+            end, display_len,
+            "{label}: visible end should reach display length"
+        );
     }
 
     fn editor_amplitude_nav_rect(harness: &Harness<'static, WavesPreviewer>) -> egui::Rect {
@@ -827,6 +1002,71 @@ mod kittest_suite {
         assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
         harness.run_steps(1);
         assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Reverse));
+    }
+
+    #[test]
+    fn new_editor_tab_inherits_last_opened_inspector_tool() {
+        let files = sample_wav_files(2);
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&files[0]));
+        wait_for_tab_ready(&mut harness);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::LoopEdit),
+            "first editor tab should keep the default tool"
+        );
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        let first_tab_idx = harness.state().active_tab.expect("first tab idx");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&files[1]));
+        wait_for_tab_ready(&mut harness);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::Gain),
+            "new editor tab should inherit the last opened tab tool"
+        );
+        assert_eq!(
+            harness.state().tabs[first_tab_idx].active_tool,
+            ToolKind::Gain,
+            "existing tab tool should not be changed while opening a new tab"
+        );
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
+        assert!(harness.state_mut().test_open_tab_for_path(&files[0]));
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::Gain),
+            "reactivating an existing tab should keep that tab's own tool"
+        );
+    }
+
+    #[test]
+    fn edited_cache_restore_keeps_cached_tool_instead_of_inheriting() {
+        let files = sample_wav_files(2);
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&files[0]));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
+        assert!(harness.state_mut().test_add_marker_frac(0.25));
+        assert!(harness.state_mut().test_close_tab_for_path(&files[0]));
+        harness.run_steps(2);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&files[1]));
+        wait_for_tab_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+
+        assert!(harness.state_mut().test_open_tab_for_path(&files[0]));
+        wait_for_tab_ready(&mut harness);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::Reverse),
+            "edited-cache restore should use the cached tab tool, not the inherited tool"
+        );
     }
 
     #[test]
@@ -2139,6 +2379,162 @@ mod kittest_suite {
     }
 
     #[test]
+    fn editor_open_initializes_waveform_geometry_without_zoom_nudge() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let tab = &harness.state().tabs[tab_idx];
+        assert!(
+            tab.samples_per_px > 0.0,
+            "samples_per_px should be ready after open"
+        );
+        assert!(
+            tab.last_wave_w > 0.0,
+            "last_wave_w should be ready after open"
+        );
+        let display_len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display length");
+        let (start, end) = harness
+            .state()
+            .test_editor_visible_display_range()
+            .expect("visible display range");
+        assert!(display_len > 0, "display length should be non-zero");
+        assert!(
+            start < end,
+            "visible range should be non-empty: {start}..{end}"
+        );
+        assert!(
+            end <= display_len,
+            "visible range should fit display length: end={end} len={display_len}"
+        );
+        assert!(
+            tab.view_offset <= display_len.saturating_sub(1),
+            "view offset should be clamped after open"
+        );
+    }
+
+    #[test]
+    fn editor_resize_refits_when_whole_file_is_visible() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        harness.set_size(egui::vec2(900.0, 720.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+        assert_editor_whole_fit(&harness, "before resize");
+        let before_wave_w = editor_wave_width(&harness);
+
+        harness.set_size(egui::vec2(1920.0, 720.0));
+        harness.run_steps(6);
+        let after_wave_w = editor_wave_width(&harness);
+        assert!(
+            after_wave_w > before_wave_w + 100.0,
+            "test setup should widen the editor canvas: before={before_wave_w} after={after_wave_w}"
+        );
+        assert_editor_whole_fit(&harness, "after resize");
+
+        let display_len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display length");
+        let last_x = harness
+            .state()
+            .test_editor_display_sample_x_offset(display_len.saturating_sub(1))
+            .expect("last sample x");
+        let wave_w = editor_wave_width(&harness);
+        assert!(
+            last_x >= wave_w - 2.0,
+            "last sample should reach the right edge after fit resize: x={last_x} wave_w={wave_w}"
+        );
+    }
+
+    #[test]
+    fn editor_resize_preserves_center_when_zoomed_in() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        for _ in 0..8 {
+            editor_zoom_in_once(&mut harness);
+        }
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before_spp = harness.state().tabs[tab_idx].samples_per_px;
+        let before_center = editor_center_display_sample(&harness);
+        let before_wave_w = editor_wave_width(&harness);
+
+        harness.set_size(egui::vec2(1600.0, 720.0));
+        harness.run_steps(6);
+
+        let after = &harness.state().tabs[tab_idx];
+        let after_center = editor_center_display_sample(&harness);
+        let after_wave_w = editor_wave_width(&harness);
+        assert!(
+            after_wave_w > before_wave_w + 100.0,
+            "test setup should widen the editor canvas: before={before_wave_w} after={after_wave_w}"
+        );
+        assert!(
+            (after.samples_per_px - before_spp).abs() <= before_spp.max(1.0) * 0.01,
+            "zoomed resize should preserve zoom level: before={before_spp} after={}",
+            after.samples_per_px
+        );
+        assert!(
+            (after_center as i64 - before_center as i64).abs() <= 4,
+            "zoomed resize should preserve center sample: before={before_center} after={after_center}"
+        );
+    }
+
+    #[test]
+    fn editor_plain_vertical_wheel_zoom_in_changes_samples_per_px() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+        editor_plain_vertical_wheel_once(&mut harness);
+        let spp_after = harness.state().tabs[tab_idx].samples_per_px;
+        assert!(
+            spp_after < spp_before,
+            "plain vertical wheel should zoom in: before={spp_before} after={spp_after}"
+        );
+    }
+
+    #[test]
+    fn editor_horizontal_wheel_pan_changes_view_offset_without_shift() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        for _ in 0..8 {
+            editor_zoom_in_once(&mut harness);
+        }
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let mid_view = harness.state().tabs[tab_idx].samples_len / 2;
+        assert!(harness.state_mut().test_set_tab_view_offset(mid_view));
+        harness.run_steps(1);
+
+        let before_view = harness.state().tabs[tab_idx].view_offset;
+        let before_exact = harness.state().tabs[tab_idx].view_offset_exact;
+        let before_spp = harness.state().tabs[tab_idx].samples_per_px;
+        editor_horizontal_pan_once(&mut harness, 120.0);
+        let after = &harness.state().tabs[tab_idx];
+        assert!(
+            after.view_offset != before_view
+                || (after.view_offset_exact - before_exact).abs() > 0.001,
+            "horizontal wheel should pan without Shift"
+        );
+        assert!(
+            (after.samples_per_px - before_spp).abs() < 0.0001,
+            "horizontal wheel pan should not zoom"
+        );
+    }
+
+    #[test]
     fn editor_shift_wheel_pan_changes_view_offset() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -2813,6 +3209,137 @@ mod kittest_suite {
     }
 
     #[test]
+    fn editor_shift_right_drag_start_snaps_to_playhead_within_radius() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let display_len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display len")
+            .max(2);
+        let playhead = display_len / 2;
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(playhead));
+        harness.run_steps(2);
+        let playhead = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("actual playhead display");
+        let playhead_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("playhead x");
+        let wave_w = editor_wave_width(&harness);
+        let start = editor_canvas_pos_at_x_offset(&harness, (playhead_x + 4.0).min(wave_w - 2.0));
+        let end = editor_canvas_pos_at_x_offset(&harness, (playhead_x + 80.0).min(wave_w - 2.0));
+
+        editor_shift_right_drag_between(&mut harness, start, end);
+
+        let anchor = harness
+            .state()
+            .test_tab_selection_anchor()
+            .expect("selection anchor");
+        let selection = harness.state().test_tab_selection().expect("selection");
+        assert_eq!(
+            anchor, playhead,
+            "shift+right drag should snap its start anchor to the playhead within 8px"
+        );
+        assert_eq!(selection.0, playhead);
+        assert!(selection.1 > selection.0);
+    }
+
+    #[test]
+    fn editor_shift_right_drag_start_outside_radius_uses_button_down_sample() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let display_len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display len")
+            .max(2);
+        let playhead = display_len / 2;
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(playhead));
+        harness.run_steps(2);
+        let playhead = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("actual playhead display");
+        let playhead_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("playhead x");
+        let wave_w = editor_wave_width(&harness);
+        let start_x = (playhead_x + 20.0).min(wave_w - 2.0);
+        let expected_anchor = harness
+            .state()
+            .test_editor_x_offset_to_display_sample(start_x)
+            .expect("expected anchor");
+        assert_ne!(
+            expected_anchor, playhead,
+            "test setup should place the button-down sample outside the snap radius"
+        );
+        let start = editor_canvas_pos_at_x_offset(&harness, start_x);
+        let end = editor_canvas_pos_at_x_offset(&harness, (playhead_x + 100.0).min(wave_w - 2.0));
+
+        editor_shift_right_drag_between(&mut harness, start, end);
+
+        let anchor = harness
+            .state()
+            .test_tab_selection_anchor()
+            .expect("selection anchor");
+        assert_eq!(
+            anchor, expected_anchor,
+            "shift+right drag should preserve the button-down sample outside 8px"
+        );
+    }
+
+    #[test]
+    fn editor_shift_click_endpoint_snaps_to_playhead_within_radius() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let display_len = harness
+            .state()
+            .test_editor_display_samples_len()
+            .expect("display len")
+            .max(2);
+        let playhead = display_len / 2;
+        assert!(harness.state_mut().test_set_selection_frac(0.10, 0.20));
+        let anchor = harness
+            .state()
+            .test_tab_selection()
+            .expect("initial selection")
+            .0;
+        assert!(harness
+            .state_mut()
+            .test_seek_active_editor_display_sample(playhead));
+        harness.run_steps(2);
+        let playhead = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("actual playhead display");
+        let playhead_x = harness
+            .state()
+            .test_editor_playhead_x_offset()
+            .expect("playhead x");
+        let pos = editor_canvas_pos_at_x_offset(&harness, playhead_x + 4.0);
+
+        editor_shift_click_at_pos(&mut harness, pos);
+
+        let selection = harness.state().test_tab_selection().expect("selection");
+        assert_eq!(selection.0, anchor, "shift+click should keep the existing anchor");
+        assert_eq!(
+            selection.1, playhead,
+            "shift+click endpoint should snap to the playhead within 8px"
+        );
+    }
+
+    #[test]
     fn editor_horizontal_zoom_anchor_pointer_keeps_pointer_sample() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -3411,9 +3938,20 @@ mod kittest_suite {
         );
 
         harness.get_by_label("Add Trim As Virtual").click();
-        harness.run_steps(3);
+        harness.run_steps(1);
         assert!(
-            harness.state().test_virtual_item_count() > virtual_before,
+            harness.state().test_virtual_trim_active(),
+            "Add Trim As Virtual should start asynchronously"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].trim_range,
+            None,
+            "Add Trim As Virtual should clear consumed trim range"
+        );
+        wait_for_virtual_trim_done(&mut harness);
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            virtual_before + 1,
             "Add Trim As Virtual should create a new virtual item"
         );
         assert_eq!(
@@ -3442,6 +3980,292 @@ mod kittest_suite {
             harness.state().test_playing_path().cloned(),
             Some(source_path),
             "playing path should remain source tab path"
+        );
+    }
+
+    #[test]
+    fn trim_v_shortcut_sets_selection_and_adds_virtual() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let source_path = harness.state().tabs[tab_idx].path.clone();
+        let virtual_before = harness.state().test_virtual_item_count();
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.20, 0.60));
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().tabs[tab_idx].trim_range,
+            None,
+            "test setup should not pre-set the trim range"
+        );
+
+        harness.key_press(Key::V);
+        harness.run_steps(1);
+        assert!(
+            harness.state().test_virtual_trim_active(),
+            "V should start virtual trim creation asynchronously"
+        );
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            virtual_before,
+            "V should not create the virtual item synchronously"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].selection,
+            None,
+            "V should clear selection like T after consuming the range"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].trim_range,
+            None,
+            "V should not leave the Set trim range behind"
+        );
+        wait_for_virtual_trim_done(&mut harness);
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            virtual_before + 1,
+            "V should create a virtual trim item"
+        );
+        assert_eq!(
+            harness.state().test_active_tab_path(),
+            Some(source_path),
+            "V shortcut should keep the source editor tab active"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].preview_audio_tool,
+            None,
+            "V shortcut should clear trim preview like the button path"
+        );
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::Gain),
+            "V should not force-switch the inspector tool"
+        );
+    }
+
+    #[test]
+    fn trim_v_shortcut_ignores_stale_trim_range_outside_trim_and_missing_range() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_trim_range_frac(0.20, 0.60));
+        let before_other_tool = harness.state().test_virtual_item_count();
+        harness.key_press(Key::V);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            before_other_tool,
+            "V should not use a stale trim range outside the Trim tool when no selection is active"
+        );
+
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        let before_missing_range = harness.state().test_virtual_item_count();
+        harness.key_press(Key::V);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            before_missing_range,
+            "V should not create a virtual item without a trim range"
+        );
+    }
+
+    #[test]
+    fn trim_v_shortcut_uses_existing_trim_range_without_selection() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_trim_range_frac(0.20, 0.60));
+        let virtual_before = harness.state().test_virtual_item_count();
+        harness.key_press(Key::V);
+        harness.run_steps(1);
+        assert!(harness.state().test_virtual_trim_active());
+        assert_eq!(
+            harness.state().tabs[harness.state().active_tab.expect("active tab")].trim_range,
+            None,
+            "V should clear existing Trim range after consuming it"
+        );
+        wait_for_virtual_trim_done(&mut harness);
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            virtual_before + 1,
+            "V should use an existing trim range when no selection is active"
+        );
+    }
+
+    #[test]
+    fn clear_edits_on_virtual_item_after_v_shortcut_does_not_freeze_or_remove_it() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.20, 0.60));
+        let virtual_before = harness.state().test_virtual_item_count();
+        harness.key_press(Key::V);
+        harness.run_steps(1);
+        assert!(harness.state().test_virtual_trim_active());
+        wait_for_virtual_trim_done(&mut harness);
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            virtual_before + 1,
+            "V should create exactly one virtual trim item"
+        );
+        let virtual_path = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("virtual item should be selected");
+
+        assert!(harness
+            .state_mut()
+            .test_set_selected_sample_rate_override(22_050));
+        assert!(harness.state().test_has_edits_for_selected());
+        assert!(harness.state_mut().test_clear_selected_edits());
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_virtual_item_count(),
+            virtual_before + 1,
+            "Clear Edits should clear virtual item overrides, not remove the virtual item"
+        );
+        assert_eq!(
+            harness.state().test_selected_path(),
+            Some(&virtual_path),
+            "Clear Edits should keep the virtual item selected"
+        );
+        assert!(
+            !harness.state().test_has_edits_for_selected(),
+            "virtual item overrides should be cleared"
+        );
+    }
+
+    #[test]
+    fn clear_edits_for_cached_editor_payload_clears_without_snapshot_freeze() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let source_path = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active source tab");
+        assert!(harness.state_mut().test_apply_gain(0.20, 0.60, -6.0));
+        assert!(harness.state().test_tab_dirty());
+        assert!(harness.state_mut().test_close_active_tab());
+        assert_eq!(
+            harness.state().test_edited_cache_count(),
+            1,
+            "closing a dirty editor tab should create a cached edit"
+        );
+
+        assert!(harness.state_mut().test_select_path(&source_path));
+        assert!(harness.state().test_has_edits_for_selected());
+        assert!(harness.state_mut().test_clear_selected_edits());
+        harness.run_steps(2);
+
+        assert_eq!(
+            harness.state().test_edited_cache_count(),
+            0,
+            "Clear Edits should remove the cached edit without taking a heavy undo snapshot"
+        );
+        assert!(
+            !harness.state().test_has_edits_for_selected(),
+            "source edits should be cleared"
+        );
+    }
+
+    #[test]
+    fn reopening_cached_editor_payload_uses_loading_placeholder_before_audio_ready() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let source_path = harness
+            .state()
+            .test_active_tab_path()
+            .expect("active source tab");
+        assert!(harness.state_mut().test_apply_gain(0.20, 0.60, -6.0));
+        assert!(harness.state_mut().test_close_active_tab());
+        assert_eq!(harness.state().test_edited_cache_count(), 1);
+
+        assert!(harness.state_mut().test_open_tab_for_path(&source_path));
+        let tab_idx = harness.state().active_tab.expect("cached tab");
+        assert_eq!(harness.state().tabs[tab_idx].path, source_path);
+        assert!(
+            harness.state().tabs[tab_idx].loading,
+            "cached tab should show a loading placeholder immediately"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            0,
+            "cached tab should not synchronously restore the full audio payload"
+        );
+
+        wait_for_tab_ready(&mut harness);
+        let tab_idx = harness.state().active_tab.expect("cached tab ready");
+        assert!(
+            harness.state().tabs[tab_idx].samples_len > 0,
+            "cached tab should receive audio after background restore"
+        );
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(ToolKind::LoopEdit),
+            "cached restore should preserve its own tool state"
+        );
+    }
+
+    #[test]
+    fn opening_virtual_item_uses_loading_placeholder_before_audio_ready() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_selection_frac(0.20, 0.60));
+        harness.key_press(Key::V);
+        harness.run_steps(1);
+        assert!(harness.state().test_virtual_trim_active());
+        wait_for_virtual_trim_done(&mut harness);
+        let virtual_path = harness
+            .state()
+            .test_selected_path()
+            .cloned()
+            .expect("virtual item should be selected");
+
+        assert!(harness.state_mut().test_open_tab_for_path(&virtual_path));
+        harness.run_steps(1);
+        let tab_idx = harness.state().active_tab.expect("virtual tab");
+        assert_eq!(harness.state().tabs[tab_idx].path, virtual_path);
+        assert!(
+            harness.state().tabs[tab_idx].loading,
+            "virtual tab should show a loading placeholder immediately"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].samples_len,
+            0,
+            "virtual tab should not synchronously clone audio into the editor"
+        );
+
+        wait_for_tab_ready(&mut harness);
+        let tab_idx = harness.state().active_tab.expect("virtual tab ready");
+        assert!(
+            !harness.state().tabs[tab_idx].loading,
+            "virtual tab should finish background open"
+        );
+        assert!(
+            harness.state().tabs[tab_idx].samples_len > 0,
+            "virtual tab should receive audio after background open"
         );
     }
 
@@ -4079,6 +4903,96 @@ mod kittest_suite {
         let after_out = dir.join("pan_after.png");
         before.save(&before_out).expect("save pan before");
         after.save(&after_out).expect("save pan after");
+        assert!(std::fs::metadata(&before_out).is_ok());
+        assert!(std::fs::metadata(&after_out).is_ok());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_horizontal_wheel_pan_changes_waveform_position_png() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        for _ in 0..4 {
+            editor_zoom_in_once(&mut harness);
+        }
+        harness.run_steps(2);
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let before_offset = harness.state().tabs[tab_idx].view_offset_exact;
+        let before = harness.render().expect("pre-horizontal-pan render");
+
+        let inspector_rect = harness.get_by_label("Inspector").rect();
+        let hover_pos = egui::pos2(
+            (inspector_rect.left() - 220.0).max(40.0),
+            inspector_rect.center().y,
+        );
+        harness.hover_at(hover_pos);
+        harness.event_modifiers(
+            egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(180.0, 0.0),
+                modifiers: Modifiers::NONE,
+            },
+            Modifiers::NONE,
+        );
+        harness.run_steps(3);
+
+        let after_offset = harness.state().tabs[tab_idx].view_offset_exact;
+        assert!(
+            (after_offset - before_offset).abs() > 0.5,
+            "horizontal wheel should pan the editor view: before={before_offset} after={after_offset}"
+        );
+
+        let after = harness.render().expect("post-horizontal-pan render");
+        let changed_pixels = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(a, b)| a.0 != b.0)
+            .count();
+        assert!(
+            changed_pixels > 1024,
+            "horizontal pan render difference too small: {changed_pixels}"
+        );
+
+        let dir = make_temp_dir("kittest_horizontal_wheel_pan");
+        let before_out = dir.join("horizontal_pan_before.png");
+        let after_out = dir.join("horizontal_pan_after.png");
+        before
+            .save(&before_out)
+            .expect("save horizontal pan before");
+        after.save(&after_out).expect("save horizontal pan after");
+        assert!(std::fs::metadata(&before_out).is_ok());
+        assert!(std::fs::metadata(&after_out).is_ok());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_editor_resize_refit_saves_before_after_screenshots() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        harness.set_size(egui::vec2(900.0, 720.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+        assert_editor_whole_fit(&harness, "render before resize");
+        let before = harness.render().expect("pre-resize render");
+
+        harness.set_size(egui::vec2(1600.0, 720.0));
+        harness.run_steps(6);
+        assert_editor_whole_fit(&harness, "render after resize");
+        let after = harness.render().expect("post-resize render");
+        assert!(
+            after.width() > before.width(),
+            "post-resize screenshot should be wider: before={} after={}",
+            before.width(),
+            after.width()
+        );
+
+        let dir = make_temp_dir("kittest_editor_resize_refit");
+        let before_out = dir.join("resize_fit_before.png");
+        let after_out = dir.join("resize_fit_after.png");
+        before.save(&before_out).expect("save resize before");
+        after.save(&after_out).expect("save resize after");
         assert!(std::fs::metadata(&before_out).is_ok());
         assert!(std::fs::metadata(&after_out).is_ok());
     }

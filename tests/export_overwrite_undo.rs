@@ -190,9 +190,13 @@ mod export_overwrite_undo {
             .expect("probe source wav")
             .sample_rate
             .max(1);
-        let expected_file_loop =
-            neowaves::wave::map_loop_markers_to_file_sr(expected_loop.0, expected_loop.1, out_sr, file_sr)
-                .expect("map loop markers to file sr");
+        let expected_file_loop = neowaves::wave::map_loop_markers_to_file_sr(
+            expected_loop.0,
+            expected_loop.1,
+            out_sr,
+            file_sr,
+        )
+        .expect("map loop markers to file sr");
 
         harness.state_mut().test_set_export_first_prompt(false);
         harness
@@ -207,10 +211,7 @@ mod export_overwrite_undo {
             neowaves::loop_markers::read_loop_markers(&src).expect("saved loop markers");
         assert_eq!(
             saved_loop,
-            (
-                expected_file_loop.0 as u64,
-                expected_file_loop.1 as u64
-            )
+            (expected_file_loop.0 as u64, expected_file_loop.1 as u64)
         );
         let saved_markers =
             neowaves::markers::read_markers(&src, file_sr, file_sr).expect("read saved markers");

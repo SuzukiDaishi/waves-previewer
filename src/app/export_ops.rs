@@ -51,10 +51,12 @@ impl super::WavesPreviewer {
                 loop_region: tab.loop_region,
             });
         }
-        self.edited_cache.get(path).map(|cached| EditAnnotationSnapshot {
-            markers: cached.markers.clone(),
-            loop_region: cached.loop_region,
-        })
+        self.edited_cache
+            .get(path)
+            .map(|cached| EditAnnotationSnapshot {
+                markers: cached.markers.clone(),
+                loop_region: cached.loop_region,
+            })
     }
 
     pub(super) fn spawn_export_gains(&mut self, _overwrite: bool) {
@@ -367,10 +369,8 @@ impl super::WavesPreviewer {
                     || path_format_override.is_some();
                 if has_edits {
                     if let Some(snapshot) = self.current_edit_annotation_snapshot(&p) {
-                        edit_annotation_snapshots.insert(
-                            p.clone(),
-                            (snapshot.markers.clone(), snapshot.loop_region),
-                        );
+                        edit_annotation_snapshots
+                            .insert(p.clone(), (snapshot.markers.clone(), snapshot.loop_region));
                     }
                     let write_audio = cfg.save_mode == SaveMode::NewFile
                         || dirty_audio
@@ -988,11 +988,7 @@ impl super::WavesPreviewer {
                                 .get(p)
                                 .cloned()
                                 .unwrap_or_else(|| (Vec::new(), None));
-                            self.mark_edit_saved_for_path(
-                                p,
-                                &saved_markers,
-                                saved_loop_region,
-                            );
+                            self.mark_edit_saved_for_path(p, &saved_markers, saved_loop_region);
                         }
                     }
                 }

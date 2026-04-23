@@ -11,21 +11,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use walkdir::WalkDir;
 
+use super::cli_workspace::{resolve_playback_range, CliWorkspace};
 use super::project::{
     self, deserialize_project, loop_mode_from_str, marker_entry_to_project,
     primary_view_from_project, project_other_sub_view_string, project_primary_view_string,
     project_spec_sub_view_string, project_tool_state_to_tool_state, serialize_project, ProjectApp,
-    ProjectChannelView, ProjectExportPolicy, ProjectFile, ProjectList,
-    ProjectListColumns, ProjectListItem, ProjectMarker, ProjectPluginFxDraft, ProjectTab,
-    ProjectToolState,
+    ProjectChannelView, ProjectExportPolicy, ProjectFile, ProjectList, ProjectListColumns,
+    ProjectListItem, ProjectMarker, ProjectPluginFxDraft, ProjectTab, ProjectToolState,
 };
 use super::render::spectrogram;
-use super::cli_workspace::{resolve_playback_range, CliWorkspace};
 use super::types::{
-    EditorPrimaryView, EditorSpecSubView, EffectGraphDocument, EffectGraphEdge,
-    EffectGraphNode, EffectGraphNodeData, EffectGraphNodeKind, EffectGraphSeverity,
-    EffectGraphSpectrumMode, EffectGraphTemplateFile, ListColumnConfig, LoopMode,
-    LoopXfadeShape, SpectrogramConfig, SpectrogramData, ToolKind, ToolState, ViewMode,
+    EditorPrimaryView, EditorSpecSubView, EffectGraphDocument, EffectGraphEdge, EffectGraphNode,
+    EffectGraphNodeData, EffectGraphNodeKind, EffectGraphSeverity, EffectGraphSpectrumMode,
+    EffectGraphTemplateFile, ListColumnConfig, LoopMode, LoopXfadeShape, SpectrogramConfig,
+    SpectrogramData, ToolKind, ToolState, ViewMode,
 };
 use super::WavesPreviewer;
 use crate::audio_io::{
@@ -35,41 +34,40 @@ use crate::audio_io::{
 use crate::cli::{
     BatchCommand, BatchExportArgs, BatchLoudnessApplyArgs, BatchLoudnessCommand,
     BatchLoudnessPlanArgs, CliCommand, CliCursorSnap, CliEffectGraphSpectrumMode,
-    CliLoopXfadeShape, CliRoot, CliSpectralViewMode, CliToggle, DebugCommand,
-    DebugScreenshotArgs, DebugSummaryArgs, EditorCommand, EditorCursorCommand,
-    EditorCursorGetArgs, EditorCursorNudgeArgs, EditorCursorSetArgs, EditorInspectArgs,
-    EditorLoopApplyArgs, EditorLoopClearArgs, EditorLoopCommand, EditorLoopGetArgs,
-    EditorLoopModeArgs, EditorLoopRepeatArgs, EditorLoopSetArgs, EditorLoopXfadeArgs,
-    EditorMarkersAddArgs, EditorMarkersApplyArgs, EditorMarkersClearArgs,
-    EditorMarkersCommand, EditorMarkersListArgs, EditorMarkersRemoveArgs, EditorMarkersSetArgs,
-    EditorPlaybackCommand, EditorPlaybackPlayArgs, EditorSelectionClearArgs,
-    EditorSelectionCommand, EditorSelectionGetArgs, EditorSelectionSetArgs, EditorSourceArgs,
-    EditorToolApplyArgs, EditorToolCommand, EditorToolGetArgs, EditorToolSetArgs,
-    EditorViewCommand, EditorViewGetArgs, EditorViewSetArgs, EffectGraphCommand,
-    EffectGraphEdgeCommand, EffectGraphEdgeConnectArgs, EffectGraphEdgeDisconnectArgs,
-    EffectGraphExportArgs, EffectGraphImportArgs, EffectGraphInspectArgs, EffectGraphListArgs,
-    EffectGraphNewArgs, EffectGraphNodeAddArgs, EffectGraphNodeCommand, EffectGraphNodeRemoveArgs,
-    EffectGraphNodeSetArgs, EffectGraphRefArgs, EffectGraphRenderArgs, EffectGraphSaveArgs,
-    EffectGraphTestArgs, EffectGraphValidateArgs, ExportCommand, ExportFileArgs,
-    ExportVerifyLoopTagsArgs, ExternalCommand, ExternalConfigCommand, ExternalConfigGetArgs,
-    ExternalConfigSetArgs, ExternalInspectArgs, ExternalRenderArgs, ExternalRowsArgs,
-    ExternalSourceAddArgs, ExternalSourceClearArgs, ExternalSourceCommand,
-    ExternalSourceListArgs, ExternalSourceReloadArgs, ExternalSourceRemoveArgs, ItemArtworkArgs,
-    ItemCommand, ItemInspectArgs, ItemMetaArgs, ListColumnsArgs, ListCommand, ListQueryArgs,
-    ListRenderArgs, ListSaveQueryArgs, ListSearchArgs, ListSelectArgs, ListSortArgs,
-    ListSourceArgs, MusicAiAnalyzeArgs, MusicAiApplyMarkersArgs, MusicAiCommand,
-    MusicAiExportStemsArgs, MusicAiInspectArgs, MusicAiModelCommand, MusicAiModelDownloadArgs,
-    MusicAiModelStatusArgs, MusicAiModelUninstallArgs, PluginCommand, PluginListArgs,
-    PluginProbeArgs, PluginScanArgs, PluginSearchPathAddArgs, PluginSearchPathCommand,
-    PluginSearchPathListArgs, PluginSearchPathRemoveArgs, PluginSearchPathResetArgs,
-    PluginSessionApplyArgs, PluginSessionClearArgs, PluginSessionCommand,
-    PluginSessionInspectArgs, PluginSessionPreviewArgs, PluginSessionSetArgs, RenderCommand,
-    RenderEditorArgs, RenderListArgs, RenderSpectrumArgs, RenderWaveformArgs, SessionCommand,
-    SessionInspectArgs, SessionNewArgs, TranscriptBatchCommand, TranscriptBatchGenerateArgs,
-    TranscriptCommand, TranscriptConfigCommand, TranscriptConfigGetArgs,
-    TranscriptConfigSetArgs, TranscriptExportSrtArgs, TranscriptGenerateArgs,
-    TranscriptInspectArgs, TranscriptModelCommand, TranscriptModelDownloadArgs,
-    TranscriptModelStatusArgs, TranscriptModelUninstallArgs,
+    CliLoopXfadeShape, CliRoot, CliSpectralViewMode, CliToggle, DebugCommand, DebugScreenshotArgs,
+    DebugSummaryArgs, EditorCommand, EditorCursorCommand, EditorCursorGetArgs,
+    EditorCursorNudgeArgs, EditorCursorSetArgs, EditorInspectArgs, EditorLoopApplyArgs,
+    EditorLoopClearArgs, EditorLoopCommand, EditorLoopGetArgs, EditorLoopModeArgs,
+    EditorLoopRepeatArgs, EditorLoopSetArgs, EditorLoopXfadeArgs, EditorMarkersAddArgs,
+    EditorMarkersApplyArgs, EditorMarkersClearArgs, EditorMarkersCommand, EditorMarkersListArgs,
+    EditorMarkersRemoveArgs, EditorMarkersSetArgs, EditorPlaybackCommand, EditorPlaybackPlayArgs,
+    EditorSelectionClearArgs, EditorSelectionCommand, EditorSelectionGetArgs,
+    EditorSelectionSetArgs, EditorSourceArgs, EditorToolApplyArgs, EditorToolCommand,
+    EditorToolGetArgs, EditorToolSetArgs, EditorViewCommand, EditorViewGetArgs, EditorViewSetArgs,
+    EffectGraphCommand, EffectGraphEdgeCommand, EffectGraphEdgeConnectArgs,
+    EffectGraphEdgeDisconnectArgs, EffectGraphExportArgs, EffectGraphImportArgs,
+    EffectGraphInspectArgs, EffectGraphListArgs, EffectGraphNewArgs, EffectGraphNodeAddArgs,
+    EffectGraphNodeCommand, EffectGraphNodeRemoveArgs, EffectGraphNodeSetArgs, EffectGraphRefArgs,
+    EffectGraphRenderArgs, EffectGraphSaveArgs, EffectGraphTestArgs, EffectGraphValidateArgs,
+    ExportCommand, ExportFileArgs, ExportVerifyLoopTagsArgs, ExternalCommand,
+    ExternalConfigCommand, ExternalConfigGetArgs, ExternalConfigSetArgs, ExternalInspectArgs,
+    ExternalRenderArgs, ExternalRowsArgs, ExternalSourceAddArgs, ExternalSourceClearArgs,
+    ExternalSourceCommand, ExternalSourceListArgs, ExternalSourceReloadArgs,
+    ExternalSourceRemoveArgs, ItemArtworkArgs, ItemCommand, ItemInspectArgs, ItemMetaArgs,
+    ListColumnsArgs, ListCommand, ListQueryArgs, ListRenderArgs, ListSaveQueryArgs, ListSearchArgs,
+    ListSelectArgs, ListSortArgs, ListSourceArgs, MusicAiAnalyzeArgs, MusicAiApplyMarkersArgs,
+    MusicAiCommand, MusicAiExportStemsArgs, MusicAiInspectArgs, MusicAiModelCommand,
+    MusicAiModelDownloadArgs, MusicAiModelStatusArgs, MusicAiModelUninstallArgs, PluginCommand,
+    PluginListArgs, PluginProbeArgs, PluginScanArgs, PluginSearchPathAddArgs,
+    PluginSearchPathCommand, PluginSearchPathListArgs, PluginSearchPathRemoveArgs,
+    PluginSearchPathResetArgs, PluginSessionApplyArgs, PluginSessionClearArgs,
+    PluginSessionCommand, PluginSessionInspectArgs, PluginSessionPreviewArgs, PluginSessionSetArgs,
+    RenderCommand, RenderEditorArgs, RenderListArgs, RenderSpectrumArgs, RenderWaveformArgs,
+    SessionCommand, SessionInspectArgs, SessionNewArgs, TranscriptBatchCommand,
+    TranscriptBatchGenerateArgs, TranscriptCommand, TranscriptConfigCommand,
+    TranscriptConfigGetArgs, TranscriptConfigSetArgs, TranscriptExportSrtArgs,
+    TranscriptGenerateArgs, TranscriptInspectArgs, TranscriptModelCommand,
+    TranscriptModelDownloadArgs, TranscriptModelStatusArgs, TranscriptModelUninstallArgs,
 };
 use crate::loop_markers;
 use crate::markers::{self, MarkerEntry};
@@ -287,9 +285,7 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         }
         CliCommand::Editor(EditorCommand::Tool(EditorToolCommand::Get(_))) => "editor.tool.get",
         CliCommand::Editor(EditorCommand::Tool(EditorToolCommand::Set(_))) => "editor.tool.set",
-        CliCommand::Editor(EditorCommand::Tool(EditorToolCommand::Apply(_))) => {
-            "editor.tool.apply"
-        }
+        CliCommand::Editor(EditorCommand::Tool(EditorToolCommand::Apply(_))) => "editor.tool.apply",
         CliCommand::Editor(EditorCommand::Markers(EditorMarkersCommand::List(_))) => {
             "editor.markers.list"
         }
@@ -310,18 +306,10 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         }
         CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Get(_))) => "editor.loop.get",
         CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Set(_))) => "editor.loop.set",
-        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Clear(_))) => {
-            "editor.loop.clear"
-        }
-        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Apply(_))) => {
-            "editor.loop.apply"
-        }
-        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Mode(_))) => {
-            "editor.loop.mode"
-        }
-        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Xfade(_))) => {
-            "editor.loop.xfade"
-        }
+        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Clear(_))) => "editor.loop.clear",
+        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Apply(_))) => "editor.loop.apply",
+        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Mode(_))) => "editor.loop.mode",
+        CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Xfade(_))) => "editor.loop.xfade",
         CliCommand::Editor(EditorCommand::Loop(EditorLoopCommand::Repeat(_))) => {
             "editor.loop.repeat"
         }
@@ -440,9 +428,9 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         CliCommand::EffectGraph(EffectGraphCommand::Edge(EffectGraphEdgeCommand::Connect(_))) => {
             "effect-graph.edge.connect"
         }
-        CliCommand::EffectGraph(EffectGraphCommand::Edge(EffectGraphEdgeCommand::Disconnect(_))) => {
-            "effect-graph.edge.disconnect"
-        }
+        CliCommand::EffectGraph(EffectGraphCommand::Edge(EffectGraphEdgeCommand::Disconnect(
+            _,
+        ))) => "effect-graph.edge.disconnect",
         CliCommand::Debug(DebugCommand::Summary(_)) => "debug.summary",
         CliCommand::Debug(DebugCommand::Screenshot(_)) => "debug.screenshot",
     }
@@ -559,8 +547,12 @@ fn dispatch_transcript(command: TranscriptCommand) -> Result<CliCommandOutput> {
         TranscriptCommand::Model(TranscriptModelCommand::Uninstall(args)) => {
             transcript_model_uninstall(args)
         }
-        TranscriptCommand::Config(TranscriptConfigCommand::Get(args)) => transcript_config_get(args),
-        TranscriptCommand::Config(TranscriptConfigCommand::Set(args)) => transcript_config_set(args),
+        TranscriptCommand::Config(TranscriptConfigCommand::Get(args)) => {
+            transcript_config_get(args)
+        }
+        TranscriptCommand::Config(TranscriptConfigCommand::Set(args)) => {
+            transcript_config_set(args)
+        }
         TranscriptCommand::Generate(args) => transcript_generate(args),
         TranscriptCommand::Batch(TranscriptBatchCommand::Generate(args)) => {
             transcript_batch_generate(args)
@@ -766,26 +758,106 @@ fn item_artwork(args: ItemArtworkArgs) -> Result<CliCommandOutput> {
 
 fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
     let columns = vec![
-        ColumnDescriptor { key: "edited", description: "Dirty/edit badge", enabled_by_default: true },
-        ColumnDescriptor { key: "cover_art", description: "Cover art thumbnail", enabled_by_default: false },
-        ColumnDescriptor { key: "type_badge", description: "File type badge", enabled_by_default: false },
-        ColumnDescriptor { key: "file", description: "File name", enabled_by_default: true },
-        ColumnDescriptor { key: "folder", description: "Parent folder", enabled_by_default: true },
-        ColumnDescriptor { key: "transcript", description: "Transcript summary", enabled_by_default: false },
-        ColumnDescriptor { key: "transcript_language", description: "Transcript language", enabled_by_default: false },
-        ColumnDescriptor { key: "external", description: "Merged external columns", enabled_by_default: true },
-        ColumnDescriptor { key: "length", description: "Duration", enabled_by_default: true },
-        ColumnDescriptor { key: "channels", description: "Channel count", enabled_by_default: true },
-        ColumnDescriptor { key: "sample_rate", description: "Sample rate", enabled_by_default: true },
-        ColumnDescriptor { key: "bits", description: "Bit depth", enabled_by_default: true },
-        ColumnDescriptor { key: "bit_rate", description: "Bit rate", enabled_by_default: false },
-        ColumnDescriptor { key: "peak", description: "Peak dBFS", enabled_by_default: true },
-        ColumnDescriptor { key: "lufs", description: "Integrated LUFS", enabled_by_default: true },
-        ColumnDescriptor { key: "bpm", description: "BPM", enabled_by_default: false },
-        ColumnDescriptor { key: "created_at", description: "Created timestamp", enabled_by_default: false },
-        ColumnDescriptor { key: "modified_at", description: "Modified timestamp", enabled_by_default: false },
-        ColumnDescriptor { key: "gain", description: "Pending gain dB", enabled_by_default: true },
-        ColumnDescriptor { key: "wave", description: "Wave thumbnail column", enabled_by_default: true },
+        ColumnDescriptor {
+            key: "edited",
+            description: "Dirty/edit badge",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "cover_art",
+            description: "Cover art thumbnail",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "type_badge",
+            description: "File type badge",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "file",
+            description: "File name",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "folder",
+            description: "Parent folder",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "transcript",
+            description: "Transcript summary",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "transcript_language",
+            description: "Transcript language",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "external",
+            description: "Merged external columns",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "length",
+            description: "Duration",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "channels",
+            description: "Channel count",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "sample_rate",
+            description: "Sample rate",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "bits",
+            description: "Bit depth",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "bit_rate",
+            description: "Bit rate",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "peak",
+            description: "Peak dBFS",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "lufs",
+            description: "Integrated LUFS",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "bpm",
+            description: "BPM",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "created_at",
+            description: "Created timestamp",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "modified_at",
+            description: "Modified timestamp",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "gain",
+            description: "Pending gain dB",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "wave",
+            description: "Wave thumbnail column",
+            enabled_by_default: true,
+        },
     ];
     Ok(CliCommandOutput {
         result: json!({
@@ -1029,7 +1101,8 @@ fn batch_export(args: BatchExportArgs) -> Result<CliCommandOutput> {
     for entry in matched {
         let has_session_edit = find_project_tab_index(&session, &entry.path).is_some()
             || session.project.cached_edits.iter().any(|edit| {
-                path_key(&project::resolve_path(&edit.path, &session.base_dir)) == path_key(&entry.path)
+                path_key(&project::resolve_path(&edit.path, &session.base_dir))
+                    == path_key(&entry.path)
             });
         if args.overwrite && entry.pending_gain_db.abs() <= 0.0001 && !has_session_edit {
             skipped_paths.push(pathbuf_to_string(&entry.path));
@@ -1195,7 +1268,11 @@ fn effect_graph_test(args: EffectGraphTestArgs) -> Result<CliCommandOutput> {
     {
         bail!("effect graph has validation errors");
     }
-    let input = args.input.as_deref().map(absolute_existing_path).transpose()?;
+    let input = args
+        .input
+        .as_deref()
+        .map(absolute_existing_path)
+        .transpose()?;
     let report = super::effect_graph_ops::effect_graph_test_document_for_cli(
         &resolved.file.graph,
         input.as_deref(),
@@ -1205,7 +1282,13 @@ fn effect_graph_test(args: EffectGraphTestArgs) -> Result<CliCommandOutput> {
     let preview_path = prepare_output_path(args.output, "effect-graph-test", "png")?;
     save_rgba_image(&preview, &preview_path)?;
     if let Some(report_path) = args.report.as_deref() {
-        write_effect_graph_test_report(report_path, &resolved, input.as_deref(), &report, &preview_path)?;
+        write_effect_graph_test_report(
+            report_path,
+            &resolved,
+            input.as_deref(),
+            &report,
+            &preview_path,
+        )?;
     }
     Ok(CliCommandOutput {
         result: json!({
@@ -1293,9 +1376,9 @@ fn effect_graph_node_add(args: EffectGraphNodeAddArgs) -> Result<CliCommandOutpu
         crate::cli::CliEffectGraphNodeKind::DebugWaveform => EffectGraphNodeKind::DebugWaveform,
         crate::cli::CliEffectGraphNodeKind::DebugSpectrum => EffectGraphNodeKind::DebugSpectrum,
     };
-    let node_id = args
-        .node_id
-        .unwrap_or_else(|| unique_effect_graph_node_id(&resolved.file.graph, &format!("{:?}", kind)));
+    let node_id = args.node_id.unwrap_or_else(|| {
+        unique_effect_graph_node_id(&resolved.file.graph, &format!("{:?}", kind))
+    });
     let node = EffectGraphNode {
         id: node_id,
         ui_pos: [args.x, args.y],
@@ -1314,7 +1397,11 @@ fn effect_graph_node_add(args: EffectGraphNodeAddArgs) -> Result<CliCommandOutpu
 
 fn effect_graph_node_remove(args: EffectGraphNodeRemoveArgs) -> Result<CliCommandOutput> {
     let mut resolved = load_effect_graph(&args.graph.graph)?;
-    resolved.file.graph.nodes.retain(|node| node.id != args.node_id);
+    resolved
+        .file
+        .graph
+        .nodes
+        .retain(|node| node.id != args.node_id);
     resolved
         .file
         .graph
@@ -1427,7 +1514,10 @@ fn effect_graph_edge_connect(args: EffectGraphEdgeConnectArgs) -> Result<CliComm
     let edge_id = args.edge_id.unwrap_or_else(|| {
         unique_effect_graph_edge_id(
             &resolved.file.graph,
-            &format!("{}_{}_{}_{}", args.from_node, args.from_port, args.to_node, args.to_port),
+            &format!(
+                "{}_{}_{}_{}",
+                args.from_node, args.from_port, args.to_node, args.to_port
+            ),
         )
     });
     resolved.file.graph.edges.push(EffectGraphEdge {
@@ -1514,10 +1604,12 @@ fn editor_view_set(args: EditorViewSetArgs) -> Result<CliCommandOutput> {
     if let Some(mode) = args.view_mode {
         let mode: ViewMode = mode.into();
         session.project.tabs[tab_idx].view_mode = format!("{mode:?}");
-        session.project.tabs[tab_idx].primary_view =
-            Some(project_primary_view_string(EditorPrimaryView::from_mode(mode)));
-        session.project.tabs[tab_idx].spec_sub_view =
-            Some(project_spec_sub_view_string(EditorSpecSubView::from_mode(mode)));
+        session.project.tabs[tab_idx].primary_view = Some(project_primary_view_string(
+            EditorPrimaryView::from_mode(mode),
+        ));
+        session.project.tabs[tab_idx].spec_sub_view = Some(project_spec_sub_view_string(
+            EditorSpecSubView::from_mode(mode),
+        ));
         session.project.tabs[tab_idx].other_sub_view = Some(project_other_sub_view_string(
             super::types::EditorOtherSubView::from_mode(mode),
         ));
@@ -1538,7 +1630,9 @@ fn editor_view_set(args: EditorViewSetArgs) -> Result<CliCommandOutput> {
         session.project.tabs[tab_idx].vertical_view_center = v.clamp(-1.0, 1.0);
     }
     save_session(&session)?;
-    editor_view_get(EditorViewGetArgs { source: args.source })
+    editor_view_get(EditorViewGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_selection_get(args: EditorSelectionGetArgs) -> Result<CliCommandOutput> {
@@ -1566,7 +1660,9 @@ fn editor_selection_set(args: EditorSelectionSetArgs) -> Result<CliCommandOutput
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].selection = Some(range_to_array(range));
     save_session(&session)?;
-    editor_selection_get(EditorSelectionGetArgs { source: args.source })
+    editor_selection_get(EditorSelectionGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_selection_clear(args: EditorSelectionClearArgs) -> Result<CliCommandOutput> {
@@ -1575,7 +1671,9 @@ fn editor_selection_clear(args: EditorSelectionClearArgs) -> Result<CliCommandOu
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].selection = None;
     save_session(&session)?;
-    editor_selection_get(EditorSelectionGetArgs { source: args.source })
+    editor_selection_get(EditorSelectionGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_cursor_get(args: EditorCursorGetArgs) -> Result<CliCommandOutput> {
@@ -1597,10 +1695,9 @@ fn editor_cursor_set(args: EditorCursorSetArgs) -> Result<CliCommandOutput> {
     let total_samples = total_samples_for_session_path(&session, &target)?;
     let mut cursor = match (args.sample, args.frac) {
         (Some(sample), None) => sample.min(total_samples.saturating_sub(1)),
-        (None, Some(frac)) => {
-            ((frac.clamp(0.0, 1.0) * total_samples.max(1) as f32).round() as usize)
-                .min(total_samples.saturating_sub(1))
-        }
+        (None, Some(frac)) => ((frac.clamp(0.0, 1.0) * total_samples.max(1) as f32).round()
+            as usize)
+            .min(total_samples.saturating_sub(1)),
         _ => bail!("cursor set requires exactly one of --sample or --frac"),
     };
     if matches!(args.snap, CliCursorSnap::ZeroCross) {
@@ -1609,7 +1706,9 @@ fn editor_cursor_set(args: EditorCursorSetArgs) -> Result<CliCommandOutput> {
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].cursor_sample = Some(cursor);
     save_session(&session)?;
-    editor_cursor_get(EditorCursorGetArgs { source: args.source })
+    editor_cursor_get(EditorCursorGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_cursor_nudge(args: EditorCursorNudgeArgs) -> Result<CliCommandOutput> {
@@ -1637,20 +1736,25 @@ fn editor_cursor_nudge(args: EditorCursorNudgeArgs) -> Result<CliCommandOutput> 
     }
     session.project.tabs[tab_idx].cursor_sample = Some(cursor);
     save_session(&session)?;
-    editor_cursor_get(EditorCursorGetArgs { source: args.source })
+    editor_cursor_get(EditorCursorGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_playback_play(args: EditorPlaybackPlayArgs) -> Result<CliCommandOutput> {
     let volume_linear = 10.0f32.powf(args.volume_db / 20.0).clamp(0.0, 1.0);
-    let engine = crate::audio::AudioEngine::new_with_output_device_name(args.output_device.as_deref())
-        .context("open playback output device")?;
+    let engine =
+        crate::audio::AudioEngine::new_with_output_device_name(args.output_device.as_deref())
+            .context("open playback output device")?;
     if !engine.has_output_stream() {
         bail!("output device is not available for playback");
     }
     engine.set_volume(volume_linear);
     engine.set_rate(args.rate);
     engine.set_loop_enabled(false);
-    let (path, sample_rate, range, transport) = if let Some(session_path) = args.source.session.as_deref() {
+    let (path, sample_rate, range, transport) = if let Some(session_path) =
+        args.source.session.as_deref()
+    {
         let mut workspace = CliWorkspace::load(session_path)?;
         let tab_idx = workspace.ensure_target_tab_loaded(args.source.path.as_deref())?;
         let (path, sample_rate, total_samples, selection, loop_region, dirty, channels) = {
@@ -1707,14 +1811,7 @@ fn editor_playback_play(args: EditorPlaybackPlayArgs) -> Result<CliCommandOutput
             args.end_frac,
             total_samples,
         )?;
-        let spec = resolve_playback_range(
-            total_samples,
-            false,
-            None,
-            false,
-            None,
-            explicit_range,
-        );
+        let spec = resolve_playback_range(total_samples, false, None, false, None, explicit_range);
         if is_exact_stream_playback_candidate(&path, false) {
             play_exact_stream(&engine, &path, spec.range, args.rate)?;
             (path, info.sample_rate.max(1), spec.range, "exact_stream")
@@ -1785,7 +1882,9 @@ fn editor_tool_set(args: EditorToolSetArgs) -> Result<CliCommandOutput> {
         tab.tool_state.loop_repeat = value.max(2);
     }
     save_session(&session)?;
-    editor_tool_get(EditorToolGetArgs { source: args.source })
+    editor_tool_get(EditorToolGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_tool_apply(args: EditorToolApplyArgs) -> Result<CliCommandOutput> {
@@ -1797,7 +1896,9 @@ fn editor_tool_apply(args: EditorToolApplyArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(session_path)?;
     workspace.apply_tool_for_target(args.source.path.as_deref())?;
     workspace.save()?;
-    editor_tool_get(EditorToolGetArgs { source: args.source })
+    editor_tool_get(EditorToolGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_markers_list(args: EditorMarkersListArgs) -> Result<CliCommandOutput> {
@@ -1820,16 +1921,26 @@ fn editor_markers_add(args: EditorMarkersAddArgs) -> Result<CliCommandOutput> {
     let target = resolve_session_target_path(&session, &args.source)?;
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     let label = args.label.unwrap_or_else(|| {
-        format!("M{:02}", session.project.tabs[tab_idx].markers.len().saturating_add(1))
+        format!(
+            "M{:02}",
+            session.project.tabs[tab_idx]
+                .markers
+                .len()
+                .saturating_add(1)
+        )
     });
     session.project.tabs[tab_idx].markers.push(ProjectMarker {
         sample: args.sample,
         label,
     });
-    session.project.tabs[tab_idx].markers.sort_by_key(|m| m.sample);
+    session.project.tabs[tab_idx]
+        .markers
+        .sort_by_key(|m| m.sample);
     session.project.tabs[tab_idx].markers_dirty = true;
     save_session(&session)?;
-    editor_markers_list(EditorMarkersListArgs { source: args.source })
+    editor_markers_list(EditorMarkersListArgs {
+        source: args.source,
+    })
 }
 
 fn editor_markers_set(args: EditorMarkersSetArgs) -> Result<CliCommandOutput> {
@@ -1840,7 +1951,9 @@ fn editor_markers_set(args: EditorMarkersSetArgs) -> Result<CliCommandOutput> {
     session.project.tabs[tab_idx].markers = markers.iter().map(marker_entry_to_project).collect();
     session.project.tabs[tab_idx].markers_dirty = true;
     save_session(&session)?;
-    editor_markers_list(EditorMarkersListArgs { source: args.source })
+    editor_markers_list(EditorMarkersListArgs {
+        source: args.source,
+    })
 }
 
 fn editor_markers_remove(args: EditorMarkersRemoveArgs) -> Result<CliCommandOutput> {
@@ -1854,7 +1967,9 @@ fn editor_markers_remove(args: EditorMarkersRemoveArgs) -> Result<CliCommandOutp
     tab.markers.remove(args.index);
     tab.markers_dirty = true;
     save_session(&session)?;
-    editor_markers_list(EditorMarkersListArgs { source: args.source })
+    editor_markers_list(EditorMarkersListArgs {
+        source: args.source,
+    })
 }
 
 fn editor_markers_clear(args: EditorMarkersClearArgs) -> Result<CliCommandOutput> {
@@ -1864,7 +1979,9 @@ fn editor_markers_clear(args: EditorMarkersClearArgs) -> Result<CliCommandOutput
     session.project.tabs[tab_idx].markers.clear();
     session.project.tabs[tab_idx].markers_dirty = true;
     save_session(&session)?;
-    editor_markers_list(EditorMarkersListArgs { source: args.source })
+    editor_markers_list(EditorMarkersListArgs {
+        source: args.source,
+    })
 }
 
 fn editor_markers_apply(args: EditorMarkersApplyArgs) -> Result<CliCommandOutput> {
@@ -1873,7 +1990,9 @@ fn editor_markers_apply(args: EditorMarkersApplyArgs) -> Result<CliCommandOutput
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].markers_dirty = false;
     save_session(&session)?;
-    editor_markers_list(EditorMarkersListArgs { source: args.source })
+    editor_markers_list(EditorMarkersListArgs {
+        source: args.source,
+    })
 }
 
 fn editor_loop_get(args: EditorLoopGetArgs) -> Result<CliCommandOutput> {
@@ -1900,7 +2019,9 @@ fn editor_loop_set(args: EditorLoopSetArgs) -> Result<CliCommandOutput> {
     session.project.tabs[tab_idx].loop_mode = "Marker".to_string();
     session.project.tabs[tab_idx].loop_markers_dirty = true;
     save_session(&session)?;
-    editor_loop_get(EditorLoopGetArgs { source: args.source })
+    editor_loop_get(EditorLoopGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_loop_clear(args: EditorLoopClearArgs) -> Result<CliCommandOutput> {
@@ -1910,7 +2031,9 @@ fn editor_loop_clear(args: EditorLoopClearArgs) -> Result<CliCommandOutput> {
     session.project.tabs[tab_idx].loop_region = None;
     session.project.tabs[tab_idx].loop_markers_dirty = true;
     save_session(&session)?;
-    editor_loop_get(EditorLoopGetArgs { source: args.source })
+    editor_loop_get(EditorLoopGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_loop_apply(args: EditorLoopApplyArgs) -> Result<CliCommandOutput> {
@@ -1919,7 +2042,9 @@ fn editor_loop_apply(args: EditorLoopApplyArgs) -> Result<CliCommandOutput> {
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].loop_markers_dirty = false;
     save_session(&session)?;
-    editor_loop_get(EditorLoopGetArgs { source: args.source })
+    editor_loop_get(EditorLoopGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_loop_mode(args: EditorLoopModeArgs) -> Result<CliCommandOutput> {
@@ -1928,7 +2053,9 @@ fn editor_loop_mode(args: EditorLoopModeArgs) -> Result<CliCommandOutput> {
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].loop_mode = format!("{:?}", LoopMode::from(args.mode));
     save_session(&session)?;
-    editor_loop_get(EditorLoopGetArgs { source: args.source })
+    editor_loop_get(EditorLoopGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_loop_xfade(args: EditorLoopXfadeArgs) -> Result<CliCommandOutput> {
@@ -1936,9 +2063,12 @@ fn editor_loop_xfade(args: EditorLoopXfadeArgs) -> Result<CliCommandOutput> {
     let target = resolve_session_target_path(&session, &args.source)?;
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].loop_xfade_samples = args.samples;
-    session.project.tabs[tab_idx].loop_xfade_shape = loop_xfade_shape_string(args.shape).to_string();
+    session.project.tabs[tab_idx].loop_xfade_shape =
+        loop_xfade_shape_string(args.shape).to_string();
     save_session(&session)?;
-    editor_loop_get(EditorLoopGetArgs { source: args.source })
+    editor_loop_get(EditorLoopGetArgs {
+        source: args.source,
+    })
 }
 
 fn editor_loop_repeat(args: EditorLoopRepeatArgs) -> Result<CliCommandOutput> {
@@ -1947,7 +2077,9 @@ fn editor_loop_repeat(args: EditorLoopRepeatArgs) -> Result<CliCommandOutput> {
     let tab_idx = ensure_project_tab_for_path(&mut session, &target)?;
     session.project.tabs[tab_idx].tool_state.loop_repeat = args.count.max(2);
     save_session(&session)?;
-    editor_loop_get(EditorLoopGetArgs { source: args.source })
+    editor_loop_get(EditorLoopGetArgs {
+        source: args.source,
+    })
 }
 
 fn render_waveform(args: RenderWaveformArgs) -> Result<CliCommandOutput> {
@@ -2179,11 +2311,19 @@ fn export_file_from_input(input: &Path, args: &ExportFileArgs) -> Result<CliComm
     ensure_parent_dir(&output)?;
     if let Some(gain_db) = args.gain_db {
         wave::export_gain_audio(&input, &output, gain_db).with_context(|| {
-            format!("export gain audio: {} -> {}", input.display(), output.display())
+            format!(
+                "export gain audio: {} -> {}",
+                input.display(),
+                output.display()
+            )
         })?;
     } else {
         std::fs::copy(&input, &output).with_context(|| {
-            format!("copy source audio: {} -> {}", input.display(), output.display())
+            format!(
+                "copy source audio: {} -> {}",
+                input.display(),
+                output.display()
+            )
         })?;
     }
     let src_info = read_audio_info(&input)?;
@@ -2223,7 +2363,10 @@ fn export_file_from_input(input: &Path, args: &ExportFileArgs) -> Result<CliComm
     })
 }
 
-fn export_file_from_session(session_path: &Path, args: &ExportFileArgs) -> Result<CliCommandOutput> {
+fn export_file_from_session(
+    session_path: &Path,
+    args: &ExportFileArgs,
+) -> Result<CliCommandOutput> {
     if args.overwrite == args.output.is_some() {
         bail!("session export requires exactly one of --overwrite or --output");
     }
@@ -2627,7 +2770,10 @@ fn list_row_for_entry(
         row.insert("lufs".to_string(), Value::Null);
         row.insert("bpm".to_string(), Value::Null);
         row.insert("created_at".to_string(), system_time_json(info.created_at));
-        row.insert("modified_at".to_string(), system_time_json(info.modified_at));
+        row.insert(
+            "modified_at".to_string(),
+            system_time_json(info.modified_at),
+        );
     }
     row.insert("wave".to_string(), json!(true));
     if include_overlays {
@@ -2947,9 +3093,18 @@ fn resolve_query_filter(filter: &crate::cli::CliQueryFilterArgs) -> Result<Resol
         decode_query_handle_spec(query_id)?
     } else {
         QueryHandleSpec {
-            query: filter.query.clone().filter(|value| !value.trim().is_empty()),
-            sort_key: filter.sort_key.clone().filter(|value| !value.trim().is_empty()),
-            sort_dir: filter.sort_dir.clone().filter(|value| !value.trim().is_empty()),
+            query: filter
+                .query
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            sort_key: filter
+                .sort_key
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            sort_dir: filter
+                .sort_dir
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
         }
     };
     Ok(ResolvedQueryFilter {
@@ -2961,15 +3116,11 @@ fn resolve_query_filter(filter: &crate::cli::CliQueryFilterArgs) -> Result<Resol
 }
 
 fn encode_query_handle_spec(spec: &QueryHandleSpec) -> Result<String> {
-    Ok(URL_SAFE_NO_PAD.encode(
-        serde_json::to_vec(spec).context("serialize query handle")?,
-    ))
+    Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(spec).context("serialize query handle")?))
 }
 
 fn decode_query_handle_spec(raw: &str) -> Result<QueryHandleSpec> {
-    let bytes = URL_SAFE_NO_PAD
-        .decode(raw)
-        .context("decode query handle")?;
+    let bytes = URL_SAFE_NO_PAD.decode(raw).context("decode query handle")?;
     serde_json::from_slice(&bytes).context("parse query handle")
 }
 
@@ -3090,13 +3241,7 @@ fn build_batch_loudness_row(entry: SessionListEntry, target_lufs: f32) -> Result
 fn measure_file_loudness_and_peak(path: &Path) -> (Option<f32>, Option<f32>, Option<String>) {
     let (channels, sample_rate) = match decode_audio_multi(path) {
         Ok(value) => value,
-        Err(err) => {
-            return (
-                None,
-                None,
-                Some(format!("decode failed: {err}")),
-            )
-        }
+        Err(err) => return (None, None, Some(format!("decode failed: {err}"))),
     };
     let peak = channels
         .iter()
@@ -3123,10 +3268,8 @@ fn normalize_markers_for_range(markers: &[MarkerEntry], range: (usize, usize)) -
     markers
         .iter()
         .filter_map(|marker| {
-            (marker.sample >= range.0 && marker.sample <= range.1).then_some(normalize_sample(
-                marker.sample.saturating_sub(range.0),
-                len,
-            ))
+            (marker.sample >= range.0 && marker.sample <= range.1)
+                .then_some(normalize_sample(marker.sample.saturating_sub(range.0), len))
         })
         .collect()
 }
@@ -3271,7 +3414,9 @@ fn write_batch_loudness_report(
                 "# NeoWaves Batch Loudness Plan\n\n"
             });
             text.push_str(&format!("Target LUFS: `{target_lufs:.2}`\n\n"));
-            text.push_str("| File | Measured | Effective | Proposed Gain | Clip Risk | Warning |\n");
+            text.push_str(
+                "| File | Measured | Effective | Proposed Gain | Clip Risk | Warning |\n",
+            );
             text.push_str("| --- | ---: | ---: | ---: | --- | --- |\n");
             for row in rows {
                 text.push_str(&format!(
@@ -3318,7 +3463,10 @@ fn write_batch_export_report(
             text.push_str("# NeoWaves Batch Export Report\n\n");
             text.push_str(&format!("Mutated: {}\n\n", mutated_paths.len()));
             for value in mutated_paths {
-                let src = value.get("source").and_then(Value::as_str).unwrap_or_default();
+                let src = value
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let dst = value
                     .get("destination")
                     .and_then(Value::as_str)
@@ -3334,8 +3482,14 @@ fn write_batch_export_report(
             if !failed_paths.is_empty() {
                 text.push_str("\n## Failed\n");
                 for value in failed_paths {
-                    let src = value.get("path").and_then(Value::as_str).unwrap_or_default();
-                    let err = value.get("error").and_then(Value::as_str).unwrap_or_default();
+                    let src = value
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let err = value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     text.push_str(&format!("- `{src}`: {err}\n"));
                 }
             }
@@ -3347,7 +3501,8 @@ fn write_batch_export_report(
 }
 
 fn effect_graph_library_entries() -> Result<Vec<Value>> {
-    let dir = super::effect_graph_ops::effect_graph_templates_dir_for_cli().map_err(anyhow::Error::msg)?;
+    let dir = super::effect_graph_ops::effect_graph_templates_dir_for_cli()
+        .map_err(anyhow::Error::msg)?;
     let mut out = Vec::new();
     if !dir.exists() {
         return Ok(out);
@@ -3402,7 +3557,8 @@ fn resolve_effect_graph_reference(reference: &str) -> Result<PathBuf> {
     if raw.components().count() > 1 || reference.ends_with(".json") || raw.is_absolute() {
         return absolute_existing_path(raw);
     }
-    let dir = super::effect_graph_ops::effect_graph_templates_dir_for_cli().map_err(anyhow::Error::msg)?;
+    let dir = super::effect_graph_ops::effect_graph_templates_dir_for_cli()
+        .map_err(anyhow::Error::msg)?;
     let direct = dir.join(format!("{}.nwgraph.json", sanitize_cli_token(reference)));
     if direct.exists() {
         return Ok(direct);
@@ -3432,7 +3588,8 @@ fn resolve_effect_graph_reference(reference: &str) -> Result<PathBuf> {
 }
 
 fn default_effect_graph_output_path_for_new(name: &str) -> Result<PathBuf> {
-    let dir = super::effect_graph_ops::effect_graph_templates_dir_for_cli().map_err(anyhow::Error::msg)?;
+    let dir = super::effect_graph_ops::effect_graph_templates_dir_for_cli()
+        .map_err(anyhow::Error::msg)?;
     let token = format!("{}_{}", sanitize_cli_token(name), now_unix_ms_local());
     Ok(dir.join(format!("{token}.nwgraph.json")))
 }
@@ -3548,13 +3705,25 @@ fn unique_effect_graph_edge_id(graph: &EffectGraphDocument, prefix: &str) -> Str
     format!("{base}_{}", now_unix_ms_local())
 }
 
-fn draw_effect_graph_document_image(document: &EffectGraphDocument, width: u32, height: u32) -> RgbaImage {
+fn draw_effect_graph_document_image(
+    document: &EffectGraphDocument,
+    width: u32,
+    height: u32,
+) -> RgbaImage {
     let mut image = ImageBuffer::from_pixel(width, height, Rgba([18, 20, 26, 255]));
     for edge in &document.edges {
-        let Some(from) = document.nodes.iter().find(|node| node.id == edge.from_node_id) else {
+        let Some(from) = document
+            .nodes
+            .iter()
+            .find(|node| node.id == edge.from_node_id)
+        else {
             continue;
         };
-        let Some(to) = document.nodes.iter().find(|node| node.id == edge.to_node_id) else {
+        let Some(to) = document
+            .nodes
+            .iter()
+            .find(|node| node.id == edge.to_node_id)
+        else {
             continue;
         };
         let x0 = (from.ui_pos[0] + from.ui_size[0]).max(0.0) as u32;
@@ -3567,7 +3736,9 @@ fn draw_effect_graph_document_image(document: &EffectGraphDocument, width: u32, 
         let color = match node.data.kind() {
             EffectGraphNodeKind::Input => [82, 178, 255, 255],
             EffectGraphNodeKind::Output => [112, 220, 120, 255],
-            EffectGraphNodeKind::DebugWaveform | EffectGraphNodeKind::DebugSpectrum => [245, 196, 92, 255],
+            EffectGraphNodeKind::DebugWaveform | EffectGraphNodeKind::DebugSpectrum => {
+                [245, 196, 92, 255]
+            }
             EffectGraphNodeKind::PluginFx => [220, 120, 120, 255],
             _ => [76, 88, 110, 255],
         };
@@ -3693,10 +3864,12 @@ fn write_effect_graph_test_report(
     ));
     text.push_str(&format!(
         "Output channels: `{}` at `{}` Hz\n\n",
-        report.output_channel_count,
-        report.output_sample_rate
+        report.output_channel_count, report.output_sample_rate
     ));
-    text.push_str(&format!("Preview: `{}`\n\n", pathbuf_to_string(preview_path)));
+    text.push_str(&format!(
+        "Preview: `{}`\n\n",
+        pathbuf_to_string(preview_path)
+    ));
     text.push_str("## Per-channel Peaks\n");
     for (idx, peak) in report.per_channel_peak_db.iter().enumerate() {
         text.push_str(&format!("- Ch{}: {}\n", idx + 1, opt_f32_md(*peak)));
@@ -3718,9 +3891,7 @@ fn opt_f32_md(value: Option<f32>) -> String {
 }
 
 fn opt_f32_csv(value: Option<f32>) -> String {
-    value
-        .map(|value| format!("{value:.6}"))
-        .unwrap_or_default()
+    value.map(|value| format!("{value:.6}")).unwrap_or_default()
 }
 
 fn parse_list_column_keys(raw: &str) -> Result<Vec<String>> {
@@ -4059,9 +4230,8 @@ fn slice_channels_for_range(channels: &[Vec<f32>], range: (usize, usize)) -> Vec
 
 fn infer_total_frames(info: &AudioInfo) -> Option<usize> {
     info.total_frames.map(|frames| frames as usize).or_else(|| {
-        info.duration_secs.map(|secs| {
-            ((secs.max(0.0) as f64) * info.sample_rate.max(1) as f64).round() as usize
-        })
+        info.duration_secs
+            .map(|secs| ((secs.max(0.0) as f64) * info.sample_rate.max(1) as f64).round() as usize)
     })
 }
 
@@ -4260,10 +4430,12 @@ fn build_editor_render_session(args: &RenderEditorArgs) -> Result<PathBuf> {
         if let Some(mode) = args.view_mode {
             let mode: ViewMode = mode.into();
             session.project.tabs[idx].view_mode = format!("{mode:?}");
-            session.project.tabs[idx].primary_view =
-                Some(project_primary_view_string(EditorPrimaryView::from_mode(mode)));
-            session.project.tabs[idx].spec_sub_view =
-                Some(project_spec_sub_view_string(EditorSpecSubView::from_mode(mode)));
+            session.project.tabs[idx].primary_view = Some(project_primary_view_string(
+                EditorPrimaryView::from_mode(mode),
+            ));
+            session.project.tabs[idx].spec_sub_view = Some(project_spec_sub_view_string(
+                EditorSpecSubView::from_mode(mode),
+            ));
             session.project.tabs[idx].other_sub_view = Some(project_other_sub_view_string(
                 super::types::EditorOtherSubView::from_mode(mode),
             ));
@@ -4300,8 +4472,12 @@ fn build_editor_render_session(args: &RenderEditorArgs) -> Result<PathBuf> {
     if let Some(mode) = args.view_mode {
         let mode: ViewMode = mode.into();
         tab.view_mode = format!("{mode:?}");
-        tab.primary_view = Some(project_primary_view_string(EditorPrimaryView::from_mode(mode)));
-        tab.spec_sub_view = Some(project_spec_sub_view_string(EditorSpecSubView::from_mode(mode)));
+        tab.primary_view = Some(project_primary_view_string(EditorPrimaryView::from_mode(
+            mode,
+        )));
+        tab.spec_sub_view = Some(project_spec_sub_view_string(EditorSpecSubView::from_mode(
+            mode,
+        )));
         tab.other_sub_view = Some(project_other_sub_view_string(
             super::types::EditorOtherSubView::from_mode(mode),
         ));
@@ -4521,7 +4697,10 @@ fn system_time_json(value: Option<SystemTime>) -> Value {
 fn scan_audio_paths(folder: &Path) -> Result<Vec<PathBuf>> {
     let root = absolute_existing_path(folder)?;
     let mut out = Vec::new();
-    for entry in WalkDir::new(&root).into_iter().filter_map(|entry| entry.ok()) {
+    for entry in WalkDir::new(&root)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
         if entry.file_type().is_file() && is_supported_audio_path(entry.path()) {
             out.push(entry.into_path());
         }
@@ -4540,7 +4719,9 @@ fn path_key(path: &Path) -> String {
     };
     #[cfg(windows)]
     {
-        abs.to_string_lossy().replace('/', "\\").to_ascii_lowercase()
+        abs.to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {
@@ -4598,7 +4779,12 @@ fn external_rows(args: ExternalRowsArgs) -> Result<CliCommandOutput> {
     workspace.wait_for_external_loads()?;
     let session = load_session(&args.session)?;
     let headers = workspace.app.external_headers.clone();
-    let unmatched: HashSet<usize> = workspace.app.external_unmatched_rows.iter().copied().collect();
+    let unmatched: HashSet<usize> = workspace
+        .app
+        .external_unmatched_rows
+        .iter()
+        .copied()
+        .collect();
     let merged_rows = slice_rows(
         workspace
             .app
@@ -4748,7 +4934,9 @@ fn external_source_remove(args: ExternalSourceRemoveArgs) -> Result<CliCommandOu
     if workspace.app.external_sources.is_empty() {
         workspace.app.clear_external_data();
     } else {
-        let next_active = args.index.min(workspace.app.external_sources.len().saturating_sub(1));
+        let next_active = args
+            .index
+            .min(workspace.app.external_sources.len().saturating_sub(1));
         workspace.app.external_active_source = Some(next_active);
         workspace.app.rebuild_external_merged();
         workspace.app.sync_active_external_source();
@@ -5002,7 +5190,9 @@ fn transcript_generate(args: TranscriptGenerateArgs) -> Result<CliCommandOutput>
     if args.overwrite_existing {
         workspace.app.transcript_ai_cfg.overwrite_existing_srt = true;
     }
-    workspace.app.run_transcript_ai_for_selected(vec![path.clone()]);
+    workspace
+        .app
+        .run_transcript_ai_for_selected(vec![path.clone()]);
     if workspace.app.transcript_ai_state.is_some() {
         workspace.wait_for_transcript_ai()?;
     } else if let Some(err) = workspace.app.transcript_ai_last_error.clone() {
@@ -5063,7 +5253,8 @@ fn transcript_batch_generate(args: TranscriptBatchGenerateArgs) -> Result<CliCom
     let mut output_srt_paths = Vec::new();
     for path in paths {
         let Some(srt_path) = super::transcript::srt_path_for_audio(&path) else {
-            failed_paths.push(json!({"path": pathbuf_to_string(&path), "error": "not an audio path"}));
+            failed_paths
+                .push(json!({"path": pathbuf_to_string(&path), "error": "not an audio path"}));
             continue;
         };
         if srt_path.is_file() {
@@ -5074,7 +5265,8 @@ fn transcript_batch_generate(args: TranscriptBatchGenerateArgs) -> Result<CliCom
                 completed_paths.push(pathbuf_to_string(&path));
             }
         } else {
-            failed_paths.push(json!({"path": pathbuf_to_string(&path), "error": "SRT was not produced"}));
+            failed_paths
+                .push(json!({"path": pathbuf_to_string(&path), "error": "SRT was not produced"}));
         }
     }
     Ok(CliCommandOutput {
@@ -5117,7 +5309,11 @@ fn music_ai_inspect(args: MusicAiInspectArgs) -> Result<CliCommandOutput> {
             .context("music-ai inspect requires --session")?,
     )?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.source.path.as_deref())?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     Ok(CliCommandOutput {
         result: json!({
             "path": pathbuf_to_string(&tab.path),
@@ -5166,7 +5362,11 @@ fn music_ai_analyze(args: MusicAiAnalyzeArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
     let before = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         music_analysis_json(&tab.music_analysis_draft)
     };
     let prefer_demucs_override = if args.prefer_demucs && args.stems_dir.is_none() {
@@ -5201,7 +5401,11 @@ fn music_ai_analyze(args: MusicAiAnalyzeArgs) -> Result<CliCommandOutput> {
         }
     }
     let after = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         if let Some(err) = tab.music_analysis_draft.last_error.clone() {
             if tab.music_analysis_draft.result.is_none() {
                 bail!(err);
@@ -5235,7 +5439,11 @@ fn music_ai_apply_markers(args: MusicAiApplyMarkersArgs) -> Result<CliCommandOut
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
     let before = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         json!({
             "markers": tab.markers.iter().map(marker_json).collect::<Vec<_>>(),
             "analysis": music_analysis_json(&tab.music_analysis_draft),
@@ -5249,7 +5457,9 @@ fn music_ai_apply_markers(args: MusicAiApplyMarkersArgs) -> Result<CliCommandOut
             tab.music_analysis_draft.show_section = args.sections;
         }
     }
-    workspace.app.rebuild_music_provisional_markers_for_tab(tab_idx);
+    workspace
+        .app
+        .rebuild_music_provisional_markers_for_tab(tab_idx);
     if args.replace {
         if let Some(tab) = workspace.app.tabs.get_mut(tab_idx) {
             tab.markers.clear();
@@ -5259,7 +5469,11 @@ fn music_ai_apply_markers(args: MusicAiApplyMarkersArgs) -> Result<CliCommandOut
     }
     workspace.app.apply_music_analysis_markers_to_tab(tab_idx);
     workspace.save()?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     Ok(CliCommandOutput {
         result: json!({
             "before": before,
@@ -5277,7 +5491,11 @@ fn music_ai_apply_markers(args: MusicAiApplyMarkersArgs) -> Result<CliCommandOut
 fn music_ai_export_stems(args: MusicAiExportStemsArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     let stem_paths = super::music_onnx::resolve_stem_paths(
         tab.path.as_path(),
         tab.music_analysis_draft.stems_dir_override.as_deref(),
@@ -5347,7 +5565,11 @@ fn resolve_transcript_target_and_language(
                     .tabs
                     .get(idx)
                     .map(|tab| project::resolve_path(&tab.path, &session.base_dir))
-                    .or_else(|| session_list_entries(&session).first().map(|entry| entry.path.clone()))
+                    .or_else(|| {
+                        session_list_entries(&session)
+                            .first()
+                            .map(|entry| entry.path.clone())
+                    })
                     .context("session does not contain any target audio")?
             } else if let Some(tab) = session.project.tabs.first() {
                 project::resolve_path(&tab.path, &session.base_dir)
@@ -5507,9 +5729,7 @@ fn transcript_perf_mode_string(mode: super::types::TranscriptPerfMode) -> &'stat
     }
 }
 
-fn transcript_model_variant_string(
-    variant: super::types::TranscriptModelVariant,
-) -> &'static str {
+fn transcript_model_variant_string(variant: super::types::TranscriptModelVariant) -> &'static str {
     match variant {
         super::types::TranscriptModelVariant::Auto => "auto",
         super::types::TranscriptModelVariant::Fp16 => "fp16",
@@ -5517,9 +5737,7 @@ fn transcript_model_variant_string(
     }
 }
 
-fn transcript_compute_target_string(
-    target: super::types::TranscriptComputeTarget,
-) -> &'static str {
+fn transcript_compute_target_string(target: super::types::TranscriptComputeTarget) -> &'static str {
     match target {
         super::types::TranscriptComputeTarget::Auto => "auto",
         super::types::TranscriptComputeTarget::Cpu => "cpu",
@@ -5674,9 +5892,21 @@ fn write_music_analysis_report(path: &Path, after: &Value) -> Result<()> {
             ));
             text.push_str(&format!(
                 "Beats: {}\nDownbeats: {}\nSections: {}\n",
-                after.get("beats").and_then(Value::as_array).map(|v| v.len()).unwrap_or(0),
-                after.get("downbeats").and_then(Value::as_array).map(|v| v.len()).unwrap_or(0),
-                after.get("sections").and_then(Value::as_array).map(|v| v.len()).unwrap_or(0),
+                after
+                    .get("beats")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len())
+                    .unwrap_or(0),
+                after
+                    .get("downbeats")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len())
+                    .unwrap_or(0),
+                after
+                    .get("sections")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len())
+                    .unwrap_or(0),
             ));
             std::fs::write(path, text)
                 .with_context(|| format!("write report: {}", path.display()))?;
@@ -5693,9 +5923,21 @@ fn write_music_analysis_report(path: &Path, after: &Value) -> Result<()> {
             ));
             text.push_str(&format!(
                 "- Beats: `{}`\n- Downbeats: `{}`\n- Sections: `{}`\n",
-                after.get("beats").and_then(Value::as_array).map(|v| v.len()).unwrap_or(0),
-                after.get("downbeats").and_then(Value::as_array).map(|v| v.len()).unwrap_or(0),
-                after.get("sections").and_then(Value::as_array).map(|v| v.len()).unwrap_or(0),
+                after
+                    .get("beats")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len())
+                    .unwrap_or(0),
+                after
+                    .get("downbeats")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len())
+                    .unwrap_or(0),
+                after
+                    .get("sections")
+                    .and_then(Value::as_array)
+                    .map(|v| v.len())
+                    .unwrap_or(0),
             ));
             std::fs::write(path, text)
                 .with_context(|| format!("write report: {}", path.display()))?;
@@ -5782,7 +6024,13 @@ fn draw_external_rows_image(
             } else {
                 [44, 48, 56, 200]
             };
-            draw_rect(x + 3, y + 4, col_w.saturating_sub(8), row_h.saturating_sub(10), cell_color);
+            draw_rect(
+                x + 3,
+                y + 4,
+                col_w.saturating_sub(8),
+                row_h.saturating_sub(10),
+                cell_color,
+            );
         }
     }
     image
@@ -6069,7 +6317,11 @@ fn plugin_scan(_: PluginScanArgs) -> Result<CliCommandOutput> {
     let mut app = WavesPreviewer::new_headless(super::StartupConfig::default())?;
     app.spawn_plugin_scan();
     wait_for_plugin_scan_app(&mut app)?;
-    let warnings = app.plugin_scan_error.clone().into_iter().collect::<Vec<_>>();
+    let warnings = app
+        .plugin_scan_error
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
     Ok(CliCommandOutput {
         result: json!({
             "search_paths": app.plugin_search_paths.iter().map(|path| pathbuf_to_string(path)).collect::<Vec<_>>(),
@@ -6084,7 +6336,10 @@ fn plugin_list(args: PluginListArgs) -> Result<CliCommandOutput> {
     let mut app = WavesPreviewer::new_headless(super::StartupConfig::default())?;
     app.spawn_plugin_scan();
     wait_for_plugin_scan_app(&mut app)?;
-    let filter = args.filter.as_deref().map(|value| value.to_ascii_lowercase());
+    let filter = args
+        .filter
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase());
     let plugins = app
         .plugin_catalog
         .iter()
@@ -6092,12 +6347,20 @@ fn plugin_list(args: PluginListArgs) -> Result<CliCommandOutput> {
             filter.as_ref().map_or(true, |needle| {
                 entry.key.to_ascii_lowercase().contains(needle)
                     || entry.name.to_ascii_lowercase().contains(needle)
-                    || entry.path.to_string_lossy().to_ascii_lowercase().contains(needle)
+                    || entry
+                        .path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains(needle)
             })
         })
         .map(plugin_catalog_entry_json)
         .collect::<Vec<_>>();
-    let warnings = app.plugin_scan_error.clone().into_iter().collect::<Vec<_>>();
+    let warnings = app
+        .plugin_scan_error
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
     Ok(CliCommandOutput {
         result: json!({
             "plugins": plugins,
@@ -6142,7 +6405,11 @@ fn plugin_probe(args: PluginProbeArgs) -> Result<CliCommandOutput> {
 fn plugin_session_inspect(args: PluginSessionInspectArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     Ok(CliCommandOutput {
         result: json!({
             "path": pathbuf_to_string(&tab.path),
@@ -6156,7 +6423,11 @@ fn plugin_session_set(args: PluginSessionSetArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
     let before = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         plugin_draft_json(&tab.plugin_fx_draft)
     };
     if let Some(plugin) = args.plugin.as_deref() {
@@ -6204,7 +6475,11 @@ fn plugin_session_set(args: PluginSessionSetArgs) -> Result<CliCommandOutput> {
         }
     }
     workspace.save()?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     Ok(CliCommandOutput {
         result: json!({
             "before": before,
@@ -6219,7 +6494,11 @@ fn plugin_session_preview(args: PluginSessionPreviewArgs) -> Result<CliCommandOu
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
     let before = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         plugin_draft_json(&tab.plugin_fx_draft)
     };
     if workspace.app.plugin_catalog.is_empty() {
@@ -6229,7 +6508,11 @@ fn plugin_session_preview(args: PluginSessionPreviewArgs) -> Result<CliCommandOu
     workspace.app.spawn_plugin_preview_for_tab(tab_idx);
     workspace.wait_for_plugin_process()?;
     workspace.save()?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     if let Some(err) = tab.plugin_fx_draft.last_error.clone() {
         if tab.preview_overlay.is_none() {
             bail!(err);
@@ -6251,7 +6534,11 @@ fn plugin_session_apply(args: PluginSessionApplyArgs) -> Result<CliCommandOutput
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
     let before = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         json!({
             "draft": plugin_draft_json(&tab.plugin_fx_draft),
             "dirty": tab.dirty,
@@ -6266,7 +6553,11 @@ fn plugin_session_apply(args: PluginSessionApplyArgs) -> Result<CliCommandOutput
     workspace.app.spawn_plugin_apply_for_tab(tab_idx);
     workspace.wait_for_plugin_process()?;
     workspace.save()?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     if let Some(err) = tab.plugin_fx_draft.last_error.clone() {
         bail!(err);
     }
@@ -6289,7 +6580,11 @@ fn plugin_session_clear(args: PluginSessionClearArgs) -> Result<CliCommandOutput
     let mut workspace = CliWorkspace::load(&args.session)?;
     let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
     let before = {
-        let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+        let tab = workspace
+            .app
+            .tabs
+            .get(tab_idx)
+            .context("missing target tab")?;
         plugin_draft_json(&tab.plugin_fx_draft)
     };
     let tab = workspace
@@ -6301,7 +6596,11 @@ fn plugin_session_clear(args: PluginSessionClearArgs) -> Result<CliCommandOutput
     tab.preview_audio_tool = None;
     tab.preview_overlay = None;
     workspace.save()?;
-    let tab = workspace.app.tabs.get(tab_idx).context("missing target tab")?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
     Ok(CliCommandOutput {
         result: json!({
             "before": before,

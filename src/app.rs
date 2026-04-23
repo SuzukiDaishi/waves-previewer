@@ -20,9 +20,9 @@ type HeavyOverlayMessage = (
 mod app_init;
 mod audio_ops;
 mod capture;
-mod clipboard_ops;
-mod cli_workspace;
 mod cli_ops;
+mod cli_workspace;
+mod clipboard_ops;
 mod debug_ops;
 mod dialogs;
 mod editor_decode_ops;
@@ -80,6 +80,7 @@ mod types;
 mod ui;
 mod zoo_assets;
 mod zoo_ops;
+pub use self::cli_ops::run_cli;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
 use self::render::waveform_pyramid::WaveformScratch;
@@ -88,10 +89,9 @@ use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
     ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
-    StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant,
-    TranscriptPerfMode, ViewMode, WorkspaceView,
+    StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
+    ViewMode, WorkspaceView,
 };
-pub use self::cli_ops::run_cli;
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
 const UNDO_STACK_LIMIT: usize = 20;
@@ -561,6 +561,8 @@ pub struct WavesPreviewer {
     zoo_voice_audio: Option<AudioEngine>,
     // background heavy apply for editor (pitch/stretch)
     editor_apply_state: Option<EditorApplyState>,
+    // background virtual trim creation for editor/list virtual items
+    virtual_trim_state: Option<VirtualTrimState>,
     // background decode for editor (prefix + full)
     editor_decode_state: Option<EditorDecodeState>,
     editor_decode_job_id: u64,
@@ -1054,6 +1056,15 @@ impl WavesPreviewer {
     }
 
     fn close_tab_at(&mut self, idx: usize, ctx: &egui::Context) {
+        if let (Some(state), Some(tab)) = (self.virtual_trim_state.as_ref(), self.tabs.get(idx)) {
+            if tab.path == state.source_path {
+                self.debug_log(format!(
+                    "tab close ignored while virtual trim is running: {}",
+                    tab.path.display()
+                ));
+                return;
+            }
+        }
         self.close_plugin_gui_for_tab(idx);
         let mut closing_path: Option<PathBuf> = None;
         if let Some(path) = self.tabs.get(idx).map(|t| t.path.clone()) {
@@ -1427,6 +1438,21 @@ impl WavesPreviewer {
         bits_per_sample: u16,
         virtual_state: Option<VirtualState>,
     ) -> MediaItem {
+        let meta = Some(Self::build_meta_from_audio(
+            &audio.channels,
+            sample_rate,
+            bits_per_sample,
+        ));
+        self.make_virtual_item_with_meta(display_name, audio, meta, virtual_state)
+    }
+
+    fn make_virtual_item_with_meta(
+        &mut self,
+        display_name: String,
+        audio: std::sync::Arc<crate::audio::AudioBuffer>,
+        meta: Option<FileMeta>,
+        virtual_state: Option<VirtualState>,
+    ) -> MediaItem {
         let id = self.next_media_id;
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let safe = crate::app::helpers::sanitize_filename_component(&display_name);
@@ -1437,11 +1463,7 @@ impl WavesPreviewer {
             display_name,
             display_folder: "(virtual)".to_string(),
             source: MediaSource::Virtual,
-            meta: Some(Self::build_meta_from_audio(
-                &audio.channels,
-                sample_rate,
-                bits_per_sample,
-            )),
+            meta,
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,

@@ -25,11 +25,7 @@ impl super::WavesPreviewer {
             .find(|path| self.is_open_target_audio_path(path))
     }
 
-    pub(super) fn select_open_target_path(
-        &mut self,
-        paths: &[PathBuf],
-        auto_scroll: bool,
-    ) -> bool {
+    pub(super) fn select_open_target_path(&mut self, paths: &[PathBuf], auto_scroll: bool) -> bool {
         let Some(target_path) = self.resolve_last_open_target_path(paths).cloned() else {
             return false;
         };

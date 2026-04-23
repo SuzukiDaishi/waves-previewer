@@ -1,4 +1,4 @@
-use super::types::{LoopMode, UndoScope, ViewMode};
+use super::types::{LoopMode, ToolKind, UndoScope, ViewMode};
 
 impl super::WavesPreviewer {
     pub(super) fn list_focus_id() -> egui::Id {
@@ -275,6 +275,9 @@ impl super::WavesPreviewer {
                         self.editor_apply_trim_range(tab_idx, (s, e));
                     }
                 }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::V)) {
+                    self.try_add_trim_range_as_virtual_shortcut(tab_idx);
+                }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num0)) {
                     self.seek_to_fraction_in_active_tab(1, 1);
                 }
@@ -330,6 +333,31 @@ impl super::WavesPreviewer {
 
     fn has_selected_range(&self, tab_idx: usize) -> bool {
         self.selected_range(tab_idx).is_some()
+    }
+
+    fn try_add_trim_range_as_virtual_shortcut(&mut self, tab_idx: usize) -> bool {
+        if !self.is_editor_workspace_active() {
+            return false;
+        }
+        let selected_range = self.selected_range(tab_idx);
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let range = if let Some(range) = selected_range {
+            Some(range)
+        } else if tab.active_tool == ToolKind::Trim {
+            tab.trim_range
+        } else {
+            None
+        };
+        let Some((a, b)) = range else {
+            return false;
+        };
+        let (s, e) = if a <= b { (a, b) } else { (b, a) };
+        if e <= s {
+            return false;
+        }
+        self.begin_trim_virtual_job(tab_idx, (s, e))
     }
 
     fn add_applied_marker_at_playhead(&mut self, tab_idx: usize) {

@@ -1,10 +1,11 @@
 ﻿[package]
 name = "neowaves"
-version = "0.20260415.1"
+version = "0.20260421.0"
 edition = "2021"
 default-run = "neowaves"
 build = "build.rs"
 description = "NeoWaves Audio List Editor"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.101"

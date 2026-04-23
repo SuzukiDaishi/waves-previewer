@@ -259,6 +259,24 @@ impl crate::app::WavesPreviewer {
         tab.view_offset = clamped.round() as usize;
     }
 
+    fn editor_fit_samples_per_px(display_samples_len: usize, wave_w: f32) -> f32 {
+        (display_samples_len as f32 / wave_w.max(1.0)).max(crate::app::EDITOR_MIN_SAMPLES_PER_PX)
+    }
+
+    fn editor_is_whole_file_fit(tab: &EditorTab, display_samples_len: usize, wave_w: f32) -> bool {
+        if display_samples_len == 0 || wave_w <= 0.0 || tab.samples_per_px <= 0.0 {
+            return false;
+        }
+        if tab.view_offset > 1 || tab.view_offset_exact.abs() > 0.5 {
+            return false;
+        }
+        let fit_spp = Self::editor_fit_samples_per_px(display_samples_len, wave_w);
+        let visible_samples = tab.samples_per_px.max(0.0001) * wave_w.max(1.0);
+        let covers_whole = visible_samples + 1.0 >= display_samples_len as f32;
+        let close_to_fit = (tab.samples_per_px - fit_spp).abs() <= fit_spp.max(1.0) * 0.005;
+        covers_whole || close_to_fit
+    }
+
     fn editor_selection_anchor_or(tab: &EditorTab, fallback: usize) -> usize {
         tab.selection_anchor_sample
             .or_else(|| tab.selection.map(|(a, b)| a.min(b)))
@@ -1994,9 +2012,12 @@ impl crate::app::WavesPreviewer {
             .as_ref()
             .map(|s| s.tab_idx == tab_idx && s.is_apply)
             .unwrap_or(false);
+        let virtual_trim_status = self.virtual_trim_status_for_tab(tab_idx);
+        let virtual_trim_busy = virtual_trim_status.is_some();
         let overlay_busy =
             self.current_tab_preview_busy(tab_idx) || self.music_preview_state.is_some();
-        let apply_busy = self.editor_apply_state.is_some() || plugin_apply_busy;
+        let apply_busy =
+            self.editor_apply_state.is_some() || plugin_apply_busy || virtual_trim_busy;
         let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
         let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32)> = None;
         let music_model_ready = self.music_ai_has_model();
@@ -2026,7 +2047,9 @@ impl crate::app::WavesPreviewer {
             .get(tab_idx)
             .map(|tab| self.pending_gain_db_for_path(&tab.path))
             .unwrap_or(0.0);
-        let apply_msg = if let Some(state) = self.editor_apply_state.as_ref() {
+        let apply_msg = if let Some((msg, progress)) = virtual_trim_status.as_ref() {
+            Some(format!("{msg} {:.0}%", progress * 100.0))
+        } else if let Some(state) = self.editor_apply_state.as_ref() {
             Some(state.msg.clone())
         } else if plugin_apply_busy {
             Some("Applying Plugin FX...".to_string())
@@ -2205,46 +2228,65 @@ impl crate::app::WavesPreviewer {
                         tab.samples_len
                     };
                     if display_samples_len > 0 && tab.samples_per_px <= 0.0 {
-                        let fit_spp = (display_samples_len as f32 / wave_w.max(1.0))
-                            .max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
+                        let fit_spp = Self::editor_fit_samples_per_px(display_samples_len, wave_w);
                         tab.samples_per_px = fit_spp;
                         Self::editor_set_view_offset(tab, 0);
+                        Self::invalidate_editor_viewport_cache(tab);
+                        ctx.request_repaint();
                     }
                     // Keep the same center sample anchored when the window width changes.
                     if display_samples_len > 0 {
                         let spp = tab.samples_per_px.max(0.0001);
                         let old_wave_w = tab.last_wave_w;
                         if old_wave_w > 0.0 && (old_wave_w - wave_w).abs() > 0.5 {
-                            let old_geom = EditorDisplayGeometry::new(
-                                wave_left,
-                                old_wave_w,
-                                spp,
-                                tab.view_offset,
-                                tab.view_offset_exact,
-                                display_samples_len,
-                            );
-                            let new_geom = EditorDisplayGeometry::new(
-                                wave_left,
-                                wave_w,
-                                spp,
-                                tab.view_offset,
-                                tab.view_offset_exact,
-                                display_samples_len,
-                            );
-                            let old_vis = old_geom.visible_count;
-                            let new_vis = new_geom.visible_count;
-                            if old_vis > 0 && new_vis > 0 {
-                                let anchor = old_geom
-                                    .x_to_display_sample(wave_left + old_wave_w * 0.5)
-                                    .min(display_samples_len.saturating_sub(1));
-                                let next_exact = Self::editor_exact_view_for_anchor(
-                                    anchor,
-                                    0.5,
+                            if Self::editor_is_whole_file_fit(tab, display_samples_len, old_wave_w)
+                            {
+                                tab.samples_per_px =
+                                    Self::editor_fit_samples_per_px(display_samples_len, wave_w);
+                                Self::editor_set_view_offset(tab, 0);
+                                Self::invalidate_editor_viewport_cache(tab);
+                                ctx.request_repaint();
+                            } else {
+                                let old_geom = EditorDisplayGeometry::new(
+                                    wave_left,
+                                    old_wave_w,
+                                    spp,
+                                    tab.view_offset,
+                                    tab.view_offset_exact,
+                                    display_samples_len,
+                                );
+                                let new_geom = EditorDisplayGeometry::new(
+                                    wave_left,
                                     wave_w,
                                     spp,
+                                    tab.view_offset,
+                                    tab.view_offset_exact,
+                                    display_samples_len,
                                 );
-                                Self::editor_set_view_offset_exact(tab, next_exact, new_geom.max_left());
+                                let old_vis = old_geom.visible_count;
+                                let new_vis = new_geom.visible_count;
+                                if old_vis > 0 && new_vis > 0 {
+                                    let anchor = old_geom
+                                        .x_to_display_sample(wave_left + old_wave_w * 0.5)
+                                        .min(display_samples_len.saturating_sub(1));
+                                    let next_exact = Self::editor_exact_view_for_anchor(
+                                        anchor,
+                                        0.5,
+                                        wave_w,
+                                        spp,
+                                    );
+                                    Self::editor_set_view_offset_exact(
+                                        tab,
+                                        next_exact,
+                                        new_geom.max_left(),
+                                    );
+                                    Self::invalidate_editor_viewport_cache(tab);
+                                    ctx.request_repaint();
+                                }
                             }
+                        } else if old_wave_w <= 0.0 {
+                            Self::invalidate_editor_viewport_cache(tab);
+                            ctx.request_repaint();
                         }
                         tab.last_wave_w = wave_w;
                     } else {
@@ -2925,6 +2967,9 @@ impl crate::app::WavesPreviewer {
                 let scroll_y = wheel.y;
                 let pointer_x = resp.hover_pos().map(|p| p.x).filter(|_| pointer_over_waveform);
                 let wheel_has_scroll = wheel.x.abs() > 0.0 || scroll_y.abs() > 0.0;
+                let horizontal_wheel_pan = !modifiers.shift
+                    && wheel.x.abs() > 0.0
+                    && wheel.x.abs() >= scroll_y.abs();
                 let zoom_factor_from_input = if !wheel_has_scroll
                     && zoom_delta.is_finite()
                     && (zoom_delta - 1.0).abs() > 0.10
@@ -2954,7 +2999,7 @@ impl crate::app::WavesPreviewer {
                     );
                 }
                 // Zoom: plain wheel (unless Shift is held for pan) or gesture zoom.
-                if (((scroll_y.abs() > 0.0) && !modifiers.shift)
+                if (((scroll_y.abs() > 0.0) && !modifiers.shift && !horizontal_wheel_pan)
                     || zoom_factor_from_input.is_some())
                     && display_samples_len > 0
                 {
@@ -3009,7 +3054,15 @@ impl crate::app::WavesPreviewer {
                     }
                     Self::editor_set_view_offset_exact(tab, next_exact, geom2.max_left());
                 }
-                // Pan with Shift + wheel (prefer horizontal wheel if available)
+                // Pan with trackpad horizontal wheel, or Shift + wheel for mouse wheels.
+                if horizontal_wheel_pan && display_samples_len > 0 {
+                    let vis = (wave_w * tab.samples_per_px).ceil() as usize;
+                    let max_left = display_samples_len.saturating_sub(vis);
+                    let next_exact =
+                        tab.view_offset_exact + (wheel.x * tab.samples_per_px) as f64;
+                    Self::editor_set_view_offset_exact(tab, next_exact, max_left);
+                    ctx.request_repaint();
+                }
                 let mut scroll_for_pan = if wheel.x.abs() > 0.0 { wheel.x } else { wheel.y };
                 if self.invert_shift_wheel_pan {
                     scroll_for_pan = -scroll_for_pan;
@@ -3020,6 +3073,7 @@ impl crate::app::WavesPreviewer {
                     let max_left = display_samples_len.saturating_sub(vis);
                     let next_exact = tab.view_offset_exact + (delta_px * tab.samples_per_px) as f64;
                     Self::editor_set_view_offset_exact(tab, next_exact, max_left);
+                    ctx.request_repaint();
                 }
                 // Pan with Middle drag or Alt + Left drag (DAW-like).
                 let (left_down, mid_down, alt_mod) = ui.input(|i| (
@@ -3041,6 +3095,16 @@ impl crate::app::WavesPreviewer {
             // Drag markers for LoopEdit (primary button only)
             let mut suppress_seek = false;
             let alt_now = ui.input(|i| i.modifiers.alt);
+            let selection_snap_playhead_display = playhead_display_now.min(display_samples_len);
+            let selection_snap_playhead_x = geom.sample_center_x(selection_snap_playhead_display);
+            let selection_snap_radius_px = 8.0f32;
+            let to_range_selection_display_sample = |x: f32| -> usize {
+                let x = x.clamp(wave_left, wave_left + wave_w);
+                if (x - selection_snap_playhead_x).abs() <= selection_snap_radius_px {
+                    return selection_snap_playhead_display;
+                }
+                geom.x_to_display_sample(x)
+            };
             // Right drag is dedicated to seek/playhead movement.
             // Shift+Right drag switches to range selection with button-down anchor.
             if pointer_over_waveform
@@ -3064,11 +3128,11 @@ impl crate::app::WavesPreviewer {
                         RightDragMode::Seek
                     });
                     if shift_now {
-                        if let Some(pos) = resp
-                            .interact_pointer_pos()
+                        if let Some(pos) = ui.input(|i| i.pointer.press_origin())
+                            .or_else(|| resp.interact_pointer_pos())
                             .or_else(|| ui.input(|i| i.pointer.hover_pos()))
                         {
-                            let samp = to_display_sample(pos.x);
+                            let samp = to_range_selection_display_sample(pos.x);
                             Self::editor_set_selection_from_anchor(tab, samp, samp);
                             suppress_seek = true;
                         }
@@ -3076,20 +3140,21 @@ impl crate::app::WavesPreviewer {
                 }
                 if right_dragging {
                     if let Some(pos) = resp.interact_pointer_pos() {
-                        let samp = to_display_sample(pos.x);
                         match tab.right_drag_mode.unwrap_or(if shift_now {
                             RightDragMode::SelectRange
                         } else {
                             RightDragMode::Seek
                         }) {
                             RightDragMode::Seek => {
+                                let samp = to_display_sample(pos.x);
                                 request_seek = Some(map_display_to_audio(tab, samp));
                                 suppress_seek = true;
                             }
                             RightDragMode::SelectRange => {
+                                let samp = to_range_selection_display_sample(pos.x);
                                 let anchor = Self::editor_selection_anchor_or(
                                     tab,
-                                    playhead_display_now.min(display_samples_len),
+                                    selection_snap_playhead_display,
                                 );
                                 Self::editor_set_selection_from_anchor(tab, anchor, samp);
                                 suppress_seek = true;
@@ -3175,32 +3240,30 @@ impl crate::app::WavesPreviewer {
                 let drag_started = resp.drag_started_by(egui::PointerButton::Primary);
                 let dragging = resp.dragged_by(egui::PointerButton::Primary);
                 let drag_released = resp.drag_stopped_by(egui::PointerButton::Primary);
-                let playhead_display = playhead_display_now.min(display_samples_len);
-                let playhead_x = geom.sample_center_x(playhead_display);
-                let snap_radius_px = 8.0f32;
-                let to_display_sample_snapped = |x: f32| -> usize {
-                    let x = x.clamp(wave_left, wave_left + wave_w);
-                    if (x - playhead_x).abs() <= snap_radius_px {
-                        return playhead_display;
-                    }
-                    geom.x_to_display_sample(x)
-                };
                 if drag_started {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        let samp = to_display_sample_snapped(pos.x);
+                    if let Some(pos) = ui.input(|i| i.pointer.press_origin())
+                        .or_else(|| resp.interact_pointer_pos())
+                    {
+                        let samp = to_range_selection_display_sample(pos.x);
                         tab.selection_anchor_sample = Some(samp);
                     }
                 }
                 if dragging {
-                    let anchor = tab.selection_anchor_sample.or_else(|| {
-                        resp.interact_pointer_pos()
-                            .map(|pos| to_display_sample_snapped(pos.x))
-                    });
+                    let anchor = tab
+                        .selection_anchor_sample
+                        .or_else(|| {
+                            ui.input(|i| i.pointer.press_origin())
+                                .map(|pos| to_range_selection_display_sample(pos.x))
+                        })
+                        .or_else(|| {
+                            resp.interact_pointer_pos()
+                                .map(|pos| to_range_selection_display_sample(pos.x))
+                        });
                     if tab.selection_anchor_sample.is_none() {
                         tab.selection_anchor_sample = anchor;
                     }
                     if let (Some(anchor), Some(pos)) = (anchor, resp.interact_pointer_pos()) {
-                        let samp = to_display_sample_snapped(pos.x);
+                        let samp = to_range_selection_display_sample(pos.x);
                         Self::editor_set_selection_from_anchor(tab, anchor, samp);
                         suppress_seek = true;
                     }
@@ -3212,19 +3275,13 @@ impl crate::app::WavesPreviewer {
                 if resp.clicked_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let x = pos.x.clamp(wave_left, wave_left + wave_w);
-                        let spp = tab.samples_per_px.max(0.0001);
-                        let vis = (wave_w * spp).ceil() as usize;
-                        let pos_samp = tab
-                            .view_offset
-                            .saturating_add(
-                                (((x - wave_left) / wave_w) * vis as f32) as usize,
-                            )
-                            .min(display_samples_len);
+                        let pos_samp = geom.x_to_display_sample(x);
                         let shift_now = ui.input(|i| i.modifiers.shift);
                         if shift_now {
                             let anchor =
-                                Self::editor_selection_anchor_or(tab, playhead_display_now);
-                            Self::editor_set_selection_from_anchor(tab, anchor, pos_samp);
+                                Self::editor_selection_anchor_or(tab, selection_snap_playhead_display);
+                            let snapped_samp = to_range_selection_display_sample(x);
+                            Self::editor_set_selection_from_anchor(tab, anchor, snapped_samp);
                         } else {
                             if tab.selection.is_some() {
                                 tab.selection = None;
@@ -4406,10 +4463,10 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
-            if tab_samples_len > 0 {
+            if display_samples_len > 0 {
                 let spp = tab.samples_per_px.max(0.0001);
                 let vis = (wave_w * spp).ceil() as usize;
-                let max_left = tab_samples_len.saturating_sub(vis);
+                let max_left = display_samples_len.saturating_sub(vis);
                 if tab.view_offset > max_left {
                     Self::editor_set_view_offset(tab, max_left);
                 }
@@ -4421,7 +4478,7 @@ impl crate::app::WavesPreviewer {
                 if let Some(next_view) = Self::draw_editor_time_navigator(
                     ui,
                     overview,
-                    tab_samples_len,
+                    display_samples_len,
                     sr_ctx.max(1.0) as u32,
                     tab.view_offset,
                     vis,
@@ -5246,7 +5303,8 @@ impl crate::app::WavesPreviewer {
                                                 tab.preview_audio_tool = None;
                                             }
                                             if ui
-                                                .add_enabled(!dis, egui::Button::new("Add Trim As Virtual"))
+                                                .add_enabled(!dis && !apply_busy, egui::Button::new("Add Trim As Virtual"))
+                                                .on_hover_text("Add the trim range as a virtual item (V)")
                                                 .clicked()
                                             {
                                                 do_trim_virtual = Some(range);
@@ -6826,6 +6884,7 @@ impl crate::app::WavesPreviewer {
 
         if cancel_apply {
             self.cancel_editor_apply();
+            self.cancel_virtual_trim_job();
             self.cancel_plugin_process();
         }
         if cancel_decode {
@@ -6909,7 +6968,7 @@ impl crate::app::WavesPreviewer {
             self.editor_apply_trim_range(tab_idx, (s, e));
         }
         if let Some((s, e)) = do_trim_virtual {
-            self.add_trim_range_as_virtual(tab_idx, (s, e));
+            self.begin_trim_virtual_job(tab_idx, (s, e));
         }
         if let Some((s, e)) = do_mute {
             self.editor_apply_mute_range(tab_idx, (s, e));

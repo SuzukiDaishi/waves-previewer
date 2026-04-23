@@ -127,11 +127,15 @@ impl WavesPreviewer {
 }
 
 fn decode_zoo_frames(path: &Path) -> anyhow::Result<Vec<ZooFrameImage>> {
-    let bytes = std::fs::read(path).with_context(|| format!("open image failed: {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("open image failed: {}", path.display()))?;
     decode_zoo_frames_from_bytes(&bytes, &path.display().to_string())
 }
 
-fn decode_zoo_frames_from_bytes(bytes: &[u8], source_label: &str) -> anyhow::Result<Vec<ZooFrameImage>> {
+fn decode_zoo_frames_from_bytes(
+    bytes: &[u8],
+    source_label: &str,
+) -> anyhow::Result<Vec<ZooFrameImage>> {
     let ext = source_label
         .rsplit('.')
         .next()

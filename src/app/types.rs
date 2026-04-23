@@ -1245,6 +1245,43 @@ pub struct EditorApplyResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VirtualTrimPhase {
+    Copying,
+    Processing,
+}
+
+pub struct VirtualTrimState {
+    pub source_path: PathBuf,
+    pub source_name: String,
+    pub range: (usize, usize),
+    pub copied_frames: usize,
+    pub total_frames: usize,
+    pub channels: Vec<Vec<f32>>,
+    pub out_sr: u32,
+    pub source_sr: u32,
+    pub bits_per_sample: u16,
+    pub source_start: usize,
+    pub source_end: usize,
+    pub source_ref: VirtualSourceRef,
+    pub insert_idx: Option<usize>,
+    pub phase: VirtualTrimPhase,
+    pub rx: Option<std::sync::mpsc::Receiver<VirtualTrimResult>>,
+    pub started_at: Instant,
+}
+
+pub struct VirtualTrimResult {
+    pub source_path: PathBuf,
+    pub source_name: String,
+    pub audio: Arc<AudioBuffer>,
+    pub meta: FileMeta,
+    pub source_sr: u32,
+    pub bits_per_sample: u16,
+    pub source_start: usize,
+    pub source_end: usize,
+    pub source_ref: VirtualSourceRef,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorDecodeStage {
     Preview,
     StreamingFull,

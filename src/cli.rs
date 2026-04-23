@@ -486,7 +486,10 @@ pub struct CliQueryFilterArgs {
 pub struct ListQueryArgs {
     #[command(flatten)]
     pub source: ListSourceArgs,
-    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    #[arg(
+        long,
+        default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave"
+    )]
     pub columns: String,
     #[command(flatten)]
     pub filter: CliQueryFilterArgs,
@@ -506,7 +509,10 @@ pub struct ListSortArgs {
     pub sort_key: String,
     #[arg(long = "sort-dir", default_value = "asc")]
     pub sort_dir: String,
-    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    #[arg(
+        long,
+        default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave"
+    )]
     pub columns: String,
     #[arg(long)]
     pub query: Option<String>,
@@ -524,7 +530,10 @@ pub struct ListSearchArgs {
     pub session: PathBuf,
     #[arg(long)]
     pub query: String,
-    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    #[arg(
+        long,
+        default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave"
+    )]
     pub columns: String,
     #[arg(long = "sort-key")]
     pub sort_key: Option<String>,
@@ -562,7 +571,10 @@ pub struct ListSaveQueryArgs {
 pub struct ListRenderArgs {
     #[command(flatten)]
     pub source: ListSourceArgs,
-    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    #[arg(
+        long,
+        default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave"
+    )]
     pub columns: String,
     #[arg(long, default_value_t = 0)]
     pub offset: usize,
@@ -1468,7 +1480,10 @@ pub struct RenderListArgs {
     pub source: ListSourceArgs,
     #[arg(long, value_name = "PNG")]
     pub output: Option<PathBuf>,
-    #[arg(long, default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave")]
+    #[arg(
+        long,
+        default_value = "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave"
+    )]
     pub columns: String,
     #[arg(long, default_value_t = 0)]
     pub offset: usize,
@@ -2150,7 +2165,10 @@ mod tests {
         .expect("parse export overwrite");
         match cli.command {
             CliCommand::Export(ExportCommand::File(args)) => {
-                assert_eq!(args.session.as_deref(), Some(std::path::Path::new("work.nwsess")));
+                assert_eq!(
+                    args.session.as_deref(),
+                    Some(std::path::Path::new("work.nwsess"))
+                );
                 assert!(args.overwrite);
                 assert!(args.output.is_none());
             }
@@ -2199,7 +2217,9 @@ mod tests {
         ])
         .expect("parse effect graph node add");
         match cli.command {
-            CliCommand::EffectGraph(EffectGraphCommand::Node(EffectGraphNodeCommand::Add(args))) => {
+            CliCommand::EffectGraph(EffectGraphCommand::Node(EffectGraphNodeCommand::Add(
+                args,
+            ))) => {
                 assert_eq!(args.graph.graph, "convert_2ch_to_5ch");
                 assert!(matches!(args.kind, CliEffectGraphNodeKind::Gain));
                 assert_eq!(args.node_id.as_deref(), Some("gain_l"));

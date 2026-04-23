@@ -461,6 +461,142 @@ impl super::WavesPreviewer {
         });
     }
 
+    pub(super) fn spawn_editor_decode_from_audio_buffer(
+        &mut self,
+        path: PathBuf,
+        audio: std::sync::Arc<crate::audio::AudioBuffer>,
+        input_sr: u32,
+    ) {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{mpsc, Arc};
+        self.cancel_editor_decode();
+        let target_sr = self
+            .sample_rate_override
+            .get(&path)
+            .copied()
+            .filter(|v| *v > 0);
+        let preferred_out_sr = target_sr.or(Some(input_sr.max(1)));
+        let _ = self.ensure_output_sample_rate(preferred_out_sr);
+        self.editor_decode_job_id = self.editor_decode_job_id.wrapping_add(1);
+        let job_id = self.editor_decode_job_id;
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        let bit_depth = self.bit_depth_override.get(&path).copied();
+        let estimated_total_frames = Some(Self::convert_source_frames_to_output_frames(
+            audio.len(),
+            input_sr.max(1),
+            out_sr,
+        ));
+        let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
+        let path_for_thread = path.clone();
+        std::thread::spawn(move || {
+            let channels = Self::process_editor_decode_channels(
+                audio.channels.clone(),
+                input_sr.max(1),
+                out_sr,
+                target_sr,
+                bit_depth,
+                resample_quality,
+            );
+            let decoded_frames = channels.first().map(|c| c.len()).unwrap_or(0);
+            let (waveform_minmax, waveform_pyramid) =
+                Self::build_editor_waveform_cache(&channels, decoded_frames);
+            let _ = tx.send(EditorDecodeResult {
+                path: path_for_thread,
+                event: EditorDecodeEvent::FinalReady,
+                channels,
+                waveform_minmax,
+                waveform_pyramid,
+                loading_waveform_minmax: Vec::new(),
+                buffer_sample_rate: out_sr,
+                job_id,
+                error: None,
+                stage: EditorDecodeStage::FinalizingWaveform,
+                decoded_frames,
+                decoded_source_frames: decoded_frames,
+                total_source_frames: Some(decoded_frames),
+                visual_total_frames: Some(decoded_frames),
+                progress_emit_gap_ms: None,
+                finalize_audio_ms: None,
+                finalize_waveform_ms: None,
+            });
+        });
+        self.editor_decode_state = Some(EditorDecodeState {
+            path,
+            started_at: std::time::Instant::now(),
+            rx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            job_id,
+            partial_ready: false,
+            stage: EditorDecodeStage::FinalizingAudio,
+            decoded_frames: 0,
+            estimated_total_frames,
+            total_source_frames: estimated_total_frames,
+            visual_total_frames: estimated_total_frames,
+            decoded_source_frames: 0,
+            loading_waveform_updates: 0,
+            max_progress_gap_ms: 0.0,
+        });
+    }
+
+    pub(super) fn spawn_editor_decode_from_ready_channels(
+        &mut self,
+        path: PathBuf,
+        channels: Vec<Vec<f32>>,
+        buffer_sample_rate: u32,
+    ) {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{mpsc, Arc};
+        self.cancel_editor_decode();
+        let buffer_sample_rate = buffer_sample_rate.max(1);
+        let _ = self.ensure_output_sample_rate(Some(buffer_sample_rate));
+        self.editor_decode_job_id = self.editor_decode_job_id.wrapping_add(1);
+        let job_id = self.editor_decode_job_id;
+        let estimated_total_frames = channels.first().map(|c| c.len());
+        let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
+        let path_for_thread = path.clone();
+        std::thread::spawn(move || {
+            let decoded_frames = channels.first().map(|c| c.len()).unwrap_or(0);
+            let (waveform_minmax, waveform_pyramid) =
+                Self::build_editor_waveform_cache(&channels, decoded_frames);
+            let _ = tx.send(EditorDecodeResult {
+                path: path_for_thread,
+                event: EditorDecodeEvent::FinalReady,
+                channels,
+                waveform_minmax,
+                waveform_pyramid,
+                loading_waveform_minmax: Vec::new(),
+                buffer_sample_rate,
+                job_id,
+                error: None,
+                stage: EditorDecodeStage::FinalizingWaveform,
+                decoded_frames,
+                decoded_source_frames: decoded_frames,
+                total_source_frames: Some(decoded_frames),
+                visual_total_frames: Some(decoded_frames),
+                progress_emit_gap_ms: None,
+                finalize_audio_ms: None,
+                finalize_waveform_ms: None,
+            });
+        });
+        self.editor_decode_state = Some(EditorDecodeState {
+            path,
+            started_at: std::time::Instant::now(),
+            rx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            job_id,
+            partial_ready: false,
+            stage: EditorDecodeStage::FinalizingWaveform,
+            decoded_frames: 0,
+            estimated_total_frames,
+            total_source_frames: estimated_total_frames,
+            visual_total_frames: estimated_total_frames,
+            decoded_source_frames: 0,
+            loading_waveform_updates: 0,
+            max_progress_gap_ms: 0.0,
+        });
+    }
+
     pub(super) fn drain_editor_decode(&mut self) {
         fn remap_view_for_display_len(
             tab: &mut EditorTab,
@@ -585,6 +721,7 @@ impl super::WavesPreviewer {
                                     old_spp,
                                     new_display_len,
                                 );
+                                Self::invalidate_editor_viewport_cache(tab);
                                 decode_update_tab = Some(idx);
                                 decode_refresh_preview = Some(idx);
                                 if had_preview && self.active_tab == Some(idx) {
@@ -617,6 +754,7 @@ impl super::WavesPreviewer {
                                     old_spp,
                                     new_display_len,
                                 );
+                                Self::invalidate_editor_viewport_cache(tab);
                             }
                             EditorDecodeEvent::Failed => {}
                         }

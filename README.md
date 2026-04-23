@@ -169,6 +169,11 @@ repo には NeoWaves CLI を LLM と人間の両方で扱いやすくする repo
 全ドキュメント一覧:
 - `docs/INDEX.md`
 
+## ライセンス
+
+NeoWaves is released under the MIT License. See `LICENSE` for details.
+If this software was useful to you, you have the right to buy the author a drink.
+
 ## Code Layout
 
 - `src/main.rs` はネイティブ起動の入口だけを持ち、CLI 引数解析は `src/cli.rs` に分離しています。

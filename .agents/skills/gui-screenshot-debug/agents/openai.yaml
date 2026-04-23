@@ -1,0 +1,4 @@
+interface:
+  display_name: "GUI Screenshot Debug"
+  short_description: "Operate NeoWaves, capture before/after screenshots, and visually inspect the result"
+  default_prompt: "Verify a NeoWaves GUI behavior by capturing a baseline screenshot, performing the operation, capturing an after screenshot, opening the images yourself, and reporting concrete visual evidence before deciding whether a fix is needed."

@@ -3,6 +3,13 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 impl super::WavesPreviewer {
+    fn tool_for_new_editor_tab(&self) -> crate::app::types::ToolKind {
+        self.tabs
+            .last()
+            .map(|tab| tab.active_tool)
+            .unwrap_or(crate::app::types::ToolKind::LoopEdit)
+    }
+
     pub(super) fn open_or_activate_tab(&mut self, path: &Path) {
         if let Some(item) = self.item_for_path(path) {
             if item.source == crate::app::types::MediaSource::External {
@@ -31,18 +38,22 @@ impl super::WavesPreviewer {
                     .item_for_path(path)
                     .map(|item| item.display_name.clone())
                     .unwrap_or_else(|| "(virtual)".to_string());
+                let cached_sr = cached.buffer_sample_rate.max(1);
+                let cached_samples_len = cached.samples_len;
+                let cached_channels = cached.ch_samples;
+                let cached_loading_overview = cached.waveform_minmax;
                 self.tabs.push(EditorTab {
                     path: path.to_path_buf(),
                     display_name: name,
-                    waveform_minmax: cached.waveform_minmax,
-                    waveform_pyramid: cached.waveform_pyramid,
+                    waveform_minmax: Vec::new(),
+                    waveform_pyramid: None,
                     loop_enabled: false,
-                    loading: false,
-                    ch_samples: cached.ch_samples,
-                    buffer_sample_rate: cached.buffer_sample_rate.max(1),
-                    samples_len: cached.samples_len,
-                    samples_len_visual: cached.samples_len,
-                    loading_waveform_minmax: Vec::new(),
+                    loading: true,
+                    ch_samples: Vec::new(),
+                    buffer_sample_rate: cached_sr,
+                    samples_len: 0,
+                    samples_len_visual: cached_samples_len,
+                    loading_waveform_minmax: cached_loading_overview,
                     view_offset: 0,
                     view_offset_exact: 0.0,
                     samples_per_px: 0.0,
@@ -115,7 +126,18 @@ impl super::WavesPreviewer {
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.playing_path = Some(path.to_path_buf());
-                self.apply_dirty_tab_audio_with_mode(path);
+                self.audio.stop();
+                self.audio.set_samples_channels(Vec::new());
+                self.playback_mark_buffer_source(
+                    super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                    cached_sr,
+                );
+                self.apply_effective_volume();
+                self.spawn_editor_decode_from_ready_channels(
+                    path.to_path_buf(),
+                    cached_channels,
+                    cached_sr,
+                );
                 return;
             }
             let Some(item) = self.item_for_path(path) else {
@@ -132,35 +154,24 @@ impl super::WavesPreviewer {
                 .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
                 .filter(|v| *v > 0)
                 .unwrap_or(self.audio.shared.out_sample_rate.max(1));
-            let mut chs = audio.channels.clone();
-            self.apply_sample_rate_preview_for_path(path, &mut chs, virtual_in_sr);
-            let samples_len = chs.get(0).map(|c| c.len()).unwrap_or(0);
             let default_bpm = self
                 .meta_for_path(path)
                 .and_then(|m| m.bpm)
                 .filter(|v| v.is_finite() && *v > 0.0)
                 .unwrap_or(0.0);
-            let wf = if !self.mode_requires_offline_processing() {
-                crate::wave::build_waveform_minmax_from_channels(&chs, samples_len, 2048)
-            } else {
-                Vec::new()
-            };
-            let waveform_pyramid = if !self.mode_requires_offline_processing() {
-                Self::build_editor_waveform_cache(&chs, samples_len).1
-            } else {
-                None
-            };
+            let visual_len = audio.len();
+            let initial_tool = self.tool_for_new_editor_tab();
             self.tabs.push(EditorTab {
                 path: path.to_path_buf(),
                 display_name: name,
-                waveform_minmax: wf,
-                waveform_pyramid,
+                waveform_minmax: Vec::new(),
+                waveform_pyramid: None,
                 loop_enabled: false,
-                loading: false,
-                ch_samples: chs.clone(),
+                loading: true,
+                ch_samples: Vec::new(),
                 buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
-                samples_len,
-                samples_len_visual: samples_len,
+                samples_len: 0,
+                samples_len_visual: visual_len,
                 loading_waveform_minmax: Vec::new(),
                 view_offset: 0,
                 view_offset_exact: 0.0,
@@ -215,7 +226,7 @@ impl super::WavesPreviewer {
                 snap_zero_cross: true,
                 selection_anchor_sample: None,
                 right_drag_mode: None,
-                active_tool: crate::app::types::ToolKind::LoopEdit,
+                active_tool: initial_tool,
                 tool_state: crate::app::types::ToolState {
                     fade_in_ms: 0.0,
                     fade_out_ms: 0.0,
@@ -243,22 +254,14 @@ impl super::WavesPreviewer {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
-            if self.mode_requires_offline_processing() {
-                self.audio.stop();
-                self.audio.set_samples_mono(Vec::new());
-                self.spawn_heavy_processing_from_channels(
-                    path.to_path_buf(),
-                    chs,
-                    ProcessingTarget::EditorTab(path.to_path_buf()),
-                );
-            } else {
-                self.audio.set_samples_channels(chs);
-                self.playback_mark_buffer_source(
-                    super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
-                    self.audio.shared.out_sample_rate.max(1),
-                );
-            }
+            self.audio.stop();
+            self.audio.set_samples_channels(Vec::new());
+            self.playback_mark_buffer_source(
+                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                self.audio.shared.out_sample_rate.max(1),
+            );
             self.apply_effective_volume();
+            self.spawn_editor_decode_from_audio_buffer(path.to_path_buf(), audio, virtual_in_sr);
             return;
         }
         if !path.is_file() {
@@ -288,18 +291,22 @@ impl super::WavesPreviewer {
                 .and_then(|s| s.to_str())
                 .unwrap_or("(invalid)")
                 .to_string();
+            let cached_sr = cached.buffer_sample_rate.max(1);
+            let cached_samples_len = cached.samples_len;
+            let cached_channels = cached.ch_samples;
+            let cached_loading_overview = cached.waveform_minmax;
             self.tabs.push(EditorTab {
                 path: path.to_path_buf(),
                 display_name: name,
-                waveform_minmax: cached.waveform_minmax,
-                waveform_pyramid: cached.waveform_pyramid,
+                waveform_minmax: Vec::new(),
+                waveform_pyramid: None,
                 loop_enabled: false,
-                loading: false,
-                ch_samples: cached.ch_samples,
-                buffer_sample_rate: cached.buffer_sample_rate.max(1),
-                samples_len: cached.samples_len,
-                samples_len_visual: cached.samples_len,
-                loading_waveform_minmax: Vec::new(),
+                loading: true,
+                ch_samples: Vec::new(),
+                buffer_sample_rate: cached_sr,
+                samples_len: 0,
+                samples_len_visual: cached_samples_len,
+                loading_waveform_minmax: cached_loading_overview,
                 view_offset: 0,
                 view_offset_exact: 0.0,
                 samples_per_px: 0.0,
@@ -372,7 +379,18 @@ impl super::WavesPreviewer {
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
-            self.apply_dirty_tab_audio_with_mode(path);
+            self.audio.stop();
+            self.audio.set_samples_channels(Vec::new());
+            self.playback_mark_buffer_source(
+                super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                cached_sr,
+            );
+            self.apply_effective_volume();
+            self.spawn_editor_decode_from_ready_channels(
+                path.to_path_buf(),
+                cached_channels,
+                cached_sr,
+            );
             return;
         }
         let name = path
@@ -394,6 +412,7 @@ impl super::WavesPreviewer {
         } else {
             Vec::new()
         };
+        let initial_tool = self.tool_for_new_editor_tab();
         self.tabs.push(EditorTab {
             path: path.to_path_buf(),
             display_name: name,
@@ -459,7 +478,7 @@ impl super::WavesPreviewer {
             snap_zero_cross: true,
             selection_anchor_sample: None,
             right_drag_mode: None,
-            active_tool: crate::app::types::ToolKind::LoopEdit,
+            active_tool: initial_tool,
             tool_state: crate::app::types::ToolState {
                 fade_in_ms: 0.0,
                 fade_out_ms: 0.0,

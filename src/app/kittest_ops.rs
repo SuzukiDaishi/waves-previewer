@@ -1410,6 +1410,18 @@ impl super::WavesPreviewer {
             .unwrap_or(false)
     }
 
+    pub fn test_virtual_trim_active(&self) -> bool {
+        self.virtual_trim_state.is_some()
+    }
+
+    pub fn test_virtual_trim_progress(&self) -> Option<f32> {
+        let state = self.virtual_trim_state.as_ref()?;
+        if state.total_frames == 0 {
+            return Some(0.0);
+        }
+        Some((state.copied_frames as f32 / state.total_frames as f32).clamp(0.0, 1.0))
+    }
+
     pub fn test_marker_preview_pending(&self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1560,6 +1572,24 @@ impl super::WavesPreviewer {
     pub fn test_selected_sample_rate_override(&self) -> Option<u32> {
         let path = self.test_selected_path()?;
         self.sample_rate_override.get(path).copied()
+    }
+
+    pub fn test_has_edits_for_selected(&self) -> bool {
+        let selected = self.selected_paths();
+        self.has_edits_for_paths(&selected)
+    }
+
+    pub fn test_clear_selected_edits(&mut self) -> bool {
+        let selected = self.selected_paths();
+        if selected.is_empty() {
+            return false;
+        }
+        self.clear_edits_for_paths(&selected);
+        true
+    }
+
+    pub fn test_edited_cache_count(&self) -> usize {
+        self.edited_cache.len()
     }
 
     pub fn test_apply_selected_resample_override(&mut self, target_sr: u32) -> bool {

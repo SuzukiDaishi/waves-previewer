@@ -1660,7 +1660,14 @@ impl super::WavesPreviewer {
         unique_paths.sort();
         unique_paths.dedup();
         let before = self.capture_list_selection_snapshot();
-        let before_items = self.capture_list_undo_items_by_paths(&unique_paths);
+        let capture_undo = !unique_paths
+            .iter()
+            .any(|p| self.edited_cache.contains_key(p));
+        let before_items = if capture_undo {
+            self.capture_list_undo_items_by_paths(&unique_paths)
+        } else {
+            Vec::new()
+        };
         for p in &unique_paths {
             self.set_pending_gain_db_for_path(p, 0.0);
             self.lufs_override.remove(p);
@@ -1700,7 +1707,13 @@ impl super::WavesPreviewer {
         if affect_playing {
             self.apply_effective_volume();
         }
-        self.record_list_update_from_paths(&unique_paths, before_items, before);
+        if capture_undo {
+            self.record_list_update_from_paths(&unique_paths, before_items, before);
+        } else {
+            self.debug_log(
+                "clear edits skipped list undo snapshot for cached audio payload".to_string(),
+            );
+        }
     }
 
     /// Helper: read loop markers and map to given output SR, set tab.loop_region if valid

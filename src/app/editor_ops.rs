@@ -1,6 +1,12 @@
 use std::path::PathBuf;
 
-use crate::app::types::{EditorApplyResult, EditorUndoState, ToolKind};
+use crate::app::types::{
+    EditorApplyResult, EditorUndoState, ToolKind, VirtualTrimPhase, VirtualTrimResult,
+    VirtualTrimState,
+};
+
+const VIRTUAL_TRIM_COPY_CHUNK_FRAMES: usize = 262_144;
+const VIRTUAL_TRIM_COPY_FRAME_BUDGET_MS: u64 = 4;
 
 impl crate::app::WavesPreviewer {
     pub(super) fn editor_sync_view_offset_exact(tab: &mut crate::app::types::EditorTab) {
@@ -353,6 +359,293 @@ impl crate::app::WavesPreviewer {
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
     }
 
+    pub(super) fn begin_trim_virtual_job(&mut self, tab_idx: usize, range: (usize, usize)) -> bool {
+        if self.virtual_trim_state.is_some() {
+            return false;
+        }
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        if tab.loading || tab.ch_samples.is_empty() {
+            return false;
+        }
+        let (s, e) = if range.0 <= range.1 {
+            range
+        } else {
+            (range.1, range.0)
+        };
+        if e <= s || e > tab.samples_len {
+            return false;
+        }
+        let source_path = tab.path.clone();
+        let source_name = tab.display_name.clone();
+        let source_channel_count = tab.ch_samples.len();
+        let out_sr = self.audio.shared.out_sample_rate.max(1);
+        let source_sr = self
+            .item_for_path(&source_path)
+            .and_then(|item| {
+                if item.source == crate::app::types::MediaSource::Virtual {
+                    item.virtual_state.as_ref().map(|state| state.sample_rate)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| self.effective_sample_rate_for_path(&source_path))
+            .filter(|v| *v > 0)
+            .unwrap_or(out_sr);
+        let bits_per_sample = self
+            .bit_depth_override
+            .get(&source_path)
+            .copied()
+            .map(|d| d.bits_per_sample())
+            .or_else(|| {
+                self.item_for_path(&source_path).and_then(|item| {
+                    if item.source == crate::app::types::MediaSource::Virtual {
+                        item.virtual_state
+                            .as_ref()
+                            .map(|state| state.bits_per_sample)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| self.meta_for_path(&source_path).map(|m| m.bits_per_sample))
+            .filter(|v| *v > 0)
+            .unwrap_or(32);
+        let map_to_source = |pos: usize| -> usize {
+            if source_sr == out_sr {
+                return pos;
+            }
+            ((pos as u128)
+                .saturating_mul(source_sr as u128)
+                .saturating_add((out_sr / 2) as u128)
+                / (out_sr as u128)) as usize
+        };
+        let source_start = map_to_source(s);
+        let mut source_end = map_to_source(e);
+        if source_end <= source_start {
+            source_end = source_start.saturating_add(1);
+        }
+        let source_ref = if self.is_virtual_path(&source_path) {
+            crate::app::types::VirtualSourceRef::VirtualPath(source_path.clone())
+        } else {
+            crate::app::types::VirtualSourceRef::FilePath(source_path.clone())
+        };
+        let insert_idx = self.selected.map(|row| row.saturating_add(1));
+
+        self.clear_preview_if_any(tab_idx);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.selection = None;
+            tab.selection_anchor_sample = None;
+            tab.trim_range = None;
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        self.audio.stop();
+
+        self.virtual_trim_state = Some(VirtualTrimState {
+            source_path,
+            source_name,
+            range: (s, e),
+            copied_frames: 0,
+            total_frames: e.saturating_sub(s),
+            channels: (0..source_channel_count).map(|_| Vec::new()).collect(),
+            out_sr,
+            source_sr,
+            bits_per_sample,
+            source_start,
+            source_end,
+            source_ref,
+            insert_idx,
+            phase: VirtualTrimPhase::Copying,
+            rx: None,
+            started_at: std::time::Instant::now(),
+        });
+        true
+    }
+
+    pub(super) fn cancel_virtual_trim_job(&mut self) {
+        self.virtual_trim_state = None;
+    }
+
+    pub(super) fn virtual_trim_status_for_tab(&self, tab_idx: usize) -> Option<(String, f32)> {
+        let state = self.virtual_trim_state.as_ref()?;
+        let tab = self.tabs.get(tab_idx)?;
+        if tab.path != state.source_path {
+            return None;
+        }
+        let progress = if state.total_frames == 0 {
+            0.0
+        } else {
+            (state.copied_frames as f32 / state.total_frames as f32).clamp(0.0, 1.0)
+        };
+        let base_msg = match state.phase {
+            VirtualTrimPhase::Copying => "Creating virtual trim...",
+            VirtualTrimPhase::Processing => "Finalizing virtual trim...",
+        };
+        let elapsed = state.started_at.elapsed().as_secs_f32();
+        let msg = format!("{base_msg} ({elapsed:.1}s)");
+        Some((msg.to_string(), progress))
+    }
+
+    pub(super) fn tick_virtual_trim_state(&mut self, ctx: &egui::Context) {
+        let mut spawn_processing = false;
+        let mut ready: Option<VirtualTrimResult> = None;
+        let mut disconnected = false;
+        if let Some(state) = self.virtual_trim_state.as_mut() {
+            match state.phase {
+                VirtualTrimPhase::Copying => {
+                    let Some(tab) = self.tabs.iter().find(|tab| tab.path == state.source_path)
+                    else {
+                        self.virtual_trim_state = None;
+                        ctx.request_repaint();
+                        return;
+                    };
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_millis(VIRTUAL_TRIM_COPY_FRAME_BUDGET_MS);
+                    while state.copied_frames < state.total_frames {
+                        let next = state
+                            .copied_frames
+                            .saturating_add(VIRTUAL_TRIM_COPY_CHUNK_FRAMES)
+                            .min(state.total_frames);
+                        let src_start = state.range.0.saturating_add(state.copied_frames);
+                        let src_end = state.range.0.saturating_add(next);
+                        for (ch_idx, dst) in state.channels.iter_mut().enumerate() {
+                            if let Some(src) = tab.ch_samples.get(ch_idx) {
+                                let end = src_end.min(src.len());
+                                let start = src_start.min(end);
+                                dst.extend_from_slice(&src[start..end]);
+                            }
+                        }
+                        state.copied_frames = next;
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                    if state.copied_frames >= state.total_frames {
+                        spawn_processing = true;
+                    }
+                }
+                VirtualTrimPhase::Processing => {
+                    if let Some(rx) = state.rx.as_ref() {
+                        match rx.try_recv() {
+                            Ok(result) => ready = Some(result),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                disconnected = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if spawn_processing {
+            if let Some(state) = self.virtual_trim_state.as_mut() {
+                let mut channels = std::mem::take(&mut state.channels);
+                let source_path = state.source_path.clone();
+                let source_name = state.source_name.clone();
+                let out_sr = state.out_sr;
+                let source_sr = state.source_sr;
+                let bits_per_sample = state.bits_per_sample;
+                let source_start = state.source_start;
+                let source_end = state.source_end;
+                let source_ref = state.source_ref.clone();
+                let quality = Self::to_wave_resample_quality(self.src_quality);
+                let (tx, rx) = std::sync::mpsc::channel::<VirtualTrimResult>();
+                std::thread::spawn(move || {
+                    if source_sr != out_sr {
+                        for ch in channels.iter_mut() {
+                            *ch = crate::wave::resample_quality(ch, out_sr, source_sr, quality);
+                        }
+                    }
+                    let quantize_depth = match bits_per_sample {
+                        0..=16 => Some(crate::wave::WavBitDepth::Pcm16),
+                        17..=24 => Some(crate::wave::WavBitDepth::Pcm24),
+                        _ => Some(crate::wave::WavBitDepth::Float32),
+                    };
+                    if let Some(depth) = quantize_depth {
+                        crate::wave::quantize_channels_in_place(&mut channels, depth);
+                    }
+                    let audio =
+                        std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(channels));
+                    let meta = crate::app::WavesPreviewer::build_meta_from_audio(
+                        &audio.channels,
+                        source_sr,
+                        bits_per_sample,
+                    );
+                    let _ = tx.send(VirtualTrimResult {
+                        source_path,
+                        source_name,
+                        audio,
+                        meta,
+                        source_sr,
+                        bits_per_sample,
+                        source_start,
+                        source_end,
+                        source_ref,
+                    });
+                });
+                state.phase = VirtualTrimPhase::Processing;
+                state.rx = Some(rx);
+            }
+        }
+
+        if let Some(result) = ready {
+            let insert_idx = self.virtual_trim_state.as_ref().and_then(|s| s.insert_idx);
+            let base = std::path::Path::new(&result.source_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("clip");
+            let ext = std::path::Path::new(&result.source_name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("wav");
+            let name = self.unique_virtual_display_name(&format!("{base} (trim).{ext}"));
+            let virtual_state = Some(crate::app::types::VirtualState {
+                source: result.source_ref,
+                op_chain: vec![crate::app::types::VirtualOp::Trim {
+                    start: result.source_start,
+                    end: result.source_end,
+                }],
+                sample_rate: result.source_sr,
+                channels: result.audio.channels.len().max(1) as u16,
+                bits_per_sample: result.bits_per_sample,
+            });
+            let added_path = {
+                let item = self.make_virtual_item_with_meta(
+                    name,
+                    result.audio,
+                    Some(result.meta),
+                    virtual_state,
+                );
+                let before = self.capture_list_selection_snapshot();
+                let added_path = item.path.clone();
+                self.add_virtual_item(item, insert_idx);
+                self.after_add_refresh();
+                self.record_list_insert_from_paths(&[added_path.clone()], before);
+                added_path
+            };
+            if let Some(row) = self.row_for_path(&added_path) {
+                self.update_selection_on_click(row, egui::Modifiers::NONE);
+            }
+            if self.debug.cfg.enabled {
+                self.debug_log(format!(
+                    "virtual_trim_create_async source={} new_virtual={}",
+                    result.source_path.display(),
+                    added_path.display()
+                ));
+            }
+            self.virtual_trim_state = None;
+        } else if disconnected {
+            self.virtual_trim_state = None;
+        }
+        if self.virtual_trim_state.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
+    #[cfg_attr(not(feature = "kittest"), allow(dead_code))]
     pub(super) fn add_trim_range_as_virtual(&mut self, tab_idx: usize, range: (usize, usize)) {
         // "Set" in Trim inspector can route transport to preview mono.
         // Restore the visible editor waveform before creating/selecting the virtual item.
@@ -503,6 +796,11 @@ impl crate::app::WavesPreviewer {
         self.add_virtual_item(item, insert_idx);
         self.after_add_refresh();
         self.record_list_insert_from_paths(&[added_path.clone()], before);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.selection = None;
+            tab.selection_anchor_sample = None;
+            tab.trim_range = None;
+        }
         if let Some(row) = self.row_for_path(&added_path) {
             self.update_selection_on_click(row, egui::Modifiers::NONE);
         }

@@ -41,6 +41,7 @@ neowaves.exe --cli render editor --session C:\work\music.nwsess --path C:\audio\
 
 - Prefer session-backed render when loop, marker, tool, or selection state matters.
 - Prefer saving a new PNG after any meaningful edit so the result can be reviewed later.
+- If the task requires operating the GUI and comparing screenshots before/after an interaction, use `../gui-screenshot-debug/SKILL.md` instead of relying on a single render.
 
 ## Read Next
 

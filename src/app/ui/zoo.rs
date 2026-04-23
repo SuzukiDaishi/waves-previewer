@@ -218,7 +218,8 @@ impl crate::app::WavesPreviewer {
                 }
                 let alpha = (self.zoo_opacity.clamp(0.3, 1.0) * 255.0).round() as u8;
                 // The bundled turtle faces right by default, so flip it only when moving left.
-                let auto_flip = self.zoo_walk_enabled && zoo_sprite_needs_flip_for_motion(self.zoo_dir);
+                let auto_flip =
+                    self.zoo_walk_enabled && zoo_sprite_needs_flip_for_motion(self.zoo_dir);
                 let flip_x = self.zoo_flip_manual ^ auto_flip;
                 let uv = if flip_x {
                     egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))

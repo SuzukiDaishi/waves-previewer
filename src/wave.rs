@@ -905,10 +905,7 @@ fn chunk_is_fresh_audio_core(chunk: &RiffWaveChunk) -> bool {
     chunk.id == *b"fmt " || chunk.id == *b"data" || chunk.id == *b"fact"
 }
 
-fn take_matching_chunk(
-    chunks: &mut Vec<RiffWaveChunk>,
-    id: [u8; 4],
-) -> Option<RiffWaveChunk> {
+fn take_matching_chunk(chunks: &mut Vec<RiffWaveChunk>, id: [u8; 4]) -> Option<RiffWaveChunk> {
     let idx = chunks.iter().position(|chunk| chunk.id == id)?;
     Some(chunks.remove(idx))
 }
@@ -2222,7 +2219,10 @@ mod tests {
         assert_eq!(tag.title(), Some("keep-title"));
         assert_eq!(tag.artist(), Some("keep-artist"));
         assert!(tag.pictures().next().is_some());
-        assert_eq!(crate::loop_markers::read_loop_markers(&dst), Some((1234, 5678)));
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&dst),
+            Some((1234, 5678))
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2259,7 +2259,10 @@ mod tests {
             assert_eq!(tag.bpm(), Some(128));
             assert!(tag.artwork().is_some());
             if loop_write.is_ok() {
-                assert_eq!(crate::loop_markers::read_loop_markers(&dst), Some((4321, 8765)));
+                assert_eq!(
+                    crate::loop_markers::read_loop_markers(&dst),
+                    Some((4321, 8765))
+                );
             }
         } else {
             eprintln!(
