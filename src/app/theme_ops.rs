@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
 use egui::{Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle, Visuals};
 
 use super::types::{
@@ -125,29 +127,58 @@ impl WavesPreviewer {
 
     pub(super) fn init_egui_style(ctx: &egui::Context) {
         let mut fonts = FontDefinitions::default();
-        let candidates = [
+
+        // バンドルフォント: 常に使える日本語フォント (fallback)
+        // NotoSansJP-Regular.otf はビルド時に埋め込まれる
+        fonts.font_data.insert(
+            "noto_sans_jp".into(),
+            Arc::new(FontData::from_static(include_bytes!(
+                "../../assets/fonts/NotoSansJP-Regular.otf"
+            ))),
+        );
+
+        // システムフォント候補: 見つかればバンドルより高品質になる
+        // Windows → Meiryo / Yu Gothic、macOS → Hiragino Sans、Linux → Noto Sans CJK
+        let system_candidates: &[&str] = &[
+            // Windows
             "C:/Windows/Fonts/meiryo.ttc",
             "C:/Windows/Fonts/YuGothM.ttc",
+            "C:/Windows/Fonts/YuGothR.ttc",
             "C:/Windows/Fonts/msgothic.ttc",
+            // macOS
+            "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            // Linux (Noto / IPAex / Takao)
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJKjp-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
+            "/usr/share/fonts/truetype/takao-gothic/TakaoGothic.ttf",
         ];
-        for p in candidates {
-            if let Ok(bytes) = std::fs::read(p) {
-                fonts
-                    .font_data
-                    .insert("jp".into(), FontData::from_owned(bytes).into());
-                fonts
-                    .families
-                    .get_mut(&FontFamily::Proportional)
-                    .unwrap()
-                    .insert(0, "jp".into());
-                fonts
-                    .families
-                    .get_mut(&FontFamily::Monospace)
-                    .unwrap()
-                    .insert(0, "jp".into());
+        let mut system_font_loaded = false;
+        for path in system_candidates {
+            if let Ok(bytes) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    "jp_system".into(),
+                    FontData::from_owned(bytes).into(),
+                );
+                system_font_loaded = true;
                 break;
             }
         }
+
+        // フォント優先順位: システム > バンドル > egui デフォルト
+        // 日本語 UI なので日本語フォントを先頭に配置する
+        for family in [&FontFamily::Proportional, &FontFamily::Monospace] {
+            let list = fonts.families.get_mut(family).unwrap();
+            if system_font_loaded {
+                list.insert(0, "noto_sans_jp".into());
+                list.insert(0, "jp_system".into()); // システムフォントが最優先
+            } else {
+                list.insert(0, "noto_sans_jp".into()); // バンドルが最優先
+            }
+        }
+
         ctx.set_fonts(fonts);
 
         let mut style = (*ctx.style()).clone();
@@ -159,6 +190,9 @@ impl WavesPreviewer {
             .insert(TextStyle::Monospace, FontId::monospace(14.0));
         style.visuals = Self::theme_visuals(ThemeMode::Dark);
         ctx.set_style(style);
+        // DPI スケーリングは native_pixels_per_point × zoom_factor で一元管理
+        // 明示的に 1.0 を設定しておくことで widget 個別スケールとの混在を防ぐ
+        ctx.set_zoom_factor(1.0);
     }
 
     pub(super) fn ensure_theme_visuals(&self, ctx: &egui::Context) {

@@ -636,6 +636,7 @@ pub struct PluginFxDraft {
     pub params: Vec<PluginParamUiState>,
     pub state_blob: Option<Vec<u8>>,
     pub last_error: Option<String>,
+    pub last_backend_note: Option<String>,
     pub last_backend_log: Option<String>,
 }
 
@@ -1773,6 +1774,7 @@ pub struct EffectGraphPluginNodeRuntimeState {
     pub gui_capabilities: crate::plugin::GuiCapabilities,
     pub gui_status: crate::plugin::GuiSessionStatus,
     pub last_error: Option<String>,
+    pub last_backend_note: Option<String>,
     pub last_backend_log: Option<String>,
 }
 

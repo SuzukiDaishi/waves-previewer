@@ -1,4 +1,4 @@
-use egui::{Color32, RichText, Sense, Stroke, StrokeKind};
+use egui::{Color32, Frame, RichText, Sense, Stroke, StrokeKind};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -1745,6 +1745,26 @@ impl crate::app::WavesPreviewer {
                                             .small()
                                             .color(Color32::from_rgb(240, 120, 120)),
                                     );
+                                }
+                                if let Some(note) = plugin_runtime.last_backend_note.as_deref() {
+                                    Frame::none()
+                                        .fill(Color32::from_rgb(80, 60, 20))
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .rounding(4.0)
+                                        .show(ui, |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    RichText::new("⚠ Generic fallback:")
+                                                        .small()
+                                                        .color(Color32::from_rgb(255, 200, 60)),
+                                                );
+                                                ui.label(
+                                                    RichText::new(note.trim())
+                                                        .small()
+                                                        .color(Color32::from_rgb(220, 180, 100)),
+                                                );
+                                            });
+                                        });
                                 }
                                 if let Some(log) = plugin_runtime.last_backend_log.as_deref() {
                                     ui.collapsing("Backend Log", |ui| {

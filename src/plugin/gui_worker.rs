@@ -174,6 +174,9 @@ impl GuiWorkerService {
                     Err(err) => as_gui_error(session_id, err),
                 }
             }
+            WorkerRequest::Heartbeat { request_id } => {
+                WorkerResponse::HeartbeatAck { request_id }
+            }
             _ => WorkerResponse::Error {
                 message: "unsupported request for GUI worker".to_string(),
             },

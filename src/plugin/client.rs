@@ -1,7 +1,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::plugin::protocol::{WorkerRequest, WorkerResponse};
@@ -82,6 +83,7 @@ fn request_timeout(request: &WorkerRequest) -> Duration {
         WorkerRequest::GuiSessionOpen { .. } => Duration::from_millis(30_000),
         WorkerRequest::GuiSessionPoll { .. } => Duration::from_millis(10_000),
         WorkerRequest::GuiSessionClose { .. } => Duration::from_millis(10_000),
+        WorkerRequest::Heartbeat { .. } => Duration::from_millis(5_000),
     }
 }
 
@@ -246,7 +248,9 @@ pub fn run_request(request: &WorkerRequest) -> Result<WorkerResponse, String> {
 pub struct GuiWorkerClient {
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    rx: mpsc::Receiver<Result<WorkerResponse, String>>,
+    _reader_thread: std::thread::JoinHandle<()>,
+    next_heartbeat_id: u64,
 }
 
 impl GuiWorkerClient {
@@ -274,14 +278,43 @@ impl GuiWorkerClient {
             .stdout
             .take()
             .ok_or_else(|| "gui worker stdout unavailable".to_string())?;
+
+        let (tx, rx) = mpsc::channel::<Result<WorkerResponse, String>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = tx.send(Err("gui worker closed stdout".to_string()));
+                        break;
+                    }
+                    Ok(_) => {
+                        let result = serde_json::from_str::<WorkerResponse>(line.trim_end())
+                            .map_err(|e| format!("decode gui worker response failed: {e}"));
+                        if tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("gui worker read failed: {e}")));
+                        break;
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            rx,
+            _reader_thread: reader_thread,
+            next_heartbeat_id: 0,
         })
     }
 
-    pub fn request(&mut self, request: &WorkerRequest) -> Result<WorkerResponse, String> {
+    fn send_raw(&mut self, request: &WorkerRequest) -> Result<(), String> {
         let mut payload =
             serde_json::to_vec(request).map_err(|e| format!("encode gui request failed: {e}"))?;
         payload.push(b'\n');
@@ -290,17 +323,47 @@ impl GuiWorkerClient {
             .map_err(|e| format!("gui worker write failed: {e}"))?;
         self.stdin
             .flush()
-            .map_err(|e| format!("gui worker flush failed: {e}"))?;
-        let mut line = String::new();
-        let read = self
-            .stdout
-            .read_line(&mut line)
-            .map_err(|e| format!("gui worker read failed: {e}"))?;
-        if read == 0 {
-            return Err("gui worker closed stdout".to_string());
+            .map_err(|e| format!("gui worker flush failed: {e}"))
+    }
+
+    pub fn request(&mut self, request: &WorkerRequest) -> Result<WorkerResponse, String> {
+        let timeout = request_timeout(request);
+        self.send_raw(request)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                WORKER_TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed);
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(format!(
+                    "gui worker timeout after {} ms",
+                    timeout.as_millis()
+                ));
+            }
+            match self.rx.recv_timeout(remaining.min(Duration::from_millis(250))) {
+                Ok(Ok(resp)) => return Ok(resp),
+                Ok(Err(e)) => return Err(e),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // タイムアウト期限まで再確認
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("gui worker reader thread disconnected".to_string());
+                }
+            }
         }
-        serde_json::from_str::<WorkerResponse>(line.trim_end())
-            .map_err(|e| format!("decode gui worker response failed: {e}"))
+    }
+
+    /// GUI worker が生きているかを heartbeat で確認する。
+    /// ハングしていれば timeout エラーを返す（呼び出し元が kill 判断する）。
+    pub fn heartbeat(&mut self) -> Result<(), String> {
+        let id = self.next_heartbeat_id;
+        self.next_heartbeat_id = self.next_heartbeat_id.wrapping_add(1);
+        let req = WorkerRequest::Heartbeat { request_id: id };
+        match self.request(&req)? {
+            WorkerResponse::HeartbeatAck { request_id } if request_id == id => Ok(()),
+            other => Err(format!("unexpected heartbeat response: {other:?}")),
+        }
     }
 
     pub fn close(mut self) {

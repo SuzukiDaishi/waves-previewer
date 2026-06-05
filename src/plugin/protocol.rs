@@ -86,6 +86,11 @@ pub enum WorkerRequest {
     GuiSessionClose {
         session_id: u64,
     },
+    /// GUI worker が生きているかを確認するための軽量 ping。
+    /// GUI worker は即座に HeartbeatAck を返す（ブロッキング処理なし）。
+    Heartbeat {
+        request_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -140,6 +145,10 @@ pub enum WorkerResponse {
     GuiError {
         session_id: u64,
         message: String,
+    },
+    /// Heartbeat リクエストへの即時応答。
+    HeartbeatAck {
+        request_id: u64,
     },
     Error {
         message: String,

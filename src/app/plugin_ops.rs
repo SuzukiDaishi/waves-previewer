@@ -1836,6 +1836,8 @@ impl crate::app::WavesPreviewer {
                                 tab.plugin_fx_draft.enabled = true;
                                 tab.plugin_fx_draft.bypass = false;
                                 tab.plugin_fx_draft.last_error = fallback_hint;
+                                tab.plugin_fx_draft.last_backend_note =
+                                    result.backend_note.clone();
                                 let mut lines = vec![format!(
                                     "Probe: {:?}, params={}, {:.1} ms",
                                     result.backend,
@@ -1874,6 +1876,7 @@ impl crate::app::WavesPreviewer {
                         let runtime_capabilities = result.capabilities;
                         let runtime_gui_status = crate::plugin::GuiSessionStatus::Closed;
                         let mut runtime_error: Option<String> = None;
+                        let mut runtime_note: Option<String> = None;
                         let mut runtime_log: Option<String> = None;
                         if let Some(node) = self
                             .effect_graph
@@ -1925,6 +1928,7 @@ impl crate::app::WavesPreviewer {
                                                 .encode(bytes)
                                         });
                                     runtime_error = fallback_hint;
+                                    runtime_note = result.backend_note.clone();
                                     let mut lines = vec![format!(
                                         "Probe: {:?}, params={}, {:.1} ms",
                                         result.backend,
@@ -1948,6 +1952,7 @@ impl crate::app::WavesPreviewer {
                             runtime.gui_capabilities = runtime_capabilities;
                             runtime.gui_status = runtime_gui_status;
                             runtime.last_error = runtime_error;
+                            runtime.last_backend_note = runtime_note;
                             runtime.last_backend_log = runtime_log;
                             if draft_dirty {
                                 self.effect_graph.draft_dirty = true;

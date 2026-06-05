@@ -22,12 +22,16 @@ mod native {
         AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IAudioProcessorTrait, IComponent,
         IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
         IConnectionPointTrait, IEditController, IEditControllerTrait, IHostApplication,
-        IHostApplicationTrait, ParameterInfo, ProcessData, ProcessSetup, TChar,
+        IHostApplicationTrait, IParameterChanges, IParameterChangesTrait, IParamValueQueue,
+        IParamValueQueueTrait, ParameterInfo, ParamID, ParamValue, ProcessData, ProcessSetup,
+        TChar,
     };
+    use vst3::Steinberg::{IBStream, IBStreamTrait};
     use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
     use vst3::Steinberg::{IPlugView, IPlugViewTrait};
     use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
     use vst3::{Class, ComPtr, ComWrapper, Interface, Steinberg};
+    use base64::Engine;
     #[cfg(windows)]
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     #[cfg(windows)]
@@ -208,6 +212,190 @@ mod native {
             Steinberg::kResultOk
         }
         unsafe fn restartComponent(&self, _flags: Steinberg::int32) -> Steinberg::tresult {
+            Steinberg::kResultOk
+        }
+    }
+
+    struct HostParamValueQueue {
+        id: ParamID,
+        value: ParamValue,
+    }
+    impl Class for HostParamValueQueue {
+        type Interfaces = (IParamValueQueue,);
+    }
+    impl IParamValueQueueTrait for HostParamValueQueue {
+        unsafe fn getParameterId(&self) -> ParamID {
+            self.id
+        }
+        unsafe fn getPointCount(&self) -> Steinberg::int32 {
+            1
+        }
+        unsafe fn getPoint(
+            &self,
+            index: Steinberg::int32,
+            sample_offset: *mut Steinberg::int32,
+            value: *mut ParamValue,
+        ) -> Steinberg::tresult {
+            if index != 0 {
+                return Steinberg::kInvalidArgument;
+            }
+            if !sample_offset.is_null() {
+                *sample_offset = 0;
+            }
+            if !value.is_null() {
+                *value = self.value;
+            }
+            Steinberg::kResultOk
+        }
+        unsafe fn addPoint(
+            &self,
+            _sample_offset: Steinberg::int32,
+            _value: ParamValue,
+            _index: *mut Steinberg::int32,
+        ) -> Steinberg::tresult {
+            Steinberg::kResultFalse
+        }
+    }
+
+    struct HostParameterChanges {
+        _wrappers: Vec<ComWrapper<HostParamValueQueue>>,
+        ptrs: Vec<*mut IParamValueQueue>,
+    }
+    unsafe impl Send for HostParameterChanges {}
+    unsafe impl Sync for HostParameterChanges {}
+    impl Class for HostParameterChanges {
+        type Interfaces = (IParameterChanges,);
+    }
+    impl IParameterChangesTrait for HostParameterChanges {
+        unsafe fn getParameterCount(&self) -> Steinberg::int32 {
+            self.ptrs.len() as Steinberg::int32
+        }
+        unsafe fn getParameterData(&self, index: Steinberg::int32) -> *mut IParamValueQueue {
+            self.ptrs.get(index as usize).copied().unwrap_or(ptr::null_mut())
+        }
+        unsafe fn addParameterData(
+            &self,
+            _id: *const ParamID,
+            _index: *mut Steinberg::int32,
+        ) -> *mut IParamValueQueue {
+            ptr::null_mut()
+        }
+    }
+    impl HostParameterChanges {
+        fn from_params(
+            params: &[crate::plugin::protocol::PluginParamValue],
+        ) -> Option<(ComWrapper<HostParameterChanges>, ComPtr<IParameterChanges>)> {
+            let wrappers: Vec<ComWrapper<HostParamValueQueue>> = params
+                .iter()
+                .filter_map(|p| {
+                    let hex = p.id.strip_prefix("vst3:")?;
+                    let id = u32::from_str_radix(hex, 16).ok()?;
+                    Some(ComWrapper::new(HostParamValueQueue {
+                        id,
+                        value: p.normalized as f64,
+                    }))
+                })
+                .collect();
+            if wrappers.is_empty() {
+                return None;
+            }
+            let ptrs: Vec<*mut IParamValueQueue> = wrappers
+                .iter()
+                .map(|w| w.to_com_ptr::<IParamValueQueue>().map(|p| p.as_ptr()).unwrap_or(ptr::null_mut()))
+                .collect();
+            let changes_wrapper = ComWrapper::new(HostParameterChanges { _wrappers: wrappers, ptrs });
+            let changes_ptr = changes_wrapper.to_com_ptr::<IParameterChanges>()?;
+            Some((changes_wrapper, changes_ptr))
+        }
+    }
+
+    struct MemoryStream {
+        buf: Arc<Mutex<Vec<u8>>>,
+        pos: std::cell::UnsafeCell<usize>,
+    }
+    unsafe impl Send for MemoryStream {}
+    unsafe impl Sync for MemoryStream {}
+    impl MemoryStream {
+        fn new(buf: Arc<Mutex<Vec<u8>>>) -> Self {
+            Self { buf, pos: std::cell::UnsafeCell::new(0) }
+        }
+    }
+    impl Class for MemoryStream {
+        type Interfaces = (IBStream,);
+    }
+    impl IBStreamTrait for MemoryStream {
+        unsafe fn read(
+            &self,
+            buffer: *mut c_void,
+            num_bytes: Steinberg::int32,
+            num_bytes_read: *mut Steinberg::int32,
+        ) -> Steinberg::tresult {
+            if buffer.is_null() || num_bytes < 0 {
+                return Steinberg::kInvalidArgument;
+            }
+            let guard = self.buf.lock().unwrap();
+            let pos = &mut *self.pos.get();
+            let available = guard.len().saturating_sub(*pos);
+            let to_read = (num_bytes as usize).min(available);
+            if to_read > 0 {
+                std::ptr::copy_nonoverlapping(guard[*pos..].as_ptr(), buffer as *mut u8, to_read);
+                *pos += to_read;
+            }
+            if !num_bytes_read.is_null() {
+                *num_bytes_read = to_read as Steinberg::int32;
+            }
+            Steinberg::kResultOk
+        }
+        unsafe fn write(
+            &self,
+            buffer: *mut c_void,
+            num_bytes: Steinberg::int32,
+            num_bytes_written: *mut Steinberg::int32,
+        ) -> Steinberg::tresult {
+            if buffer.is_null() || num_bytes < 0 {
+                return Steinberg::kInvalidArgument;
+            }
+            let mut guard = self.buf.lock().unwrap();
+            let pos = &mut *self.pos.get();
+            let to_write = num_bytes as usize;
+            let end = *pos + to_write;
+            if end > guard.len() {
+                guard.resize(end, 0);
+            }
+            std::ptr::copy_nonoverlapping(buffer as *const u8, guard[*pos..].as_mut_ptr(), to_write);
+            *pos = end;
+            if !num_bytes_written.is_null() {
+                *num_bytes_written = to_write as Steinberg::int32;
+            }
+            Steinberg::kResultOk
+        }
+        unsafe fn seek(
+            &self,
+            pos: Steinberg::int64,
+            mode: Steinberg::int32,
+            result: *mut Steinberg::int64,
+        ) -> Steinberg::tresult {
+            let guard = self.buf.lock().unwrap();
+            let cur = &mut *self.pos.get();
+            let new_pos: i64 = match mode {
+                0 => pos,                          // kIBSeekSet
+                1 => (*cur as i64) + pos,          // kIBSeekCur
+                2 => (guard.len() as i64) + pos,   // kIBSeekEnd
+                _ => return Steinberg::kInvalidArgument,
+            };
+            if new_pos < 0 {
+                return Steinberg::kInvalidArgument;
+            }
+            *cur = new_pos as usize;
+            if !result.is_null() {
+                *result = new_pos;
+            }
+            Steinberg::kResultOk
+        }
+        unsafe fn tell(&self, pos: *mut Steinberg::int64) -> Steinberg::tresult {
+            if !pos.is_null() {
+                *pos = *self.pos.get() as Steinberg::int64;
+            }
             Steinberg::kResultOk
         }
     }
@@ -708,7 +896,7 @@ mod native {
         GuiCapabilities {
             supports_native_gui: cfg!(windows) && find_valid_binary(plugin_path).is_some(),
             supports_param_feedback: true,
-            supports_state_sync: false,
+            supports_state_sync: true,
         }
     }
 
@@ -784,6 +972,7 @@ mod native {
         let frame_count = out_channels.get(0).map(|c| c.len()).unwrap_or(0);
         let ch_count = out_channels.len().max(1);
         let block = max_block_size.clamp(16, 4096);
+        let mut saved_state_b64: Option<String> = None;
 
         unsafe {
             let loaded = ManuallyDrop::new(load_factory(&binary)?);
@@ -825,6 +1014,25 @@ mod native {
 
             let _ = controller.setComponentHandler(handler.as_ptr());
 
+            if let Some(b64) = state_blob_b64 {
+                if let Ok(data) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64) {
+                    let buf = Arc::new(Mutex::new(data));
+                    let stream_wrapper = ComWrapper::new(MemoryStream::new(buf));
+                    if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
+                        let load_r = component.setState(stream_ptr.as_ptr());
+                        if load_r != Steinberg::kResultOk && load_r != Steinberg::kResultTrue {
+                            eprintln!("[vst3] component.setState failed: {load_r} (non-fatal)");
+                        }
+                        let _ = stream_ptr.seek(0, 0, ptr::null_mut());
+                        let ctrl_r = controller.setComponentState(stream_ptr.as_ptr());
+                        if ctrl_r != Steinberg::kResultOk && ctrl_r != Steinberg::kResultTrue {
+                            eprintln!("[vst3] controller.setComponentState failed: {ctrl_r} (non-fatal)");
+                        }
+                    }
+                    std::mem::forget(stream_wrapper);
+                }
+            }
+
             if let (Some(comp_cp), Some(ctrl_cp)) = (
                 component.cast::<IConnectionPoint>(),
                 controller.cast::<IConnectionPoint>(),
@@ -844,20 +1052,33 @@ mod native {
 
             let mut in_arr = speaker_arrangement_for_channels(ch_count);
             let mut out_arr = in_arr;
-            let _ = processor.setBusArrangements(&mut in_arr, 1, &mut out_arr, 1);
+            let bus_r = processor.setBusArrangements(&mut in_arr, 1, &mut out_arr, 1);
+            if bus_r != Steinberg::kResultOk && bus_r != Steinberg::kResultTrue {
+                // 一部のプラグインは kResultFalse を返しつつも動作する。
+                // hard fail ではなく backend_note 相当としてログのみ残す。
+                eprintln!("[vst3] setBusArrangements returned {bus_r} (non-fatal, continuing)");
+            }
             let _ = component.setIoMode(Steinberg::Vst::IoModes_::kOfflineProcessing as i32);
-            let _ = component.activateBus(
+            let act_in_r = component.activateBus(
                 Steinberg::Vst::MediaTypes_::kAudio as i32,
                 Steinberg::Vst::BusDirections_::kInput as i32,
                 0,
                 1,
             );
-            let _ = component.activateBus(
+            if act_in_r != Steinberg::kResultOk && act_in_r != Steinberg::kResultTrue {
+                eprintln!("[vst3] activateBus(input) returned {act_in_r} (non-fatal, continuing)");
+            }
+            let act_out_r = component.activateBus(
                 Steinberg::Vst::MediaTypes_::kAudio as i32,
                 Steinberg::Vst::BusDirections_::kOutput as i32,
                 0,
                 1,
             );
+            if act_out_r != Steinberg::kResultOk && act_out_r != Steinberg::kResultTrue {
+                eprintln!(
+                    "[vst3] activateBus(output) returned {act_out_r} (non-fatal, continuing)"
+                );
+            }
 
             let mut setup = ProcessSetup {
                 processMode: Steinberg::Vst::ProcessModes_::kOffline as i32,
@@ -870,8 +1091,20 @@ mod native {
                 return Err(format!("processor.setupProcessing failed: {setup_r}"));
             }
 
-            let _ = component.setActive(1);
-            let _ = processor.setProcessing(1);
+            let active_r = component.setActive(1);
+            if active_r != Steinberg::kResultOk && active_r != Steinberg::kResultTrue {
+                eprintln!("[vst3] component.setActive(1) returned {active_r} (non-fatal, continuing)");
+            }
+            let proc_r = processor.setProcessing(1);
+            if proc_r != Steinberg::kResultOk && proc_r != Steinberg::kResultTrue {
+                eprintln!("[vst3] processor.setProcessing(1) returned {proc_r} (non-fatal, continuing)");
+            }
+
+            let _param_changes_holder = HostParameterChanges::from_params(params);
+            let param_changes_raw: *mut IParameterChanges = _param_changes_holder
+                .as_ref()
+                .map(|(_, p)| p.as_ptr())
+                .unwrap_or(ptr::null_mut());
 
             let mut rendered = vec![vec![0.0f32; frame_count]; ch_count];
             let mut cursor = 0usize;
@@ -909,7 +1142,7 @@ mod native {
                     numOutputs: 1,
                     inputs: &mut in_bus,
                     outputs: &mut out_bus,
-                    inputParameterChanges: ptr::null_mut(),
+                    inputParameterChanges: if cursor == 0 { param_changes_raw } else { ptr::null_mut() },
                     outputParameterChanges: ptr::null_mut(),
                     inputEvents: ptr::null_mut(),
                     outputEvents: ptr::null_mut(),
@@ -926,6 +1159,26 @@ mod native {
             }
 
             let _ = processor.setProcessing(0);
+
+            {
+                let save_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+                let stream_wrapper = ComWrapper::new(MemoryStream::new(save_buf.clone()));
+                if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
+                    let save_r = component.getState(stream_ptr.as_ptr());
+                    if save_r == Steinberg::kResultOk || save_r == Steinberg::kResultTrue {
+                        let data = save_buf.lock().unwrap().clone();
+                        if !data.is_empty() {
+                            saved_state_b64 = Some(
+                                base64::engine::general_purpose::STANDARD_NO_PAD.encode(&data),
+                            );
+                        }
+                    } else {
+                        eprintln!("[vst3] component.getState failed: {save_r} (non-fatal)");
+                    }
+                }
+                std::mem::forget(stream_wrapper);
+            }
+
             let _ = component.setActive(0);
             if !controller_from_component {
                 let _ = controller.terminate();
@@ -948,7 +1201,7 @@ mod native {
         crate::wave::export_channels_audio(&out_channels, sample_rate.max(1), output_audio_path)
             .map_err(|e| format!("encode failed: {e}"))?;
 
-        Ok(state_blob_b64.map(|v| v.to_string()))
+        Ok(saved_state_b64.or_else(|| state_blob_b64.map(|v| v.to_string())))
     }
 
     pub(crate) struct GuiSession {

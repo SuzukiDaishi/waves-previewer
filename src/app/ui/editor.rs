@@ -6532,6 +6532,26 @@ impl crate::app::WavesPreviewer {
                                                     }
                                                 }
                                             });
+                                        if let Some(note) = draft.last_backend_note.as_ref() {
+                                            Frame::none()
+                                                .fill(Color32::from_rgb(80, 60, 20))
+                                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                                .rounding(4.0)
+                                                .show(ui, |ui| {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.label(
+                                                            RichText::new("⚠ Generic fallback:")
+                                                                .small()
+                                                                .color(Color32::from_rgb(255, 200, 60)),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(note.trim())
+                                                                .small()
+                                                                .color(Color32::from_rgb(220, 180, 100)),
+                                                        );
+                                                    });
+                                                });
+                                        }
                                         if let Some(err) = draft.last_error.as_ref() {
                                             ui.label(RichText::new(err).color(Color32::LIGHT_RED));
                                         }

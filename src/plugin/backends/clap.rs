@@ -31,10 +31,15 @@ mod native {
         callback_requested: AtomicBool,
         gui_closed: AtomicBool,
         flush_requested: AtomicBool,
+        restart_requested: AtomicBool,
     }
 
     impl SharedHandler<'_> for ClapHostShared {
-        fn request_restart(&self) {}
+        fn request_restart(&self) {
+            // プラグインが再初期化を要求している。
+            // gui_poll() 側でフラグを確認し、セッションを閉じて再オープンを促す。
+            self.restart_requested.store(true, Ordering::Release);
+        }
         fn request_process(&self) {}
         fn request_callback(&self) {
             self.callback_requested.store(true, Ordering::Release);
@@ -775,11 +780,98 @@ mod native {
         instance: PluginInstance<ClapHostHandlers>,
         gui_ext: PluginGui,
         gui_open: bool,
+        gui_is_floating: bool,
         params_ext: Option<PluginParams>,
         state_ext: Option<PluginState>,
         param_specs: Vec<ClapParamSpec>,
         last_values: HashMap<u32, f32>,
         state_blob_b64: Option<String>,
+        #[cfg(windows)]
+        host_hwnd: Option<windows_sys::Win32::Foundation::HWND>,
+    }
+
+    #[cfg(windows)]
+    unsafe extern "system" fn clap_gui_wnd_proc(
+        hwnd: windows_sys::Win32::Foundation::HWND,
+        msg: u32,
+        wparam: windows_sys::Win32::Foundation::WPARAM,
+        lparam: windows_sys::Win32::Foundation::LPARAM,
+    ) -> windows_sys::Win32::Foundation::LRESULT {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        match msg {
+            WM_CLOSE => unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                0
+            },
+            WM_DESTROY => 0,
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_clap_host_window(title: &str, width: u32, height: u32) -> Option<windows_sys::Win32::Foundation::HWND> {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let class_name: Vec<u16> = "NeoWavesClapGuiHostWindow\0"
+                .encode_utf16()
+                .collect();
+            let hinstance = GetModuleHandleW(std::ptr::null());
+            let wc = WNDCLASSW {
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(clap_gui_wnd_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: hinstance,
+                hIcon: 0,
+                hCursor: 0,
+                hbrBackground: 0,
+                lpszMenuName: std::ptr::null(),
+                lpszClassName: class_name.as_ptr(),
+            };
+            let _ = RegisterClassW(&wc);
+            let style = WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
+            let ex_style = 0u32;
+            let mut rect = windows_sys::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: width.max(360) as i32,
+                bottom: height.max(180) as i32,
+            };
+            AdjustWindowRectEx(&mut rect, style, 0, ex_style);
+            let win_w = (rect.right - rect.left).max(360);
+            let win_h = (rect.bottom - rect.top).max(180);
+            let mut title_wide: Vec<u16> = title.encode_utf16().collect();
+            title_wide.push(0);
+            let hwnd = CreateWindowExW(
+                ex_style,
+                class_name.as_ptr(),
+                title_wide.as_ptr(),
+                style,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                win_w,
+                win_h,
+                0,
+                0,
+                hinstance,
+                std::ptr::null(),
+            );
+            if hwnd == 0 { None } else { Some(hwnd) }
+        }
+    }
+
+    #[cfg(windows)]
+    fn pump_clap_gui_messages(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            IsWindow(hwnd) != 0
+        }
     }
 
     pub(crate) fn gui_open(
@@ -818,12 +910,46 @@ mod native {
         gui_ext
             .create(&mut handle, config)
             .map_err(|e| format!("gui create failed: {e}"))?;
-        let title =
-            CString::new("NeoWaves Plugin GUI").map_err(|e| format!("title failed: {e}"))?;
-        gui_ext.suggest_title(&mut handle, title.as_c_str());
-        gui_ext
-            .show(&mut handle)
-            .map_err(|e| format!("gui show failed: {e}"))?;
+
+        let plugin_title = crate::plugin::backends::plugin_display_name(plugin_path);
+
+        // CLAP GUI 埋め込み手順（仕様通り）:
+        //   embedded: set_parent() → set_size() → show()
+        //   floating: suggest_title() → show()
+        #[cfg(windows)]
+        let host_hwnd: Option<windows_sys::Win32::Foundation::HWND> = if !config.is_floating {
+            let preferred_size = gui_ext.get_size(&mut handle).unwrap_or(
+                clack_extensions::gui::GuiSize { width: 640, height: 420 }
+            );
+            let hwnd = create_clap_host_window(&plugin_title, preferred_size.width, preferred_size.height);
+            if let Some(hwnd) = hwnd {
+                let parent_window = clack_extensions::gui::Window::from_win32_hwnd(hwnd as *mut std::ffi::c_void);
+                if let Err(e) = unsafe { gui_ext.set_parent(&mut handle, parent_window) } {
+                    eprintln!("[clap] gui set_parent failed: {e:?}");
+                }
+                let _ = gui_ext.set_size(&mut handle, preferred_size);
+                gui_ext.show(&mut handle).ok();
+                Some(hwnd)
+            } else {
+                eprintln!("[clap] create_clap_host_window failed, falling back to show without parent");
+                gui_ext.show(&mut handle).ok();
+                None
+            }
+        } else {
+            if let Ok(title) = CString::new(plugin_title.as_str()) {
+                gui_ext.suggest_title(&mut handle, title.as_c_str());
+            }
+            gui_ext.show(&mut handle).map_err(|e| format!("gui show failed: {e}"))?;
+            None
+        };
+
+        #[cfg(not(windows))]
+        {
+            if let Ok(title) = CString::new(plugin_title.as_str()) {
+                gui_ext.suggest_title(&mut handle, title.as_c_str());
+            }
+            gui_ext.show(&mut handle).map_err(|e| format!("gui show failed: {e}"))?;
+        }
 
         let snapshot = read_snapshot(&mut instance, params_ext, &specs);
         let mut last_values = HashMap::new();
@@ -843,11 +969,14 @@ mod native {
                 instance,
                 gui_ext,
                 gui_open: true,
+                gui_is_floating: config.is_floating,
                 params_ext,
                 state_ext,
                 param_specs: specs,
                 last_values,
                 state_blob_b64: state_blob_b64.map(|s| s.to_string()),
+                #[cfg(windows)]
+                host_hwnd,
             },
             ui_params,
             state_blob_b64.map(|s| s.to_string()),
@@ -870,6 +999,27 @@ mod native {
         });
         if callback_requested {
             session.instance.call_on_main_thread_callback();
+        }
+
+        // プラグインが再初期化を要求している場合はセッション終了を通知する
+        let restart_requested = session.instance.access_shared_handler(|shared| {
+            shared.restart_requested.swap(false, Ordering::AcqRel)
+        });
+        if restart_requested {
+            let snapshot = read_snapshot(
+                &mut session.instance,
+                session.params_ext,
+                &session.param_specs,
+            );
+            if let Some(next_state) = maybe_save_state(&mut session.instance, session.state_ext) {
+                session.state_blob_b64 = Some(next_state);
+            }
+            return Ok((
+                Vec::new(),
+                Some(snapshot),
+                session.state_blob_b64.clone(),
+                true, // closed=true で親に再オープンを促す
+            ));
         }
 
         let flush_requested = session
@@ -919,6 +1069,30 @@ mod native {
             }
         }
 
+        // Windows の embedded GUI: ホストウィンドウのメッセージを処理し、
+        // ウィンドウが閉じられていたら closed=true を返す。
+        #[cfg(windows)]
+        if !session.gui_is_floating {
+            if let Some(hwnd) = session.host_hwnd {
+                let window_alive = pump_clap_gui_messages(hwnd);
+                if !window_alive {
+                    // ユーザーがホストウィンドウを閉じた
+                    let snapshot = read_snapshot(
+                        &mut session.instance,
+                        session.params_ext,
+                        &session.param_specs,
+                    );
+                    if let Some(next_state) =
+                        maybe_save_state(&mut session.instance, session.state_ext)
+                    {
+                        session.state_blob_b64 = Some(next_state);
+                    }
+                    session.host_hwnd = None;
+                    return Ok((deltas, Some(snapshot), session.state_blob_b64.clone(), true));
+                }
+            }
+        }
+
         let closed = session
             .instance
             .access_shared_handler(|shared| shared.gui_closed.load(Ordering::Acquire));
@@ -950,6 +1124,14 @@ mod native {
             let mut handle = session.instance.plugin_handle();
             session.gui_ext.destroy(&mut handle);
             session.gui_open = false;
+        }
+
+        // Windows embedded 時はホストウィンドウを破棄する
+        #[cfg(windows)]
+        if let Some(hwnd) = session.host_hwnd.take() {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+            }
         }
 
         if let Some(next_state) = maybe_save_state(&mut session.instance, session.state_ext) {

@@ -83,7 +83,7 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                                     windows
                                 )),
                                 supports_param_feedback: cfg!(feature = "plugin_native_vst3"),
-                                supports_state_sync: false,
+                                supports_state_sync: cfg!(feature = "plugin_native_vst3"),
                             },
                             backend_note: None,
                         };
@@ -98,9 +98,12 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                             state_blob_b64,
                             backend: PluginHostBackend::NativeClap,
                             capabilities: GuiCapabilities {
-                                supports_native_gui: false,
+                                supports_native_gui: cfg!(all(
+                                    feature = "plugin_native_clap",
+                                    windows
+                                )),
                                 supports_param_feedback: cfg!(feature = "plugin_native_clap"),
-                                supports_state_sync: false,
+                                supports_state_sync: cfg!(feature = "plugin_native_clap"),
                             },
                             backend_note: None,
                         };
@@ -225,7 +228,8 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
         }
         WorkerRequest::GuiSessionOpen { .. }
         | WorkerRequest::GuiSessionPoll { .. }
-        | WorkerRequest::GuiSessionClose { .. } => WorkerResponse::Error {
+        | WorkerRequest::GuiSessionClose { .. }
+        | WorkerRequest::Heartbeat { .. } => WorkerResponse::Error {
             message: "GUI session requests require neowaves_plugin_gui_worker".to_string(),
         },
     }
