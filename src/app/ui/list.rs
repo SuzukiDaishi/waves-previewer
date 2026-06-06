@@ -323,7 +323,7 @@ impl crate::app::WavesPreviewer {
                         }
                         let is_selected = self.selected_multi.contains(&row_idx);
                         row.set_selected(is_selected);
-                        let row_base_bg = ctx.style().visuals.faint_bg_color;
+                        let row_base_bg = ctx.global_style().visuals.faint_bg_color;
                         let row_bg = if is_selected {
                             None
                         } else {

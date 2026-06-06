@@ -181,7 +181,7 @@ impl WavesPreviewer {
 
         ctx.set_fonts(fonts);
 
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         style
             .text_styles
             .insert(TextStyle::Body, FontId::proportional(16.0));
@@ -189,7 +189,7 @@ impl WavesPreviewer {
             .text_styles
             .insert(TextStyle::Monospace, FontId::monospace(14.0));
         style.visuals = Self::theme_visuals(ThemeMode::Dark);
-        ctx.set_style(style);
+        ctx.set_global_style(style);
         // DPI スケーリングは native_pixels_per_point × zoom_factor で一元管理
         // 明示的に 1.0 を設定しておくことで widget 個別スケールとの混在を防ぐ
         ctx.set_zoom_factor(1.0);
@@ -197,7 +197,7 @@ impl WavesPreviewer {
 
     pub(super) fn ensure_theme_visuals(&self, ctx: &egui::Context) {
         let want_dark = self.theme_mode == ThemeMode::Dark;
-        if ctx.style().visuals.dark_mode != want_dark {
+        if ctx.global_style().visuals.dark_mode != want_dark {
             Self::apply_theme_visuals(ctx, self.theme_mode);
         }
     }

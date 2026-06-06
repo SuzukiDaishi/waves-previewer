@@ -302,3 +302,144 @@ fn detect_header_row(raw_rows: &[Vec<String>]) -> Option<usize> {
         best_idx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::cell_to_string;
+    use calamine::{CellErrorType, Data, ExcelDateTime, ExcelDateTimeType};
+
+    // ── calamine 0.35 migration: Data enum variant coverage ──────────────────
+
+    #[test]
+    fn cell_empty_returns_empty_string() {
+        assert_eq!(cell_to_string(&Data::Empty), "");
+    }
+
+    #[test]
+    fn cell_string_trims_whitespace() {
+        assert_eq!(cell_to_string(&Data::String("  hello  ".to_string())), "hello");
+        assert_eq!(cell_to_string(&Data::String("no spaces".to_string())), "no spaces");
+        assert_eq!(cell_to_string(&Data::String(String::new())), "");
+    }
+
+    #[test]
+    fn cell_float_whole_number_no_decimal() {
+        // Whole number floats should render without fractional part
+        assert_eq!(cell_to_string(&Data::Float(42.0)), "42");
+        assert_eq!(cell_to_string(&Data::Float(-7.0)), "-7");
+        assert_eq!(cell_to_string(&Data::Float(0.0)), "0");
+    }
+
+    #[test]
+    fn cell_float_fractional_four_decimal_places() {
+        // {:.4} rounds to 4 decimal places: 3.14159 → "3.1416"
+        assert_eq!(cell_to_string(&Data::Float(3.14159)), "3.1416");
+        assert_eq!(cell_to_string(&Data::Float(1.23456789)), "1.2346");
+        assert_eq!(cell_to_string(&Data::Float(0.1)), "0.1000");
+    }
+
+    #[test]
+    fn cell_float_negative_fractional() {
+        let s = cell_to_string(&Data::Float(-1.5));
+        assert_eq!(s, "-1.5000");
+    }
+
+    #[test]
+    fn cell_int_positive_and_negative() {
+        assert_eq!(cell_to_string(&Data::Int(0)), "0");
+        assert_eq!(cell_to_string(&Data::Int(100)), "100");
+        assert_eq!(cell_to_string(&Data::Int(-999)), "-999");
+        assert_eq!(cell_to_string(&Data::Int(i64::MAX)), i64::MAX.to_string());
+    }
+
+    #[test]
+    fn cell_bool_true_and_false() {
+        assert_eq!(cell_to_string(&Data::Bool(true)), "true");
+        assert_eq!(cell_to_string(&Data::Bool(false)), "false");
+    }
+
+    #[test]
+    fn cell_datetime_formats_as_float() {
+        // ExcelDateTime wraps an f64 serial date value; Display delegates to that f64
+        let dt = ExcelDateTime::new(44927.0, ExcelDateTimeType::DateTime, false);
+        let s = cell_to_string(&Data::DateTime(dt));
+        assert!(
+            s.starts_with("44927"),
+            "DateTime serial 44927 should start with '44927', got: {s}"
+        );
+    }
+
+    #[test]
+    fn cell_datetime_iso_trims() {
+        let s = cell_to_string(&Data::DateTimeIso("  2024-01-15  ".to_string()));
+        assert_eq!(s, "2024-01-15");
+    }
+
+    #[test]
+    fn cell_duration_iso_trims() {
+        let s = cell_to_string(&Data::DurationIso("  PT1H30M  ".to_string()));
+        assert_eq!(s, "PT1H30M");
+    }
+
+    #[test]
+    fn cell_error_div0_formats() {
+        let s = cell_to_string(&Data::Error(CellErrorType::Div0));
+        assert!(!s.is_empty(), "Error variant must produce non-empty string");
+    }
+
+    #[test]
+    fn cell_error_na_formats() {
+        let s = cell_to_string(&Data::Error(CellErrorType::NA));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn cell_error_value_formats() {
+        let s = cell_to_string(&Data::Error(CellErrorType::Value));
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn cell_error_ref_formats() {
+        let s = cell_to_string(&Data::Error(CellErrorType::Ref));
+        assert!(!s.is_empty());
+    }
+
+    // ── build_table_from_rows ────────────────────────────────────────────────
+
+    #[test]
+    fn build_table_empty_input_returns_empty() {
+        use super::build_table_from_rows;
+        use crate::app::project::ProjectExternalSource;
+        let cfg = super::ExternalLoadConfig {
+            path: std::path::PathBuf::new(),
+            sheet_name: None,
+            has_header: false,
+            header_row: None,
+            data_row: None,
+        };
+        let (headers, rows) = build_table_from_rows(&[], &cfg);
+        assert!(headers.is_empty());
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn build_table_no_header_passes_rows_through() {
+        use super::build_table_from_rows;
+        let cfg = super::ExternalLoadConfig {
+            path: std::path::PathBuf::new(),
+            sheet_name: None,
+            has_header: false,
+            header_row: None,
+            data_row: None,
+        };
+        let raw = vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["1".to_string(), "2".to_string()],
+        ];
+        let (headers, rows) = build_table_from_rows(&raw, &cfg);
+        // No header → generated column names, all rows are data rows
+        assert_eq!(rows.len(), 2);
+        drop(headers);
+    }
+}

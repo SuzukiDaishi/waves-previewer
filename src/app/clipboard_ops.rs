@@ -325,7 +325,7 @@ impl super::WavesPreviewer {
         if !self.is_effect_graph_workspace_active() {
             return;
         }
-        let allow = !ctx.wants_keyboard_input();
+        let allow = !ctx.egui_wants_keyboard_input();
         let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
         let down_c = ctx.input(|i| i.key_down(egui::Key::C));
         let down_v = ctx.input(|i| i.key_down(egui::Key::V));
@@ -470,7 +470,7 @@ impl super::WavesPreviewer {
         self.clipboard_v_was_down = down_v;
         if self.debug.cfg.enabled {
             self.debug.last_clip_allow = allow;
-            self.debug.last_clip_wants_kb = ctx.wants_keyboard_input();
+            self.debug.last_clip_wants_kb = ctx.egui_wants_keyboard_input();
             self.debug.last_clip_ctrl = ctrl;
             self.debug.last_clip_event_copy = event_copy;
             self.debug.last_clip_event_paste = event_paste;
@@ -519,5 +519,62 @@ impl super::WavesPreviewer {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    // Verify clipboard-win 5.x API surface compiles and exports are accessible.
+    // Actual clipboard read/write tests require a running GUI message loop and
+    // would modify shared system state, so they are omitted from automated runs.
+
+    #[test]
+    fn clipboard_win_raw_module_accessible() {
+        // raw::set_without_clear must exist in clipboard-win 5.x
+        let _fn_exists: fn(u32, &[u8]) -> clipboard_win::SysResult<()> =
+            clipboard_win::raw::set_without_clear;
+        let _ = _fn_exists; // suppress unused warning
+    }
+
+    #[test]
+    fn clipboard_win_formats_accessible() {
+        use clipboard_win::formats::{CF_UNICODETEXT, FileList, Unicode};
+        // Just verify these types are importable and constructable
+        let _ = FileList;
+        let _ = Unicode;
+        let _cf: u32 = CF_UNICODETEXT;
+    }
+
+    #[test]
+    fn clipboard_win_clipboard_new_attempts_api_exists() {
+        // Verify Clipboard::new_attempts exists with the expected signature
+        // (does not actually open the clipboard in this test)
+        let _ = clipboard_win::Clipboard::new_attempts as fn(usize) -> clipboard_win::SysResult<clipboard_win::Clipboard>;
+    }
+
+    #[test]
+    fn clipboard_win_get_clipboard_unicode_api_exists() {
+        use clipboard_win::formats::Unicode;
+        // Verify get_clipboard(Unicode) signature is callable
+        let _ = clipboard_win::get_clipboard as fn(Unicode) -> clipboard_win::SysResult<String>;
+    }
+
+    #[test]
+    fn utf16_encode_round_trip_for_marker() {
+        // Verify the UTF-16 encoding logic used in set_clipboard_files_with_marker
+        let marker = "neowaves_paste\0";
+        let mut utf16: Vec<u16> = marker.encode_utf16().collect();
+        utf16.push(0);
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2)
+        };
+        // Decode back and verify
+        let decoded: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .take_while(|&c| c != 0)
+            .collect();
+        let result = String::from_utf16_lossy(&decoded);
+        assert!(result.starts_with("neowaves_paste"), "round-trip: {result}");
     }
 }

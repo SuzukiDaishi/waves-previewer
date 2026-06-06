@@ -47,8 +47,8 @@ impl crate::app::WavesPreviewer {
                     .default_open(true)
                     .show(ui, |ui| {
                         let mods = ctx.input(|i| i.modifiers);
-                        let wants_kb = ctx.wants_keyboard_input();
-                        let wants_ptr = ctx.wants_pointer_input();
+                        let wants_kb = ctx.egui_wants_keyboard_input();
+                        let wants_ptr = ctx.egui_wants_pointer_input();
                         let pos = ctx.input(|i| i.pointer.hover_pos());
                         let pos_text = pos
                             .map(|p| format!("{:.1},{:.1}", p.x, p.y))

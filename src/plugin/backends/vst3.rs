@@ -39,10 +39,10 @@ mod native {
     #[cfg(windows)]
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        GetClientRect, GetWindowLongW, IsWindow, PeekMessageW, RegisterClassW, SetWindowPos,
+        GetClientRect, GetWindowLongW, IsWindow, PeekMessageW, RegisterClassExW, SetWindowPos,
         SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
         GWL_EXSTYLE, GWL_STYLE, MSG, PM_REMOVE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSW, WS_CLIPCHILDREN, WS_MAXIMIZEBOX,
+        SWP_NOZORDER, SW_SHOW, WM_CLOSE, WM_DESTROY, WNDCLASSEXW, WS_CLIPCHILDREN, WS_MAXIMIZEBOX,
         WS_OVERLAPPEDWINDOW, WS_THICKFRAME, WS_VISIBLE,
     };
 
@@ -141,7 +141,7 @@ mod native {
             );
             let _ = SetWindowPos(
                 self.hwnd,
-                0,
+                std::ptr::null_mut(),
                 0,
                 0,
                 win_w,
@@ -170,7 +170,7 @@ mod native {
             let (win_w, win_h) = calc_window_size_for_client(style, ex_style, width, height);
             let _ = SetWindowPos(
                 self.hwnd,
-                0,
+                std::ptr::null_mut(),
                 0,
                 0,
                 win_w,
@@ -541,19 +541,21 @@ mod native {
         unsafe {
             let class_name = to_wide_null("NeoWavesPluginGuiHostWindow");
             let hinstance = GetModuleHandleW(std::ptr::null());
-            let wc = WNDCLASSW {
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(gui_wnd_proc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: hinstance,
-                hIcon: 0,
-                hCursor: 0,
-                hbrBackground: 0,
+                hIcon: std::ptr::null_mut(),
+                hCursor: std::ptr::null_mut(),
+                hbrBackground: std::ptr::null_mut(),
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: class_name.as_ptr(),
+                hIconSm: std::ptr::null_mut(),
             };
-            let _ = RegisterClassW(&wc);
+            let _ = RegisterClassExW(&wc);
             let mut style = WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
             if !resizable {
                 style &= !(WS_THICKFRAME | WS_MAXIMIZEBOX);
@@ -569,12 +571,12 @@ mod native {
                 CW_USEDEFAULT,
                 win_w.max(300),
                 win_h.max(180),
-                0,
-                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
                 hinstance,
                 std::ptr::null(),
             );
-            if hwnd == 0 {
+            if hwnd.is_null() {
                 return Err("CreateWindowExW failed".to_string());
             }
             let title_w = to_wide_null(title);
@@ -588,7 +590,7 @@ mod native {
     fn pump_gui_window_messages() {
         unsafe {
             let mut msg = std::mem::zeroed::<MSG>();
-            while PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) != 0 {
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -1463,7 +1465,7 @@ mod native {
                             );
                             let _ = SetWindowPos(
                                 session.hwnd,
-                                0,
+                                std::ptr::null_mut(),
                                 0,
                                 0,
                                 win_w,
@@ -1490,7 +1492,7 @@ mod native {
                                         calc_window_size_for_client(style, ex_style, new_w, new_h);
                                     let _ = SetWindowPos(
                                         session.hwnd,
-                                        0,
+                                        std::ptr::null_mut(),
                                         0,
                                         0,
                                         win_w,

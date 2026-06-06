@@ -111,7 +111,7 @@ fn apply_preview_scroll(
         }
     }
     if response.hovered() {
-        let raw_scroll = ctx.input(|i| i.raw_scroll_delta);
+        let raw_scroll = ctx.input(|i| i.smooth_scroll_delta);
         let dominant_scroll = if raw_scroll.x.abs() > raw_scroll.y.abs() {
             raw_scroll.x
         } else {
@@ -210,7 +210,7 @@ fn draw_waveform_preview(
             egui::pos2(x, rect.bottom() - 1.0),
             egui::Align2::CENTER_BOTTOM,
             label,
-            egui::TextStyle::Small.resolve(&painter.ctx().style()),
+            egui::TextStyle::Small.resolve(&painter.ctx().global_style()),
             Color32::from_rgb(146, 160, 176),
         );
     }
@@ -221,7 +221,7 @@ fn draw_waveform_preview(
             "visible {:.2}s / total {:.2}s",
             visible_duration, total_duration
         ),
-        egui::TextStyle::Small.resolve(&painter.ctx().style()),
+        egui::TextStyle::Small.resolve(&painter.ctx().global_style()),
         Color32::from_rgb(118, 132, 148),
     );
 }
@@ -366,7 +366,7 @@ fn draw_spectrum_preview(
             egui::pos2(x, rect.bottom() - 1.0),
             egui::Align2::CENTER_BOTTOM,
             format_time_axis_label(start_time + visible_duration * frac),
-            egui::TextStyle::Small.resolve(&painter.ctx().style()),
+            egui::TextStyle::Small.resolve(&painter.ctx().global_style()),
             Color32::from_rgb(146, 160, 176),
         );
     }
@@ -389,7 +389,7 @@ fn draw_spectrum_preview(
             egui::pos2(plot_rect.left() - 6.0, y),
             egui::Align2::RIGHT_CENTER,
             format_frequency_axis_label(freq),
-            egui::TextStyle::Small.resolve(&painter.ctx().style()),
+            egui::TextStyle::Small.resolve(&painter.ctx().global_style()),
             Color32::from_rgb(146, 160, 176),
         );
     }
@@ -397,31 +397,29 @@ fn draw_spectrum_preview(
 
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_effect_graph_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        use egui::{SidePanel, TopBottomPanel};
-
         self.request_plugin_scan_if_needed();
         self.handle_effect_graph_shortcuts(ctx);
         self.ui_effect_graph_unsaved_prompt(ctx);
 
-        TopBottomPanel::bottom("effect_graph_console_panel")
+        egui::Panel::bottom("effect_graph_console_panel")
             .resizable(true)
-            .default_height(self.effect_graph.bottom_panel_height)
+            .default_size(self.effect_graph.bottom_panel_height)
             .show_inside(ui, |ui| {
                 self.effect_graph.bottom_panel_height = ui.max_rect().height();
                 self.ui_effect_graph_console(ui);
             });
 
-        SidePanel::right("effect_graph_tester_panel")
+        egui::Panel::right("effect_graph_tester_panel")
             .resizable(true)
-            .default_width(self.effect_graph.right_panel_width)
+            .default_size(self.effect_graph.right_panel_width)
             .show_inside(ui, |ui| {
                 self.effect_graph.right_panel_width = ui.max_rect().width();
                 self.ui_effect_graph_tester(ui);
             });
 
-        SidePanel::left("effect_graph_library_panel")
+        egui::Panel::left("effect_graph_library_panel")
             .resizable(true)
-            .default_width(self.effect_graph.left_panel_width)
+            .default_size(self.effect_graph.left_panel_width)
             .show_inside(ui, |ui| {
                 self.effect_graph.left_panel_width = ui.max_rect().width();
                 ui.vertical(|ui| {
@@ -937,7 +935,7 @@ impl crate::app::WavesPreviewer {
             self.effect_graph.canvas.background_panning = false;
         }
         if canvas_resp.hovered() && ctx.input(|i| i.modifiers.command) {
-            let scroll = ctx.input(|i| i.raw_scroll_delta.y);
+            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.0 {
                 self.effect_graph_push_undo_snapshot();
                 self.effect_graph.canvas.zoom = (zoom * (1.0 + scroll * 0.001)).clamp(0.35, 2.0);
@@ -1747,10 +1745,10 @@ impl crate::app::WavesPreviewer {
                                     );
                                 }
                                 if let Some(note) = plugin_runtime.last_backend_note.as_deref() {
-                                    Frame::none()
+                                    Frame::NONE
                                         .fill(Color32::from_rgb(80, 60, 20))
                                         .inner_margin(egui::Margin::symmetric(8, 4))
-                                        .rounding(4.0)
+                                        .corner_radius(4.0)
                                         .show(ui, |ui| {
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.label(

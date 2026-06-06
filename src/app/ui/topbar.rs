@@ -3,12 +3,13 @@ mod status;
 mod transport;
 
 impl crate::app::WavesPreviewer {
-    pub(in crate::app) fn ui_top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+    pub(in crate::app) fn ui_top_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("top").show_inside(ui, |ui| {
+            let ctx = ui.ctx().clone();
             ui.vertical(|ui| {
-                self.ui_topbar_menu_row(ui, ctx);
-                self.ui_topbar_status_row(ui, ctx);
-                self.ui_topbar_transport_row(ui, ctx);
+                self.ui_topbar_menu_row(ui, &ctx);
+                self.ui_topbar_status_row(ui, &ctx);
+                self.ui_topbar_transport_row(ui, &ctx);
             });
         });
     }

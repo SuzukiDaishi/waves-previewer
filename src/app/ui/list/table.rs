@@ -50,7 +50,7 @@ impl WavesPreviewer {
         metrics: &ListViewMetrics,
         key_moved: bool,
     ) -> bool {
-        let wheel_raw = ctx.input(|i| i.raw_scroll_delta);
+        let wheel_raw = ctx.input(|i| i.smooth_scroll_delta);
         if metrics.pointer_over_list && wheel_raw != egui::Vec2::ZERO {
             self.last_list_scroll_at = Some(std::time::Instant::now());
         }

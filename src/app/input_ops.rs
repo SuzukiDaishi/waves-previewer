@@ -18,7 +18,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
-        let wants_kb = ctx.wants_keyboard_input();
+        let wants_kb = ctx.egui_wants_keyboard_input();
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
 
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
@@ -503,7 +503,7 @@ impl super::WavesPreviewer {
 
     pub(super) fn handle_undo_redo_hotkeys(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
-        if search_focused && ctx.wants_keyboard_input() {
+        if search_focused && ctx.egui_wants_keyboard_input() {
             return;
         }
         let cmd_down = ctx.input(|i| i.modifiers.command);

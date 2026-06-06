@@ -1781,7 +1781,7 @@ impl crate::app::WavesPreviewer {
         } else {
             0.0
         };
-        if !ctx.wants_keyboard_input() && tab_samples_len > 0 {
+        if !ctx.egui_wants_keyboard_input() && tab_samples_len > 0 {
             let mods = ctx.input(|i| i.modifiers);
             let ctrl = mods.ctrl || mods.command;
             let shift = mods.shift;
@@ -2905,7 +2905,7 @@ impl crate::app::WavesPreviewer {
             // Handle interactions (seek, zoom, pan, selection)
             if view_mode == ViewMode::Waveform
                 && display_samples_len > 0
-                && !ctx.wants_keyboard_input()
+                && !ctx.egui_wants_keyboard_input()
             {
                 let zoom_in = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
                 let zoom_out = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
@@ -2951,19 +2951,14 @@ impl crate::app::WavesPreviewer {
             if pointer_over_waveform {
                 // Zoom with wheel/pinch over this widget.
                 // `zoom_delta` captures ctrl/cmd+wheel and pinch gestures robustly.
-                let (wheel_raw, wheel_smooth, zoom_delta, modifiers) = ui.input(|i| {
+                let (wheel_smooth, zoom_delta, modifiers) = ui.input(|i| {
                     (
-                        i.raw_scroll_delta,
                         i.smooth_scroll_delta,
-                        i.zoom_delta(),
+                        i.zoom_delta() as f32,
                         i.modifiers,
                     )
                 });
-                let wheel = if wheel_raw != egui::Vec2::ZERO {
-                    wheel_raw
-                } else {
-                    wheel_smooth
-                };
+                let wheel = wheel_smooth;
                 let scroll_y = wheel.y;
                 let pointer_x = resp.hover_pos().map(|p| p.x).filter(|_| pointer_over_waveform);
                 let wheel_has_scroll = wheel.x.abs() > 0.0 || scroll_y.abs() > 0.0;
@@ -2981,14 +2976,11 @@ impl crate::app::WavesPreviewer {
                 };
                 // Debug trace (dev builds): log incoming deltas and modifiers when over canvas
                 #[cfg(debug_assertions)]
-                if wheel_raw != egui::Vec2::ZERO
-                    || wheel_smooth != egui::Vec2::ZERO
+                if wheel_smooth != egui::Vec2::ZERO
                     || zoom_factor_from_input.is_some()
                 {
                     eprintln!(
-                        "wheel_raw=({:.2},{:.2}) wheel_smooth=({:.2},{:.2}) wheel_used=({:.2},{:.2}) ctrl={} shift={} zoom_delta={:.3}",
-                        wheel_raw.x,
-                        wheel_raw.y,
+                        "wheel_smooth=({:.2},{:.2}) wheel_used=({:.2},{:.2}) ctrl={} shift={} zoom_delta={:.3}",
                         wheel_smooth.x,
                         wheel_smooth.y,
                         wheel.x,
@@ -6533,10 +6525,10 @@ impl crate::app::WavesPreviewer {
                                                 }
                                             });
                                         if let Some(note) = draft.last_backend_note.as_ref() {
-                                            Frame::none()
+                                            Frame::NONE
                                                 .fill(Color32::from_rgb(80, 60, 20))
-                                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                                .rounding(4.0)
+                                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                                .corner_radius(4.0)
                                                 .show(ui, |ui| {
                                                     ui.horizontal_wrapped(|ui| {
                                                         ui.label(

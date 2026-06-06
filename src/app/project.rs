@@ -898,6 +898,7 @@ pub fn project_plugin_fx_draft_to_draft(draft: &ProjectPluginFxDraft) -> PluginF
                 .ok()
         }),
         last_error: draft.last_error.clone(),
+        last_backend_note: None,
         last_backend_log: draft.last_backend_log.clone(),
     }
 }
@@ -1359,6 +1360,7 @@ wave = true
             state_blob: Some(vec![1, 2, 3, 4, 5]),
             last_error: None,
             last_backend_log: Some("Probe: NativeVst3 params=1".to_string()),
+            last_backend_note: None,
         };
         let project = project_plugin_fx_draft_from_draft(&src);
         let restored = project_plugin_fx_draft_to_draft(&project);
@@ -1384,6 +1386,7 @@ wave = true
             state_blob: None,
             last_error: None,
             last_backend_log: None,
+            last_backend_note: None,
         };
         let project = project_plugin_fx_draft_from_draft(&src);
         assert_eq!(project.backend.as_deref(), Some("native_clap"));
@@ -1475,5 +1478,175 @@ wave = true
                 EditorOtherSubView::Chromagram,
             )
         );
+    }
+
+    // ── TOML serialization roundtrip (toml 1.1 migration) ────────────────────
+
+    const MINIMAL_TOML: &str = r#"
+version = 1
+name = "test project"
+base_dir = "/audio"
+active_tab = 0
+tabs = []
+
+[list]
+files = ["a.wav", "b.wav"]
+
+[app]
+theme = "dark"
+sort_key = "name"
+sort_dir = "asc"
+search_query = ""
+search_regex = false
+
+[app.list_columns]
+file = true
+folder = false
+transcript = false
+external = false
+length = true
+ch = true
+sr = true
+bits = true
+peak = false
+lufs = false
+gain = false
+wave = true
+
+[spectrogram]
+fft_size = 2048
+window = "hann"
+overlap = 0.75
+max_frames = 512
+scale = "log"
+mel_scale = "linear"
+db_floor = -80.0
+max_freq_hz = 20000.0
+show_note_labels = false
+"#;
+
+    #[test]
+    fn serialize_deserialize_minimal_roundtrip() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        let s = serialize_project(&p).unwrap();
+        let p2 = deserialize_project(&s).unwrap();
+        assert_eq!(p.version, p2.version);
+        assert_eq!(p.name, p2.name);
+        assert_eq!(p.base_dir, p2.base_dir);
+        assert_eq!(p.active_tab, p2.active_tab);
+        assert_eq!(p.list.files, p2.list.files);
+        assert_eq!(p.app.theme, p2.app.theme);
+        assert_eq!(p.app.sort_key, p2.app.sort_key);
+    }
+
+    #[test]
+    fn serialize_deserialize_name_none() {
+        let toml = MINIMAL_TOML.replace(r#"name = "test project""#, "");
+        let p = deserialize_project(&toml).unwrap();
+        assert_eq!(p.name, None);
+        let s = serialize_project(&p).unwrap();
+        let p2 = deserialize_project(&s).unwrap();
+        assert_eq!(p2.name, None);
+    }
+
+    #[test]
+    fn serialize_deserialize_unicode_name() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        let mut p2 = p.clone();
+        p2.name = Some("日本語プロジェクト 🎵 été".to_string());
+        let s = serialize_project(&p2).unwrap();
+        let p3 = deserialize_project(&s).unwrap();
+        assert_eq!(p3.name.as_deref(), Some("日本語プロジェクト 🎵 été"));
+    }
+
+    #[test]
+    fn serialize_deserialize_unicode_file_paths() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        let mut p2 = p.clone();
+        p2.list.files = vec![
+            "/audio/トラック01.wav".to_string(),
+            "/audio/café_ambience.wav".to_string(),
+        ];
+        let s = serialize_project(&p2).unwrap();
+        let p3 = deserialize_project(&s).unwrap();
+        assert_eq!(p3.list.files, p2.list.files);
+    }
+
+    #[test]
+    fn serialize_output_is_valid_toml() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        let s = serialize_project(&p).unwrap();
+        let parsed: Result<toml::Value, _> = toml::from_str(&s);
+        assert!(parsed.is_ok(), "serialize output is not valid toml: {:?}", parsed.err());
+    }
+
+    #[test]
+    fn serialize_is_deterministic() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        let s1 = serialize_project(&p).unwrap();
+        let s2 = serialize_project(&p).unwrap();
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn deserialize_version_values() {
+        for v in [1u32, 2, 10, 999] {
+            let toml = MINIMAL_TOML.replace("version = 1", &format!("version = {v}"));
+            let p = deserialize_project(&toml).unwrap();
+            let s = serialize_project(&p).unwrap();
+            let p2 = deserialize_project(&s).unwrap();
+            assert_eq!(p2.version, v);
+        }
+    }
+
+    #[test]
+    fn deserialize_default_fields_are_empty() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        assert!(p.list.items.is_empty());
+        assert!(p.list.sample_rate_overrides.is_empty());
+        assert!(p.list.virtual_items.is_empty());
+        assert!(p.cached_edits.is_empty());
+        assert!(p.tabs.is_empty());
+    }
+
+    #[test]
+    fn deserialize_list_columns_defaults_false() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        assert!(!p.app.list_columns.edited);
+        assert!(!p.app.list_columns.cover_art);
+        assert!(!p.app.list_columns.bpm);
+        assert!(!p.app.list_columns.created_at);
+    }
+
+    #[test]
+    fn deserialize_spectrogram_floats_correct() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        assert!((p.spectrogram.overlap - 0.75).abs() < 1e-5);
+        assert!((p.spectrogram.db_floor - (-80.0)).abs() < 1e-3);
+        assert!((p.spectrogram.max_freq_hz - 20000.0).abs() < 0.1);
+        assert_eq!(p.spectrogram.fft_size, 2048);
+        assert!(!p.spectrogram.show_note_labels);
+    }
+
+    #[test]
+    fn serialize_large_file_list() {
+        let p = deserialize_project(MINIMAL_TOML).unwrap();
+        let mut p2 = p.clone();
+        p2.list.files = (0..200).map(|i| format!("/audio/track_{i:04}.wav")).collect();
+        let s = serialize_project(&p2).unwrap();
+        let p3 = deserialize_project(&s).unwrap();
+        assert_eq!(p3.list.files.len(), 200);
+        assert_eq!(p3.list.files[0], "/audio/track_0000.wav");
+        assert_eq!(p3.list.files[199], "/audio/track_0199.wav");
+    }
+
+    #[test]
+    fn deserialize_invalid_toml_returns_error() {
+        assert!(deserialize_project("not valid toml ][{").is_err());
+    }
+
+    #[test]
+    fn deserialize_empty_string_returns_error() {
+        assert!(deserialize_project("").is_err());
     }
 }

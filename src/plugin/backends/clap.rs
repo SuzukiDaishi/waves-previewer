@@ -817,19 +817,21 @@ mod native {
                 .encode_utf16()
                 .collect();
             let hinstance = GetModuleHandleW(std::ptr::null());
-            let wc = WNDCLASSW {
+            let wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(clap_gui_wnd_proc),
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: hinstance,
-                hIcon: 0,
-                hCursor: 0,
-                hbrBackground: 0,
+                hIcon: std::ptr::null_mut(),
+                hCursor: std::ptr::null_mut(),
+                hbrBackground: std::ptr::null_mut(),
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: class_name.as_ptr(),
+                hIconSm: std::ptr::null_mut(),
             };
-            let _ = RegisterClassW(&wc);
+            let _ = RegisterClassExW(&wc);
             let style = WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN;
             let ex_style = 0u32;
             let mut rect = windows_sys::Win32::Foundation::RECT {
@@ -852,12 +854,12 @@ mod native {
                 CW_USEDEFAULT,
                 win_w,
                 win_h,
-                0,
-                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
                 hinstance,
                 std::ptr::null(),
             );
-            if hwnd == 0 { None } else { Some(hwnd) }
+            if hwnd.is_null() { None } else { Some(hwnd) }
         }
     }
 

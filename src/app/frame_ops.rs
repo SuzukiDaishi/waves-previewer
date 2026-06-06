@@ -13,15 +13,19 @@ impl WavesPreviewer {
         had_ui_input: bool,
     ) {
         self.run_frame_pre_ui(ctx, frame_started, had_ui_input);
-        let activate_path = self.run_frame_workspace(ctx);
-        let activated_tab_idx = self.run_frame_activation(ctx, activate_path);
+    }
+
+    pub(super) fn run_frame_ui(&mut self, ui: &mut egui::Ui, frame_started: Instant) {
+        let ctx = ui.ctx().clone();
+        let activate_path = self.run_frame_workspace(ui);
+        let activated_tab_idx = self.run_frame_activation(&ctx, activate_path);
         if let Some(tab_idx) = activated_tab_idx {
             self.refresh_tool_preview_for_tab(tab_idx);
         }
-        self.run_frame_pending_editor_autoplay(ctx);
-        self.run_frame_overlays(ctx);
-        self.run_frame_modal_windows(ctx);
-        self.run_frame_finish(ctx, frame_started);
+        self.run_frame_pending_editor_autoplay(&ctx);
+        self.run_frame_overlays(&ctx);
+        self.run_frame_modal_windows(&ctx);
+        self.run_frame_finish(&ctx, frame_started);
     }
 
     fn run_frame_pre_ui(
@@ -91,11 +95,12 @@ impl WavesPreviewer {
         self.tick_processing_state(ctx);
     }
 
-    fn run_frame_workspace(&mut self, ctx: &egui::Context) -> Option<PathBuf> {
-        self.ui_top_bar(ctx);
-        self.handle_dropped_files(ctx);
+    fn run_frame_workspace(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
+        let ctx = ui.ctx().clone();
+        self.ui_top_bar(ui);
+        self.handle_dropped_files(&ctx);
         let mut activate_path: Option<PathBuf> = None;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 let is_list = self.is_list_workspace_active();
                 let list_label = if is_list {
@@ -113,7 +118,7 @@ impl WavesPreviewer {
                     self.pending_activate_kind = None;
                     self.pending_activate_ready = false;
                     self.audio.set_loop_enabled(false);
-                    self.request_list_focus(ctx);
+                    self.request_list_focus(&ctx);
                 }
                 if self.effect_graph.workspace_open {
                     ui.horizontal(|ui| {
@@ -168,19 +173,19 @@ impl WavesPreviewer {
                     });
                 }
                 if let Some(i) = to_close {
-                    self.close_tab_at(i, ctx);
+                    self.close_tab_at(i, &ctx);
                 }
             });
             ui.separator();
             if self.is_effect_graph_workspace_active() {
-                self.ui_effect_graph_view(ui, ctx);
+                self.ui_effect_graph_view(ui, &ctx);
             } else if let Some(tab_idx) = self
                 .active_tab
                 .filter(|_| self.workspace_view == WorkspaceView::Editor)
             {
-                self.ui_editor_view(ui, ctx, tab_idx);
+                self.ui_editor_view(ui, &ctx, tab_idx);
             } else {
-                self.ui_list_view(ui, ctx);
+                self.ui_list_view(ui, &ctx);
             }
         });
         activate_path

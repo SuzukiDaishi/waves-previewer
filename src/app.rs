@@ -2338,4 +2338,9 @@ impl eframe::App for WavesPreviewer {
         });
         self.run_frame(ctx, frame_started, had_ui_input);
     }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let frame_started = std::time::Instant::now();
+        self.run_frame_ui(ui, frame_started);
+    }
 }

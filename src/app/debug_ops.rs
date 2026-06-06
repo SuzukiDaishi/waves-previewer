@@ -1230,8 +1230,8 @@ impl WavesPreviewer {
                 self.debug_trace_event(format!("event: {:?}", ev));
             }
         }
-        let wants_kb = ctx.wants_keyboard_input();
-        let wants_ptr = ctx.wants_pointer_input();
+        let wants_kb = ctx.egui_wants_keyboard_input();
+        let wants_ptr = ctx.egui_wants_pointer_input();
         if ctrl && (pressed_c || pressed_v) {
             let key = if pressed_c { "C" } else { "V" };
             let pos = ctx.input(|i| i.pointer.hover_pos());

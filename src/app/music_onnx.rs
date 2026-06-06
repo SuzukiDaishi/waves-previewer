@@ -1899,7 +1899,7 @@ impl DemucsOnnx {
             }
             offset
         } else {
-            rand::thread_rng().gen_range(0..max_shift.max(1))
+            rand::rng().random_range(0..max_shift.max(1))
         };
         let shifted_length = length + max_shift.saturating_sub(shift_offset);
         let shifted_audio = padded_mix
@@ -3018,5 +3018,46 @@ mod tests {
         assert!(!source_audio_has_timing_risk(std::path::Path::new(
             "song.wav"
         )));
+    }
+
+    // ── rand 0.9 migration: random_range / rng() ──────────────────────────────
+
+    use rand::Rng as _;
+
+    #[test]
+    fn rand_range_zero_max_returns_zero() {
+        // max_shift = 0 → max_shift.max(1) = 1 → range 0..1 always yields 0
+        let result = rand::rng().random_range(0..1usize);
+        assert_eq!(result, 0, "0..1 range must always return 0");
+    }
+
+    #[test]
+    fn rand_range_within_bounds() {
+        for max in [1usize, 2, 5, 10, 100] {
+            let result = rand::rng().random_range(0..max);
+            assert!(result < max, "random_range(0..{max}) returned {result} which is out of bounds");
+        }
+    }
+
+    #[test]
+    fn rand_range_distribution_covers_full_range() {
+        // After 2000 samples from 0..10, all 10 values should appear at least once.
+        let max = 10usize;
+        let mut seen = vec![false; max];
+        for _ in 0..2000 {
+            let v = rand::rng().random_range(0..max);
+            seen[v] = true;
+        }
+        for (i, &hit) in seen.iter().enumerate() {
+            assert!(hit, "value {i} never appeared in 2000 samples from 0..{max}");
+        }
+    }
+
+    #[test]
+    fn rand_range_is_non_negative() {
+        for _ in 0..500 {
+            let v = rand::rng().random_range(0..usize::MAX);
+            assert!(v < usize::MAX);
+        }
     }
 }
