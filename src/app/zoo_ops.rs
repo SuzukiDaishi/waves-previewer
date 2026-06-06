@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use image::AnimationDecoder;
 
-use super::{WavesPreviewer, ZooFrameImage, ZooFrameTexture};
+use super::{helpers::db_to_amp, WavesPreviewer, ZooFrameImage, ZooFrameTexture};
 
 impl WavesPreviewer {
     pub(super) fn set_zoo_gif_path(&mut self, path: Option<PathBuf>) {
@@ -55,14 +55,23 @@ impl WavesPreviewer {
         if self.zoo_frames_tex.len() == self.zoo_frames_raw.len() {
             return;
         }
-        self.zoo_frames_tex.clear();
-        for (idx, frame) in self.zoo_frames_raw.iter().enumerate() {
+        // GPU テクスチャのアップロードをフレームあたり最大 4 枚に制限し、
+        // 大きな GIF でも 1 フレームを占有しない。残りは次フレームへ回す。
+        const MAX_UPLOADS_PER_FRAME: usize = 4;
+        let start = self.zoo_frames_tex.len();
+        let end = (start + MAX_UPLOADS_PER_FRAME).min(self.zoo_frames_raw.len());
+        for (i, frame) in self.zoo_frames_raw[start..end].iter().enumerate() {
+            let idx = start + i;
             let id = format!("zoo_anim_{}_{}", self.zoo_texture_gen, idx);
             let tex = ctx.load_texture(id, frame.image.clone(), egui::TextureOptions::LINEAR);
             self.zoo_frames_tex.push(ZooFrameTexture {
                 texture: tex,
                 delay_s: frame.delay_s.max(0.016),
             });
+        }
+        // まだ未アップロードのフレームがある場合は次フレームを要求する
+        if self.zoo_frames_tex.len() < self.zoo_frames_raw.len() {
+            ctx.request_repaint();
         }
     }
 
@@ -119,6 +128,8 @@ impl WavesPreviewer {
             }
         }
         if let (Some(engine), Some(buf)) = (&self.zoo_voice_audio, &self.zoo_voice_cache) {
+            // global Volume に従って再生音量を同期する
+            engine.set_volume(db_to_amp(self.volume_db).clamp(0.0, 1.0));
             engine.stop();
             engine.set_samples_buffer(buf.clone());
             engine.play();

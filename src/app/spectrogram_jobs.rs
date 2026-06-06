@@ -99,15 +99,15 @@ impl super::WavesPreviewer {
             let use_mixdown = channel_view.mode == ChannelViewMode::Mixdown || requested.is_empty();
             let channels = if use_mixdown {
                 vec![super::WavesPreviewer::mixdown_channels(
-                    &tab.ch_samples,
+                    &tab.ch_samples_arc,
                     tab.samples_len,
                 )]
             } else if channel_view.mode == ChannelViewMode::All {
-                tab.ch_samples.clone()
+                (*tab.ch_samples_arc).clone()
             } else {
                 requested
                     .iter()
-                    .filter_map(|&idx| tab.ch_samples.get(idx).cloned())
+                    .filter_map(|&idx| tab.ch_samples_arc.get(idx).cloned())
                     .collect()
             };
             (path, view_mode, channels, tab.buffer_sample_rate.max(1))

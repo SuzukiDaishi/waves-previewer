@@ -583,6 +583,7 @@ impl crate::app::WavesPreviewer {
                 .max()
                 .unwrap_or(tab.samples_len);
             tab.ch_samples = channels.clone();
+            tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
             tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
             tab.samples_len = samples_len;
             let (waveform_minmax, waveform_pyramid) =

@@ -1144,6 +1144,9 @@ impl super::WavesPreviewer {
                     bpm_value: tab.bpm_value,
                     bpm_user_set: tab.bpm_user_set,
                     bpm_offset_sec: tab.bpm_offset_sec,
+                    time_sig_numerator: tab.time_sig_numerator,
+                    time_sig_denominator: tab.time_sig_denominator,
+                    extra_selections: tab.extra_selections.clone(),
                     snap_zero_cross: tab.snap_zero_cross,
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
@@ -1270,6 +1273,7 @@ impl super::WavesPreviewer {
             tab.waveform_minmax = waveform;
             tab.waveform_pyramid = waveform_pyramid;
             tab.ch_samples = editor_channels.clone();
+            tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
             tab.samples_len = samples_len;
             tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
             Self::reset_tab_defaults(tab);
@@ -1594,6 +1598,7 @@ impl super::WavesPreviewer {
                 tab.waveform_pyramid = None;
             }
             tab.ch_samples = chs;
+            tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
             tab.samples_len = samples_len;
             tab.buffer_sample_rate = out_sr.max(1);
             Self::reset_tab_defaults(tab);
@@ -2445,35 +2450,16 @@ impl super::WavesPreviewer {
                     .items
                     .iter()
                     .filter(|item| {
-                        let name = item.display_name.as_str();
-                        let parent = item.display_folder.as_str();
                         let transcript = item
                             .transcript
                             .as_ref()
                             .map(|t| t.full_text.as_str())
                             .unwrap_or("");
-                        let meta_text = item
-                            .meta
-                            .as_ref()
-                            .map(|m| {
-                                format!(
-                                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
-                                    m.sample_rate,
-                                    m.bits_per_sample,
-                                    m.bit_rate_bps.unwrap_or(0),
-                                    m.channels,
-                                    m.duration_secs.unwrap_or(0.0),
-                                    m.peak_db.unwrap_or(0.0),
-                                    m.lufs_i.unwrap_or(0.0),
-                                    m.bpm.unwrap_or(0.0)
-                                )
-                            })
-                            .unwrap_or_default();
                         let external_hit = item.external.values().any(|v| re.is_match(v));
-                        re.is_match(name)
-                            || re.is_match(parent)
+                        re.is_match(&item.search_name)
+                            || re.is_match(&item.search_folder)
                             || re.is_match(transcript)
-                            || re.is_match(&meta_text)
+                            || re.is_match(&item.search_meta_summary)
                             || external_hit
                     })
                     .map(|item| item.id)
@@ -2485,38 +2471,19 @@ impl super::WavesPreviewer {
                     .items
                     .iter()
                     .filter(|item| {
-                        let name = item.display_name.to_lowercase();
-                        let parent = item.display_folder.to_lowercase();
                         let transcript = item
                             .transcript
                             .as_ref()
                             .map(|t| t.full_text.to_lowercase())
                             .unwrap_or_default();
-                        let meta_text = item
-                            .meta
-                            .as_ref()
-                            .map(|m| {
-                                format!(
-                                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
-                                    m.sample_rate,
-                                    m.bits_per_sample,
-                                    m.bit_rate_bps.unwrap_or(0),
-                                    m.channels,
-                                    m.duration_secs.unwrap_or(0.0),
-                                    m.peak_db.unwrap_or(0.0),
-                                    m.lufs_i.unwrap_or(0.0),
-                                    m.bpm.unwrap_or(0.0)
-                                )
-                            })
-                            .unwrap_or_default();
                         let external_hit = item
                             .external
                             .values()
                             .any(|v| v.to_lowercase().contains(&q));
-                        name.contains(&q)
-                            || parent.contains(&q)
+                        item.search_name.contains(&q)
+                            || item.search_folder.contains(&q)
                             || transcript.contains(&q)
-                            || meta_text.to_lowercase().contains(&q)
+                            || item.search_meta_summary.contains(&q)
                             || external_hit
                     })
                     .map(|item| item.id)
@@ -2528,38 +2495,19 @@ impl super::WavesPreviewer {
                 .items
                 .iter()
                 .filter(|item| {
-                    let name = item.display_name.to_lowercase();
-                    let parent = item.display_folder.to_lowercase();
                     let transcript = item
                         .transcript
                         .as_ref()
                         .map(|t| t.full_text.to_lowercase())
                         .unwrap_or_default();
-                    let meta_text = item
-                        .meta
-                        .as_ref()
-                        .map(|m| {
-                            format!(
-                                "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
-                                m.sample_rate,
-                                m.bits_per_sample,
-                                m.bit_rate_bps.unwrap_or(0),
-                                m.channels,
-                                m.duration_secs.unwrap_or(0.0),
-                                m.peak_db.unwrap_or(0.0),
-                                m.lufs_i.unwrap_or(0.0),
-                                m.bpm.unwrap_or(0.0)
-                            )
-                        })
-                        .unwrap_or_default();
                     let external_hit = item
                         .external
                         .values()
                         .any(|v| v.to_lowercase().contains(&q));
-                    name.contains(&q)
-                        || parent.contains(&q)
+                    item.search_name.contains(&q)
+                        || item.search_folder.contains(&q)
                         || transcript.contains(&q)
-                        || meta_text.to_lowercase().contains(&q)
+                        || item.search_meta_summary.contains(&q)
                         || external_hit
                 })
                 .map(|item| item.id)

@@ -618,6 +618,8 @@ impl super::WavesPreviewer {
                 bpm_value: cached.bpm_value,
                 bpm_user_set: cached.bpm_user_set,
                 bpm_offset_sec: cached.bpm_offset_sec,
+                time_sig_numerator: cached.time_sig_numerator,
+                time_sig_denominator: cached.time_sig_denominator,
                 plugin_fx_draft: project_plugin_fx_draft_from_draft(&cached.plugin_fx_draft),
                 applied_effect_graph: cached.applied_effect_graph.as_ref().map(|stamp| {
                     ProjectAppliedEffectGraph {
@@ -897,6 +899,7 @@ impl super::WavesPreviewer {
                         sample_rate,
                         bits_per_sample,
                     ));
+                    item.rebuild_search_cache();
                     item.virtual_audio = Some(audio);
                     item.virtual_state = Some(VirtualState {
                         source: source.clone(),
@@ -952,6 +955,7 @@ impl super::WavesPreviewer {
                             "Virtual restore failed".to_string(),
                         );
                         item.meta = Some(missing_file_meta(&path));
+                        item.rebuild_search_cache();
                         item.virtual_state = Some(VirtualState {
                             source: virtual_source_from_project(&entry.source, &base_dir),
                             op_chain: virtual_ops_from_project(&entry.op_chain),
@@ -1123,6 +1127,9 @@ impl super::WavesPreviewer {
                     bpm_value: edit.bpm_value,
                     bpm_user_set: edit.bpm_user_set,
                     bpm_offset_sec: edit.bpm_offset_sec,
+                    time_sig_numerator: edit.time_sig_numerator,
+                    time_sig_denominator: edit.time_sig_denominator,
+                    extra_selections: vec![],
                     applied_effect_graph: edit.applied_effect_graph.as_ref().map(|stamp| {
                         super::types::AppliedEffectGraphStamp {
                             template_id: stamp.template_id.clone(),
@@ -1197,6 +1204,9 @@ impl super::WavesPreviewer {
                         bpm_value: tab.bpm_value,
                         bpm_user_set: tab.bpm_user_set,
                         bpm_offset_sec: tab.bpm_offset_sec,
+                        time_sig_numerator: tab.time_sig_numerator,
+                        time_sig_denominator: tab.time_sig_denominator,
+                        extra_selections: vec![],
                         applied_effect_graph: None,
                     },
                 );
@@ -1208,6 +1218,7 @@ impl super::WavesPreviewer {
                     item.status =
                         super::types::MediaStatus::DecodeFailed(describe_missing(&tab_path));
                     item.meta = Some(missing_file_meta(&tab_path));
+                    item.rebuild_search_cache();
                     if item.virtual_state.is_none() {
                         item.virtual_state = Some(VirtualState {
                             source: VirtualSourceRef::FilePath(tab_path.clone()),
@@ -1295,6 +1306,8 @@ impl super::WavesPreviewer {
                     t.bpm_value = tab.bpm_value;
                     t.bpm_user_set = tab.bpm_user_set;
                     t.bpm_offset_sec = tab.bpm_offset_sec;
+                    t.time_sig_numerator = tab.time_sig_numerator;
+                    t.time_sig_denominator = tab.time_sig_denominator;
                     t.view_offset = tab.view_offset;
                     t.view_offset_exact = tab.view_offset as f64;
                     t.samples_per_px = tab.samples_per_px;

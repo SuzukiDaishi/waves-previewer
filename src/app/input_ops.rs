@@ -266,17 +266,36 @@ impl super::WavesPreviewer {
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
-                    if let Some((s, e)) = self.selected_range(tab_idx) {
+                    let ranges = self.all_selected_ranges(tab_idx);
+                    if ranges.len() > 1 {
+                        self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
+                    } else if let Some((s, e)) = self.selected_range(tab_idx) {
                         self.editor_delete_range_and_join(tab_idx, (s, e));
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::T)) {
-                    if let Some((s, e)) = self.selected_range(tab_idx) {
+                    let ranges = self.all_selected_ranges(tab_idx);
+                    if ranges.len() > 1 {
+                        self.editor_apply_trim_multi_ranges(tab_idx, ranges);
+                    } else if let Some((s, e)) = self.selected_range(tab_idx) {
                         self.editor_apply_trim_range(tab_idx, (s, e));
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::V)) {
-                    self.try_add_trim_range_as_virtual_shortcut(tab_idx);
+                    let ranges = self.all_selected_ranges(tab_idx);
+                    if ranges.len() > 1 {
+                        if let Some(path) = self.tabs.get(tab_idx).map(|t| t.path.clone()) {
+                            let mut iter = ranges.into_iter();
+                            if let Some((s, e)) = iter.next() {
+                                self.begin_trim_virtual_job(tab_idx, (s, e));
+                            }
+                            for (s, e) in iter {
+                                self.virtual_trim_queue.push_back((path.clone(), s, e));
+                            }
+                        }
+                    } else {
+                        self.try_add_trim_range_as_virtual_shortcut(tab_idx);
+                    }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num0)) {
                     self.seek_to_fraction_in_active_tab(1, 1);
@@ -318,6 +337,36 @@ impl super::WavesPreviewer {
             self.volume_db = next;
             self.apply_effective_volume();
         }
+    }
+
+    fn all_selected_ranges(&self, tab_idx: usize) -> Vec<(usize, usize)> {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return vec![];
+        };
+        let mut ranges: Vec<(usize, usize)> = tab
+            .extra_selections
+            .iter()
+            .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+            .filter(|&(a, b)| b > a)
+            .collect();
+        if let Some((a0, b0)) = tab.selection {
+            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+            if b > a {
+                ranges.push((a, b));
+            }
+        }
+        ranges.sort();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1 {
+                    last.1 = last.1.max(e);
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        merged
     }
 
     fn selected_range(&self, tab_idx: usize) -> Option<(usize, usize)> {

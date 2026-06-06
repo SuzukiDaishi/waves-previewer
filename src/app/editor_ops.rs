@@ -359,6 +359,119 @@ impl crate::app::WavesPreviewer {
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
     }
 
+    /// Trim to multiple ranges: keep only the audio inside each range, concatenated in order.
+    pub(super) fn editor_apply_trim_multi_ranges(
+        &mut self,
+        tab_idx: usize,
+        ranges: Vec<(usize, usize)>,
+    ) {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            if ranges.is_empty() {
+                return;
+            }
+            if ranges.iter().any(|&(_s, e)| e > tab.samples_len) {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            let new_len: usize = ranges.iter().map(|&(s, e)| e - s).sum();
+            for ch in tab.ch_samples.iter_mut() {
+                let new_ch: Vec<f32> = ranges
+                    .iter()
+                    .flat_map(|&(s, e)| {
+                        let end = e.min(ch.len());
+                        let start = s.min(end);
+                        ch[start..end].to_vec()
+                    })
+                    .collect();
+                *ch = new_ch;
+            }
+            tab.samples_len = new_len;
+            let remap_markers =
+                |markers: &[crate::markers::MarkerEntry]| -> Vec<crate::markers::MarkerEntry> {
+                    let mut out = Vec::new();
+                    let mut offset = 0usize;
+                    for &(s, e) in &ranges {
+                        for m in markers {
+                            if m.sample >= s && m.sample < e {
+                                out.push(crate::markers::MarkerEntry {
+                                    sample: offset + (m.sample - s),
+                                    label: m.label.clone(),
+                                });
+                            }
+                        }
+                        offset += e - s;
+                    }
+                    out.sort_by_key(|m| m.sample);
+                    out.dedup_by(|a, b| a.sample == b.sample && a.label == b.label);
+                    out
+                };
+            tab.markers = remap_markers(&tab.markers);
+            tab.markers_committed = remap_markers(&tab.markers_committed);
+            tab.markers_applied = remap_markers(&tab.markers_applied);
+            tab.view_offset = 0;
+            Self::editor_sync_view_offset_exact(tab);
+            tab.selection = None;
+            tab.extra_selections.clear();
+            tab.ab_loop = None;
+            tab.loop_region = None;
+            tab.loop_region_committed = None;
+            tab.loop_region_applied = None;
+            tab.trim_range = None;
+            Self::editor_invalidate_destructive_preview_state(tab);
+            tab.dirty = true;
+            Self::update_markers_dirty(tab);
+            Self::update_loop_markers_dirty(tab);
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
+    /// Cut multiple ranges: delete audio inside each range, join remaining parts.
+    pub(super) fn editor_delete_multi_ranges_and_join(
+        &mut self,
+        tab_idx: usize,
+        ranges: Vec<(usize, usize)>,
+    ) {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            if ranges.is_empty() {
+                return;
+            }
+            if ranges.iter().any(|&(_s, e)| e > tab.samples_len) {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            let removed: usize = ranges.iter().map(|&(s, e)| e - s).sum();
+            for ch in tab.ch_samples.iter_mut() {
+                let mut new_ch: Vec<f32> = Vec::with_capacity(ch.len().saturating_sub(removed));
+                let mut prev_end = 0usize;
+                for &(s, e) in &ranges {
+                    let seg_end = s.min(ch.len());
+                    let seg_start = prev_end.min(seg_end);
+                    new_ch.extend_from_slice(&ch[seg_start..seg_end]);
+                    prev_end = e;
+                }
+                let tail_start = prev_end.min(ch.len());
+                new_ch.extend_from_slice(&ch[tail_start..]);
+                *ch = new_ch;
+            }
+            tab.samples_len = tab.samples_len.saturating_sub(removed);
+            tab.selection = None;
+            tab.extra_selections.clear();
+            tab.loop_region = None;
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     pub(super) fn begin_trim_virtual_job(&mut self, tab_idx: usize, range: (usize, usize)) -> bool {
         if self.virtual_trim_state.is_some() {
             return false;
@@ -637,6 +750,12 @@ impl crate::app::WavesPreviewer {
                 ));
             }
             self.virtual_trim_state = None;
+            // Process next queued virtual trim job, if any.
+            if let Some((path, s, e)) = self.virtual_trim_queue.pop_front() {
+                if let Some(tab_idx) = self.tabs.iter().position(|t| t.path == path) {
+                    self.begin_trim_virtual_job(tab_idx, (s, e));
+                }
+            }
         } else if disconnected {
             self.virtual_trim_state = None;
         }
@@ -1308,6 +1427,7 @@ impl crate::app::WavesPreviewer {
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
                     tab.ch_samples = applied_channels;
+                    tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
                     tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                     tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
                     let (waveform_minmax, waveform_pyramid) =

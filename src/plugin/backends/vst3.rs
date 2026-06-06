@@ -23,8 +23,8 @@ mod native {
         IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
         IConnectionPointTrait, IEditController, IEditControllerTrait, IHostApplication,
         IHostApplicationTrait, IParameterChanges, IParameterChangesTrait, IParamValueQueue,
-        IParamValueQueueTrait, ParameterInfo, ParamID, ParamValue, ProcessData, ProcessSetup,
-        TChar,
+        IParamValueQueueTrait, ParameterInfo, ParamID, ParamValue, ProcessContext, ProcessData,
+        ProcessSetup, TChar,
     };
     use vst3::Steinberg::{IBStream, IBStreamTrait};
     use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
@@ -1060,6 +1060,9 @@ mod native {
                 // hard fail ではなく backend_note 相当としてログのみ残す。
                 eprintln!("[vst3] setBusArrangements returned {bus_r} (non-fatal, continuing)");
             }
+            // バス配列に合わせた実際のチャンネル数: mono=1, stereo以上=2
+            // numChannels がバス配列と一致しないと ACCESS_VIOLATION になる
+            let bus_ch_count: usize = if ch_count <= 1 { 1 } else { 2 };
             let _ = component.setIoMode(Steinberg::Vst::IoModes_::kOfflineProcessing as i32);
             let act_in_r = component.activateBus(
                 Steinberg::Vst::MediaTypes_::kAudio as i32,
@@ -1108,33 +1111,55 @@ mod native {
                 .map(|(_, p)| p.as_ptr())
                 .unwrap_or(ptr::null_mut());
 
-            let mut rendered = vec![vec![0.0f32; frame_count]; ch_count];
+            // 入力をそのままコピー。bus_ch_count チャンネルのみ plugin 出力で上書きし、
+            // 余分なチャンネル (3ch 以上) は入力をそのまま流す。
+            let mut rendered = out_channels.clone();
             let mut cursor = 0usize;
             while cursor < frame_count {
                 let frames_now = (frame_count - cursor).min(block);
-                let mut in_block: Vec<Vec<f32>> = out_channels
+                // バス配列に合わせて bus_ch_count チャンネルのみ渡す
+                let mut in_block: Vec<Vec<f32>> = out_channels[..bus_ch_count]
                     .iter()
                     .map(|ch| ch[cursor..cursor + frames_now].to_vec())
                     .collect();
-                let mut out_block: Vec<Vec<f32>> = vec![vec![0.0f32; frames_now]; ch_count];
+                let mut out_block: Vec<Vec<f32>> = vec![vec![0.0f32; frames_now]; bus_ch_count];
                 let mut in_ptrs: Vec<*mut f32> =
                     in_block.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
                 let mut out_ptrs: Vec<*mut f32> =
                     out_block.iter_mut().map(|ch| ch.as_mut_ptr()).collect();
 
                 let mut in_bus = AudioBusBuffers {
-                    numChannels: ch_count as i32,
+                    numChannels: bus_ch_count as i32,
                     silenceFlags: 0,
                     __field0: AudioBusBuffers__type0 {
                         channelBuffers32: in_ptrs.as_mut_ptr(),
                     },
                 };
                 let mut out_bus = AudioBusBuffers {
-                    numChannels: ch_count as i32,
+                    numChannels: bus_ch_count as i32,
                     silenceFlags: 0,
                     __field0: AudioBusBuffers__type0 {
                         channelBuffers32: out_ptrs.as_mut_ptr(),
                     },
+                };
+                // プラグインが null チェックなしに sampleRate 等を読む実装がある
+                let mut process_ctx = ProcessContext {
+                    state: 0,
+                    sampleRate: sample_rate.max(1) as f64,
+                    projectTimeSamples: cursor as i64,
+                    systemTime: 0,
+                    continousTimeSamples: cursor as i64,
+                    projectTimeMusic: 0.0,
+                    barPositionMusic: 0.0,
+                    cycleStartMusic: 0.0,
+                    cycleEndMusic: 0.0,
+                    tempo: 120.0,
+                    timeSigNumerator: 4,
+                    timeSigDenominator: 4,
+                    chord: Steinberg::Vst::Chord { keyNote: 0, rootNote: 0, chordMask: 0 },
+                    smpteOffsetSubframes: 0,
+                    frameRate: Steinberg::Vst::FrameRate { framesPerSecond: 30, flags: 0 },
+                    samplesToNextClock: 0,
                 };
                 let mut data = ProcessData {
                     processMode: setup.processMode,
@@ -1148,14 +1173,14 @@ mod native {
                     outputParameterChanges: ptr::null_mut(),
                     inputEvents: ptr::null_mut(),
                     outputEvents: ptr::null_mut(),
-                    processContext: ptr::null_mut(),
+                    processContext: &mut process_ctx,
                 };
                 let pr = processor.process(&mut data);
                 if pr != Steinberg::kResultOk && pr != Steinberg::kResultTrue {
                     return Err(format!("processor.process failed: {pr}"));
                 }
-                for (ci, ch) in rendered.iter_mut().enumerate() {
-                    ch[cursor..cursor + frames_now].copy_from_slice(&out_block[ci]);
+                for ci in 0..bus_ch_count {
+                    rendered[ci][cursor..cursor + frames_now].copy_from_slice(&out_block[ci]);
                 }
                 cursor += frames_now;
             }

@@ -36,11 +36,16 @@ impl WavesPreviewer {
                     .strong(),
             );
         }
-        ui.label("Volume (dB)");
-        let vol_resp = ui.add(egui::Slider::new(&mut self.volume_db, -80.0..=6.0));
-        if vol_resp.changed() {
-            self.apply_effective_volume();
-        }
+        // push_id stabilizes the Volume slider's auto-ID so the conditional "Playing"
+        // label above doesn't shift it and cause a per-frame ID collision flash.
+        let vol_resp = ui.push_id("vol_ctrl", |ui| {
+            ui.label("Volume (dB)");
+            let r = ui.add(egui::Slider::new(&mut self.volume_db, -80.0..=6.0));
+            if r.changed() {
+                self.apply_effective_volume();
+            }
+            r
+        }).inner;
         let vol_up = if vol_resp.has_focus() && self.is_list_workspace_active() {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
         } else {
@@ -533,6 +538,10 @@ impl WavesPreviewer {
     }
 
     fn ui_topbar_output_meter(&mut self, ui: &mut egui::Ui) {
+        ui.push_id("output_meter", |ui| { self.ui_topbar_output_meter_inner(ui); });
+    }
+
+    fn ui_topbar_output_meter_inner(&mut self, ui: &mut egui::Ui) {
         let db = self.meter_db;
         let bar_w = 200.0;
         let bar_h = 16.0;

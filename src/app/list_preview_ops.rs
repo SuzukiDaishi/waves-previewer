@@ -197,23 +197,51 @@ impl super::WavesPreviewer {
         self.list_preview_partial_ready = false;
         let job_epoch = self.list_preview_job_epoch.clone();
         let settings = self.preview_settings_for_path(&path);
-        let _ = (max_secs, emit_every_secs);
         let (tx, rx) = mpsc::channel::<ListPreviewResult>();
         std::thread::spawn(move || {
-            if job_epoch.load(Ordering::Relaxed) != job_id {
-                return;
-            }
-            if let Ok((channels, in_sr)) = crate::wave::decode_wav_multi(&path) {
-                let channels =
-                    Self::render_channels_offline_with_spec(channels, in_sr, settings, false);
-                let _ = tx.send(ListPreviewResult {
-                    path,
-                    channels,
-                    play_sr: settings.out_sr.max(1),
-                    job_id,
-                    is_final: true,
-                    settings,
-                });
+            let use_progressive = max_secs > 0.0 || emit_every_secs > 0.0;
+            if use_progressive {
+                let _ = crate::audio_io::decode_audio_multi_progressive(
+                    &path,
+                    max_secs,
+                    emit_every_secs,
+                    || job_epoch.load(Ordering::Relaxed) != job_id,
+                    |channels, in_sr, is_final| {
+                        if job_epoch.load(Ordering::Relaxed) != job_id {
+                            return false;
+                        }
+                        let rendered = Self::render_channels_offline_with_spec(
+                            channels, in_sr, settings, false,
+                        );
+                        let ok = tx
+                            .send(ListPreviewResult {
+                                path: path.clone(),
+                                channels: rendered,
+                                play_sr: settings.out_sr.max(1),
+                                job_id,
+                                is_final,
+                                settings,
+                            })
+                            .is_ok();
+                        ok && job_epoch.load(Ordering::Relaxed) == job_id
+                    },
+                );
+            } else {
+                if job_epoch.load(Ordering::Relaxed) != job_id {
+                    return;
+                }
+                if let Ok((channels, in_sr)) = crate::wave::decode_wav_multi(&path) {
+                    let channels =
+                        Self::render_channels_offline_with_spec(channels, in_sr, settings, false);
+                    let _ = tx.send(ListPreviewResult {
+                        path,
+                        channels,
+                        play_sr: settings.out_sr.max(1),
+                        job_id,
+                        is_final: true,
+                        settings,
+                    });
+                }
             }
         });
         self.list_preview_rx = Some(rx);
@@ -362,11 +390,11 @@ impl super::WavesPreviewer {
                 Ok(res) => {
                     let latest_job = res.job_id == self.list_preview_job_id;
                     if latest_job {
-                        self.list_preview_partial_ready = false;
+                        self.list_preview_partial_ready = !res.is_final;
                         let audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
                             res.channels,
                         ));
-                        let truncated = false;
+                        let truncated = !res.is_final;
                         self.insert_list_preview_cache_entry(
                             res.path.clone(),
                             ListPreviewCacheEntry {

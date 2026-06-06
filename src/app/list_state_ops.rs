@@ -153,6 +153,7 @@ impl WavesPreviewer {
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
         let updated = if let Some(item) = self.item_for_path_mut(path) {
             item.meta = Some(meta);
+            item.rebuild_search_cache();
             if let Some(sr) = sr_hint {
                 self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
             }

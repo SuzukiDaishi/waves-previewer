@@ -233,6 +233,12 @@ impl crate::app::WavesPreviewer {
                     egui::Color32::from_white_alpha(alpha),
                 );
             });
+
+        // アニメーション次フレームまでの待機時間だけ repaint を要求する。
+        // 他の処理と無関係に zoo 自身が描画タイミングを制御し、
+        // 余計な repaint を発生させない。
+        let next_delay_s = (frame.delay_s / anim_mul.max(bpm_mul).max(0.01)).clamp(0.016, 0.5);
+        ctx.request_repaint_after(std::time::Duration::from_secs_f32(next_delay_s));
     }
 }
 

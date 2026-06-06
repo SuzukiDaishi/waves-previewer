@@ -62,8 +62,12 @@ impl super::WavesPreviewer {
 
     pub(super) fn apply_spectrogram_updates(&mut self, ctx: &egui::Context) {
         let messages = self.collect_spectrogram_messages();
+        let hit_budget = messages.len() >= super::SPECTRO_DRAIN_MAX_PER_FRAME;
         for msg in messages {
             self.apply_spectrogram_message(ctx, msg);
+        }
+        if hit_budget {
+            ctx.request_repaint();
         }
     }
 
@@ -72,6 +76,9 @@ impl super::WavesPreviewer {
         if let Some(rx) = &self.spectro_rx {
             while let Ok(msg) = rx.try_recv() {
                 messages.push(msg);
+                if messages.len() >= super::SPECTRO_DRAIN_MAX_PER_FRAME {
+                    break;
+                }
             }
         }
         messages

@@ -71,7 +71,11 @@ impl WavesPreviewer {
                 external: HashMap::new(),
                 virtual_audio: None,
                 virtual_state: None,
+                search_name: String::new(),
+                search_folder: String::new(),
+                search_meta_summary: String::new(),
             };
+            item.rebuild_search_cache();
             self.next_media_id = self.next_media_id.wrapping_add(1);
             for (idx, header) in self.external_headers.iter().enumerate() {
                 if let Some(val) = row.get(idx) {

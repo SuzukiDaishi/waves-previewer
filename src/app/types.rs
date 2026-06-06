@@ -67,6 +67,36 @@ pub struct MediaItem {
     pub external: HashMap<String, String>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
     pub virtual_state: Option<VirtualState>,
+    /// Pre-lowercased display_name for search. Rebuilt by rebuild_search_cache().
+    pub search_name: String,
+    /// Pre-lowercased display_folder for search. Rebuilt by rebuild_search_cache().
+    pub search_folder: String,
+    /// Pre-built meta summary string ("sr:48000 bits:24 ...") for search. Rebuilt by rebuild_search_cache().
+    pub search_meta_summary: String,
+}
+
+impl MediaItem {
+    pub fn rebuild_search_cache(&mut self) {
+        self.search_name = self.display_name.to_lowercase();
+        self.search_folder = self.display_folder.to_lowercase();
+        self.search_meta_summary = self
+            .meta
+            .as_ref()
+            .map(|m| {
+                format!(
+                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
+                    m.sample_rate,
+                    m.bits_per_sample,
+                    m.bit_rate_bps.unwrap_or(0),
+                    m.channels,
+                    m.duration_secs.unwrap_or(0.0),
+                    m.peak_db.unwrap_or(0.0),
+                    m.lufs_i.unwrap_or(0.0),
+                    m.bpm.unwrap_or(0.0)
+                )
+            })
+            .unwrap_or_default();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -880,6 +910,7 @@ pub struct EditorTab {
     pub loop_enabled: bool,
     pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
+    pub ch_samples_arc: Arc<Vec<Vec<f32>>>, // Arc mirror of ch_samples for worker sends (updated after every write to ch_samples)
     pub buffer_sample_rate: u32,   // current sample rate of ch_samples
     pub samples_len: usize,        // length in samples
     pub samples_len_visual: usize, // length used for viewport math while loading
@@ -907,7 +938,8 @@ pub struct EditorTab {
     #[allow(dead_code)]
     pub ops: Vec<EditOp>, // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
-    pub selection: Option<(usize, usize)>, // [start,end) in samples
+    pub selection: Option<(usize, usize)>, // [start,end) in samples (primary)
+    pub extra_selections: Vec<(usize, usize)>, // additional ranges from Ctrl+drag
     pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
     pub markers_saved: Vec<MarkerEntry>,   // last saved markers
     pub markers_committed: Vec<MarkerEntry>, // New field
@@ -940,6 +972,8 @@ pub struct EditorTab {
     pub bpm_value: f32,                  // current BPM for grid
     pub bpm_user_set: bool,              // user-overridden BPM
     pub bpm_offset_sec: f32,             // grid offset in seconds
+    pub time_sig_numerator: u8,          // time signature numerator (e.g. 4)
+    pub time_sig_denominator: u8,        // time signature denominator (e.g. 4)
     pub seek_hold: Option<SeekHoldState>, // key repeat state for seek
     pub snap_zero_cross: bool,           // enable zero-cross snapping
     pub selection_anchor_sample: Option<usize>, // shared Shift/click/drag anchor
@@ -1440,6 +1474,9 @@ pub struct CachedEdit {
     pub bpm_value: f32,
     pub bpm_user_set: bool,
     pub bpm_offset_sec: f32,
+    pub time_sig_numerator: u8,
+    pub time_sig_denominator: u8,
+    pub extra_selections: Vec<(usize, usize)>,
     pub snap_zero_cross: bool,
     pub tool_state: ToolState,
     pub active_tool: ToolKind,

@@ -2652,6 +2652,8 @@ fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<Proj
         bpm_value: 0.0,
         bpm_user_set: false,
         bpm_offset_sec: 0.0,
+        time_sig_numerator: 4,
+        time_sig_denominator: 4,
         preview_tool: None,
         preview_audio: None,
         loop_mode: "Off".to_string(),

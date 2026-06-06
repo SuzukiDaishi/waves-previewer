@@ -129,6 +129,73 @@ impl EditorDisplayGeometry {
     }
 }
 
+/// Find the nearest zero crossing (in either direction, max 48001 samples) using mixdown.
+/// Used for Alt+drag snapping without holding a `&self` borrow.
+fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
+    let ch_count = ch_samples.len();
+    if ch_count == 0 {
+        return cur;
+    }
+    let min_len = ch_samples.iter().map(|c| c.len()).min().unwrap_or(0);
+    if min_len == 0 {
+        return cur;
+    }
+    let cur = cur.min(min_len.saturating_sub(1));
+    let eps = eps.max(0.0);
+    let mix_at = |idx: usize| -> f32 {
+        let sum: f32 = ch_samples
+            .iter()
+            .filter_map(|c| c.get(idx).copied())
+            .sum();
+        sum / ch_count as f32
+    };
+    let is_cross = |a: f32, b: f32| -> bool {
+        b.abs() <= eps || a.abs() <= eps || (a > 0.0) != (b > 0.0)
+    };
+    let fwd = if cur + 1 < min_len {
+        let mut prev = mix_at(cur);
+        let mut found = cur;
+        let limit = min_len.min(cur + 48001);
+        for i in (cur + 1)..limit {
+            let s = mix_at(i);
+            if is_cross(prev, s) {
+                found = i;
+                break;
+            }
+            prev = s;
+        }
+        found
+    } else {
+        cur
+    };
+    let bwd = if cur > 0 {
+        let mut next = mix_at(cur);
+        let mut found = cur;
+        let lo = cur.saturating_sub(48000);
+        let mut i = cur - 1;
+        loop {
+            let s = mix_at(i);
+            if is_cross(s, next) {
+                found = i;
+                break;
+            }
+            next = s;
+            if i <= lo {
+                break;
+            }
+            i -= 1;
+        }
+        found
+    } else {
+        cur
+    };
+    if cur.abs_diff(fwd) <= cur.abs_diff(bwd) {
+        fwd
+    } else {
+        bwd
+    }
+}
+
 impl crate::app::WavesPreviewer {
     pub(crate) fn normalized_loop_range(range: Option<(usize, usize)>) -> Option<(usize, usize)> {
         range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
@@ -614,7 +681,7 @@ impl crate::app::WavesPreviewer {
         let mut next_center = current_center;
         let nav_resp = ui.interact(
             rect,
-            egui::Id::new("editor_amplitude_nav"),
+            ui.id().with("editor_amplitude_nav"),
             Sense::click_and_drag(),
         );
         let nav_resp = nav_resp.on_hover_text(format!(
@@ -1733,6 +1800,27 @@ impl crate::app::WavesPreviewer {
             {
                 tab.bpm_offset_sec = bpm_offset_sec.clamp(-30.0, 30.0);
             }
+            let mut tsig_num = tab.time_sig_numerator as f64;
+            let mut tsig_den = tab.time_sig_denominator as f64;
+            let num_resp = ui.add(
+                egui::DragValue::new(&mut tsig_num)
+                    .range(1.0..=64.0)
+                    .speed(1.0)
+                    .fixed_decimals(0),
+            );
+            ui.label("/");
+            let den_resp = ui.add(
+                egui::DragValue::new(&mut tsig_den)
+                    .range(1.0..=64.0)
+                    .speed(1.0)
+                    .fixed_decimals(0),
+            );
+            if num_resp.changed() {
+                tab.time_sig_numerator = (tsig_num as u8).max(1);
+            }
+            if den_resp.changed() {
+                tab.time_sig_denominator = (tsig_den as u8).max(1);
+            }
             ui.separator();
             // Time HUD: play position (editable) / total length
             let sr = sr_ctx.max(1.0); // restore local sample-rate alias after removing top-level Loop block
@@ -1983,6 +2071,7 @@ impl crate::app::WavesPreviewer {
         let mut do_normalize: Option<((usize, usize), f32)> = None;
         let mut do_reverse: Option<(usize, usize)> = None;
         let mut do_mute: Option<(usize, usize)> = None;
+        let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_cutjoin: Option<(usize, usize)> = None;
         // Loop/marker apply handled via commit flags below.
         let mut do_fade_in: Option<((usize, usize), crate::app::types::FadeShape)> = None;
@@ -2373,25 +2462,38 @@ impl crate::app::WavesPreviewer {
                         let beat_sec = 60.0 / bpm;
                         let offset_sec = tab.bpm_offset_sec;
                         let px_per_beat = px_per_sec * beat_sec;
-                        let steps: [f32; 10] = [1.0/64.0, 1.0/32.0, 1.0/16.0, 1.0/8.0, 1.0/4.0, 0.5, 1.0, 2.0, 4.0, 8.0];
-                        let mut step_beats = steps[steps.len() - 1];
-                        for s in steps {
+                        let num = tab.time_sig_numerator.max(1) as f32; // beats per bar
+
+                        // Sub-beat + beat steps, then bar-aligned multiples (1 bar, 2 bar, …)
+                        let mut steps: Vec<f32> = vec![
+                            1.0/64.0, 1.0/32.0, 1.0/16.0, 1.0/8.0, 1.0/4.0, 0.5, 1.0,
+                        ];
+                        let mut bar_mult = 1.0f32;
+                        for _ in 0..12 {
+                            steps.push(num * bar_mult);
+                            bar_mult *= 2.0;
+                            if num * bar_mult > 65536.0 { break; }
+                        }
+                        steps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        steps.dedup_by(|a, b| (*a - *b).abs() < 0.001);
+
+                        let mut step_beats = *steps.last().unwrap();
+                        for &s in &steps {
                             if px_per_beat * s >= min_px {
                                 step_beats = s;
                                 break;
                             }
                         }
+
                         let b0 = (t0 - offset_sec) / beat_sec;
                         let b1 = (t1 - offset_sec) / beat_sec;
                         let start_beat = (b0 / step_beats).floor() * step_beats;
                         let mut beat = start_beat;
-                        let label_every = if step_beats < 0.25 {
-                            1.0
-                        } else if step_beats < 1.0 {
-                            1.0
-                        } else {
-                            step_beats
-                        };
+
+                        // Bar lines are noticeably brighter than beat/sub-beat lines
+                        let bar_line_col = Color32::from_rgb(72, 72, 88);
+                        let beat_line_col = grid_col;
+
                         while beat <= b1 + step_beats * 0.5 {
                             let t = offset_sec + beat * beat_sec;
                             if t < t0 || t > t1 {
@@ -2400,16 +2502,29 @@ impl crate::app::WavesPreviewer {
                             }
                             let s_idx = (t * sr).round() as isize;
                             let x = geom.sample_boundary_x(s_idx.max(0) as usize);
+
+                            // Bar boundary check with small floating-point tolerance
+                            let beat_in_bar = beat.rem_euclid(num);
+                            let is_bar = beat_in_bar < 0.001 || beat_in_bar > num - 0.001;
+
                             painter.line_segment(
                                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                                egui::Stroke::new(1.0, grid_col),
+                                egui::Stroke::new(
+                                    if is_bar { 1.5 } else { 1.0 },
+                                    if is_bar { bar_line_col } else { beat_line_col },
+                                ),
                             );
-                            if px_per_beat * step_beats >= 70.0
-                                && ((beat / label_every).round() * label_every - beat).abs() < 1e-6
-                            {
-                                let label = if label_every >= 1.0 {
-                                    format!("{:.0}b", beat)
+
+                            if px_per_beat * step_beats >= 70.0 {
+                                let label = if is_bar {
+                                    // Bar number, 1-indexed from beat 0
+                                    let bar = (beat / num).round() as i64 + 1;
+                                    format!("|{bar}")
+                                } else if step_beats >= 1.0 {
+                                    // Whole beat within bar (2, 3, 4 …)
+                                    format!(".{}", beat_in_bar.round() as i32 + 1)
                                 } else {
+                                    // Sub-beat: show fractional beat count
                                     format!("{:.2}b", beat)
                                 };
                                 painter.text(
@@ -3067,14 +3182,9 @@ impl crate::app::WavesPreviewer {
                     Self::editor_set_view_offset_exact(tab, next_exact, max_left);
                     ctx.request_repaint();
                 }
-                // Pan with Middle drag or Alt + Left drag (DAW-like).
-                let (left_down, mid_down, alt_mod) = ui.input(|i| (
-                    i.pointer.button_down(egui::PointerButton::Primary),
-                    i.pointer.button_down(egui::PointerButton::Middle),
-                    i.modifiers.alt,
-                ));
-                let alt_left_pan = alt_mod && left_down;
-                if (mid_down || alt_left_pan) && display_samples_len > 0 {
+                // Pan with Middle drag.
+                let mid_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
+                if mid_down && display_samples_len > 0 {
                     let dx = ui.input(|i| i.pointer.delta().x);
                     if dx.abs() > 0.0 {
                         let vis = (wave_w * tab.samples_per_px).ceil() as usize;
@@ -3223,20 +3333,35 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
-            // Drag to select a range (independent of tool), unless we are dragging markers
+            // Drag to select a range (independent of tool), unless we are dragging markers.
+            // Alt+Drag: both endpoints snap to nearest zero crossing.
+            // Ctrl+Drag: push current selection to extra_selections and start a new one.
             if pointer_over_waveform
-                && !alt_now
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
             {
                 let drag_started = resp.drag_started_by(egui::PointerButton::Primary);
                 let dragging = resp.dragged_by(egui::PointerButton::Primary);
                 let drag_released = resp.drag_stopped_by(egui::PointerButton::Primary);
+                let ctrl_now = ui.input(|i| i.modifiers.ctrl);
                 if drag_started {
+                    if !ctrl_now {
+                        tab.extra_selections.clear();
+                    } else if let Some(sel) = tab.selection {
+                        let (a, b) = if sel.0 <= sel.1 { sel } else { (sel.1, sel.0) };
+                        if b > a {
+                            tab.extra_selections.push((a, b));
+                        }
+                    }
                     if let Some(pos) = ui.input(|i| i.pointer.press_origin())
                         .or_else(|| resp.interact_pointer_pos())
                     {
-                        let samp = to_range_selection_display_sample(pos.x);
+                        let raw = to_range_selection_display_sample(pos.x);
+                        let samp = if alt_now {
+                            zc_snap_nearest(&tab.ch_samples, self.zero_cross_epsilon, raw)
+                        } else {
+                            raw
+                        };
                         tab.selection_anchor_sample = Some(samp);
                     }
                 }
@@ -3255,15 +3380,20 @@ impl crate::app::WavesPreviewer {
                         tab.selection_anchor_sample = anchor;
                     }
                     if let (Some(anchor), Some(pos)) = (anchor, resp.interact_pointer_pos()) {
-                        let samp = to_range_selection_display_sample(pos.x);
+                        let raw = to_range_selection_display_sample(pos.x);
+                        let samp = if alt_now {
+                            zc_snap_nearest(&tab.ch_samples, self.zero_cross_epsilon, raw)
+                        } else {
+                            raw
+                        };
                         Self::editor_set_selection_from_anchor(tab, anchor, samp);
                         suppress_seek = true;
                     }
                 }
                 let _ = drag_released;
             }
-            // Selection vs Seek with primary button (Alt+LeftDrag = pan handled above)
-            if !alt_now && !suppress_seek {
+            // Selection vs Seek with primary button click
+            if !suppress_seek {
                 if resp.clicked_by(egui::PointerButton::Primary) {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let x = pos.x.clamp(wave_left, wave_left + wave_w);
@@ -3275,12 +3405,10 @@ impl crate::app::WavesPreviewer {
                             let snapped_samp = to_range_selection_display_sample(x);
                             Self::editor_set_selection_from_anchor(tab, anchor, snapped_samp);
                         } else {
-                            if tab.selection.is_some() {
-                                tab.selection = None;
-                            }
+                            tab.selection = None;
+                            tab.extra_selections.clear();
                             tab.selection_anchor_sample = None;
                             tab.right_drag_mode = None;
-                            tab.selection = None;
                             request_seek = Some(map_display_to_audio(tab, pos_samp));
                         }
                     }
@@ -3986,7 +4114,29 @@ impl crate::app::WavesPreviewer {
                 let mut fade_in_handle: Option<f32> = None;
                 let mut fade_out_handle: Option<f32> = None;
 
-                // Selection overlay (tool-independent)
+                // Extra selections (Ctrl+drag additive ranges) — dimmer blue
+                {
+                    let vis = (wave_w * spp).ceil() as usize;
+                    let view_end = tab.view_offset.saturating_add(vis).min(tab.samples_len);
+                    for &(a0, b0) in &tab.extra_selections {
+                        let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                        if b < tab.view_offset || a > view_end { continue; }
+                        let ax = to_x(a);
+                        let bx = to_x(b);
+                        let sel_rect = egui::Rect::from_min_max(
+                            egui::pos2(ax, rect.top()),
+                            egui::pos2(bx, rect.bottom()),
+                        );
+                        painter.rect_filled(sel_rect, 0.0, Color32::from_rgba_unmultiplied(70, 140, 255, 16));
+                        painter.rect_stroke(
+                            sel_rect,
+                            0.0,
+                            egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 140, 255, 100)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                // Primary selection overlay (tool-independent)
                 if let Some((a0, b0)) = tab.selection {
                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                     if b >= tab.view_offset {
@@ -4674,7 +4824,7 @@ impl crate::app::WavesPreviewer {
                         ViewMode::Waveform => {
                             // Tool selector
                             let mut tool = tab.active_tool;
-                            egui::ComboBox::new("tool_selector", "Tool")
+                            egui::ComboBox::new(("tool_selector", tab_idx), "Tool")
                                 .selected_text(format!("{:?}", tool))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut tool, ToolKind::LoopEdit, "Loop Edit");
@@ -4861,7 +5011,7 @@ impl crate::app::WavesPreviewer {
                                             }
                                             let mut use_dip = Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
                                             ui.label("Mode:");
-                                            egui::ComboBox::from_id_salt("xfade_mode")
+                                            egui::ComboBox::from_id_salt(("xfade_mode", tab_idx))
                                                 .selected_text(if use_dip { "Fade to 0" } else { "Crossfade" })
                                                 .show_ui(ui, |ui| {
                                                     ui.selectable_value(&mut use_dip, false, "Crossfade");
@@ -4874,7 +5024,7 @@ impl crate::app::WavesPreviewer {
                                                 crate::app::types::LoopXfadeShape::EqualPower
                                                     | crate::app::types::LoopXfadeShape::EqualPowerDip
                                             );
-                                            egui::ComboBox::from_id_salt("xfade_shape")
+                                            egui::ComboBox::from_id_salt(("xfade_shape", tab_idx))
                                                 .selected_text(if use_equal { "Equal" } else { "Linear" })
                                                 .show_ui(ui, |ui| {
                                                     ui.selectable_value(&mut use_equal, false, "Linear");
@@ -5172,6 +5322,7 @@ impl crate::app::WavesPreviewer {
                                             let mut resort = false;
                                             let mut dirty = false;
                                             egui::ScrollArea::vertical()
+                                                .id_salt(("editor_markers_scroll", tab_idx))
                                                 .max_height(160.0)
                                                 .show(ui, |ui| {
                                                     for (idx, m) in markers_local.iter_mut().enumerate() {
@@ -5289,6 +5440,10 @@ impl crate::app::WavesPreviewer {
                                             }
                                             if ui.add_enabled(!dis, egui::Button::new("Apply mute")).clicked() {
                                                 do_mute = Some(range);
+                                                do_mute_extra = tab.extra_selections.iter()
+                                                    .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+                                                    .filter(|&(a, b)| b > a)
+                                                    .collect();
                                             }
                                             if ui.add_enabled(!dis, egui::Button::new("Apply trim")).clicked() {
                                                 do_trim = Some(range);
@@ -5341,7 +5496,7 @@ impl crate::app::WavesPreviewer {
                                                 .changed();
                                             ui.label("shape");
                                             let mut shape = tab.fade_in_shape;
-                                            egui::ComboBox::from_id_salt("fade_in_shape")
+                                            egui::ComboBox::from_id_salt(("fade_in_shape", tab_idx))
                                                 .selected_text(shape_label(shape))
                                                 .show_ui(ui, |ui| {
                                                     ui.selectable_value(
@@ -5439,7 +5594,7 @@ impl crate::app::WavesPreviewer {
                                                 .changed();
                                             ui.label("shape");
                                             let mut shape = tab.fade_out_shape;
-                                            egui::ComboBox::from_id_salt("fade_out_shape")
+                                            egui::ComboBox::from_id_salt(("fade_out_shape", tab_idx))
                                                 .selected_text(shape_label(shape))
                                                 .show_ui(ui, |ui| {
                                                     ui.selectable_value(
@@ -6300,7 +6455,7 @@ impl crate::app::WavesPreviewer {
                                                 }
                                             })
                                             .unwrap_or_else(|| "(Select plugin)".to_string());
-                                        egui::ComboBox::from_id_salt("plugin_fx_select")
+                                        egui::ComboBox::from_id_salt(("plugin_fx_select", tab_idx))
                                             .selected_text(selected_text)
                                             .show_ui(ui, |ui| {
                                                 for entry in plugin_catalog.iter() {
@@ -6400,7 +6555,7 @@ impl crate::app::WavesPreviewer {
                                                 }
                                             });
                                             egui::ScrollArea::vertical()
-                                                .id_salt("plugin_search_paths_scroll")
+                                                .id_salt(("plugin_search_paths_scroll", tab_idx))
                                                 .max_height(120.0)
                                                 .show(ui, |ui| {
                                                     if plugin_search_paths.is_empty() {
@@ -6461,7 +6616,7 @@ impl crate::app::WavesPreviewer {
                                         }
                                         let filter = draft.filter.trim().to_ascii_lowercase();
                                         egui::ScrollArea::vertical()
-                                            .id_salt("plugin_param_scroll")
+                                            .id_salt(("plugin_param_scroll", tab_idx))
                                             .max_height(320.0)
                                             .show(ui, |ui| {
                                                 if draft.params.is_empty() {
@@ -6984,6 +7139,9 @@ impl crate::app::WavesPreviewer {
         }
         if let Some((s, e)) = do_mute {
             self.editor_apply_mute_range(tab_idx, (s, e));
+            for (es, ee) in do_mute_extra {
+                self.editor_apply_mute_range(tab_idx, (es, ee));
+            }
         }
         if let Some(((s, e), in_ms, out_ms)) = do_fade {
             self.editor_apply_fade_range(tab_idx, (s, e), in_ms, out_ms);

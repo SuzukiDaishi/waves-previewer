@@ -71,6 +71,7 @@ impl WavesPreviewer {
         let header_dirty = self.list_header_dirty();
         let mut filler_cols = 0usize;
         let mut table = TableBuilder::new(ui)
+            .id_salt("list_table")
             .striped(true)
             .resizable(true)
             .auto_shrink([false, true])

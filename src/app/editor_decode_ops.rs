@@ -696,6 +696,7 @@ impl super::WavesPreviewer {
                                 tab.preview_overlay = None;
                                 let old_audio_len = tab.samples_len;
                                 tab.ch_samples = res.channels;
+                                tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
                                 tab.buffer_sample_rate = res.buffer_sample_rate.max(1);
                                 tab.samples_len =
                                     tab.ch_samples.first().map(|c| c.len()).unwrap_or(0);

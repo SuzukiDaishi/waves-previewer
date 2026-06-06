@@ -4351,6 +4351,7 @@ impl WavesPreviewer {
                 tab.markers_saved = remap_markers(&tab.markers_saved, old_len, new_len);
                 tab.markers_applied = remap_markers(&tab.markers_applied, old_len, new_len);
                 tab.ch_samples = channels.clone();
+                tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
                 tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                 tab.samples_len = new_len;
                 tab.waveform_minmax = rough_waveform.clone();
@@ -4401,6 +4402,9 @@ impl WavesPreviewer {
                 bpm_value: tab.bpm_value,
                 bpm_user_set: tab.bpm_user_set,
                 bpm_offset_sec: tab.bpm_offset_sec,
+                time_sig_numerator: tab.time_sig_numerator,
+                time_sig_denominator: tab.time_sig_denominator,
+                extra_selections: vec![],
                 snap_zero_cross: tab.snap_zero_cross,
                 tool_state: tab.tool_state,
                 active_tool: tab.active_tool,
@@ -4444,6 +4448,9 @@ impl WavesPreviewer {
                 bpm_value: existing.bpm_value,
                 bpm_user_set: existing.bpm_user_set,
                 bpm_offset_sec: existing.bpm_offset_sec,
+                time_sig_numerator: existing.time_sig_numerator,
+                time_sig_denominator: existing.time_sig_denominator,
+                extra_selections: vec![],
                 snap_zero_cross: existing.snap_zero_cross,
                 tool_state: existing.tool_state,
                 active_tool: existing.active_tool,
@@ -4486,6 +4493,9 @@ impl WavesPreviewer {
                     .unwrap_or(0.0),
                 bpm_user_set: false,
                 bpm_offset_sec: 0.0,
+                time_sig_numerator: 4,
+                time_sig_denominator: 4,
+                extra_selections: vec![],
                 snap_zero_cross: true,
                 tool_state: default_tool_state(),
                 active_tool: ToolKind::LoopEdit,

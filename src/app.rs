@@ -99,6 +99,7 @@ const UNDO_STACK_MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_EDITOR_TABS: usize = 12;
 const SPECTRO_TILE_FRAMES: usize = 64;
 const SPECTRO_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+const SPECTRO_DRAIN_MAX_PER_FRAME: usize = 8;
 const BULK_RESAMPLE_THRESHOLD: usize = 10_000;
 const BULK_RESAMPLE_CHUNK: usize = 200;
 const BULK_RESAMPLE_BLOCK_SECS: u64 = 2;
@@ -568,6 +569,8 @@ pub struct WavesPreviewer {
     editor_apply_state: Option<EditorApplyState>,
     // background virtual trim creation for editor/list virtual items
     virtual_trim_state: Option<VirtualTrimState>,
+    // queued virtual trim jobs (processed sequentially after each job completes)
+    virtual_trim_queue: std::collections::VecDeque<(PathBuf, usize, usize)>,
     // background decode for editor (prefix + full)
     editor_decode_state: Option<EditorDecodeState>,
     editor_decode_job_id: u64,
@@ -1349,7 +1352,11 @@ impl WavesPreviewer {
             external: HashMap::new(),
             virtual_audio: None,
             virtual_state: None,
+            search_name: String::new(),
+            search_folder: String::new(),
+            search_meta_summary: String::new(),
         };
+        item.rebuild_search_cache();
         self.fill_external_for_item(&mut item);
         item
     }
@@ -1462,7 +1469,7 @@ impl WavesPreviewer {
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let safe = crate::app::helpers::sanitize_filename_component(&display_name);
         let path = PathBuf::from("__virtual__").join(format!("{id}_{safe}"));
-        MediaItem {
+        let mut item = MediaItem {
             id,
             path,
             display_name,
@@ -1476,7 +1483,12 @@ impl WavesPreviewer {
             external: HashMap::new(),
             virtual_audio: Some(audio),
             virtual_state,
-        }
+            search_name: String::new(),
+            search_folder: String::new(),
+            search_meta_summary: String::new(),
+        };
+        item.rebuild_search_cache();
+        item
     }
 
     fn add_virtual_item(&mut self, item: MediaItem, insert_idx: Option<usize>) {

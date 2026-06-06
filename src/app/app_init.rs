@@ -233,6 +233,7 @@ impl WavesPreviewer {
             zoo_voice_audio: None,
             editor_apply_state: None,
             virtual_trim_state: None,
+            virtual_trim_queue: std::collections::VecDeque::new(),
             editor_decode_state: None,
             editor_decode_job_id: 0,
             edited_cache: HashMap::new(),

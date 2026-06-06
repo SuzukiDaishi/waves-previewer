@@ -143,6 +143,10 @@ pub struct ProjectEdit {
     pub bpm_user_set: bool,
     #[serde(default)]
     pub bpm_offset_sec: f32,
+    #[serde(default = "default_time_sig_numerator")]
+    pub time_sig_numerator: u8,
+    #[serde(default = "default_time_sig_denominator")]
+    pub time_sig_denominator: u8,
     #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
     #[serde(default)]
@@ -313,6 +317,10 @@ pub struct ProjectTab {
     pub bpm_user_set: bool,
     #[serde(default)]
     pub bpm_offset_sec: f32,
+    #[serde(default = "default_time_sig_numerator")]
+    pub time_sig_numerator: u8,
+    #[serde(default = "default_time_sig_denominator")]
+    pub time_sig_denominator: u8,
     #[serde(default)]
     pub preview_tool: Option<String>,
     #[serde(default)]
@@ -589,6 +597,14 @@ fn default_bpm_value() -> f32 {
     0.0
 }
 
+fn default_time_sig_numerator() -> u8 {
+    4
+}
+
+fn default_time_sig_denominator() -> u8 {
+    4
+}
+
 fn default_external_key_rule() -> String {
     "file".to_string()
 }
@@ -739,6 +755,8 @@ pub fn project_tab_from_tab(
         bpm_value: tab.bpm_value,
         bpm_user_set: tab.bpm_user_set,
         bpm_offset_sec: tab.bpm_offset_sec,
+        time_sig_numerator: tab.time_sig_numerator,
+        time_sig_denominator: tab.time_sig_denominator,
         preview_tool,
         preview_audio: preview_audio.map(|p| rel_path(&p, base)),
         loop_mode: format!("{:?}", tab.loop_mode),
@@ -1192,6 +1210,7 @@ impl super::WavesPreviewer {
             if !p.is_file() {
                 item.status = super::types::MediaStatus::DecodeFailed(describe_missing(&p));
                 item.meta = Some(missing_file_meta(&p));
+                item.rebuild_search_cache();
             }
             let id = item.id;
             self.path_index.insert(p, id);
