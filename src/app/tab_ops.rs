@@ -126,6 +126,9 @@ impl super::WavesPreviewer {
                     undo_bytes: 0,
                     redo_stack: Vec::new(),
                     redo_bytes: 0,
+                    auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
+                    auto_trim_state: None,
+                    loop_detect_state: None,
                 });
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
@@ -258,6 +261,9 @@ impl super::WavesPreviewer {
                 undo_bytes: 0,
                 redo_stack: Vec::new(),
                 redo_bytes: 0,
+                auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
+                auto_trim_state: None,
+                loop_detect_state: None,
             });
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
@@ -387,6 +393,9 @@ impl super::WavesPreviewer {
                 undo_bytes: 0,
                 redo_stack: Vec::new(),
                 redo_bytes: 0,
+                auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
+                auto_trim_state: None,
+                loop_detect_state: None,
             });
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
@@ -518,6 +527,9 @@ impl super::WavesPreviewer {
             undo_bytes: 0,
             redo_stack: Vec::new(),
             redo_bytes: 0,
+            auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
+            auto_trim_state: None,
+            loop_detect_state: None,
         });
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);

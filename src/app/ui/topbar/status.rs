@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use egui::{Align, Color32, RichText, Sense};
+use egui::{Align, Color32, RichText};
 
 use crate::app::types::{EffectGraphRunMode, ToolKind};
 use crate::app::WavesPreviewer;
@@ -15,20 +15,55 @@ struct ListLoadingStatus {
     visible: bool,
 }
 
+#[derive(Clone, Copy)]
+enum TopbarActivityCancel {
+    Processing,
+    EditorDecode,
+    EffectGraph,
+    HeavyPreview,
+    MusicPreview,
+    EditorApply,
+    PluginProcess,
+    BulkResample,
+    Transcript,
+    Music,
+    EditorAnalysis,
+}
+
+struct TopbarActivityItem {
+    label: String,
+    progress: Option<f32>,
+    show_percentage: bool,
+    cancel: Option<TopbarActivityCancel>,
+}
+
 impl WavesPreviewer {
     pub(super) fn ui_topbar_status_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let available_w = ui.available_width();
+        let compact = available_w < 760.0;
         ui.horizontal(|ui| {
-            self.ui_topbar_primary_status(ui, ctx);
-            self.ui_topbar_activity_status(ui);
-            ui.separator();
+            let right_w = if compact { 280.0_f32 } else { 450.0_f32 }.min(ui.available_width());
+            let status_w = if compact {
+                (ui.available_width() - right_w).max(180.0)
+            } else {
+                (ui.available_width() - right_w).max(220.0)
+            };
+            ui.allocate_ui_with_layout(
+                egui::vec2(status_w, 28.0),
+                egui::Layout::left_to_right(Align::Center),
+                |ui| {
+                    self.ui_topbar_primary_status(ui);
+                    self.ui_topbar_activity_slot(ui);
+                },
+            );
             ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                self.ui_topbar_output_meter(ui);
+                self.ui_topbar_meter_group(ui, ctx, compact);
             });
         });
         ui.add_space(4.0);
     }
 
-    fn ui_topbar_primary_status(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn ui_topbar_primary_status(&mut self, ui: &mut egui::Ui) {
         if self.playback_session.is_playing {
             ui.label(
                 RichText::new("Playing")
@@ -36,40 +71,10 @@ impl WavesPreviewer {
                     .strong(),
             );
         }
-        // push_id stabilizes the Volume slider's auto-ID so the conditional "Playing"
-        // label above doesn't shift it and cause a per-frame ID collision flash.
-        let vol_resp = ui.push_id("vol_ctrl", |ui| {
-            ui.label("Volume (dB)");
-            let r = ui.add(egui::Slider::new(&mut self.volume_db, -80.0..=6.0));
-            if r.changed() {
-                self.apply_effective_volume();
-            }
-            r
-        }).inner;
-        let vol_up = if vol_resp.has_focus() && self.is_list_workspace_active() {
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
-        } else {
-            false
-        };
-        let vol_down = if vol_resp.has_focus() && self.is_list_workspace_active() {
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
-        } else {
-            false
-        };
-        if vol_up || vol_down {
-            let delta = if vol_down { 1 } else { -1 };
-            self.ui_topbar_release_focus_to_list(ctx, &vol_resp, Some(delta));
-        }
-        if vol_resp.has_focus()
-            && ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape))
-        {
-            self.ui_topbar_release_focus_to_list(ctx, &vol_resp, None);
-        }
 
         let total_vis = self.files.len();
         let total_all = self.items.len();
         let dirty_gains = self.pending_gain_count();
-        let sort_loading_visible = self.ui_topbar_sort_loading_visible();
         let has_status = total_all > 0 || dirty_gains > 0;
         if has_status {
             ui.separator();
@@ -88,13 +93,6 @@ impl WavesPreviewer {
                     format!("Files: {} / {}", total_vis, total_all)
                 };
                 ui.label(RichText::new(label).monospace());
-                if sort_loading_visible {
-                    ui.add(egui::Spinner::new());
-                    ui.label(
-                        RichText::new(format!("Sorting... ({:.0} ms)", self.sort_loading_last_ms))
-                            .weak(),
-                    );
-                }
             }
             if dirty_gains > 0 {
                 ui.separator();
@@ -118,49 +116,292 @@ impl WavesPreviewer {
         visible
     }
 
-    fn ui_topbar_activity_status(&mut self, ui: &mut egui::Ui) {
+    fn ui_topbar_activity_slot(&mut self, ui: &mut egui::Ui) {
+        let items = self.topbar_activity_items();
+        ui.separator();
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width().max(180.0), 26.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_height(26.0);
+                let Some(item) = items.first() else {
+                    ui.label(RichText::new("Ready").weak());
+                    return;
+                };
+                if item.progress.is_none() {
+                    ui.add(egui::Spinner::new());
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(item.label.as_str()).weak())
+                        .truncate()
+                        .show_tooltip_when_elided(true),
+                );
+                if let Some(progress) = item.progress {
+                    let mut bar = egui::ProgressBar::new(progress.clamp(0.0, 1.0))
+                        .desired_width(96.0);
+                    if item.show_percentage {
+                        bar = bar.show_percentage();
+                    }
+                    ui.add(bar);
+                }
+                if items.len() > 1 {
+                    ui.label(RichText::new(format!("+{}", items.len() - 1)).weak());
+                }
+                if let Some(cancel) = item.cancel {
+                    if ui.button("Cancel").clicked() {
+                        self.handle_topbar_activity_cancel(cancel);
+                    }
+                }
+            },
+        );
+    }
+
+    fn topbar_activity_items(&mut self) -> Vec<TopbarActivityItem> {
         let sort_loading_visible = self.ui_topbar_sort_loading_visible();
         let list_loading = self.topbar_list_loading_status();
         let effect_graph_apply = self.topbar_effect_graph_apply_status();
-        let show_activity = self.scan_in_progress
-            || self.processing.is_some()
-            || self.editor_decode_state.is_some()
+        let mut items = Vec::new();
+
+        if let Some(label) = self.topbar_scan_activity_text() {
+            items.push(TopbarActivityItem {
+                label,
+                progress: None,
+                show_percentage: false,
+                cancel: None,
+            });
+        }
+        if let Some(status) = self
+            .editor_decode_state
+            .as_ref()
+            .filter(|state| state.started_at.elapsed() >= Duration::from_millis(120))
+            .and_then(|_| self.editor_decode_ui_status(None))
+        {
+            items.push(TopbarActivityItem {
+                label: status.message,
+                progress: Some(status.progress),
+                show_percentage: status.show_percentage,
+                cancel: Some(TopbarActivityCancel::EditorDecode),
+            });
+        }
+        if let Some(apply) = &self.editor_apply_state {
+            items.push(TopbarActivityItem {
+                label: apply.msg.clone(),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::EditorApply),
+            });
+        }
+        if let Some(state) = &self.plugin_process_state {
+            items.push(TopbarActivityItem {
+                label: if state.is_apply {
+                    "Applying Plugin FX...".to_string()
+                } else {
+                    "Previewing Plugin FX...".to_string()
+                },
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::PluginProcess),
+            });
+        }
+        if let Some(proc) = &self.processing {
+            if proc.started_at.elapsed() >= Duration::from_millis(120) {
+                items.push(TopbarActivityItem {
+                    label: proc.msg.clone(),
+                    progress: None,
+                    show_percentage: false,
+                    cancel: Some(TopbarActivityCancel::Processing),
+                });
+            }
+        }
+        if effect_graph_apply.visible {
+            let total = self.effect_graph.runner.total.max(1);
+            let done = self.effect_graph.runner.done.min(total);
+            let elapsed = effect_graph_apply.elapsed.as_secs_f32();
+            let template_name = self
+                .effect_graph
+                .runner
+                .template_stamp
+                .as_ref()
+                .map(|stamp| stamp.template_name.as_str())
+                .unwrap_or("Effect Graph");
+            items.push(TopbarActivityItem {
+                label: format!("Effect Graph {template_name}: {done}/{total} ({elapsed:.1}s)"),
+                progress: Some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::EffectGraph),
+            });
+        }
+        if self.heavy_preview_expected_tool.is_some()
             || self.heavy_preview_rx.is_some()
             || self.heavy_overlay_rx.is_some()
-            || self.music_preview_state.is_some()
-            || self.editor_apply_state.is_some()
-            || self.transcript_ai_state.is_some()
-            || self.transcript_model_download_state.is_some()
-            || self.music_ai_state.is_some()
-            || self.music_model_download_state.is_some()
-            || self.export_state.is_some()
-            || self.csv_export_state.is_some()
-            || self.total_editor_analysis_inflight() > 0
-            || self.project_open_state.is_some()
-            || self.bulk_resample_state.is_some()
-            || list_loading.visible
-            || effect_graph_apply.visible
-            || sort_loading_visible;
-        if !show_activity {
-            return;
+        {
+            let label = match self.heavy_preview_expected_tool {
+                Some(ToolKind::PitchShift) => "Previewing PitchShift",
+                Some(ToolKind::TimeStretch) => "Previewing TimeStretch",
+                _ => "Previewing",
+            };
+            items.push(TopbarActivityItem {
+                label: label.to_string(),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::HeavyPreview),
+            });
         }
+        if self.music_preview_state.is_some() {
+            items.push(TopbarActivityItem {
+                label: "Previewing Music Analyze...".to_string(),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::MusicPreview),
+            });
+        }
+        if let Some(state) = &self.bulk_resample_state {
+            let total = state.targets.len().max(1);
+            let (label, pct) = if state.finalizing {
+                (
+                    format!("Resample finalize: {}/{}", state.after_index, total),
+                    (state.after_index as f32 / total as f32).clamp(0.0, 1.0),
+                )
+            } else {
+                (
+                    format!("Resample: {}/{}", state.index, total),
+                    (state.index as f32 / total as f32).clamp(0.0, 1.0),
+                )
+            };
+            items.push(TopbarActivityItem {
+                label,
+                progress: Some(pct),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::BulkResample),
+            });
+        }
+        if let Some(state) = &self.transcript_ai_state {
+            let total = state.total.max(1);
+            let done = state.done.min(total);
+            let elapsed = state.started_at.elapsed().as_secs_f32();
+            let remaining = state.total.saturating_sub(state.done);
+            items.push(TopbarActivityItem {
+                label: format!(
+                    "Transcribing: {done}/{total} ({elapsed:.1}s) candidates:{} skip:{} rem:{}",
+                    state.process_total, state.skipped_total, remaining
+                ),
+                progress: Some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::Transcript),
+            });
+        }
+        if let Some(state) = &self.transcript_model_download_state {
+            let total = state.total.max(1);
+            let done = state.done.min(total);
+            items.push(TopbarActivityItem {
+                label: format!("Downloading transcript model... {done}/{total}"),
+                progress: Some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: None,
+            });
+        }
+        if let Some(state) = &self.music_ai_state {
+            let total = state.total.max(1);
+            let done = state.done.min(total);
+            let elapsed = state.started_at.elapsed().as_secs_f32();
+            items.push(TopbarActivityItem {
+                label: format!("Music Analyze: {done}/{total} ({elapsed:.1}s)"),
+                progress: Some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::Music),
+            });
+        }
+        if let Some(state) = &self.music_model_download_state {
+            let total = state.total.max(1);
+            let done = state.done.min(total);
+            items.push(TopbarActivityItem {
+                label: format!("Downloading music model... {done}/{total}"),
+                progress: Some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: None,
+            });
+        }
+        if self.total_editor_analysis_inflight() > 0 {
+            let (done, total) = self.total_editor_analysis_progress();
+            items.push(TopbarActivityItem {
+                label: if total > 0 {
+                    format!("Analysis: {done}/{total}")
+                } else {
+                    format!("Analysis: {}", self.total_editor_analysis_inflight())
+                },
+                progress: (total > 0).then_some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::EditorAnalysis),
+            });
+        }
+        if let Some(state) = &self.project_open_state {
+            let elapsed = state.started_at.elapsed().as_secs_f32();
+            items.push(TopbarActivityItem {
+                label: format!("Opening session... ({elapsed:.1}s)"),
+                progress: None,
+                show_percentage: false,
+                cancel: None,
+            });
+        }
+        if let Some(export) = &self.export_state {
+            items.push(TopbarActivityItem {
+                label: export.msg.clone(),
+                progress: None,
+                show_percentage: false,
+                cancel: None,
+            });
+        }
+        if let Some(csv) = &self.csv_export_state {
+            let total = csv.total.max(1);
+            let done = csv.done.min(total);
+            let elapsed = csv.started_at.elapsed().as_secs_f32();
+            items.push(TopbarActivityItem {
+                label: format!("CSV: {done}/{total} ({elapsed:.1}s)"),
+                progress: Some(done as f32 / total as f32),
+                show_percentage: true,
+                cancel: None,
+            });
+        }
+        if list_loading.visible {
+            let elapsed = list_loading.elapsed.as_secs_f32();
+            items.push(TopbarActivityItem {
+                label: format!("Loading audio... ({elapsed:.1}s)"),
+                progress: None,
+                show_percentage: false,
+                cancel: None,
+            });
+        }
+        if sort_loading_visible
+            && (self.sort_loading_started_at.is_some() || self.sort_loading_last_ms >= 50.0)
+        {
+            items.push(TopbarActivityItem {
+                label: format!("Sorting... ({:.0} ms)", self.sort_loading_last_ms),
+                progress: None,
+                show_percentage: false,
+                cancel: None,
+            });
+        }
+        items
+    }
 
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            self.ui_topbar_scan_activity(ui);
-            self.ui_topbar_sort_activity(ui, sort_loading_visible);
-            self.ui_topbar_processing_activity(ui);
-            self.ui_topbar_editor_decode_activity(ui);
-            self.ui_topbar_list_loading_activity(ui, &list_loading);
-            self.ui_topbar_effect_graph_activity(ui, &effect_graph_apply);
-            self.ui_topbar_preview_activity(ui);
-            self.ui_topbar_apply_and_export_activity(ui);
-            self.ui_topbar_bulk_resample_activity(ui);
-            self.ui_topbar_transcript_activity(ui);
-            self.ui_topbar_music_activity(ui);
-            self.ui_topbar_editor_analysis_activity(ui);
-            self.ui_topbar_project_open_activity(ui);
-        });
+    fn handle_topbar_activity_cancel(&mut self, cancel: TopbarActivityCancel) {
+        match cancel {
+            TopbarActivityCancel::Processing => self.cancel_processing(),
+            TopbarActivityCancel::EditorDecode => self.cancel_editor_decode(),
+            TopbarActivityCancel::EffectGraph => self.cancel_effect_graph_run(),
+            TopbarActivityCancel::HeavyPreview => self.cancel_heavy_preview(),
+            TopbarActivityCancel::MusicPreview => self.cancel_music_preview_run(),
+            TopbarActivityCancel::EditorApply => self.cancel_editor_apply(),
+            TopbarActivityCancel::PluginProcess => self.cancel_plugin_process(),
+            TopbarActivityCancel::BulkResample => {
+                if let Some(state) = &mut self.bulk_resample_state {
+                    state.cancel_requested = true;
+                }
+            }
+            TopbarActivityCancel::Transcript => self.cancel_transcript_ai_run(),
+            TopbarActivityCancel::Music => self.cancel_music_analysis_run(),
+            TopbarActivityCancel::EditorAnalysis => self.cancel_all_editor_analyses(),
+        }
     }
 
     fn topbar_list_loading_status(&self) -> ListLoadingStatus {
@@ -200,363 +441,171 @@ impl WavesPreviewer {
         }
     }
 
-    fn ui_topbar_scan_activity(&mut self, ui: &mut egui::Ui) {
-        let Some(label) = self.topbar_scan_activity_text() else {
-            return;
-        };
-        ui.add(egui::Spinner::new());
-        ui.label(RichText::new(label).weak());
+    fn ui_topbar_meter_group(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, compact: bool) {
+        let group_w = if compact { 270.0 } else { 440.0 };
+        ui.allocate_ui_with_layout(
+            egui::vec2(group_w, 26.0),
+            egui::Layout::left_to_right(Align::Center),
+            |ui| {
+                self.ui_topbar_volume_control(ui, ctx, compact);
+                ui.separator();
+                self.ui_topbar_output_meter(ui, compact);
+            },
+        );
     }
 
-    fn ui_topbar_sort_activity(&mut self, ui: &mut egui::Ui, visible: bool) {
-        if !visible {
-            return;
+    fn ui_topbar_volume_control(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, compact: bool) {
+        let width = if compact { 128.0 } else { 210.0 };
+        let height = 22.0;
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+        self.topbar_volume_rect = Some(rect);
+        if response.clicked() {
+            response.request_focus();
         }
-        ui.add(egui::Spinner::new());
-        ui.label(RichText::new(format!("Sorting... ({:.0} ms)", self.sort_loading_last_ms)).weak());
-    }
 
-    fn ui_topbar_processing_activity(&mut self, ui: &mut egui::Ui) {
-        let Some(proc) = &self.processing else {
-            return;
-        };
-        if proc.started_at.elapsed() < Duration::from_millis(120) {
-            return;
-        }
-        ui.add(egui::Spinner::new());
-        ui.label(RichText::new(proc.msg.as_str()).weak());
-        if ui.button("Cancel").clicked() {
-            self.cancel_processing();
-        }
-    }
-
-    fn ui_topbar_editor_decode_activity(&mut self, ui: &mut egui::Ui) {
-        if !self
-            .editor_decode_state
-            .as_ref()
-            .map(|state| state.started_at.elapsed() >= Duration::from_millis(120))
-            .unwrap_or(false)
+        let track_left = rect.left() + if compact { 28.0 } else { 62.0 };
+        let track_right = rect.right() - if compact { 42.0 } else { 58.0 };
+        let track_rect = egui::Rect::from_min_max(
+            egui::pos2(track_left, rect.center().y - 4.0),
+            egui::pos2(track_right.max(track_left + 24.0), rect.center().y + 4.0),
+        );
+        let mut changed = false;
+        if (response.dragged() || response.clicked())
+            && ctx.input(|i| i.pointer.interact_pos()).is_some()
         {
-            return;
-        }
-        if let Some(status) = self.editor_decode_ui_status(None) {
-            ui.add(egui::Spinner::new());
-            ui.label(RichText::new(status.message).weak());
-            let mut bar = egui::ProgressBar::new(status.progress).desired_width(60.0);
-            if status.show_percentage {
-                bar = bar.show_percentage();
-            }
-            ui.add(bar);
-            if ui.button("Cancel").clicked() {
-                self.cancel_editor_decode();
+            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                let t = ((pos.x - track_rect.left()) / track_rect.width()).clamp(0.0, 1.0);
+                let next = -80.0 + t * 86.0;
+                if (next - self.volume_db).abs() >= 0.05 {
+                    self.volume_db = next.clamp(-80.0, 6.0);
+                    changed = true;
+                }
             }
         }
-    }
+        if response.has_focus() {
+            let left = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+            });
+            let right = ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+            });
+            if left || right {
+                let delta = if right { 1.0 } else { -1.0 };
+                let next = (self.volume_db + delta).clamp(-80.0, 6.0);
+                if (next - self.volume_db).abs() >= f32::EPSILON {
+                    self.volume_db = next;
+                    changed = true;
+                }
+            }
+            let nav_up = self.is_list_workspace_active()
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+            let nav_down = self.is_list_workspace_active()
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+            if nav_up || nav_down {
+                let delta = if nav_down { 1 } else { -1 };
+                self.ui_topbar_release_focus_to_list(ctx, &response, Some(delta));
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape)) {
+                self.ui_topbar_release_focus_to_list(ctx, &response, None);
+            }
+        }
+        if changed {
+            self.apply_effective_volume();
+        }
 
-    fn ui_topbar_list_loading_activity(&mut self, ui: &mut egui::Ui, status: &ListLoadingStatus) {
-        if !status.visible {
-            return;
-        }
-        let elapsed = status.elapsed.as_secs_f32();
-        ui.add(egui::Spinner::new());
-        let label = if elapsed >= 0.1 {
-            format!("Loading audio... ({elapsed:.1}s)")
+        let painter = ui.painter_at(rect);
+        let text_col = if response.hovered() {
+            Color32::from_rgb(220, 226, 232)
         } else {
-            "Loading audio...".to_string()
+            Color32::from_rgb(174, 180, 188)
         };
-        ui.label(RichText::new(label).weak());
-    }
-
-    fn ui_topbar_effect_graph_activity(
-        &mut self,
-        ui: &mut egui::Ui,
-        status: &EffectGraphApplyStatus,
-    ) {
-        if !status.visible {
-            return;
-        }
-        let elapsed = status.elapsed.as_secs_f32();
-        let total = self.effect_graph.runner.total.max(1);
-        let done = self.effect_graph.runner.done.min(total);
-        let template_name = self
-            .effect_graph
-            .runner
-            .template_stamp
-            .as_ref()
-            .map(|stamp| stamp.template_name.as_str())
-            .unwrap_or("Effect Graph");
-        let current_label = self
-            .effect_graph
-            .runner
-            .current_path
-            .as_ref()
-            .and_then(|path| path.file_name().and_then(|name| name.to_str()))
-            .map(|name| format!(": {name}"))
-            .unwrap_or_default();
-        ui.add(egui::Spinner::new());
-        ui.label(
-            RichText::new(format!(
-                "Effect Graph {template_name}: {done}/{total} ({elapsed:.1}s){current_label}"
-            ))
-            .weak(),
+        let body_font = egui::TextStyle::Body.resolve(ui.style());
+        let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
+        painter.text(
+            egui::pos2(rect.left(), rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            if compact { "Vol" } else { "Volume" },
+            body_font.clone(),
+            text_col,
         );
-        ui.add(
-            egui::ProgressBar::new(done as f32 / total as f32)
-                .desired_width(80.0)
-                .show_percentage(),
+        painter.rect_filled(track_rect, 3.0, Color32::from_rgb(24, 27, 31));
+        let t = ((self.volume_db + 80.0) / 86.0).clamp(0.0, 1.0);
+        let fill_rect = egui::Rect::from_min_max(
+            track_rect.min,
+            egui::pos2(track_rect.left() + track_rect.width() * t, track_rect.bottom()),
         );
-        if ui.button("Cancel").clicked() {
-            self.cancel_effect_graph_run();
-        }
-    }
-
-    fn ui_topbar_preview_activity(&mut self, ui: &mut egui::Ui) {
-        if let Some(tool) = &self.heavy_preview_expected_tool {
-            ui.add(egui::Spinner::new());
-            let message = match tool {
-                ToolKind::PitchShift => "Previewing PitchShift",
-                ToolKind::TimeStretch => "Previewing TimeStretch",
-                _ => "Previewing",
-            };
-            ui.label(RichText::new(message).weak());
-            if ui.button("Cancel").clicked() {
-                self.cancel_heavy_preview();
-            }
-            return;
-        }
-        if self.heavy_preview_rx.is_some() || self.heavy_overlay_rx.is_some() {
-            ui.add(egui::Spinner::new());
-            ui.label(RichText::new("Previewing...").weak());
-            if ui.button("Cancel").clicked() {
-                self.cancel_heavy_preview();
-            }
-            return;
-        }
-        if self.music_preview_state.is_some() {
-            ui.add(egui::Spinner::new());
-            ui.label(RichText::new("Previewing Music Analyze...").weak());
-            if ui.button("Cancel").clicked() {
-                self.cancel_music_preview_run();
-            }
-        }
-    }
-
-    fn ui_topbar_apply_and_export_activity(&mut self, ui: &mut egui::Ui) {
-        if let Some(apply) = &self.editor_apply_state {
-            ui.add(egui::Spinner::new());
-            ui.label(RichText::new(apply.msg.as_str()).weak());
-            if ui.button("Cancel").clicked() {
-                self.cancel_editor_apply();
-            }
-        } else if let Some(state) = &self.plugin_process_state {
-            ui.add(egui::Spinner::new());
-            let message = if state.is_apply {
-                "Applying Plugin FX..."
-            } else {
-                "Previewing Plugin FX..."
-            };
-            ui.label(RichText::new(message).weak());
-            if ui.button("Cancel").clicked() {
-                self.cancel_plugin_process();
-            }
-        }
-        if let Some(export) = &self.export_state {
-            ui.add(egui::Spinner::new());
-            ui.label(RichText::new(export.msg.as_str()).weak());
-        }
-        if let Some(csv) = &self.csv_export_state {
-            ui.add(egui::Spinner::new());
-            if csv.total > 0 {
-                let elapsed = csv.started_at.elapsed().as_secs_f32();
-                let pct = (csv.done as f32 / csv.total as f32).clamp(0.0, 1.0);
-                ui.label(
-                    RichText::new(format!(
-                        "CSV: {}/{} ({:.0}%, {:.1}s)",
-                        csv.done,
-                        csv.total,
-                        pct * 100.0,
-                        elapsed
-                    ))
-                    .weak(),
-                );
-            } else {
-                ui.label(RichText::new("CSV: preparing").weak());
-            }
-        }
-    }
-
-    fn ui_topbar_bulk_resample_activity(&mut self, ui: &mut egui::Ui) {
-        let Some(state) = &mut self.bulk_resample_state else {
-            return;
-        };
-        let total = state.targets.len().max(1);
-        let (label, pct) = if state.finalizing {
-            let pct = (state.after_index as f32 / total as f32).clamp(0.0, 1.0);
-            (
-                format!("Resample finalize: {}/{}", state.after_index, total),
-                pct,
-            )
+        painter.rect_filled(fill_rect, 3.0, Color32::from_rgb(88, 196, 118));
+        let stroke_col = if response.has_focus() {
+            Color32::from_rgb(130, 190, 235)
+        } else if response.hovered() {
+            Color32::from_rgb(120, 150, 165)
         } else {
-            let pct = (state.index as f32 / total as f32).clamp(0.0, 1.0);
-            (format!("Resample: {}/{}", state.index, total), pct)
+            Color32::from_rgb(70, 76, 84)
         };
-        ui.add(egui::Spinner::new());
-        ui.label(RichText::new(label).weak());
-        ui.add(
-            egui::ProgressBar::new(pct)
-                .desired_width(60.0)
-                .show_percentage(),
-        );
-        if ui.button("Cancel").clicked() {
-            state.cancel_requested = true;
-        }
-    }
-
-    fn ui_topbar_transcript_activity(&mut self, ui: &mut egui::Ui) {
-        if let Some(state) = &self.transcript_ai_state {
-            ui.add(egui::Spinner::new());
-            let elapsed = state.started_at.elapsed().as_secs_f32();
-            let canceling = state
-                .cancel_requested
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let remaining = state.total.saturating_sub(state.done);
-            let label = if state.total > 0 {
-                let prefix = if canceling {
-                    "Transcribing (canceling)"
-                } else {
-                    "Transcribing"
-                };
-                format!(
-                    "{prefix}: {}/{} ({:.1}s) candidates:{} skip:{} rem:{}",
-                    state.done,
-                    state.total,
-                    elapsed,
-                    state.process_total,
-                    state.skipped_total,
-                    remaining
-                )
-            } else {
-                format!("Transcribing... ({elapsed:.1}s)")
-            };
-            ui.label(RichText::new(label).weak());
-            if ui.button("Cancel").clicked() {
-                self.cancel_transcript_ai_run();
-            }
-        }
-        if let Some(state) = &self.transcript_model_download_state {
-            ui.add(egui::Spinner::new());
-            let total = state.total.max(1);
-            let done = state.done.min(total);
-            ui.label(
-                RichText::new(format!("Downloading transcript model... {done}/{total}")).weak(),
-            );
-            ui.add(
-                egui::ProgressBar::new(done as f32 / total as f32)
-                    .desired_width(80.0)
-                    .show_percentage(),
-            );
-        }
-        if let Some(err) = &self.transcript_ai_last_error {
-            ui.label(
-                RichText::new(format!("Transcript: {err}")).color(Color32::from_rgb(255, 120, 120)),
-            );
-        }
-    }
-
-    fn ui_topbar_music_activity(&mut self, ui: &mut egui::Ui) {
-        if let Some(state) = &self.music_ai_state {
-            ui.add(egui::Spinner::new());
-            let elapsed = state.started_at.elapsed().as_secs_f32();
-            let canceling = state
-                .cancel_requested
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let prefix = if canceling {
-                "Music Analyze (canceling)"
-            } else {
-                "Music Analyze"
-            };
-            ui.label(
-                RichText::new(format!(
-                    "{prefix}: {}/{} ({elapsed:.1}s)",
-                    state.done, state.total
-                ))
-                .weak(),
-            );
-            if ui.button("Cancel").clicked() {
-                self.cancel_music_analysis_run();
-            }
-        }
-        if let Some(state) = &self.music_model_download_state {
-            ui.add(egui::Spinner::new());
-            let total = state.total.max(1);
-            let done = state.done.min(total);
-            ui.label(
-                RichText::new(format!("Downloading music analyze model... {done}/{total}")).weak(),
-            );
-            ui.add(
-                egui::ProgressBar::new(done as f32 / total as f32)
-                    .desired_width(80.0)
-                    .show_percentage(),
-            );
-        }
-        if let Some(err) = &self.music_ai_last_error {
-            ui.label(
-                RichText::new(format!("Music Analyze: {err}"))
-                    .color(Color32::from_rgb(255, 120, 120)),
-            );
-        }
-    }
-
-    fn ui_topbar_editor_analysis_activity(&mut self, ui: &mut egui::Ui) {
-        if self.total_editor_analysis_inflight() == 0 {
-            return;
-        }
-        ui.add(egui::Spinner::new());
-        let (done, total) = self.total_editor_analysis_progress();
-        let label = if total > 0 {
-            let pct = ((done as f32 / total as f32) * 100.0).clamp(0.0, 100.0);
-            format!(
-                "Analysis: {} ({pct:.0}%)",
-                self.total_editor_analysis_inflight()
-            )
-        } else {
-            format!("Analysis: {}", self.total_editor_analysis_inflight())
-        };
-        ui.label(RichText::new(label).weak());
-        if ui.button("Cancel").clicked() {
-            self.cancel_all_editor_analyses();
-        }
-    }
-
-    fn ui_topbar_project_open_activity(&mut self, ui: &mut egui::Ui) {
-        let Some(state) = &self.project_open_state else {
-            return;
-        };
-        let elapsed = state.started_at.elapsed().as_secs_f32();
-        ui.add(egui::Spinner::new());
-        ui.label(RichText::new(format!("Opening session... ({elapsed:.1}s)")).weak());
-    }
-
-    fn ui_topbar_output_meter(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("output_meter", |ui| { self.ui_topbar_output_meter_inner(ui); });
-    }
-
-    fn ui_topbar_output_meter_inner(&mut self, ui: &mut egui::Ui) {
-        let db = self.meter_db;
-        let bar_w = 200.0;
-        let bar_h = 16.0;
-        let (rect, painter) = ui.allocate_painter(egui::vec2(bar_w, bar_h), Sense::hover());
         painter.rect_stroke(
-            rect.rect,
+            track_rect,
+            3.0,
+            egui::Stroke::new(1.0, stroke_col),
+            egui::StrokeKind::Inside,
+        );
+        let knob_x = track_rect.left() + track_rect.width() * t;
+        painter.circle_filled(
+            egui::pos2(knob_x, track_rect.center().y),
+            5.0,
+            Color32::from_rgb(142, 224, 160),
+        );
+        painter.circle_stroke(
+            egui::pos2(knob_x, track_rect.center().y),
+            5.0,
+            egui::Stroke::new(1.0, Color32::from_rgb(38, 52, 42)),
+        );
+        painter.text(
+            egui::pos2(rect.right(), rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0} dB", self.volume_db),
+            mono_font,
+            text_col,
+        );
+    }
+
+    fn ui_topbar_output_meter(&mut self, ui: &mut egui::Ui, compact: bool) {
+        ui.push_id("topbar_output_meter", |ui| {
+            self.ui_topbar_output_meter_inner(ui, compact);
+        });
+    }
+
+    fn ui_topbar_output_meter_inner(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let db = self.meter_db;
+        let bar_w = if compact { 90.0 } else { 150.0 };
+        let bar_h = 16.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::empty());
+        self.topbar_output_meter_rect = Some(rect);
+        let painter = ui.painter_at(rect);
+        let track_rect = rect.shrink(1.0);
+        painter.rect_filled(track_rect, 2.0, Color32::from_rgb(18, 18, 22));
+        let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        if norm > 0.0 {
+            let fill = egui::Rect::from_min_size(
+                track_rect.min,
+                egui::vec2(track_rect.width() * norm, track_rect.height()),
+            );
+            painter.rect_filled(fill, 2.0, Color32::from_rgb(100, 220, 120));
+        }
+        painter.rect_stroke(
+            track_rect,
             2.0,
             egui::Stroke::new(1.0, Color32::GRAY),
             egui::StrokeKind::Inside,
         );
-        let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        let fill = egui::Rect::from_min_size(rect.rect.min, egui::vec2(bar_w * norm, bar_h));
-        painter.rect_filled(fill, 0.0, Color32::from_rgb(100, 220, 120));
         let db_label = if db <= -79.9 {
-            "-inf dBFS".to_string()
+            if compact {
+                "-inf".to_string()
+            } else {
+                "-inf dBFS".to_string()
+            }
+        } else if compact {
+            format!("{db:.0} dB")
         } else {
             format!("{db:.1} dBFS")
         };

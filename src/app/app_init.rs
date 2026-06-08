@@ -34,6 +34,10 @@ impl WavesPreviewer {
             prepared_playback_fx_pitch: 0.0,
             pitch_semitones: 0.0,
             meter_db: -80.0,
+            topbar_volume_rect: None,
+            topbar_output_meter_rect: None,
+            topbar_search_rect: None,
+            editor_inspector_rect: None,
             tabs: Vec::new(),
             waveform_scratch: WaveformScratch::default(),
             active_tab: None,
@@ -157,6 +161,7 @@ impl WavesPreviewer {
             select_anchor: None,
             clipboard_payload: None,
             clipboard_temp_files: Vec::new(),
+            recording_temp_files: Vec::new(),
             clipboard_c_was_down: false,
             clipboard_v_was_down: false,
             undo_z_was_down: false,
@@ -319,6 +324,8 @@ impl WavesPreviewer {
             ipc_rx,
             #[cfg(feature = "kittest")]
             test_dialogs: TestDialogQueue::default(),
+
+            recording_tab: RecordingTabState::default(),
         };
         app.load_prefs();
         app.refresh_audio_output_devices();

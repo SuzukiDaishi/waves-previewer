@@ -46,8 +46,8 @@ impl WavesPreviewer {
         }
         self.ensure_theme_visuals(ctx);
         self.tick_project_open();
-        self.meter_db = self.current_output_meter_db();
         self.playback_sync_state_snapshot();
+        self.meter_db = self.current_output_meter_db();
         self.apply_effective_volume();
         self.process_scan_messages();
         self.pump_list_meta_prefetch();
@@ -68,6 +68,9 @@ impl WavesPreviewer {
         self.drain_list_preview_prefetch_results();
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
+        self.drain_auto_trim_results();
+        self.drain_loop_detect_results();
+        self.drain_recording_events();
         self.drain_editor_apply_jobs(ctx);
         self.tick_virtual_trim_state(ctx);
         self.drain_plugin_jobs(ctx);
@@ -119,6 +122,39 @@ impl WavesPreviewer {
                     self.pending_activate_ready = false;
                     self.audio.set_loop_enabled(false);
                     self.request_list_focus(&ctx);
+                }
+                // Recording tab label
+                if self.recording_tab.tab_open
+                    || self.workspace_view == WorkspaceView::Recording
+                    || self.recording_tab.state != crate::app::types::RecordingState::Idle
+                {
+                    self.recording_tab.tab_open = true;
+                    ui.horizontal(|ui| {
+                        let active = self.workspace_view == WorkspaceView::Recording;
+                        let rec_label = if self.recording_tab.state
+                            == crate::app::types::RecordingState::Recording
+                        {
+                            RichText::new("[● Recording]")
+                                .strong()
+                                .color(egui::Color32::RED)
+                        } else if active {
+                            RichText::new("[Recording]").strong()
+                        } else {
+                            RichText::new("Recording")
+                        };
+                        if ui.selectable_label(active, rec_label).clicked() {
+                            self.workspace_view = WorkspaceView::Recording;
+                        }
+                        if ui
+                            .button("x")
+                            .on_hover_text("Close recording tab")
+                            .clicked()
+                        {
+                            self.discard_recording();
+                            self.recording_tab.tab_open = false;
+                            self.workspace_view = WorkspaceView::List;
+                        }
+                    });
                 }
                 if self.effect_graph.workspace_open {
                     ui.horizontal(|ui| {
@@ -179,6 +215,8 @@ impl WavesPreviewer {
             ui.separator();
             if self.is_effect_graph_workspace_active() {
                 self.ui_effect_graph_view(ui, &ctx);
+            } else if self.workspace_view == WorkspaceView::Recording {
+                self.ui_recording_view(ui, &ctx);
             } else if let Some(tab_idx) = self
                 .active_tab
                 .filter(|_| self.workspace_view == WorkspaceView::Editor)

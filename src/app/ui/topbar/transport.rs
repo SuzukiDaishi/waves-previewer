@@ -188,10 +188,13 @@ impl WavesPreviewer {
 
     fn ui_topbar_search_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let regex_changed = ui.checkbox(&mut self.search_use_regex, "Regex").changed();
+        let search_w = ui.available_width().clamp(180.0, 420.0);
         let te = egui::TextEdit::singleline(&mut self.search_query)
             .hint_text("Search...")
+            .desired_width(search_w)
             .id(crate::app::WavesPreviewer::search_box_id());
         let resp = ui.add(te);
+        self.topbar_search_rect = Some(resp.rect);
         let search_focused = resp.has_focus();
         let search_lost = resp.lost_focus();
         self.search_has_focus = search_focused;

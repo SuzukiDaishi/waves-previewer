@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use egui::{Color32, RichText};
 
+use crate::app::types::WorkspaceView;
 use crate::app::WavesPreviewer;
 
 fn ensure_extension(mut path: PathBuf, ext: &str) -> PathBuf {
@@ -175,6 +176,14 @@ impl WavesPreviewer {
         ui.menu_button("Tools", |ui| {
             if ui.button("Effect Graph...").clicked() {
                 self.open_effect_graph_workspace();
+                ui.close();
+            }
+            if ui.button("Recording...").clicked() {
+                self.workspace_view = WorkspaceView::Recording;
+                self.recording_tab.tab_open = true;
+                if self.recording_tab.input_devices.is_empty() {
+                    self.recording_refresh_devices();
+                }
                 ui.close();
             }
             ui.separator();

@@ -1,5 +1,8 @@
+use crate::app::auto_trim::{AutoTrimConfig, AutoTrimOutcome};
+use crate::app::loop_detect::{LoopDetectCandidate, LoopDetectConfig};
 use crate::app::render::waveform_pyramid::{Peak, WaveformPyramidSet};
 use crate::audio::AudioBuffer;
+pub use crate::audio_capture::RecordingDeviceInfo;
 use crate::markers::MarkerEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -277,6 +280,7 @@ pub enum WorkspaceView {
     List,
     Editor,
     EffectGraph,
+    Recording,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -911,21 +915,21 @@ pub struct EditorTab {
     pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
     pub ch_samples_arc: Arc<Vec<Vec<f32>>>, // Arc mirror of ch_samples for worker sends (updated after every write to ch_samples)
-    pub buffer_sample_rate: u32,   // current sample rate of ch_samples
-    pub samples_len: usize,        // length in samples
-    pub samples_len_visual: usize, // length used for viewport math while loading
+    pub buffer_sample_rate: u32,            // current sample rate of ch_samples
+    pub samples_len: usize,                 // length in samples
+    pub samples_len_visual: usize,          // length used for viewport math while loading
     pub loading_waveform_minmax: Vec<(f32, f32)>, // coarse overview while full decode streams
-    pub view_offset: usize,        // first visible sample index
-    pub view_offset_exact: f64,    // authoritative horizontal view position
-    pub samples_per_px: f32,       // time zoom: samples per pixel
-    pub vertical_zoom: f32,        // waveform vertical zoom multiplier
-    pub vertical_view_center: f32, // centered waveform viewport anchor in [-1, 1]
-    pub last_wave_w: f32,          // last waveform width (for resize anchoring)
+    pub view_offset: usize,                 // first visible sample index
+    pub view_offset_exact: f64,             // authoritative horizontal view position
+    pub samples_per_px: f32,                // time zoom: samples per pixel
+    pub vertical_zoom: f32,                 // waveform vertical zoom multiplier
+    pub vertical_view_center: f32,          // centered waveform viewport anchor in [-1, 1]
+    pub last_wave_w: f32,                   // last waveform width (for resize anchoring)
     pub last_amplitude_nav_rect: Option<egui::Rect>, // transient right rail rect for UI tests
     pub last_amplitude_viewport_rect: Option<egui::Rect>, // transient right rail viewport
-    pub last_amplitude_nav_click_at: f64, // transient double-click timing for amplitude rail
+    pub last_amplitude_nav_click_at: f64,   // transient double-click timing for amplitude rail
     pub last_amplitude_nav_click_pos: Option<egui::Pos2>, // transient double-click location
-    pub viewport_source_generation: u64, // transient source generation for viewport cache
+    pub viewport_source_generation: u64,    // transient source generation for viewport cache
     pub viewport_render_requested_generation: u64, // transient latest queued viewport request
     pub viewport_render_requested_key: Option<EditorViewportRenderKey>, // transient desired key
     pub viewport_render_pending_fine_at: Option<Instant>, // transient fine render debounce
@@ -934,7 +938,7 @@ pub struct EditorTab {
     pub viewport_render_coarse: Option<EditorViewportRenderCache>, // transient coarse viewport
     pub viewport_render_fine: Option<EditorViewportRenderCache>, // transient fine viewport
     pub viewport_render_last: Option<EditorViewportRenderCache>, // transient stale fallback
-    pub dirty: bool,               // unsaved edits exist
+    pub dirty: bool,                        // unsaved edits exist
     #[allow(dead_code)]
     pub ops: Vec<EditOp>, // non-destructive operations (skeleton)
     // --- Editing state (MVP) ---
@@ -995,6 +999,10 @@ pub struct EditorTab {
     pub undo_bytes: usize,
     pub redo_stack: Vec<EditorUndoState>,
     pub redo_bytes: usize,
+    // Auto-analysis states (non-persistent, transient)
+    pub auto_trim_config: AutoTrimConfig,
+    pub auto_trim_state: Option<AutoTrimState>,
+    pub loop_detect_state: Option<LoopDetectState>,
 }
 
 impl EditorTab {
@@ -2812,4 +2820,174 @@ pub enum DebugAction {
     PreviewTimeStretch(f32),
     DumpSummaryAuto,
     Exit,
+}
+
+// ---------------------------------------------------------------------------
+// Auto Trim state
+// ---------------------------------------------------------------------------
+
+pub struct AutoTrimState {
+    pub generation: u64,
+    pub running: bool,
+    pub progress: f32,
+    pub message: String,
+    pub result: Option<AutoTrimOutcome>,
+    pub cancel: Arc<AtomicBool>,
+    pub rx: Option<Receiver<(u64, Result<AutoTrimOutcome, String>)>>,
+}
+
+impl Default for AutoTrimState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            running: false,
+            progress: 0.0,
+            message: String::new(),
+            result: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Loop Detect state
+// ---------------------------------------------------------------------------
+
+pub struct LoopDetectState {
+    pub generation: u64,
+    pub running: bool,
+    pub progress: f32,
+    pub message: String,
+    pub candidates: Vec<LoopDetectCandidate>,
+    pub selected_idx: usize,
+    pub config: LoopDetectConfig,
+    pub cancel: Arc<AtomicBool>,
+    pub rx: Option<Receiver<LoopDetectWorkerEvent>>,
+}
+
+pub enum LoopDetectWorkerEvent {
+    Progress {
+        generation: u64,
+        progress: f32,
+        message: String,
+    },
+    Finished {
+        generation: u64,
+        result: Result<Vec<LoopDetectCandidate>, String>,
+    },
+}
+
+impl Default for LoopDetectState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            running: false,
+            progress: 0.0,
+            message: String::new(),
+            candidates: Vec::new(),
+            selected_idx: 0,
+            config: LoopDetectConfig::default(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            rx: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recording state
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecordingSourceKind {
+    Microphone,
+    System,
+    SystemAndMicrophone,
+}
+
+impl Default for RecordingSourceKind {
+    fn default() -> Self {
+        RecordingSourceKind::Microphone
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecordingState {
+    Idle,
+    Recording,
+    Paused,
+    Finalizing,
+    Error(String),
+}
+
+impl Default for RecordingState {
+    fn default() -> Self {
+        RecordingState::Idle
+    }
+}
+
+pub enum RecordingWorkerMsg {
+    /// Level update (peak L, peak R)
+    Level(f32, f32),
+    /// Waveform overview block (min, max)
+    WaveformBlock(f32, f32),
+    /// Recording finalized — path to temp WAV
+    Finalized(std::path::PathBuf),
+    /// Error from worker
+    Error(String),
+}
+
+pub struct RecordingTabState {
+    pub source: RecordingSourceKind,
+    pub input_devices: Vec<RecordingDeviceInfo>,
+    pub selected_mic_id: Option<String>,
+    pub state: RecordingState,
+    pub elapsed_secs: f32,
+    pub level_l: f32,
+    pub level_r: f32,
+    pub waveform_overview: Vec<(f32, f32)>,
+    /// duration in seconds represented by each waveform_overview block (for grid drawing)
+    pub overview_block_secs: f32,
+    pub progress_message: String,
+    pub last_recording_path: Option<std::path::PathBuf>,
+    /// channel for receiving events from the recording worker
+    pub rx: Option<Receiver<RecordingWorkerMsg>>,
+    /// cancel flag for the worker
+    pub cancel: Arc<AtomicBool>,
+    /// pause flag for the worker (true while paused: capture is drained but not written)
+    pub paused: Arc<AtomicBool>,
+    /// elapsed timer start
+    pub record_start: Option<std::time::Instant>,
+    /// when the current pause began (None while not paused)
+    pub pause_started_at: Option<std::time::Instant>,
+    /// total time spent paused so far (excludes the current in-progress pause)
+    pub paused_accum: std::time::Duration,
+    /// whether the Recording tab is open in the workspace tab strip (stays open
+    /// when navigating to other workspaces, mirroring `EffectGraphState::workspace_open`)
+    pub tab_open: bool,
+}
+
+impl Default for RecordingTabState {
+    fn default() -> Self {
+        Self {
+            source: RecordingSourceKind::Microphone,
+            input_devices: Vec::new(),
+            selected_mic_id: None,
+            state: RecordingState::Idle,
+            elapsed_secs: 0.0,
+            level_l: 0.0,
+            level_r: 0.0,
+            waveform_overview: Vec::new(),
+            overview_block_secs: 0.0,
+            progress_message: String::new(),
+            last_recording_path: None,
+            rx: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
+            record_start: None,
+            pause_started_at: None,
+            paused_accum: std::time::Duration::ZERO,
+            tab_open: false,
+        }
+    }
 }

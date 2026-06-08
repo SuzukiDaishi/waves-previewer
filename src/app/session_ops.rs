@@ -652,6 +652,9 @@ impl super::WavesPreviewer {
         }
         std::fs::write(&path, text).map_err(|e| e.to_string())?;
         self.project_path = Some(path);
+        // Recorded virtual items have just been persisted as sidecar audio above;
+        // their backing temp WAVs in %TEMP% are no longer needed.
+        self.clear_recording_temp_files();
         Ok(())
     }
 

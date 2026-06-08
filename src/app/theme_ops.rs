@@ -158,10 +158,9 @@ impl WavesPreviewer {
         let mut system_font_loaded = false;
         for path in system_candidates {
             if let Ok(bytes) = std::fs::read(path) {
-                fonts.font_data.insert(
-                    "jp_system".into(),
-                    FontData::from_owned(bytes).into(),
-                );
+                fonts
+                    .font_data
+                    .insert("jp_system".into(), FontData::from_owned(bytes).into());
                 system_font_loaded = true;
                 break;
             }
@@ -203,6 +202,12 @@ impl WavesPreviewer {
     }
 
     fn prefs_path() -> Option<PathBuf> {
+        // Kittest harnesses build a real `WavesPreviewer` and must stay isolated from
+        // the developer's actual saved preferences (e.g. `auto_play_list_nav`) — both
+        // for read and write — so tests behave identically across machines.
+        if cfg!(feature = "kittest") {
+            return None;
+        }
         let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("LOCALAPPDATA"))?;
         let mut path = PathBuf::from(base);
         path.push("NeoWaves");

@@ -143,15 +143,11 @@ fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
     let cur = cur.min(min_len.saturating_sub(1));
     let eps = eps.max(0.0);
     let mix_at = |idx: usize| -> f32 {
-        let sum: f32 = ch_samples
-            .iter()
-            .filter_map(|c| c.get(idx).copied())
-            .sum();
+        let sum: f32 = ch_samples.iter().filter_map(|c| c.get(idx).copied()).sum();
         sum / ch_count as f32
     };
-    let is_cross = |a: f32, b: f32| -> bool {
-        b.abs() <= eps || a.abs() <= eps || (a > 0.0) != (b > 0.0)
-    };
+    let is_cross =
+        |a: f32, b: f32| -> bool { b.abs() <= eps || a.abs() <= eps || (a > 0.0) != (b > 0.0) };
     let fwd = if cur + 1 < min_len {
         let mut prev = mix_at(cur);
         let mut found = cur;
@@ -1735,7 +1731,7 @@ impl crate::app::WavesPreviewer {
                     view.mode = ChannelViewMode::All;
                     view_changed = true;
                 }
-                ui.menu_button("Select", |ui| {
+                ui.menu_button("Channels", |ui| {
                     let mut selection_changed = false;
                     for idx in 0..channel_count {
                         let label = format!("Ch {}", idx + 1);
@@ -1770,57 +1766,66 @@ impl crate::app::WavesPreviewer {
                 }
             }
             ui.separator();
-            let mut bpm_enabled = tab.bpm_enabled;
-            if ui.checkbox(&mut bpm_enabled, "BPM").changed() {
-                tab.bpm_enabled = bpm_enabled;
-            }
-            let mut bpm_value = tab.bpm_value;
-            let bpm_resp = ui.add(
-                egui::DragValue::new(&mut bpm_value)
-                    .range(0.0..=300.0)
-                    .speed(0.1)
-                    .fixed_decimals(2)
-                    .suffix(" BPM"),
-            );
-            if bpm_resp.changed() {
-                tab.bpm_value = bpm_value.max(0.0);
-                tab.bpm_user_set = true;
-            }
-            ui.label("Offset:");
-            let mut bpm_offset_sec = tab.bpm_offset_sec;
-            if ui
-                .add(
-                    egui::DragValue::new(&mut bpm_offset_sec)
-                        .range(-30.0..=30.0)
-                        .speed(0.01)
-                        .fixed_decimals(2)
-                        .suffix(" s"),
-                )
-                .changed()
-            {
-                tab.bpm_offset_sec = bpm_offset_sec.clamp(-30.0, 30.0);
-            }
-            let mut tsig_num = tab.time_sig_numerator as f64;
-            let mut tsig_den = tab.time_sig_denominator as f64;
-            let num_resp = ui.add(
-                egui::DragValue::new(&mut tsig_num)
-                    .range(1.0..=64.0)
-                    .speed(1.0)
-                    .fixed_decimals(0),
-            );
-            ui.label("/");
-            let den_resp = ui.add(
-                egui::DragValue::new(&mut tsig_den)
-                    .range(1.0..=64.0)
-                    .speed(1.0)
-                    .fixed_decimals(0),
-            );
-            if num_resp.changed() {
-                tab.time_sig_numerator = (tsig_num as u8).max(1);
-            }
-            if den_resp.changed() {
-                tab.time_sig_denominator = (tsig_den as u8).max(1);
-            }
+            ui.menu_button("Grid", |ui| {
+                let mut bpm_enabled = tab.bpm_enabled;
+                if ui.checkbox(&mut bpm_enabled, "Show BPM grid").changed() {
+                    tab.bpm_enabled = bpm_enabled;
+                }
+                ui.horizontal(|ui| {
+                    ui.label("BPM");
+                    let mut bpm_value = tab.bpm_value;
+                    let bpm_resp = ui.add(
+                        egui::DragValue::new(&mut bpm_value)
+                            .range(0.0..=300.0)
+                            .speed(0.1)
+                            .fixed_decimals(2),
+                    );
+                    if bpm_resp.changed() {
+                        tab.bpm_value = bpm_value.max(0.0);
+                        tab.bpm_user_set = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Offset");
+                    let mut bpm_offset_sec = tab.bpm_offset_sec;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut bpm_offset_sec)
+                                .range(-30.0..=30.0)
+                                .speed(0.01)
+                                .fixed_decimals(2)
+                                .suffix(" s"),
+                        )
+                        .changed()
+                    {
+                        tab.bpm_offset_sec = bpm_offset_sec.clamp(-30.0, 30.0);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Time signature");
+                    let mut tsig_num = tab.time_sig_numerator as f64;
+                    let mut tsig_den = tab.time_sig_denominator as f64;
+                    let num_resp = ui.add(
+                        egui::DragValue::new(&mut tsig_num)
+                            .range(1.0..=64.0)
+                            .speed(1.0)
+                            .fixed_decimals(0),
+                    );
+                    ui.label("/");
+                    let den_resp = ui.add(
+                        egui::DragValue::new(&mut tsig_den)
+                            .range(1.0..=64.0)
+                            .speed(1.0)
+                            .fixed_decimals(0),
+                    );
+                    if num_resp.changed() {
+                        tab.time_sig_numerator = (tsig_num as u8).max(1);
+                    }
+                    if den_resp.changed() {
+                        tab.time_sig_denominator = (tsig_den as u8).max(1);
+                    }
+                });
+            });
             ui.separator();
             // Time HUD: play position (editable) / total length
             let sr = sr_ctx.max(1.0); // restore local sample-rate alias after removing top-level Loop block
@@ -2065,7 +2070,9 @@ impl crate::app::WavesPreviewer {
         // pending actions to perform after UI borrows end
         let mut do_set_loop_from: Option<(usize, usize)> = None;
         let mut do_trim: Option<(usize, usize)> = None; // keep-only (optional)
+        let mut do_trim_multi: Option<Vec<(usize, usize)>> = None;
         let mut do_trim_virtual: Option<(usize, usize)> = None;
+        let mut do_trim_virtual_multi: Option<Vec<(usize, usize)>> = None;
         let do_fade: Option<((usize, usize), f32, f32)> = None; // legacy whole-file fade
         let mut do_gain: Option<((usize, usize), f32)> = None;
         let mut do_normalize: Option<((usize, usize), f32)> = None;
@@ -2073,7 +2080,12 @@ impl crate::app::WavesPreviewer {
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_cutjoin: Option<(usize, usize)> = None;
-        // Loop/marker apply handled via commit flags below.
+        let mut do_auto_trim: Option<usize> = None;
+        let mut do_cancel_auto_trim: Option<usize> = None;
+        let mut do_auto_detect_loop: Option<usize> = None;
+        let mut do_cancel_loop_detect: Option<usize> = None;
+        let mut do_apply_loop_candidate: Option<(usize, usize)> = None; // (tab_idx, candidate_idx)
+                                                                        // Loop/marker apply handled via commit flags below.
         let mut do_fade_in: Option<((usize, usize), crate::app::types::FadeShape)> = None;
         let mut do_fade_out: Option<((usize, usize), crate::app::types::FadeShape)> = None;
         let mut stop_playback = false;
@@ -2197,20 +2209,37 @@ impl crate::app::WavesPreviewer {
         let mut waveform_query_ms_total = 0.0f32;
         let mut waveform_draw_ms_total = 0.0f32;
         let pixels_per_point = ctx.pixels_per_point();
-        // Split canvas and inspector; keep inspector visible on narrow widths.
-        let min_canvas_w = 160.0f32;
-        let min_inspector_w = 220.0f32;
-        let max_inspector_w = 360.0f32;
+        // Split canvas and inspector. Narrow windows stack vertically so the
+        // waveform never collapses to a zero-width strip.
+        let stacked_editor = avail.x < 860.0;
+        let min_canvas_w = 320.0f32;
+        let min_inspector_w = 280.0f32;
+        let max_inspector_w = 340.0f32;
         let split_spacing = ui.spacing().item_spacing.x;
         let split_avail_w = (avail.x - split_spacing).max(0.0);
-        let inspector_w = if split_avail_w <= min_inspector_w {
-            split_avail_w
+        let inspector_w = if stacked_editor {
+            split_avail_w.max(1.0)
         } else {
             let available = (split_avail_w - min_canvas_w).max(min_inspector_w);
             available.min(max_inspector_w).min(split_avail_w)
         };
-        let canvas_w = (split_avail_w - inspector_w).max(0.0);
-        ui.horizontal_top(|ui| {
+        let canvas_w = if stacked_editor {
+            split_avail_w.max(1.0)
+        } else {
+            (split_avail_w - inspector_w).max(min_canvas_w.min(split_avail_w))
+        };
+        let canvas_area_h = if stacked_editor {
+            (avail.y * 0.45).clamp(180.0, (avail.y - 260.0).max(180.0))
+        } else {
+            avail.y
+        };
+        let inspector_area_h = if stacked_editor {
+            (avail.y - canvas_area_h - split_spacing).max(180.0)
+        } else {
+            avail.y
+        };
+        {
+        let draw_editor_body = |ui: &mut egui::Ui| {
                 let tab = &mut self.tabs[tab_idx];
                 let preview_ok = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
                 let simplified_preview_note = if !preview_ok {
@@ -2251,10 +2280,10 @@ impl crate::app::WavesPreviewer {
                     need_restore_preview = true;
                 }
                 ui.allocate_ui_with_layout(
-                    egui::vec2(canvas_w, avail.y),
+                    egui::vec2(canvas_w, canvas_area_h),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                    let canvas_h = (canvas_w * 0.35).clamp(180.0, avail.y);
+                    let canvas_h = (canvas_w * 0.35).clamp(180.0, canvas_area_h);
                     let (resp, painter) = ui.allocate_painter(egui::vec2(canvas_w, canvas_h), Sense::click_and_drag());
                     let rect = resp.rect;
                     let w = rect.width().max(1.0); let h = rect.height().max(1.0);
@@ -3084,8 +3113,14 @@ impl crate::app::WavesPreviewer {
                     && zoom_delta.is_finite()
                     && (zoom_delta - 1.0).abs() > 0.10
                 {
-                    // egui zoom_delta > 1 means "zoom in". For samples-per-pixel we invert it.
-                    Some((1.0 / zoom_delta.max(1e-3)).clamp(0.2, 5.0))
+                    // egui zoom_delta > 1 means "zoom in". For samples-per-pixel we invert it
+                    // (and flip again when the user prefers reversed wheel-zoom direction).
+                    let raw = if self.invert_wave_zoom_wheel {
+                        zoom_delta.max(1e-3)
+                    } else {
+                        1.0 / zoom_delta.max(1e-3)
+                    };
+                    Some(raw.clamp(0.2, 5.0))
                 } else {
                     None
                 };
@@ -4679,8 +4714,13 @@ impl crate::app::WavesPreviewer {
                 ); // end canvas UI
 
                 // Inspector area (right)
+                let inspector_rect = egui::Rect::from_min_size(
+                    ui.cursor().min,
+                    egui::vec2(inspector_w, inspector_area_h),
+                );
+                self.editor_inspector_rect = Some(inspector_rect);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(inspector_w, avail.y),
+                    egui::vec2(inspector_w, inspector_area_h),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                     ui.set_width(inspector_w);
@@ -4690,94 +4730,126 @@ impl crate::app::WavesPreviewer {
                         .id_salt(("editor_inspector_scroll", tab_idx))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                    if let Some(status) = decode_status.as_ref() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(egui::Spinner::new());
-                            ui.label(RichText::new(status.message.as_str()).strong());
-                            let mut bar =
-                                egui::ProgressBar::new(status.progress).desired_width(120.0);
-                            if status.show_percentage {
-                                bar = bar.show_percentage();
-                            }
-                            ui.add(bar);
-                            if ui.button("Cancel").clicked() {
-                                cancel_decode = true;
-                            }
-                        });
-                        ui.separator();
-                    }
-                    if let Some(apply_msg) = apply_msg.as_ref() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(egui::Spinner::new());
-                            ui.label(RichText::new(apply_msg.as_str()).strong());
-                            if ui.button("Cancel").clicked() {
-                                cancel_apply = true;
-                            }
-                        });
-                        ui.separator();
-                    }
-                    if let Some((msg, started_at)) = processing_msg {
-                        let elapsed = started_at.elapsed().as_secs_f32();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(egui::Spinner::new());
-                            ui.label(RichText::new(format!(
-                                "{} ({:.1}s)",
-                                msg,
-                                elapsed
-                            )).weak());
-                            if ui.button("Cancel").clicked() {
-                                cancel_processing = true;
-                            }
-                        });
-                        ui.separator();
-                    }
-                    if let Some(msg) = preview_msg.as_ref() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(egui::Spinner::new());
-                            ui.label(RichText::new(msg.as_str()).weak());
-                            if ui.button("Cancel").clicked() {
-                                cancel_preview = true;
-                            }
-                        });
-                        ui.separator();
-                    }
-                    if analysis_loading {
-                        let (done, total, started_at) =
-                            analysis_progress.unwrap_or((0, 0, std::time::Instant::now()));
-                        let pct = if total > 0 {
-                            (done as f32 / total as f32).clamp(0.0, 1.0)
-                        } else {
-                            0.0
-                        };
-                        let elapsed = started_at.elapsed().as_secs_f32();
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(egui::Spinner::new());
-                            ui.label(RichText::new(format!(
-                                "{}... ({:.1}s)",
-                                analysis_label,
-                                elapsed
-                            )).weak());
-                            if total > 0 {
-                                ui.add(
-                                    egui::ProgressBar::new(pct)
-                                        .desired_width(120.0)
-                                        .show_percentage(),
-                                );
-                            }
-                            if ui.button("Cancel").clicked() {
-                                match current_view {
-                                    ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
-                                        cancel_spectro = true;
+                    let activity_h = 52.0;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), activity_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_height(activity_h);
+                            if let Some(status) = decode_status.as_ref() {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new());
+                                    let label_w = (ui.available_width() - 76.0).max(64.0);
+                                    ui.add_sized(
+                                        [label_w, 20.0],
+                                        egui::Label::new(
+                                            RichText::new(status.message.as_str()).strong(),
+                                        )
+                                        .truncate()
+                                        .show_tooltip_when_elided(true),
+                                    );
+                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                        cancel_decode = true;
                                     }
-                                    ViewMode::Tempogram | ViewMode::Chromagram => {
-                                        cancel_feature_analysis = true;
+                                });
+                                let mut bar = egui::ProgressBar::new(status.progress)
+                                    .desired_width(ui.available_width());
+                                if status.show_percentage {
+                                    bar = bar.show_percentage();
+                                }
+                                ui.add(bar);
+                            } else if let Some(apply_msg) = apply_msg.as_ref() {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new());
+                                    let label_w = (ui.available_width() - 76.0).max(64.0);
+                                    ui.add_sized(
+                                        [label_w, 20.0],
+                                        egui::Label::new(RichText::new(apply_msg.as_str()).strong())
+                                            .truncate()
+                                            .show_tooltip_when_elided(true),
+                                    );
+                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                        cancel_apply = true;
                                     }
-                                    ViewMode::Waveform => {}
+                                });
+                            } else if let Some((msg, started_at)) = processing_msg {
+                                let elapsed = started_at.elapsed().as_secs_f32();
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new());
+                                    let label_w = (ui.available_width() - 76.0).max(64.0);
+                                    ui.add_sized(
+                                        [label_w, 20.0],
+                                        egui::Label::new(
+                                            RichText::new(format!("{} ({:.1}s)", msg, elapsed)).weak(),
+                                        )
+                                        .truncate()
+                                        .show_tooltip_when_elided(true),
+                                    );
+                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                        cancel_processing = true;
+                                    }
+                                });
+                            } else if let Some(msg) = preview_msg.as_ref() {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new());
+                                    let label_w = (ui.available_width() - 76.0).max(64.0);
+                                    ui.add_sized(
+                                        [label_w, 20.0],
+                                        egui::Label::new(RichText::new(msg.as_str()).weak())
+                                            .truncate()
+                                            .show_tooltip_when_elided(true),
+                                    );
+                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                        cancel_preview = true;
+                                    }
+                                });
+                            } else if analysis_loading {
+                                let (done, total, started_at) = analysis_progress
+                                    .unwrap_or((0, 0, std::time::Instant::now()));
+                                let pct = if total > 0 {
+                                    (done as f32 / total as f32).clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                };
+                                let elapsed = started_at.elapsed().as_secs_f32();
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new());
+                                    let label_w = (ui.available_width() - 76.0).max(64.0);
+                                    ui.add_sized(
+                                        [label_w, 20.0],
+                                        egui::Label::new(
+                                            RichText::new(format!(
+                                                "{}... ({:.1}s)",
+                                                analysis_label, elapsed
+                                            ))
+                                            .weak(),
+                                        )
+                                        .truncate()
+                                        .show_tooltip_when_elided(true),
+                                    );
+                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                        match current_view {
+                                            ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
+                                                cancel_spectro = true;
+                                            }
+                                            ViewMode::Tempogram | ViewMode::Chromagram => {
+                                                cancel_feature_analysis = true;
+                                            }
+                                            ViewMode::Waveform => {}
+                                        }
+                                    }
+                                });
+                                if total > 0 {
+                                    ui.add(
+                                        egui::ProgressBar::new(pct)
+                                            .desired_width(ui.available_width())
+                                            .show_percentage(),
+                                    );
                                 }
                             }
-                        });
-                        ui.separator();
-                    }
+                        },
+                    );
+                    ui.separator();
                     let can_undo = !tab.undo_stack.is_empty();
                     let can_redo = !tab.redo_stack.is_empty();
                     ui.horizontal(|ui| {
@@ -4824,25 +4896,41 @@ impl crate::app::WavesPreviewer {
                         ViewMode::Waveform => {
                             // Tool selector
                             let mut tool = tab.active_tool;
+                            let tool_label = |tool: ToolKind| match tool {
+                                ToolKind::LoopEdit => "Loop Edit",
+                                ToolKind::Markers => "Markers",
+                                ToolKind::Trim => "Trim",
+                                ToolKind::Fade => "Fade",
+                                ToolKind::Gain => "Gain",
+                                ToolKind::Normalize => "Normalize",
+                                ToolKind::PitchShift => "Pitch Shift",
+                                ToolKind::TimeStretch => "Time Stretch",
+                                ToolKind::Loudness => "LoudNorm",
+                                ToolKind::MusicAnalyze => "Music Analyze",
+                                ToolKind::PluginFx => "Plugin FX",
+                                ToolKind::Reverse => "Reverse",
+                            };
                             egui::ComboBox::new(("tool_selector", tab_idx), "Tool")
-                                .selected_text(format!("{:?}", tool))
+                                .selected_text(tool_label(tool))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut tool, ToolKind::LoopEdit, "Loop Edit");
                                     ui.selectable_value(&mut tool, ToolKind::Markers, "Markers");
                                     ui.selectable_value(&mut tool, ToolKind::Trim, "Trim");
                                     ui.selectable_value(&mut tool, ToolKind::Fade, "Fade");
-                                    ui.selectable_value(&mut tool, ToolKind::PitchShift, "PitchShift");
-                                    ui.selectable_value(&mut tool, ToolKind::TimeStretch, "TimeStretch");
                                     ui.selectable_value(&mut tool, ToolKind::Gain, "Gain");
                                     ui.selectable_value(&mut tool, ToolKind::Normalize, "Normalize");
+                                    ui.separator();
+                                    ui.label(RichText::new("More tools").weak());
+                                    ui.selectable_value(&mut tool, ToolKind::PitchShift, "Pitch Shift");
+                                    ui.selectable_value(&mut tool, ToolKind::TimeStretch, "Time Stretch");
                                     ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
-                                    ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
                                     ui.selectable_value(
                                         &mut tool,
                                         ToolKind::MusicAnalyze,
                                         "Music Analyze",
                                     );
                                     ui.selectable_value(&mut tool, ToolKind::PluginFx, "Plugin FX");
+                                    ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -4886,7 +4974,7 @@ impl crate::app::WavesPreviewer {
                                 tab.active_tool = tool;
                             }
                             ui.separator();
-                            ui.label(RichText::new(format!("Tool: {:?}", tab.active_tool)).strong());
+                            ui.label(RichText::new(tool_label(tab.active_tool)).strong());
                             match tab.active_tool {
                                 // Seek/Select removed: seeking is always available on the canvas
                                 ToolKind::LoopEdit => {
@@ -5146,6 +5234,130 @@ impl crate::app::WavesPreviewer {
                                             }
                                         });
 
+                                        // Auto Loop Detection
+                                        ui.separator();
+                                        ui.label(RichText::new("Auto Detect").strong());
+                                        let ld_running = tab
+                                            .loop_detect_state
+                                            .as_ref()
+                                            .map(|s| s.running)
+                                            .unwrap_or(false);
+                                        let ld_msg = tab
+                                            .loop_detect_state
+                                            .as_ref()
+                                            .map(|s| s.message.clone())
+                                            .unwrap_or_default();
+                                        let ld_candidates: Vec<(usize, usize, f32, String)> = tab
+                                            .loop_detect_state
+                                            .as_ref()
+                                            .map(|s| {
+                                                s.candidates
+                                                    .iter()
+                                                    .map(|c| {
+                                                        (
+                                                            c.start,
+                                                            c.end,
+                                                            c.score,
+                                                            c.confidence.label().to_string(),
+                                                        )
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                        let ld_selected = tab
+                                            .loop_detect_state
+                                            .as_ref()
+                                            .map(|s| s.selected_idx)
+                                            .unwrap_or(0);
+                                        let ld_progress = tab
+                                            .loop_detect_state
+                                            .as_ref()
+                                            .map(|s| s.progress)
+                                            .unwrap_or(0.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    !ld_running && !tab.ch_samples.is_empty(),
+                                                    egui::Button::new("Auto Detect"),
+                                                )
+                                                .on_hover_text(
+                                                    "Detect loop point candidates",
+                                                )
+                                                .clicked()
+                                            {
+                                                do_auto_detect_loop = Some(tab_idx);
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    ld_running,
+                                                    egui::Button::new("Cancel"),
+                                                )
+                                                .clicked()
+                                            {
+                                                do_cancel_loop_detect = Some(tab_idx);
+                                            }
+                                        });
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), 40.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.set_min_height(40.0);
+                                                ui.allocate_ui_with_layout(
+                                                    egui::vec2(ui.available_width(), 20.0),
+                                                    egui::Layout::left_to_right(egui::Align::Center),
+                                                    |ui| {
+                                                        ui.set_min_height(20.0);
+                                                        if ld_running {
+                                                            ui.add(
+                                                                egui::ProgressBar::new(
+                                                                    ld_progress.clamp(0.0, 1.0),
+                                                                )
+                                                                .desired_width(ui.available_width())
+                                                                .show_percentage(),
+                                                            );
+                                                        }
+                                                    },
+                                                );
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(
+                                                            if ld_msg.is_empty() {
+                                                                " "
+                                                            } else {
+                                                                ld_msg.as_str()
+                                                            },
+                                                        )
+                                                        .weak(),
+                                                    )
+                                                    .truncate()
+                                                    .show_tooltip_when_elided(true),
+                                                );
+                                            },
+                                        );
+                                        // Candidate list
+                                        let sr = tab.buffer_sample_rate.max(1) as f32;
+                                        for (ci, (cs, ce, score, conf)) in
+                                            ld_candidates.iter().enumerate()
+                                        {
+                                            let selected = ci == ld_selected;
+                                            let len_secs =
+                                                ce.saturating_sub(*cs) as f32 / sr;
+                                            let label = format!(
+                                                "{conf} {score:.2}  {:.2}s..{:.2}s ({:.2}s)",
+                                                *cs as f32 / sr,
+                                                *ce as f32 / sr,
+                                                len_secs,
+                                            );
+                                            ui.horizontal(|ui| {
+                                                if ui
+                                                    .selectable_label(selected, &label)
+                                                    .clicked()
+                                                {
+                                                    do_apply_loop_candidate =
+                                                        Some((tab_idx, ci));
+                                                }
+                                            });
+                                        }
 
                                         });
 
@@ -5432,9 +5644,38 @@ impl crate::app::WavesPreviewer {
                                             }
                                         });
 
+                                        let selected_trim_ranges = {
+                                            let mut ranges: Vec<(usize, usize)> = tab
+                                                .extra_selections
+                                                .iter()
+                                                .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
+                                                .filter(|&(a, b)| b > a)
+                                                .collect();
+                                            if let Some((a0, b0)) = tab.selection {
+                                                let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                                if b > a {
+                                                    ranges.push((a, b));
+                                                }
+                                            }
+                                            ranges.sort();
+                                            let mut merged: Vec<(usize, usize)> = Vec::new();
+                                            for (s, e) in ranges {
+                                                if let Some(last) = merged.last_mut() {
+                                                    if s <= last.1 {
+                                                        last.1 = last.1.max(e);
+                                                        continue;
+                                                    }
+                                                }
+                                                merged.push((s, e));
+                                            }
+                                            merged
+                                        };
+                                        let selected_trim_count = selected_trim_ranges.len();
+
                                         ui.horizontal_wrapped(|ui| {
                                             let dis = !range_opt.map(|(s, e)| e > s).unwrap_or(false);
                                             let range = range_opt.unwrap_or((0, 0));
+                                            let has_multi_selected_trim = selected_trim_count > 1;
                                             if ui.add_enabled(!dis, egui::Button::new("Apply cut")).clicked() {
                                                 do_cutjoin = Some(range);
                                             }
@@ -5445,18 +5686,215 @@ impl crate::app::WavesPreviewer {
                                                     .filter(|&(a, b)| b > a)
                                                     .collect();
                                             }
-                                            if ui.add_enabled(!dis, egui::Button::new("Apply trim")).clicked() {
-                                                do_trim = Some(range);
+                                            if ui
+                                                .add_enabled(
+                                                    has_multi_selected_trim || !dis,
+                                                    egui::Button::new("Apply trim"),
+                                                )
+                                                .clicked()
+                                            {
+                                                if has_multi_selected_trim {
+                                                    do_trim_multi = Some(selected_trim_ranges.clone());
+                                                } else {
+                                                    do_trim = Some(range);
+                                                }
                                                 tab.preview_audio_tool = None;
                                             }
                                             if ui
-                                                .add_enabled(!dis && !apply_busy, egui::Button::new("Add Trim As Virtual"))
+                                                .add_enabled(
+                                                    (has_multi_selected_trim || !dis) && !apply_busy,
+                                                    egui::Button::new("Add Trim As Virtual"),
+                                                )
                                                 .on_hover_text("Add the trim range as a virtual item (V)")
                                                 .clicked()
                                             {
-                                                do_trim_virtual = Some(range);
+                                                if has_multi_selected_trim {
+                                                    do_trim_virtual_multi = Some(selected_trim_ranges.clone());
+                                                } else {
+                                                    do_trim_virtual = Some(range);
+                                                }
                                             }
                                         });
+
+                                        // Auto Trim
+                                        ui.separator();
+                                        ui.label(RichText::new("Auto Trim").strong());
+                                        let at_running = tab
+                                            .auto_trim_state
+                                            .as_ref()
+                                            .map(|s| s.running)
+                                            .unwrap_or(false);
+                                        let at_msg = tab
+                                            .auto_trim_state
+                                            .as_ref()
+                                            .map(|s| s.message.clone())
+                                            .unwrap_or_default();
+                                        {
+                                            let cfg = &mut tab.auto_trim_config;
+                                            egui::Grid::new(("auto_trim_config_grid", tab_idx))
+                                                .num_columns(2)
+                                                .spacing(egui::vec2(10.0, 6.0))
+                                                .show(ui, |ui| {
+                                                    ui.label("above noise (dB)");
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        ui.add_sized(
+                                                            [66.0, 22.0],
+                                                            egui::DragValue::new(
+                                                                &mut cfg.threshold_above_noise_db,
+                                                            )
+                                                            .range(0.0..=48.0)
+                                                            .speed(0.5)
+                                                            .fixed_decimals(1),
+                                                        );
+                                                    });
+                                                    ui.end_row();
+                                                    ui.label("below peak (dB)");
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        ui.add_sized(
+                                                            [66.0, 22.0],
+                                                            egui::DragValue::new(
+                                                                &mut cfg.threshold_below_peak_db,
+                                                            )
+                                                            .range(0.0..=80.0)
+                                                            .speed(0.5)
+                                                            .fixed_decimals(1),
+                                                        );
+                                                    });
+                                                    ui.end_row();
+                                                    ui.label("pre-roll (s)");
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        ui.add_sized(
+                                                            [66.0, 22.0],
+                                                            egui::DragValue::new(
+                                                                &mut cfg.pre_roll_secs,
+                                                            )
+                                                            .range(0.0..=2.0)
+                                                            .speed(0.01)
+                                                            .fixed_decimals(3),
+                                                        );
+                                                    });
+                                                    ui.end_row();
+                                                    ui.label("post-roll (s)");
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        ui.add_sized(
+                                                            [66.0, 22.0],
+                                                            egui::DragValue::new(
+                                                                &mut cfg.post_roll_secs,
+                                                            )
+                                                            .range(0.0..=2.0)
+                                                            .speed(0.01)
+                                                            .fixed_decimals(3),
+                                                        );
+                                                    });
+                                                    ui.end_row();
+                                                    ui.label("gap merge (s)");
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        ui.add_sized(
+                                                            [66.0, 22.0],
+                                                            egui::DragValue::new(
+                                                                &mut cfg.gap_merge_secs,
+                                                            )
+                                                            .range(0.0..=2.0)
+                                                            .speed(0.01)
+                                                            .fixed_decimals(3),
+                                                        );
+                                                    });
+                                                    ui.end_row();
+                                                    ui.label("min active (s)");
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        ui.add_sized(
+                                                            [66.0, 22.0],
+                                                            egui::DragValue::new(
+                                                                &mut cfg.min_active_secs,
+                                                            )
+                                                            .range(0.0..=1.0)
+                                                            .speed(0.005)
+                                                            .fixed_decimals(3),
+                                                        );
+                                                    });
+                                                    ui.end_row();
+                                                });
+                                        }
+                                        let at_range_count = {
+                                            let mut count = tab
+                                                .extra_selections
+                                                .iter()
+                                                .filter(|&&(a, b)| a != b)
+                                                .count();
+                                            if let Some((a, b)) = tab.selection {
+                                                if a != b {
+                                                    count += 1;
+                                                }
+                                            }
+                                            count
+                                        };
+                                        if at_range_count > 0 {
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "Selected sections: {at_range_count}"
+                                                ))
+                                                .weak(),
+                                            );
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    !at_running && !tab.ch_samples.is_empty(),
+                                                    egui::Button::new("Auto Trim"),
+                                                )
+                                                .on_hover_text("Detect active sections")
+                                                .clicked()
+                                            {
+                                                do_auto_trim = Some(tab_idx);
+                                            }
+                                            if ui
+                                                .add_enabled(at_running, egui::Button::new("Cancel"))
+                                                .clicked()
+                                            {
+                                                do_cancel_auto_trim = Some(tab_idx);
+                                            }
+                                        });
+                                        ui.allocate_ui_with_layout(
+                                            egui::vec2(ui.available_width(), 40.0),
+                                            egui::Layout::top_down(egui::Align::Min),
+                                            |ui| {
+                                                ui.set_min_height(40.0);
+                                                ui.allocate_ui_with_layout(
+                                                    egui::vec2(ui.available_width(), 20.0),
+                                                    egui::Layout::left_to_right(egui::Align::Center),
+                                                    |ui| {
+                                                        ui.set_min_height(20.0);
+                                                        if at_running {
+                                                            ui.add(
+                                                                egui::ProgressBar::new(
+                                                                    tab.auto_trim_state
+                                                                        .as_ref()
+                                                                        .map(|s| s.progress)
+                                                                        .unwrap_or(0.0)
+                                                                        .clamp(0.0, 1.0),
+                                                                )
+                                                                .desired_width(ui.available_width())
+                                                                .show_percentage(),
+                                                            );
+                                                        }
+                                                    },
+                                                );
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(
+                                                            if at_msg.is_empty() {
+                                                                " "
+                                                            } else {
+                                                                at_msg.as_str()
+                                                            },
+                                                        )
+                                                        .weak(),
+                                                    )
+                                                    .truncate()
+                                                    .show_tooltip_when_elided(true),
+                                                );
+                                            },
+                                        );
                                     });
                                 }
                                 ToolKind::Fade => {
@@ -7017,7 +7455,17 @@ impl crate::app::WavesPreviewer {
                     }
                 }
                 if let Some((tool_kind, mono)) = pending_preview { self.set_preview_mono(tab_idx, tool_kind, mono); }
-            }); // end horizontal split
+            };
+            if stacked_editor {
+                ui.vertical(|ui| {
+                    draw_editor_body(ui);
+                });
+            } else {
+                ui.horizontal_top(|ui| {
+                    draw_editor_body(ui);
+                });
+            }
+        } // end editor split
         self.plugin_search_path_input = plugin_search_path_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
@@ -7131,11 +7579,40 @@ impl crate::app::WavesPreviewer {
         if let Some(state) = pending_edit_undo.take() {
             self.push_editor_undo_state(tab_idx, state, true);
         }
+        if let Some(idx) = do_auto_trim {
+            self.start_auto_trim(idx);
+        }
+        if let Some(idx) = do_cancel_auto_trim {
+            self.cancel_auto_trim(idx);
+        }
+        if let Some(idx) = do_auto_detect_loop {
+            self.start_loop_detect(idx);
+        }
+        if let Some(idx) = do_cancel_loop_detect {
+            self.cancel_loop_detect(idx);
+        }
+        if let Some((tidx, cidx)) = do_apply_loop_candidate {
+            self.apply_loop_detect_candidate(tidx, cidx);
+        }
         if let Some((s, e)) = do_trim {
             self.editor_apply_trim_range(tab_idx, (s, e));
         }
+        if let Some(ranges) = do_trim_multi {
+            self.editor_apply_trim_multi_ranges(tab_idx, ranges);
+        }
         if let Some((s, e)) = do_trim_virtual {
             self.begin_trim_virtual_job(tab_idx, (s, e));
+        }
+        if let Some(ranges) = do_trim_virtual_multi {
+            if let Some(path) = self.tabs.get(tab_idx).map(|t| t.path.clone()) {
+                let mut iter = ranges.into_iter();
+                if let Some((s, e)) = iter.next() {
+                    self.begin_trim_virtual_job(tab_idx, (s, e));
+                }
+                for (s, e) in iter {
+                    self.virtual_trim_queue.push_back((path.clone(), s, e));
+                }
+            }
         }
         if let Some((s, e)) = do_mute {
             self.editor_apply_mute_range(tab_idx, (s, e));

@@ -344,6 +344,7 @@ impl crate::app::WavesPreviewer {
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
+            tab.extra_selections.clear();
             tab.ab_loop = None;
             tab.loop_region = None;
             tab.loop_region_committed = None;
@@ -1297,6 +1298,8 @@ impl crate::app::WavesPreviewer {
             }
             tab.samples_len = tab.samples_len.saturating_sub(remove_len);
             tab.loop_region = None;
+            tab.selection = None;
+            tab.extra_selections.clear();
             tab.dirty = true;
             Self::editor_clamp_ranges(tab);
             (tab.ch_samples.clone(), undo_state)
@@ -1498,6 +1501,21 @@ impl crate::app::WavesPreviewer {
             return false;
         };
         self.editor_apply_trim_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_delete_range_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_delete_range_and_join(tab_idx, range);
         true
     }
 

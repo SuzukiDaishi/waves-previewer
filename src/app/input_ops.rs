@@ -339,7 +339,7 @@ impl super::WavesPreviewer {
         }
     }
 
-    fn all_selected_ranges(&self, tab_idx: usize) -> Vec<(usize, usize)> {
+    pub(super) fn all_selected_ranges(&self, tab_idx: usize) -> Vec<(usize, usize)> {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return vec![];
         };

@@ -1126,6 +1126,9 @@ impl AudioEngine {
         self.shared
             .playing
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .meter_rms
+            .store(0.0, std::sync::atomic::Ordering::Relaxed);
         self.clear_swap_crossfade();
     }
 

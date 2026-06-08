@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app::types::{
-    EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, FileMeta, LoopMode,
-    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind, ProcessingResult,
-    ProcessingState, ProcessingTarget, RateMode, SampleValueKind, SortDir, SortKey, ToolKind,
-    ToolState, ViewMode,
+    AutoTrimState, EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData,
+    EditorDecodeResult, EditorDecodeStage, EditorDecodeState, FileMeta, LoopDetectState, LoopMode,
+    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind,
+    ProcessingResult, ProcessingState, ProcessingTarget, RateMode, SampleValueKind, SortDir,
+    SortKey, ToolKind, ToolState, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -232,6 +233,138 @@ impl super::WavesPreviewer {
 
     pub fn test_topbar_scan_activity_text(&self) -> Option<String> {
         self.topbar_scan_activity_text()
+    }
+
+    pub fn test_topbar_volume_rect(&self) -> Option<egui::Rect> {
+        self.topbar_volume_rect
+    }
+
+    pub fn test_topbar_output_meter_rect(&self) -> Option<egui::Rect> {
+        self.topbar_output_meter_rect
+    }
+
+    pub fn test_topbar_search_rect(&self) -> Option<egui::Rect> {
+        self.topbar_search_rect
+    }
+
+    pub fn test_editor_inspector_rect(&self) -> Option<egui::Rect> {
+        self.editor_inspector_rect
+    }
+
+    pub fn test_set_mock_editor_decode_progress(&mut self, progress: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let path = tab.path.clone();
+        let (_tx, rx) = std::sync::mpsc::channel::<EditorDecodeResult>();
+        let total_source_frames = 100_000usize;
+        let streaming_progress = ((progress.clamp(0.15, 0.92) - 0.15) / 0.77)
+            .clamp(0.0, 1.0);
+        let decoded_source_frames =
+            ((total_source_frames as f32) * streaming_progress).round() as usize;
+        self.editor_decode_state = Some(EditorDecodeState {
+            path,
+            started_at: std::time::Instant::now(),
+            rx,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            job_id: 999_002,
+            partial_ready: true,
+            stage: EditorDecodeStage::StreamingFull,
+            decoded_frames: decoded_source_frames,
+            estimated_total_frames: Some(total_source_frames),
+            total_source_frames: Some(total_source_frames),
+            visual_total_frames: Some(total_source_frames),
+            decoded_source_frames,
+            loading_waveform_updates: 1,
+            max_progress_gap_ms: 0.0,
+        });
+        true
+    }
+
+    pub fn test_clear_mock_editor_decode_progress(&mut self) {
+        self.editor_decode_state = None;
+    }
+
+    pub fn test_set_mock_active_tab_processing(&mut self, msg: &str) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let path = tab.path.clone();
+        let (_tx, rx) = std::sync::mpsc::channel::<ProcessingResult>();
+        self.processing = Some(ProcessingState {
+            msg: msg.to_string(),
+            path: path.clone(),
+            job_id: 999_001,
+            mode: self.mode,
+            target: ProcessingTarget::EditorTab(path),
+            autoplay_when_ready: false,
+            source_time_sec: None,
+            started_at: std::time::Instant::now() - std::time::Duration::from_millis(250),
+            rx,
+        });
+        true
+    }
+
+    pub fn test_clear_mock_processing(&mut self) {
+        self.processing = None;
+    }
+
+    pub fn test_set_mock_auto_trim_running(&mut self, progress: f32, message: &str) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let mut state = AutoTrimState::default();
+        state.running = true;
+        state.progress = progress.clamp(0.0, 1.0);
+        state.message = message.to_string();
+        tab.auto_trim_state = Some(state);
+        true
+    }
+
+    pub fn test_clear_mock_auto_trim(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.auto_trim_state = None;
+        true
+    }
+
+    pub fn test_set_mock_loop_detect_running(&mut self, progress: f32, message: &str) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let mut state = LoopDetectState::default();
+        state.running = true;
+        state.progress = progress.clamp(0.0, 1.0);
+        state.message = message.to_string();
+        tab.loop_detect_state = Some(state);
+        true
+    }
+
+    pub fn test_clear_mock_loop_detect(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.loop_detect_state = None;
+        true
     }
 
     pub fn test_start_folder_load(&mut self, dir: PathBuf) {
@@ -802,6 +935,41 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).and_then(|tab| tab.selection)
     }
 
+    pub fn test_set_extra_selections_frac(&mut self, ranges: &[(f32, f32)]) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let mut out = Vec::with_capacity(ranges.len());
+        for &(start, end) in ranges {
+            let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+                return false;
+            };
+            out.push(range);
+        }
+        tab.extra_selections = out;
+        true
+    }
+
+    pub fn test_tab_extra_selections(&self) -> Vec<(usize, usize)> {
+        let Some(tab_idx) = self.active_tab else {
+            return Vec::new();
+        };
+        self.tabs
+            .get(tab_idx)
+            .map(|tab| tab.extra_selections.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn test_all_selected_ranges(&self) -> Vec<(usize, usize)> {
+        let Some(tab_idx) = self.active_tab else {
+            return Vec::new();
+        };
+        self.all_selected_ranges(tab_idx)
+    }
+
     pub fn test_tab_selection_anchor(&self) -> Option<usize> {
         let tab_idx = self.active_tab?;
         self.tabs
@@ -1035,6 +1203,64 @@ impl super::WavesPreviewer {
             _ => return false,
         };
         true
+    }
+
+    pub fn test_set_auto_trim_thresholds_db(
+        &mut self,
+        above_noise_db: f32,
+        below_peak_db: f32,
+    ) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.auto_trim_config.threshold_above_noise_db = above_noise_db;
+        tab.auto_trim_config.threshold_below_peak_db = below_peak_db;
+        true
+    }
+
+    pub fn test_auto_trim_config_thresholds_db(&self) -> Option<(f32, f32)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some((
+            tab.auto_trim_config.threshold_above_noise_db,
+            tab.auto_trim_config.threshold_below_peak_db,
+        ))
+    }
+
+    pub fn test_start_auto_trim(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.start_auto_trim(tab_idx);
+        true
+    }
+
+    pub fn test_cancel_auto_trim(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.cancel_auto_trim(tab_idx);
+        true
+    }
+
+    pub fn test_auto_trim_running(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.tabs
+            .get(tab_idx)
+            .and_then(|tab| tab.auto_trim_state.as_ref())
+            .map(|s| s.running)
+            .unwrap_or(false)
+    }
+
+    pub fn test_auto_trim_message(&self) -> Option<String> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        tab.auto_trim_state.as_ref().map(|s| s.message.clone())
     }
 
     pub fn test_set_trim_range_frac(&mut self, start: f32, end: f32) -> bool {
@@ -2354,5 +2580,87 @@ impl super::WavesPreviewer {
     pub fn test_clear_mock_model_download_progress(&mut self) {
         self.transcript_model_download_state = None;
         self.music_model_download_state = None;
+    }
+
+    pub fn test_recording_state_name(&self) -> &'static str {
+        match &self.recording_tab.state {
+            crate::app::types::RecordingState::Idle => "Idle",
+            crate::app::types::RecordingState::Recording => "Recording",
+            crate::app::types::RecordingState::Paused => "Paused",
+            crate::app::types::RecordingState::Finalizing => "Finalizing",
+            crate::app::types::RecordingState::Error(_) => "Error",
+        }
+    }
+
+    /// Test-only: force the recording state machine into `Recording` without
+    /// starting real hardware capture, so pause/resume can be exercised in
+    /// headless environments where no microphone is available.
+    pub fn test_force_recording_started(&mut self) {
+        self.recording_tab.state = crate::app::types::RecordingState::Recording;
+        self.recording_tab.record_start = Some(std::time::Instant::now());
+        self.recording_tab
+            .paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.recording_tab.pause_started_at = None;
+        self.recording_tab.paused_accum = std::time::Duration::ZERO;
+    }
+
+    pub fn test_pause_recording(&mut self) {
+        self.pause_recording();
+    }
+
+    pub fn test_resume_recording(&mut self) {
+        self.resume_recording();
+    }
+
+    pub fn test_discard_recording(&mut self) {
+        self.discard_recording();
+    }
+
+    pub fn test_recording_paused_flag(&self) -> bool {
+        self.recording_tab
+            .paused
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn test_recording_pause_started(&self) -> bool {
+        self.recording_tab.pause_started_at.is_some()
+    }
+
+    pub fn test_recording_paused_accum_secs(&self) -> f32 {
+        self.recording_tab.paused_accum.as_secs_f32()
+    }
+
+    /// Test-only: rewind `record_start`/`pause_started_at` by `secs` so that
+    /// elapsed-time and paused-duration assertions don't depend on real sleeps.
+    pub fn test_rewind_recording_clock(&mut self, secs: f32) {
+        let delta = std::time::Duration::from_secs_f32(secs.max(0.0));
+        if let Some(start) = self.recording_tab.record_start {
+            self.recording_tab.record_start = start.checked_sub(delta);
+        }
+        if let Some(started) = self.recording_tab.pause_started_at {
+            self.recording_tab.pause_started_at = started.checked_sub(delta);
+        }
+    }
+
+    pub fn test_recording_temp_file_count(&self) -> usize {
+        self.recording_temp_files.len()
+    }
+
+    /// Test-only: mirrors the "Tools > Recording..." menu action so the
+    /// Recording workspace tab can be opened without driving the menu UI.
+    pub fn test_open_recording_tab(&mut self) {
+        self.workspace_view = crate::app::types::WorkspaceView::Recording;
+        self.recording_tab.tab_open = true;
+    }
+
+    pub fn test_recording_tab_open(&self) -> bool {
+        self.recording_tab.tab_open
+    }
+
+    /// Test-only: switches the active workspace to the file list, mirroring
+    /// the "List" tab-strip click without depending on label-text queries.
+    pub fn test_switch_to_list_workspace(&mut self) {
+        self.workspace_view = crate::app::types::WorkspaceView::List;
     }
 }

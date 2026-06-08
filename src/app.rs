@@ -19,6 +19,8 @@ type HeavyOverlayMessage = (
 
 mod app_init;
 mod audio_ops;
+mod auto_trim;
+mod auto_trim_ops;
 mod capture;
 mod cli_ops;
 mod cli_workspace;
@@ -48,6 +50,8 @@ mod list_state_ops;
 mod list_undo;
 mod loading_ops;
 mod logic;
+mod loop_detect;
+mod loop_detect_ops;
 mod loudnorm_ops;
 mod meta;
 mod meta_ops;
@@ -57,6 +61,7 @@ mod plugin_ops;
 mod preview;
 mod preview_ops;
 mod project;
+mod recording_ops;
 mod rename_ops;
 mod render;
 mod resample_ops;
@@ -355,6 +360,10 @@ pub struct WavesPreviewer {
     // unified numeric control via DragValue; no string normalization
     pub pitch_semitones: f32,
     pub meter_db: f32,
+    topbar_volume_rect: Option<egui::Rect>,
+    topbar_output_meter_rect: Option<egui::Rect>,
+    topbar_search_rect: Option<egui::Rect>,
+    editor_inspector_rect: Option<egui::Rect>,
     pub tabs: Vec<EditorTab>,
     waveform_scratch: WaveformScratch,
     pub active_tab: Option<usize>,
@@ -482,6 +491,9 @@ pub struct WavesPreviewer {
     // clipboard (list copy/paste)
     pub clipboard_payload: Option<ClipboardPayload>,
     pub clipboard_temp_files: Vec<PathBuf>,
+    /// temp WAV files written by the Recording tab, backing `(virtual)` items
+    /// until the project is saved (sidecar audio persists them) and they're removed
+    pub recording_temp_files: Vec<PathBuf>,
     clipboard_c_was_down: bool,
     clipboard_v_was_down: bool,
     undo_z_was_down: bool,
@@ -660,6 +672,9 @@ pub struct WavesPreviewer {
     ipc_rx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ipc::IpcRequest>>>>,
     #[cfg(feature = "kittest")]
     test_dialogs: TestDialogQueue,
+
+    // Recording tab
+    recording_tab: RecordingTabState,
 }
 
 impl WavesPreviewer {

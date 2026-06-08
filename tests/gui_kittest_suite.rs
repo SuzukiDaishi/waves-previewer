@@ -244,6 +244,25 @@ mod kittest_suite {
         vec![left, right]
     }
 
+    fn synth_auto_trim_sections_stereo(sr: u32) -> Vec<Vec<f32>> {
+        let secs = 3.0_f32;
+        let frames = (sr as f32 * secs) as usize;
+        let mut left = vec![0.0_f32; frames];
+        let mut right = vec![0.0_f32; frames];
+        let mut write_burst = |start_sec: f32, dur_sec: f32, freq: f32, amp: f32| {
+            let start = (start_sec * sr as f32) as usize;
+            let end = ((start_sec + dur_sec) * sr as f32) as usize;
+            for i in start.min(frames)..end.min(frames) {
+                let t = i as f32 / sr as f32;
+                left[i] = (t * freq * std::f32::consts::TAU).sin() * amp;
+                right[i] = (t * (freq * 1.5) * std::f32::consts::TAU).sin() * (amp * 0.8);
+            }
+        };
+        write_burst(0.50, 0.35, 440.0, 0.45);
+        write_burst(1.35, 0.40, 660.0, 0.40);
+        vec![left, right]
+    }
+
     fn build_format_fixtures(dir: &Path, secs: f32) -> Vec<PathBuf> {
         let sr = 44_100;
         let chans = synth_stereo(sr, secs);
@@ -281,6 +300,16 @@ mod kittest_suite {
         let path = dir.join("dynamic_editor_fixture.wav");
         neowaves::wave::export_channels_audio(&chans, sr, &path)
             .unwrap_or_else(|e| panic!("export dynamic editor fixture failed: {e}"));
+        harness_with_folder(dir)
+    }
+
+    fn harness_with_auto_trim_sections_fixture() -> Harness<'static, WavesPreviewer> {
+        let dir = make_temp_dir("auto_trim_sections_fixture");
+        let sr = 48_000;
+        let chans = synth_auto_trim_sections_stereo(sr);
+        let path = dir.join("auto_trim_sections_fixture.wav");
+        neowaves::wave::export_channels_audio(&chans, sr, &path)
+            .unwrap_or_else(|e| panic!("export auto trim sections fixture failed: {e}"));
         harness_with_folder(dir)
     }
 
@@ -520,6 +549,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(0.0, 120.0),
                 modifiers: Modifiers::COMMAND,
             },
@@ -534,6 +564,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(0.0, -120.0),
                 modifiers: Modifiers::COMMAND,
             },
@@ -548,6 +579,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(0.0, 120.0),
                 modifiers: Modifiers::SHIFT,
             },
@@ -562,6 +594,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(delta_x, 0.0),
                 modifiers: Modifiers::NONE,
             },
@@ -576,6 +609,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(0.0, 120.0),
                 modifiers: Modifiers::NONE,
             },
@@ -626,6 +660,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(0.0, 120.0),
                 modifiers: Modifiers::COMMAND,
             },
@@ -930,6 +965,120 @@ mod kittest_suite {
         node
     }
 
+    fn first_label_rect(harness: &Harness<'static, WavesPreviewer>, label: &str) -> egui::Rect {
+        harness
+            .query_all_by_label(label)
+            .min_by(|a, b| {
+                a.rect()
+                    .min
+                    .y
+                    .partial_cmp(&b.rect().min.y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|| panic!("label '{label}' not found"))
+            .rect()
+    }
+
+    fn assert_rect_nearly_same(a: egui::Rect, b: egui::Rect, label: &str) {
+        let tolerance = 2.0;
+        assert!(
+            (a.left() - b.left()).abs() <= tolerance
+                && (a.top() - b.top()).abs() <= tolerance
+                && (a.width() - b.width()).abs() <= tolerance
+                && (a.height() - b.height()).abs() <= tolerance,
+            "{label} moved/resized too much: before={a:?} after={b:?}"
+        );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    fn assert_inspector_labels_inside(
+        harness: &Harness<'static, WavesPreviewer>,
+        labels: &[&str],
+    ) {
+        let inspector = harness
+            .state()
+            .test_editor_inspector_rect()
+            .expect("inspector rect");
+        for label in labels {
+            let nodes: Vec<_> = harness
+                .query_all_by_label(*label)
+                .filter(|node| node.rect().intersects(inspector.expand(2.0)))
+                .collect();
+            assert!(!nodes.is_empty(), "inspector label '{label}' not found");
+            for node in nodes {
+                let rect = node.rect();
+                assert!(
+                    rect.right() <= inspector.right() + 2.0,
+                    "inspector label '{label}' overflows right edge: node={rect:?} inspector={inspector:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "kittest_render")]
+    fn strong_red_pixels_in_rect(image: &image::RgbaImage, rect: egui::Rect) -> usize {
+        let width = image.width() as i32;
+        let height = image.height() as i32;
+        let left = rect.left().floor().max(0.0) as i32;
+        let top = rect.top().floor().max(0.0) as i32;
+        let right = rect.right().ceil().min(width as f32) as i32;
+        let bottom = rect.bottom().ceil().min(height as f32) as i32;
+        let mut count = 0usize;
+        for y in top.max(0)..bottom.max(0).min(height) {
+            for x in left.max(0)..right.max(0).min(width) {
+                let p = image.get_pixel(x as u32, y as u32).0;
+                if p[0] > 170 && p[1] < 105 && p[2] < 105 && p[0] > p[1].saturating_add(55) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[cfg(feature = "kittest_render")]
+    fn ui_stability_screenshot_dir() -> PathBuf {
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("ui_stability");
+        std::fs::create_dir_all(&out_dir).expect("create screenshot verify dir");
+        out_dir
+    }
+
+    #[cfg(feature = "kittest_render")]
+    fn assert_topbar_volume_meter_has_no_red(
+        harness: &Harness<'static, WavesPreviewer>,
+        image: &image::RgbaImage,
+        label: &str,
+    ) {
+        let volume = harness
+            .state()
+            .test_topbar_volume_rect()
+            .unwrap_or_else(|| panic!("{label}: volume rect"));
+        let meter = harness
+            .state()
+            .test_topbar_output_meter_rect()
+            .unwrap_or_else(|| panic!("{label}: meter rect"));
+        let red = strong_red_pixels_in_rect(image, volume.expand(2.0))
+            + strong_red_pixels_in_rect(image, meter.expand(2.0));
+        assert_eq!(red, 0, "{label} volume/meter area should not contain strong red pixels");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    fn render_ui_stability_png(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        file_name: &str,
+    ) -> image::RgbaImage {
+        harness.run_steps(2);
+        let image = harness.render().expect("render image");
+        assert_topbar_volume_meter_has_no_red(harness, &image, file_name);
+        let out = ui_stability_screenshot_dir().join(file_name);
+        image
+            .save(&out)
+            .unwrap_or_else(|e| panic!("save {} failed: {e}", out.display()));
+        image
+    }
+
     #[test]
     fn load_folder_shows_files() {
         let mut harness = harness_with_wavs(false);
@@ -1002,6 +1151,152 @@ mod kittest_suite {
         assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
         harness.run_steps(1);
         assert_eq!(harness.state().test_active_tool(), Some(ToolKind::Reverse));
+    }
+
+    #[test]
+    fn topbar_activity_does_not_move_search_or_meter_controls() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+
+        let search_before = harness
+            .state()
+            .test_topbar_search_rect()
+            .expect("search rect before");
+        let volume_before = harness
+            .state()
+            .test_topbar_volume_rect()
+            .expect("volume rect before");
+        let meter_before = harness
+            .state()
+            .test_topbar_output_meter_rect()
+            .expect("meter rect before");
+
+        assert!(harness
+            .state_mut()
+            .test_set_mock_active_tab_processing("Rendering preview..."));
+        harness.run_steps(3);
+
+        assert_rect_nearly_same(
+            search_before,
+            harness
+                .state()
+                .test_topbar_search_rect()
+                .expect("search rect after"),
+            "topbar search",
+        );
+        assert_rect_nearly_same(
+            volume_before,
+            harness
+                .state()
+                .test_topbar_volume_rect()
+                .expect("volume rect after"),
+            "topbar volume",
+        );
+        assert_rect_nearly_same(
+            meter_before,
+            harness
+                .state()
+                .test_topbar_output_meter_rect()
+                .expect("meter rect after"),
+            "topbar meter",
+        );
+        harness.state_mut().test_clear_mock_processing();
+    }
+
+    #[test]
+    fn inspector_activity_slot_does_not_move_range_or_tool_picker() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+        let range_before = first_label_rect(&harness, "Range: -");
+        let tool_before = first_label_rect(&harness, "Tool");
+
+        assert!(harness
+            .state_mut()
+            .test_set_mock_active_tab_processing("Rendering preview..."));
+        harness.run_steps(3);
+
+        assert_rect_nearly_same(range_before, first_label_rect(&harness, "Range: -"), "range row");
+        assert_rect_nearly_same(tool_before, first_label_rect(&harness, "Tool"), "tool picker");
+        harness.state_mut().test_clear_mock_processing();
+    }
+
+    #[test]
+    fn editor_layout_has_valid_canvas_and_inspector_at_common_sizes() {
+        for size in [
+            egui::vec2(760.0, 540.0),
+            egui::vec2(1160.0, 720.0),
+            egui::vec2(1600.0, 900.0),
+        ] {
+            let mut harness = harness_with_editor_fixture();
+            harness.set_size(size);
+            wait_for_scan(&mut harness);
+            ensure_editor_ready(&mut harness);
+            harness.run_steps(4);
+
+            let inspector = first_label_rect(&harness, "Inspector");
+            let nav = harness
+                .state()
+                .test_tab_amplitude_nav_rect()
+                .expect("amplitude nav rect");
+            assert!(
+                inspector.height() >= 18.0 && inspector.top() < size.y - 32.0,
+                "inspector should be visible at size {size:?}: {inspector:?}"
+            );
+            assert!(
+                nav.width() >= 12.0 && nav.height() >= 120.0,
+                "canvas amplitude nav should be visible at size {size:?}: {nav:?}"
+            );
+            assert!(
+                harness.state().test_topbar_volume_rect().is_some()
+                    && harness.state().test_topbar_output_meter_rect().is_some()
+                    && harness.state().test_topbar_search_rect().is_some(),
+                "topbar control rects should be recorded at size {size:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_detect_progress_slot_does_not_move_loop_inspector() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        harness.run_steps(3);
+        let before = first_label_rect(&harness, "Loop inspector: -");
+
+        assert!(harness
+            .state_mut()
+            .test_set_mock_loop_detect_running(0.42, "Scoring loop candidates... 42%"));
+        harness.run_steps(3);
+
+        assert_rect_nearly_same(
+            before,
+            first_label_rect(&harness, "Loop inspector: -"),
+            "loop inspector row",
+        );
+        assert!(harness.state_mut().test_clear_mock_loop_detect());
+    }
+
+    #[test]
+    fn auto_trim_progress_slot_keeps_trim_section_stable() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        harness.run_steps(3);
+        let before = first_label_rect(&harness, "Auto Trim");
+
+        assert!(harness
+            .state_mut()
+            .test_set_mock_auto_trim_running(0.55, "Auto Trim detecting sections... 55%"));
+        harness.run_steps(3);
+
+        assert_rect_nearly_same(before, first_label_rect(&harness, "Auto Trim"), "Auto Trim header");
+        assert!(harness.state_mut().test_clear_mock_auto_trim());
     }
 
     #[test]
@@ -3380,7 +3675,10 @@ mod kittest_suite {
         editor_shift_click_at_pos(&mut harness, pos);
 
         let selection = harness.state().test_tab_selection().expect("selection");
-        assert_eq!(selection.0, anchor, "shift+click should keep the existing anchor");
+        assert_eq!(
+            selection.0, anchor,
+            "shift+click should keep the existing anchor"
+        );
         assert_eq!(
             selection.1, playhead,
             "shift+click endpoint should snap to the playhead within 8px"
@@ -4870,6 +5168,168 @@ mod kittest_suite {
 
     #[cfg(feature = "kittest_render")]
     #[test]
+    fn kittest_render_volume_meter_has_no_red_idle_playing_or_stopped() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+
+        render_ui_stability_png(&mut harness, "volume_meter_idle.png");
+        harness.state_mut().test_audio_seek_to_sample(10_000);
+        harness.key_press(Key::Space);
+        render_ui_stability_png(&mut harness, "volume_meter_playing.png");
+        harness.key_press(Key::Space);
+        render_ui_stability_png(&mut harness, "volume_meter_stopped.png");
+        assert!(
+            harness.state().test_meter_db() <= -79.9,
+            "stopped meter should settle at -inf-equivalent"
+        );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_editor_ui_stability_common_sizes_and_processing_png() {
+        for (name, size) in [
+            ("layout_760x540_idle.png", egui::vec2(760.0, 540.0)),
+            ("layout_1160x720_idle.png", egui::vec2(1160.0, 720.0)),
+            ("layout_1600x900_idle.png", egui::vec2(1600.0, 900.0)),
+        ] {
+            let mut harness = harness_with_editor_fixture();
+            harness.set_size(size);
+            wait_for_scan(&mut harness);
+            ensure_editor_ready(&mut harness);
+            harness.run_steps(4);
+
+            let image = render_ui_stability_png(&mut harness, name);
+            assert_eq!(image.width(), size.x as u32, "{name}: width");
+            assert_eq!(image.height(), size.y as u32, "{name}: height");
+            let inspector = first_label_rect(&harness, "Inspector");
+            let nav = harness
+                .state()
+                .test_tab_amplitude_nav_rect()
+                .expect("amplitude nav rect");
+            assert!(
+                inspector.width() >= 80.0 && inspector.height() >= 18.0,
+                "{name}: inspector should be visible: {inspector:?}"
+            );
+            assert!(
+                nav.width() >= 12.0 && nav.height() >= 120.0,
+                "{name}: editor canvas/nav should keep a usable size: {nav:?}"
+            );
+        }
+
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1160.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(4);
+
+        let search_before = harness
+            .state()
+            .test_topbar_search_rect()
+            .expect("search rect before processing");
+        let volume_before = harness
+            .state()
+            .test_topbar_volume_rect()
+            .expect("volume rect before processing");
+        let range_before = first_label_rect(&harness, "Range: -");
+        assert!(harness
+            .state_mut()
+            .test_set_mock_active_tab_processing("Rendering preview..."));
+        harness.run_steps(3);
+        render_ui_stability_png(&mut harness, "processing_topbar_inspector.png");
+        assert_rect_nearly_same(
+            search_before,
+            harness
+                .state()
+                .test_topbar_search_rect()
+                .expect("search rect during processing"),
+            "processing search",
+        );
+        assert_rect_nearly_same(
+            volume_before,
+            harness
+                .state()
+                .test_topbar_volume_rect()
+                .expect("volume rect during processing"),
+            "processing volume",
+        );
+        assert_rect_nearly_same(
+            range_before,
+            first_label_rect(&harness, "Range: -"),
+            "processing inspector range",
+        );
+        harness.state_mut().test_clear_mock_processing();
+
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        harness.run_steps(4);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        harness.run_steps(2);
+        let loop_before = first_label_rect(&harness, "Loop inspector: -");
+        assert!(harness
+            .state_mut()
+            .test_set_mock_loop_detect_running(0.42, "Scoring loop candidates... 42%"));
+        harness.run_steps(3);
+        harness.get_by_label("Scoring loop candidates... 42%");
+        render_ui_stability_png(&mut harness, "processing_loop_detect.png");
+        assert_rect_nearly_same(
+            loop_before,
+            first_label_rect(&harness, "Loop inspector: -"),
+            "loop detect inspector",
+        );
+        assert!(harness.state_mut().test_clear_mock_loop_detect());
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        harness.run_steps(2);
+        let trim_before = first_label_rect(&harness, "Auto Trim");
+        assert!(harness
+            .state_mut()
+            .test_set_mock_auto_trim_running(0.55, "Auto Trim detecting sections... 55%"));
+        harness.run_steps(3);
+        harness.get_by_label("Auto Trim detecting sections... 55%");
+        render_ui_stability_png(&mut harness, "processing_auto_trim.png");
+        assert_rect_nearly_same(
+            trim_before,
+            first_label_rect(&harness, "Auto Trim"),
+            "auto trim section",
+        );
+        assert!(harness.state_mut().test_clear_mock_auto_trim());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_inspector_trim_loading_does_not_overflow_png() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1160.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
+        assert!(harness.state_mut().test_set_mock_editor_decode_progress(0.88));
+        assert!(harness
+            .state_mut()
+            .test_set_mock_auto_trim_running(0.55, "Auto Trim detecting sections... 55%"));
+        harness.run_steps(4);
+
+        harness.get_by_label("Loading exact audio");
+        harness.get_by_label("Auto Trim detecting sections... 55%");
+        render_ui_stability_png(&mut harness, "inspector_trim_loading_no_overflow.png");
+        assert_inspector_labels_inside(
+            &harness,
+            &[
+                "Loading exact audio",
+                "below peak (dB)",
+                "gap merge (s)",
+                "min active (s)",
+                "Cancel",
+            ],
+        );
+
+        harness.state_mut().test_clear_mock_editor_decode_progress();
+        assert!(harness.state_mut().test_clear_mock_auto_trim());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
     fn kittest_render_zoom_ctrl_wheel_saves_before_after_screenshots() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -4888,6 +5348,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(0.0, 120.0),
                 modifiers: Modifiers::COMMAND,
             },
@@ -4979,6 +5440,7 @@ mod kittest_suite {
         harness.event_modifiers(
             egui::Event::MouseWheel {
                 unit: MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
                 delta: egui::vec2(180.0, 0.0),
                 modifiers: Modifiers::NONE,
             },
@@ -5112,5 +5574,345 @@ mod kittest_suite {
         after.save(&after_out).expect("save spec overlay after");
         assert!(std::fs::metadata(&before_out).is_ok());
         assert!(std::fs::metadata(&after_out).is_ok());
+    }
+
+    fn wait_for_auto_trim_done(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_auto_trim_running() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!(
+                    "auto trim timeout message={:?}",
+                    harness.state().test_auto_trim_message()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn editor_apply_trim_range_clears_stale_extra_selections() {
+        // Regression test: editor_apply_trim_range used to reset `selection`
+        // but leave `extra_selections` untouched, so a stale multi-selection
+        // rectangle would survive a single-range Trim (T) and corrupt the
+        // grid/waveform redraw afterwards.
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_selection_frac(0.2, 0.6));
+        assert!(harness
+            .state_mut()
+            .test_set_extra_selections_frac(&[(0.7, 0.9)]));
+        assert_eq!(harness.state().test_tab_extra_selections().len(), 1);
+
+        assert!(harness.state_mut().test_apply_trim_frac(0.2, 0.6));
+        harness.run_steps(2);
+
+        assert!(
+            harness.state().test_tab_selection().is_none(),
+            "selection should clear after single-range trim"
+        );
+        assert!(
+            harness.state().test_tab_extra_selections().is_empty(),
+            "extra_selections should also clear after single-range trim (latent bug fix)"
+        );
+    }
+
+    #[test]
+    fn editor_delete_range_and_join_clears_stale_extra_selections() {
+        // Same latent bug as above, but for the C (delete-and-join) path.
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let before_len = harness.state().test_tab_samples_len();
+        assert!(harness.state_mut().test_set_selection_frac(0.3, 0.5));
+        assert!(harness
+            .state_mut()
+            .test_set_extra_selections_frac(&[(0.7, 0.9)]));
+        assert_eq!(harness.state().test_tab_extra_selections().len(), 1);
+
+        assert!(harness.state_mut().test_apply_delete_range_frac(0.3, 0.5));
+        harness.run_steps(2);
+
+        let after_len = harness.state().test_tab_samples_len();
+        assert!(after_len < before_len, "delete should shorten the buffer");
+        assert!(
+            harness.state().test_tab_selection().is_none(),
+            "selection should clear after single-range delete"
+        );
+        assert!(
+            harness.state().test_tab_extra_selections().is_empty(),
+            "extra_selections should also clear after single-range delete (latent bug fix)"
+        );
+    }
+
+    #[test]
+    fn auto_trim_threshold_config_is_persisted_per_tab() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let default_thresholds = harness
+            .state()
+            .test_auto_trim_config_thresholds_db()
+            .expect("auto trim config available for active tab");
+        assert!(harness
+            .state_mut()
+            .test_set_auto_trim_thresholds_db(20.0, 30.0));
+        let updated = harness
+            .state()
+            .test_auto_trim_config_thresholds_db()
+            .expect("auto trim config after update");
+        assert_eq!(updated, (20.0, 30.0));
+        assert_ne!(
+            updated, default_thresholds,
+            "changing the per-tab config should not silently fall back to defaults"
+        );
+    }
+
+    #[test]
+    fn auto_trim_multi_range_replaces_selection_with_detected_subranges() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        let ranges = [
+            (0.05_f32, 0.30_f32),
+            (0.40_f32, 0.65_f32),
+            (0.75_f32, 0.95_f32),
+        ];
+        assert!(harness
+            .state_mut()
+            .test_set_selection_frac(ranges[0].0, ranges[0].1));
+        assert!(harness
+            .state_mut()
+            .test_set_extra_selections_frac(&ranges[1..]));
+        let original = harness.state().test_all_selected_ranges();
+        assert_eq!(
+            original.len(),
+            3,
+            "expected 3 disjoint selected ranges going into Auto Trim, got {original:?}"
+        );
+
+        assert!(harness.state_mut().test_start_auto_trim());
+        wait_for_auto_trim_done(&mut harness);
+        harness.run_steps(2);
+
+        let detected = harness.state().test_all_selected_ranges();
+        assert_eq!(
+            detected.len(),
+            original.len(),
+            "multi-range Auto Trim should produce one detected sub-range per input range \
+             (original={original:?} detected={detected:?})"
+        );
+        for (orig, det) in original.iter().zip(detected.iter()) {
+            assert!(
+                det.0 >= orig.0 && det.1 <= orig.1 && det.0 <= det.1,
+                "detected sub-range {det:?} should stay within its source range {orig:?}"
+            );
+        }
+        assert!(
+            harness.state().test_tab_selection().is_some(),
+            "primary selection should hold the first detected sub-range"
+        );
+        assert_eq!(
+            harness.state().test_tab_extra_selections().len(),
+            detected.len() - 1,
+            "remaining detected sub-ranges should populate extra_selections"
+        );
+    }
+
+    #[test]
+    fn auto_trim_no_selection_detects_multiple_sections() {
+        let mut harness = harness_with_auto_trim_sections_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state().test_all_selected_ranges().is_empty());
+
+        assert!(harness.state_mut().test_start_auto_trim());
+        wait_for_auto_trim_done(&mut harness);
+        harness.run_steps(2);
+
+        let detected = harness.state().test_all_selected_ranges();
+        assert_eq!(
+            detected.len(),
+            2,
+            "whole-file Auto Trim should select both separated sections: {detected:?}"
+        );
+        assert!(
+            detected[0].1 < detected[1].0,
+            "detected sections should stay separated: {detected:?}"
+        );
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert!(
+            harness.state().tabs[tab_idx].trim_range.is_none(),
+            "multi-section Auto Trim should leave trim_range empty"
+        );
+    }
+
+    #[test]
+    fn auto_trim_inside_single_selection_only_emits_inside_that_range() {
+        let mut harness = harness_with_auto_trim_sections_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.30, 0.72));
+        let original = harness
+            .state()
+            .test_tab_selection()
+            .expect("source selection");
+
+        assert!(harness.state_mut().test_start_auto_trim());
+        wait_for_auto_trim_done(&mut harness);
+        harness.run_steps(2);
+
+        let detected = harness.state().test_all_selected_ranges();
+        assert_eq!(
+            detected.len(),
+            1,
+            "selected subrange should only include the second voice section: {detected:?}"
+        );
+        assert!(
+            detected[0].0 >= original.0 && detected[0].1 <= original.1,
+            "detected range {detected:?} should stay inside source selection {original:?}"
+        );
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert_eq!(
+            harness.state().tabs[tab_idx].trim_range,
+            Some(detected[0]),
+            "single-section Auto Trim should mirror the selection into trim_range"
+        );
+    }
+
+    #[test]
+    fn auto_trim_single_range_updates_selection_and_trim_range() {
+        // With one selected source range, Auto Trim now replaces the selection
+        // with the detected active sub-range and mirrors it into `trim_range`.
+        let mut harness = harness_with_dynamic_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.1, 0.9));
+        assert_eq!(harness.state().test_all_selected_ranges().len(), 1);
+
+        assert!(harness.state_mut().test_start_auto_trim());
+        wait_for_auto_trim_done(&mut harness);
+        harness.run_steps(2);
+
+        let detected = harness
+            .state()
+            .test_tab_selection()
+            .expect("detected primary selection");
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        assert_eq!(
+            harness.state().tabs[tab_idx].trim_range,
+            Some(detected),
+            "single-section Auto Trim should also update trim_range"
+        );
+        assert!(
+            harness.state().test_tab_extra_selections().is_empty(),
+            "single-range Auto Trim should not populate extra_selections"
+        );
+    }
+
+    #[test]
+    fn recording_pause_resume_tracks_state_and_elapsed_pause_time() {
+        // The cpal capture stream lives on a worker thread we can't drive in a
+        // headless test, so we force the state machine into `Recording` and
+        // exercise pause/resume/discard directly — this is exactly the part
+        // that used to be UI-only (pause didn't actually stop capture, and
+        // there was no resume at all).
+        let mut harness = harness_default();
+        harness.run_steps(1);
+
+        assert_eq!(harness.state().test_recording_state_name(), "Idle");
+
+        harness.state_mut().test_force_recording_started();
+        assert_eq!(harness.state().test_recording_state_name(), "Recording");
+        assert!(!harness.state().test_recording_paused_flag());
+
+        harness.state_mut().test_pause_recording();
+        assert_eq!(harness.state().test_recording_state_name(), "Paused");
+        assert!(
+            harness.state().test_recording_paused_flag(),
+            "worker should observe the paused flag and stop writing samples"
+        );
+        assert!(harness.state().test_recording_pause_started());
+
+        // Pausing again (already paused) must be a no-op, not reset the timer.
+        harness.state_mut().test_pause_recording();
+        assert_eq!(harness.state().test_recording_state_name(), "Paused");
+
+        // Simulate ~2 real seconds having passed while paused.
+        harness.state_mut().test_rewind_recording_clock(2.0);
+        harness.state_mut().test_resume_recording();
+
+        assert_eq!(harness.state().test_recording_state_name(), "Recording");
+        assert!(
+            !harness.state().test_recording_paused_flag(),
+            "resume should clear the paused flag so the worker writes samples again"
+        );
+        assert!(!harness.state().test_recording_pause_started());
+        let accum = harness.state().test_recording_paused_accum_secs();
+        assert!(
+            accum >= 1.9,
+            "paused_accum should record ~2s of pause time for gapless resume accounting, got {accum}"
+        );
+
+        // Resuming again (already recording) must be a no-op.
+        harness.state_mut().test_resume_recording();
+        assert_eq!(harness.state().test_recording_state_name(), "Recording");
+
+        harness.state_mut().test_discard_recording();
+        assert_eq!(harness.state().test_recording_state_name(), "Idle");
+        assert!(!harness.state().test_recording_paused_flag());
+        assert!(!harness.state().test_recording_pause_started());
+        assert_eq!(harness.state().test_recording_paused_accum_secs(), 0.0);
+
+        // Pause/resume must be no-ops outside their expected source states.
+        harness.state_mut().test_pause_recording();
+        assert_eq!(
+            harness.state().test_recording_state_name(),
+            "Idle",
+            "pause should do nothing while idle"
+        );
+        harness.state_mut().test_resume_recording();
+        assert_eq!(
+            harness.state().test_recording_state_name(),
+            "Idle",
+            "resume should do nothing while idle"
+        );
+    }
+
+    #[test]
+    fn recording_tab_stays_open_after_navigating_away() {
+        // Opening the Recording tab (mirroring "Tools > Recording...") used to
+        // make it vanish from the workspace tab strip the instant you switched
+        // to another workspace, because its visibility was tied solely to
+        // `workspace_view == Recording`. It should persist like the Effect
+        // Graph tab does via `EffectGraphState::workspace_open`.
+        let mut harness = harness_default();
+        harness.run_steps(1);
+
+        harness.state_mut().test_open_recording_tab();
+        harness.run_steps(2);
+        assert!(harness.state().test_recording_tab_open());
+        harness.get_by_label("[Recording]");
+
+        harness.state_mut().test_switch_to_list_workspace();
+        harness.run_steps(2);
+        assert!(
+            harness.state().test_recording_tab_open(),
+            "Recording tab should remain open in the tab strip after navigating away"
+        );
+        harness.get_by_label("Recording").click();
+        harness.run_steps(2);
+
+        assert!(harness.state().test_recording_tab_open());
+        harness.get_by_label("[Recording]");
     }
 }

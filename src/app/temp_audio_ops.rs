@@ -10,6 +10,14 @@ impl WavesPreviewer {
         }
     }
 
+    /// Removes the temp WAV files backing recorded `(virtual)` items once their
+    /// audio has been persisted as project sidecar audio (i.e. after a save).
+    pub(super) fn clear_recording_temp_files(&mut self) {
+        for path in self.recording_temp_files.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     pub(super) fn export_audio_to_temp_wav(
         &mut self,
         display_name: &str,

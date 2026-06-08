@@ -1,5 +1,6 @@
 pub mod app;
 pub mod audio;
+pub mod audio_capture;
 pub mod audio_io;
 pub mod cli;
 pub mod ipc;
