@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (defaults to the version in Cargo.toml)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $ver = "${{ inputs.version }}"
+          }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build release binaries and installer
+        shell: pwsh
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          $ver = "${{ steps.version.outputs.version }}"
+          if ($ver) {
+            .\commands\build_installer.ps1 -AppVersion $ver
+          } else {
+            .\commands\build_installer.ps1 -NoAutoVersion
+          }
+
+      - name: Locate installer
+        id: installer
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path installer\out -Recurse -Filter "NeoWaves-Setup-*.exe" |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) {
+            throw "Installer exe not found under installer\out"
+          }
+          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "name=$($exe.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.installer.outputs.name }}
+          path: ${{ steps.installer.outputs.path }}
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" "${{ steps.installer.outputs.path }}" `
+            --title "${{ github.ref_name }}" `
+            --generate-notes
