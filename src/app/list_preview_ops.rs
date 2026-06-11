@@ -436,7 +436,14 @@ impl super::WavesPreviewer {
                                     self.debug_mark_list_play_start(&res.path);
                                 }
                             } else {
-                                self.audio.set_samples_buffer(audio);
+                                if self.list_preview_active_buffer_job != Some(res.job_id) {
+                                    // First chunk for this job: fresh buffer, restart from 0.
+                                    self.audio.set_samples_buffer(audio);
+                                    self.list_preview_active_buffer_job = Some(res.job_id);
+                                } else {
+                                    // Continuation chunk: swap buffer in place, preserve play position.
+                                    self.audio.replace_samples_keep_pos(audio);
+                                }
                                 self.mark_list_preview_source(&res.path, res.play_sr.max(1));
                                 if let Some(buf) = self.audio.shared.samples.load().as_ref() {
                                     self.audio.set_loop_region(0, buf.len());

@@ -1990,6 +1990,7 @@ impl crate::app::WavesPreviewer {
                     };
                     let base_step_samples =
                         ((base_step_sec * sr).round() as usize).max(sample_step);
+                    let mut single_sample_seek = false;
                     let raw_target = if alt && !ctrl {
                         // Alt: zero-cross move/range.
                         self.find_zero_cross_display(tab_idx, cur_display, dir)
@@ -2002,6 +2003,7 @@ impl crate::app::WavesPreviewer {
                         }
                     } else {
                         let step_samples = if ctrl { sample_step } else { base_step_samples };
+                        single_sample_seek = step_samples == 1;
                         if ctrl || shift {
                             if dir > 0 {
                                 cur_display.saturating_add(step_samples)
@@ -2046,7 +2048,24 @@ impl crate::app::WavesPreviewer {
                     }
                     if new_display != cur_display {
                         if let Some(tab) = self.tabs.get(tab_idx) {
-                            request_seek = Some(map_display_to_audio(tab, new_display));
+                            // At single-display-sample steps, converting the
+                            // new display position back to an audio sample
+                            // can round-trip to the same audio position when
+                            // the display and audio sample rates differ
+                            // (e.g. high zoom on a file whose native rate
+                            // differs from the output rate), leaving the
+                            // playhead stuck. Step the audio position by one
+                            // sample directly in that case instead.
+                            request_seek = Some(if single_sample_seek {
+                                let cur_audio = map_display_to_audio(tab, cur_display);
+                                if dir > 0 {
+                                    cur_audio.saturating_add(1)
+                                } else {
+                                    cur_audio.saturating_sub(1)
+                                }
+                            } else {
+                                map_display_to_audio(tab, new_display)
+                            });
                         }
                     }
                     hold_state.last_step_at = now;
@@ -2080,6 +2099,7 @@ impl crate::app::WavesPreviewer {
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_cutjoin: Option<(usize, usize)> = None;
+        let mut do_delete_multi: Option<Vec<(usize, usize)>> = None;
         let mut do_auto_trim: Option<usize> = None;
         let mut do_cancel_auto_trim: Option<usize> = None;
         let mut do_auto_detect_loop: Option<usize> = None;
@@ -5602,48 +5622,6 @@ impl crate::app::WavesPreviewer {
                                         if let Some(reason) = preview_disabled_reason {
                                             ui.label(RichText::new(reason).weak());
                                         }
-                                        // Trim range is separated from loop markers and set from generic selection.
-                                        let mut range_opt = tab.trim_range;
-                                        if let Some((smp, emp)) = range_opt {
-                                            let (s, e) = if smp <= emp { (smp, emp) } else { (emp, smp) };
-                                            ui.label(
-                                                RichText::new(format!("Trim: {s}..{e} ({} smp)", e.saturating_sub(s)))
-                                                    .monospace(),
-                                            );
-                                        } else {
-                                            ui.label(RichText::new("Trim: -").monospace().weak());
-                                        }
-
-                                        ui.horizontal_wrapped(|ui| {
-                                            let can_set = tab
-                                                .selection
-                                                .map(|(a0, b0)| {
-                                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                                    b > a
-                                                })
-                                                .unwrap_or(false);
-                                            let set_resp = ui
-                                                .add_enabled(can_set, egui::Button::new("Set"))
-                                                .on_hover_text("Use current range as trim range");
-                                            if set_resp.clicked() {
-                                                if let Some((a0, b0)) = tab.selection {
-                                                    let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                                    tab.trim_range = Some((a, b));
-                                                    range_opt = tab.trim_range;
-                                                    if preview_ok && b > a {
-                                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                                        mono = mono[a..b].to_vec();
-                                                        pending_preview = Some((ToolKind::Trim, mono));
-                                                        stop_playback = true;
-                                                        tab.preview_audio_tool = Some(ToolKind::Trim);
-                                                    } else {
-                                                        tab.preview_audio_tool = None;
-                                                        tab.preview_overlay = None;
-                                                    }
-                                                }
-                                            }
-                                        });
-
                                         let selected_trim_ranges = {
                                             let mut ranges: Vec<(usize, usize)> = tab
                                                 .extra_selections
@@ -5671,24 +5649,26 @@ impl crate::app::WavesPreviewer {
                                             merged
                                         };
                                         let selected_trim_count = selected_trim_ranges.len();
+                                        let range_opt = selected_trim_ranges.first().copied();
 
                                         ui.horizontal_wrapped(|ui| {
-                                            let dis = !range_opt.map(|(s, e)| e > s).unwrap_or(false);
+                                            let dis = range_opt.is_none();
                                             let range = range_opt.unwrap_or((0, 0));
                                             let has_multi_selected_trim = selected_trim_count > 1;
                                             if ui.add_enabled(!dis, egui::Button::new("Apply cut")).clicked() {
-                                                do_cutjoin = Some(range);
+                                                if has_multi_selected_trim {
+                                                    do_delete_multi = Some(selected_trim_ranges.clone());
+                                                } else {
+                                                    do_cutjoin = Some(range);
+                                                }
                                             }
                                             if ui.add_enabled(!dis, egui::Button::new("Apply mute")).clicked() {
                                                 do_mute = Some(range);
-                                                do_mute_extra = tab.extra_selections.iter()
-                                                    .map(|&(a, b)| if a <= b { (a, b) } else { (b, a) })
-                                                    .filter(|&(a, b)| b > a)
-                                                    .collect();
+                                                do_mute_extra = selected_trim_ranges[1..].to_vec();
                                             }
                                             if ui
                                                 .add_enabled(
-                                                    has_multi_selected_trim || !dis,
+                                                    !dis,
                                                     egui::Button::new("Apply trim"),
                                                 )
                                                 .clicked()
@@ -5702,7 +5682,7 @@ impl crate::app::WavesPreviewer {
                                             }
                                             if ui
                                                 .add_enabled(
-                                                    (has_multi_selected_trim || !dis) && !apply_busy,
+                                                    !dis && !apply_busy,
                                                     egui::Button::new("Add Trim As Virtual"),
                                                 )
                                                 .on_hover_text("Add the trim range as a virtual item (V)")
@@ -7653,6 +7633,9 @@ impl crate::app::WavesPreviewer {
         }
         if let Some((s, e)) = do_cutjoin {
             self.editor_delete_range_and_join(tab_idx, (s, e));
+        }
+        if let Some(ranges) = do_delete_multi {
+            self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
         }
         if do_commit_loop {
             let mut apply_xfade = false;

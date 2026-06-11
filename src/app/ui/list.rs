@@ -1135,6 +1135,14 @@ impl crate::app::WavesPreviewer {
                         });
                         // row-level interaction (must call response() after at least one col())
                         let resp = self.attach_row_context_menu(row.response(), row_idx, ctx);
+                        let drag_started =
+                            resp.drag_started_by(egui::PointerButton::Primary);
+                        if drag_started && self.queue_external_drag_for_row(row_idx) {
+                            ctx.memory_mut(|m| m.request_focus(list_focus_id));
+                            list_has_focus = true;
+                            self.search_has_focus = false;
+                            return;
+                        }
                         let clicked_any = (resp.clicked_by(egui::PointerButton::Primary)
                             && !resp.double_clicked())
                             || clicked_to_load;

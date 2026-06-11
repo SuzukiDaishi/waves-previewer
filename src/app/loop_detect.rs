@@ -264,8 +264,16 @@ pub fn detect_loop(
 
     // local refinement and zero-cross snap
     progress_cb(0.85);
+    // The grid search below evaluates `score_loop_boundary` at O((radius/stride)^2)
+    // points per candidate. Reusing the full `match_window` (often 1+ second) for
+    // every one of those evaluations made this phase dominate total runtime (far
+    // more work than the entire coarse-scoring pass above). A window scaled to the
+    // local search radius is plenty to rank nearby offsets against each other; the
+    // final re-score below still uses the full `match_window` for the reported score.
+    let refine_window = match_window.min(config.local_coarse_radius * 2);
+    let total_candidates = raw_candidates.len();
     let mut final_candidates: Vec<LoopDetectCandidate> = Vec::new();
-    for mut cand in raw_candidates {
+    for (idx, mut cand) in raw_candidates.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Err("Cancelled".to_string());
         }
@@ -276,13 +284,13 @@ pub fn detect_loop(
             cand.end,
             config.local_coarse_radius,
             128,
-            match_window,
+            refine_window,
             sr,
         );
         let (rs, re) = best;
         // local fine search
         let (fs, fe) =
-            refine_boundary(&mono, rs, re, config.local_fine_radius, 8, match_window, sr);
+            refine_boundary(&mono, rs, re, config.local_fine_radius, 8, refine_window, sr);
 
         // zero-cross snap
         let snapped_start = snap_to_zero_cross_fwd(&mono, fs, config.zero_cross_radius);
@@ -303,6 +311,10 @@ pub fn detect_loop(
         cand.confidence = LoopDetectConfidence::from_score(final_score);
         cand.reason = "refined".to_string();
         final_candidates.push(cand);
+
+        if total_candidates > 0 {
+            progress_cb(0.85 + 0.15 * ((idx + 1) as f32 / total_candidates as f32));
+        }
     }
 
     // re-sort after refinement

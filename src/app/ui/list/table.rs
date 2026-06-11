@@ -75,7 +75,7 @@ impl WavesPreviewer {
             .striped(true)
             .resizable(true)
             .auto_shrink([false, true])
-            .sense(egui::Sense::click())
+            .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
         if cols.edited {
             table = table.column(egui_extras::Column::initial(30.0).resizable(false));

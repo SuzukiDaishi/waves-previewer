@@ -1088,6 +1088,64 @@ mod kittest_suite {
     }
 
     #[test]
+    fn external_drag_selected_multi_queues_selected_set() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        assert!(
+            harness.state().files.len() >= 2,
+            "fixture needs at least two audio files"
+        );
+        let paths = {
+            let state = harness.state();
+            vec![path_for_row(state, 0), path_for_row(state, 1)]
+        };
+        assert!(harness.state_mut().test_select_paths_multi(&paths));
+
+        assert!(harness.state_mut().test_queue_external_drag_for_row(1));
+        assert_eq!(harness.state().test_pending_external_drag_len(), 2);
+        let prepared = harness
+            .state_mut()
+            .test_prepare_external_drag_paths_for_pending()
+            .expect("prepare drag paths");
+
+        assert_eq!(prepared.len(), 2);
+        assert!(prepared.iter().all(|path| path.is_file()));
+    }
+
+    #[test]
+    fn external_drag_unselected_row_queues_single_item() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        assert!(
+            harness.state().files.len() >= 3,
+            "fixture needs at least three audio files"
+        );
+        let selected = {
+            let state = harness.state();
+            vec![path_for_row(state, 0), path_for_row(state, 1)]
+        };
+        let target = {
+            let state = harness.state();
+            path_for_row(state, 2)
+        };
+        assert!(harness.state_mut().test_select_paths_multi(&selected));
+
+        assert!(harness.state_mut().test_queue_external_drag_for_row(2));
+        assert_eq!(harness.state().test_pending_external_drag_len(), 1);
+        assert_eq!(harness.state().test_selected_path(), Some(&target));
+        let prepared = harness
+            .state_mut()
+            .test_prepare_external_drag_paths_for_pending()
+            .expect("prepare drag paths");
+
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(
+            prepared[0],
+            std::fs::canonicalize(target).expect("canonical target")
+        );
+    }
+
+    #[test]
     fn top_menu_smoke() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -1137,6 +1195,174 @@ mod kittest_suite {
         harness.run_steps(1);
         let modal_nodes: Vec<_> = harness.query_all_by_label("Artwork").collect();
         assert!(!modal_nodes.is_empty(), "Artwork window title not found");
+    }
+
+    /// Recursively scan a [`egui::Shape`] tree for the debug overlays egui paints when
+    /// `Context::check_for_id_clash` (🔥 debug text) or `warn_if_rect_changes_id`
+    /// (plain red rect outline, no text) fire.
+    fn collect_id_clash_shapes(shape: &egui::Shape, hits: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Vec(shapes) => {
+                for s in shapes {
+                    collect_id_clash_shapes(s, hits);
+                }
+            }
+            egui::Shape::Text(text_shape) => {
+                let text = &text_shape.galley.job.text;
+                if text.contains('\u{1F525}') || text.contains("widget ID") {
+                    let rect = egui::Rect::from_min_size(text_shape.pos, egui::Vec2::ZERO);
+                    hits.push((format!("id-clash text: {text}"), rect));
+                }
+            }
+            egui::Shape::Rect(rect_shape) => {
+                if rect_shape.stroke.color == egui::Color32::from_rgb(255, 0, 0) {
+                    hits.push((
+                        format!(
+                            "red rect_stroke width={}",
+                            rect_shape.stroke.width
+                        ),
+                        rect_shape.rect,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_no_id_clash_text(harness: &Harness<'static, WavesPreviewer>, when: &str) {
+        let mut hits = Vec::new();
+        for clipped in &harness.output().shapes {
+            collect_id_clash_shapes(&clipped.shape, &mut hits);
+        }
+        assert!(
+            hits.is_empty(),
+            "id clash overlay detected {when}: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn list_view_no_id_clash_during_scroll() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        let file_count = harness.state().files.len();
+        assert!(
+            file_count >= 20,
+            "need at least 20 files to exercise list scrolling, got {file_count}"
+        );
+
+        harness.run_steps(3);
+        assert_no_id_clash_text(&harness, "baseline");
+
+        let hover_pos = egui::pos2(640.0, 200.0);
+        harness.hover_at(hover_pos);
+        harness.run_steps(1);
+        assert_no_id_clash_text(&harness, "after hover");
+
+        for i in 0..40 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -3.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+            assert_no_id_clash_text(&harness, &format!("during scroll down step {i}"));
+        }
+
+        for i in 0..40 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 3.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+            assert_no_id_clash_text(&harness, &format!("during scroll up step {i}"));
+        }
+
+        // `warn_if_rect_changes_id` only fires when a widget rect is bit-identical
+        // between two consecutive passes but its `Id` changed. Table row rects shift
+        // by exactly `row_h` per fully-scrolled row, so step the scroll offset by
+        // exactly one row height (in points) to try to land on that exact alignment.
+        let row_h = harness.state().wave_row_h;
+        for i in 0..30 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -row_h),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+            assert_no_id_clash_text(&harness, &format!("during single-row point scroll down step {i}"));
+        }
+        for i in 0..30 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, row_h),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+            assert_no_id_clash_text(&harness, &format!("during single-row point scroll up step {i}"));
+        }
+    }
+
+    /// Sanity check for [`collect_id_clash_shapes`]: a deliberate same-frame `Id` clash
+    /// between two non-overlapping interactive widgets must be detected.
+    #[test]
+    fn id_clash_detection_sanity_check() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let id = egui::Id::new("kittest_sanity_clash");
+            ui.interact(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)), id, egui::Sense::click());
+            ui.interact(egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(10.0, 10.0)), id, egui::Sense::click());
+        });
+        harness.run();
+        let mut hits = Vec::new();
+        for clipped in &harness.output().shapes {
+            collect_id_clash_shapes(&clipped.shape, &mut hits);
+        }
+        assert!(!hits.is_empty(), "expected id clash overlay to be detected: {hits:?}");
+    }
+
+    #[test]
+    fn list_view_no_id_clash_during_keyboard_scroll_jump() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        let file_count = harness.state().files.len();
+        assert!(
+            file_count >= 20,
+            "need at least 20 files to exercise list scrolling, got {file_count}"
+        );
+
+        // Give the list focus via an initial selection.
+        harness.state_mut().selected = Some(0);
+        harness.run_steps(2);
+        assert_no_id_clash_text(&harness, "after initial selection");
+
+        for i in 0..10 {
+            // Jump to the last row (forces TableBuilder::scroll_to_row to a far offset).
+            harness.key_press(Key::End);
+            harness.run_steps(2);
+            assert_no_id_clash_text(&harness, &format!("after End jump {i}"));
+
+            // Jump back to the first row.
+            harness.key_press(Key::Home);
+            harness.run_steps(2);
+            assert_no_id_clash_text(&harness, &format!("after Home jump {i}"));
+        }
+
+        for i in 0..10 {
+            harness.key_press(Key::PageDown);
+            harness.run_steps(2);
+            assert_no_id_clash_text(&harness, &format!("after PageDown {i}"));
+        }
+        for i in 0..10 {
+            harness.key_press(Key::PageUp);
+            harness.run_steps(2);
+            assert_no_id_clash_text(&harness, &format!("after PageUp {i}"));
+        }
     }
 
     #[test]

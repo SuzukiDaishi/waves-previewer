@@ -188,6 +188,17 @@ impl WavesPreviewer {
             .text_styles
             .insert(TextStyle::Monospace, FontId::monospace(14.0));
         style.visuals = Self::theme_visuals(ThemeMode::Dark);
+        #[cfg(debug_assertions)]
+        {
+            // The virtualized file-list table reuses on-screen row rects for
+            // different rows after a `scroll_to_row` jump that lands on an
+            // exact row-height multiple (e.g. PageDown/PageUp). This debug-only
+            // heuristic then flags every visible row as a false-positive
+            // "Id changed for this rect" for one frame, flashing a red border
+            // around the whole list. `warn_on_id_clash` (real duplicate-Id
+            // detection) stays enabled.
+            style.debug.warn_if_rect_changes_id = false;
+        }
         ctx.set_global_style(style);
         // DPI スケーリングは native_pixels_per_point × zoom_factor で一元管理
         // 明示的に 1.0 を設定しておくことで widget 個別スケールとの混在を防ぐ

@@ -2242,4 +2242,188 @@ mod small_fix_regressions {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn arrow_key_seek_keeps_repeating_at_extreme_zoom() {
+        let dir = make_temp_dir("arrow_extreme_zoom");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 5.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        // Force extreme horizontal zoom (sample-accurate stepping mode, spp <= 1.0).
+        // 0.0025 matches EDITOR_MIN_SAMPLES_PER_PX (the editor's max zoom-in clamp).
+        assert!(harness.state_mut().test_set_tab_samples_per_px(0.0025));
+        harness.state_mut().test_audio_seek_to_sample(100_000);
+        harness.run_steps(2);
+
+        let start_pos = harness.state().test_audio_play_pos();
+
+        // First key-down should step immediately.
+        harness.key_down(Key::ArrowRight);
+        harness.run_steps(1);
+        let after_first = harness.state().test_audio_play_pos();
+        assert_eq!(
+            after_first,
+            start_pos + 1,
+            "first ArrowRight press should step by 1 sample at min spp"
+        );
+
+        // Hold the key and let real time pass so the key-repeat path runs
+        // (mirrors the OS sending repeated key-down events while held).
+        let mut last_pos = after_first;
+        let mut steps_observed = 0usize;
+        let deadline = Instant::now() + Duration::from_millis(900);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            harness.run_steps(1);
+            let pos = harness.state().test_audio_play_pos();
+            if pos != last_pos {
+                steps_observed += 1;
+                last_pos = pos;
+            }
+        }
+        harness.key_up(Key::ArrowRight);
+        harness.run_steps(1);
+
+        assert!(
+            steps_observed > 0,
+            "ArrowRight key-repeat should keep advancing the playhead at extreme zoom \
+             (start={start_pos}, after_first={after_first}, last={last_pos})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arrow_key_seek_after_realistic_zoom_in_via_arrowup() {
+        let dir = make_temp_dir("arrow_realistic_zoom");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 60.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        // Seek to roughly the middle of the 60s file so there is room to step
+        // either direction at extreme zoom.
+        harness.state_mut().test_audio_seek_to_sample(1_440_000);
+        harness.run_steps(2);
+
+        let display_len = harness.state().test_tab_samples_len() as f32;
+
+        // Zoom in repeatedly via the real ArrowUp zoom handler (each press
+        // multiplies samples_per_px by 0.9) WITHOUT moving the playhead, then
+        // probe ArrowRight/ArrowLeft from the (unchanged) middle position at
+        // each zoom level.
+        let mut stuck_at: Option<(usize, f32, &'static str)> = None;
+        for i in 0..70 {
+            harness.key_press(Key::ArrowUp);
+            harness.run_steps(1);
+            let spp = harness.state().test_tab_samples_per_px().unwrap();
+            let wave_w = harness.state().test_tab_last_wave_w().unwrap_or(0.0);
+            let vis = (wave_w * spp).ceil().max(1.0);
+            let zoom = display_len / vis;
+
+            let before_r = harness.state().test_playhead_display_now().unwrap();
+            harness.key_press(Key::ArrowRight);
+            harness.run_steps(1);
+            let after_r = harness.state().test_playhead_display_now().unwrap();
+            let delta_r = after_r as i64 - before_r as i64;
+
+            let before_l = harness.state().test_playhead_display_now().unwrap();
+            harness.key_press(Key::ArrowLeft);
+            harness.run_steps(1);
+            let after_l = harness.state().test_playhead_display_now().unwrap();
+            let delta_l = after_l as i64 - before_l as i64;
+
+            println!(
+                "step {i:02}: spp={spp:.6} wave_w={wave_w:.1} vis={vis:.1} zoom=x{zoom:.1} \
+                 R: before={before_r} after={after_r} delta={delta_r} | \
+                 L: before={before_l} after={after_l} delta={delta_l}"
+            );
+            if delta_r == 0 && stuck_at.is_none() {
+                stuck_at = Some((i, zoom, "Right"));
+            }
+            if delta_l == 0 && stuck_at.is_none() {
+                stuck_at = Some((i, zoom, "Left"));
+            }
+        }
+
+        if let Some((i, zoom, which)) = stuck_at {
+            panic!(
+                "Arrow{which} stopped advancing the playhead at zoom step {i} (zoom=x{zoom:.1})"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arrow_key_single_step_not_stuck_with_mismatched_buffer_rate() {
+        let dir = make_temp_dir("arrow_rate_mismatch");
+        let src = dir.join("src.wav");
+        write_wav_32_float(&src, 48_000, 4.0);
+
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_tab_for_path(&src));
+        wait_for_tab_ready(&mut harness);
+
+        // Simulate a file whose native sample rate differs from the audio
+        // output rate (e.g. a 96kHz file previewed on a 48kHz output
+        // device), so display-sample <-> audio-sample mapping is not 1:1.
+        assert!(harness
+            .state_mut()
+            .test_set_active_tab_buffer_sample_rate(96_000));
+
+        // Force single-display-sample stepping (spp <= 1.0), the "high
+        // zoom" regime the user reported (zoom exceeding roughly x130).
+        assert!(harness.state_mut().test_set_tab_samples_per_px(0.5));
+
+        harness.state_mut().test_audio_seek_to_sample(48_000);
+        harness.run_steps(2);
+
+        // ArrowLeft repeatedly: the playhead must keep moving, never stuck.
+        let mut stuck_count = 0usize;
+        for i in 0..20 {
+            let before = harness.state().test_playhead_display_now().unwrap();
+            harness.key_press(Key::ArrowLeft);
+            harness.run_steps(1);
+            let after = harness.state().test_playhead_display_now().unwrap();
+            if after == before {
+                stuck_count += 1;
+            }
+            println!("ArrowLeft step {i:02}: before={before} after={after}");
+        }
+        assert_eq!(
+            stuck_count, 0,
+            "ArrowLeft got stuck (playhead position unchanged) {stuck_count} time(s) \
+             out of 20 presses when buffer/output sample rates differ at high zoom"
+        );
+
+        // ArrowRight repeatedly: same check in the other direction.
+        let mut stuck_count_r = 0usize;
+        for i in 0..20 {
+            let before = harness.state().test_playhead_display_now().unwrap();
+            harness.key_press(Key::ArrowRight);
+            harness.run_steps(1);
+            let after = harness.state().test_playhead_display_now().unwrap();
+            if after == before {
+                stuck_count_r += 1;
+            }
+            println!("ArrowRight step {i:02}: before={before} after={after}");
+        }
+        assert_eq!(
+            stuck_count_r, 0,
+            "ArrowRight got stuck (playhead position unchanged) {stuck_count_r} time(s) \
+             out of 20 presses when buffer/output sample rates differ at high zoom"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

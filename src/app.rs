@@ -57,6 +57,7 @@ mod meta;
 mod meta_ops;
 mod music_ai_ops;
 mod music_onnx;
+mod native_drag;
 mod plugin_ops;
 mod preview;
 mod preview_ops;
@@ -141,6 +142,17 @@ struct PendingExternalRestore {
     visible_columns: Vec<String>,
     key_column: Option<String>,
     show_unmatched: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingExternalDrag {
+    item_ids: Vec<MediaId>,
+}
+
+#[derive(Clone, Debug)]
+struct ExternalDragTempFile {
+    path: PathBuf,
+    created_at: std::time::Instant,
 }
 
 #[derive(Clone)]
@@ -491,6 +503,9 @@ pub struct WavesPreviewer {
     // clipboard (list copy/paste)
     pub clipboard_payload: Option<ClipboardPayload>,
     pub clipboard_temp_files: Vec<PathBuf>,
+    pending_external_drag: Option<PendingExternalDrag>,
+    external_drag_temp_files: VecDeque<ExternalDragTempFile>,
+    external_drag_last_status: Option<String>,
     /// temp WAV files written by the Recording tab, backing `(virtual)` items
     /// until the project is saved (sidecar audio persists them) and they're removed
     pub recording_temp_files: Vec<PathBuf>,
@@ -536,6 +551,7 @@ pub struct WavesPreviewer {
     // background full load for list preview
     list_preview_rx: Option<std::sync::mpsc::Receiver<ListPreviewResult>>,
     list_preview_job_id: u64,
+    list_preview_active_buffer_job: Option<u64>,
     list_preview_job_epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
     list_preview_partial_ready: bool,
     list_preview_pending_path: Option<PathBuf>,
@@ -2366,8 +2382,9 @@ impl eframe::App for WavesPreviewer {
         self.run_frame(ctx, frame_started, had_ui_input);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let frame_started = std::time::Instant::now();
         self.run_frame_ui(ui, frame_started);
+        self.flush_pending_external_drag(frame);
     }
 }

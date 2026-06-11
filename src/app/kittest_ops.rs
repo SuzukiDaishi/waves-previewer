@@ -1153,6 +1153,42 @@ impl super::WavesPreviewer {
         self.tabs.get(tab_idx).map(|tab| tab.samples_per_px)
     }
 
+    pub fn test_tab_last_wave_w(&self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.last_wave_w)
+    }
+
+    pub fn test_set_tab_samples_per_px(&mut self, spp: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.samples_per_px = spp.max(crate::app::EDITOR_MIN_SAMPLES_PER_PX);
+        true
+    }
+
+    pub fn test_tab_seek_hold_dir(&self) -> Option<i32> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx)?.seek_hold.as_ref().map(|h| h.dir)
+    }
+
+    pub fn test_egui_wants_keyboard_input(&self, ctx: &egui::Context) -> bool {
+        ctx.egui_wants_keyboard_input()
+    }
+
+    pub fn test_playhead_display_now(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        let pos_audio_now = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        Some(self.map_audio_to_display_sample(tab, pos_audio_now))
+    }
+
     pub fn test_meter_db(&self) -> f32 {
         self.meter_db
     }
@@ -1949,6 +1985,31 @@ impl super::WavesPreviewer {
             self.open_or_activate_tab(&path);
         }
         true
+    }
+
+    pub fn test_queue_external_drag_for_row(&mut self, row: usize) -> bool {
+        self.queue_external_drag_for_row(row)
+    }
+
+    pub fn test_pending_external_drag_len(&self) -> usize {
+        self.pending_external_drag
+            .as_ref()
+            .map(|pending| pending.item_ids.len())
+            .unwrap_or(0)
+    }
+
+    pub fn test_prepare_external_drag_paths_for_pending(&mut self) -> Result<Vec<PathBuf>, String> {
+        let ids = self
+            .pending_external_drag
+            .as_ref()
+            .map(|pending| pending.item_ids.clone())
+            .unwrap_or_default();
+        self.prepare_external_drag_paths_for_ids(&ids)
+            .map(|prepared| prepared.paths)
+    }
+
+    pub fn test_external_drag_last_status(&self) -> Option<String> {
+        self.external_drag_last_status.clone()
     }
 
     pub fn test_switch_to_list(&mut self) {
