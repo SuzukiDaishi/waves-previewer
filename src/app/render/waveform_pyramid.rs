@@ -273,25 +273,40 @@ pub fn build_editor_waveform_cache(
     base_bin_samples: usize,
 ) -> (Vec<(f32, f32)>, Arc<WaveformPyramidSet>) {
     let samples_len = samples_len.min(min_channel_len(channels));
-    let overview =
-        crate::wave::build_waveform_minmax_from_channels(channels, samples_len, overview_bins);
-    let mixdown = Arc::new(PeakPyramid::from_mixdown_channels(
-        channels,
-        samples_len,
-        base_bin_samples,
-    ));
-    let channels = channels
-        .iter()
-        .map(|channel| {
-            Arc::new(PeakPyramid::from_samples(
-                &channel[..samples_len.min(channel.len())],
-                base_bin_samples,
-            ))
-        })
-        .collect();
+    // The overview, the mixdown pyramid, and each per-channel pyramid are
+    // independent O(n) scans; build them in parallel so long files become
+    // ready in roughly one scan's time instead of (channels + 2) scans.
+    let (overview, mixdown, channel_pyramids) = std::thread::scope(|scope| {
+        let overview_task = scope.spawn(move || {
+            crate::wave::build_waveform_minmax_from_channels(channels, samples_len, overview_bins)
+        });
+        let mixdown_task = scope.spawn(move || {
+            PeakPyramid::from_mixdown_channels(channels, samples_len, base_bin_samples)
+        });
+        let channel_tasks: Vec<_> = channels
+            .iter()
+            .map(|channel| {
+                scope.spawn(move || {
+                    PeakPyramid::from_samples(
+                        &channel[..samples_len.min(channel.len())],
+                        base_bin_samples,
+                    )
+                })
+            })
+            .collect();
+        let channel_pyramids: Vec<Arc<PeakPyramid>> = channel_tasks
+            .into_iter()
+            .map(|task| Arc::new(task.join().expect("channel pyramid build panicked")))
+            .collect();
+        (
+            overview_task.join().expect("overview build panicked"),
+            Arc::new(mixdown_task.join().expect("mixdown pyramid build panicked")),
+            channel_pyramids,
+        )
+    });
     let set = WaveformPyramidSet {
         mixdown,
-        channels,
+        channels: channel_pyramids,
         base_bin_samples: base_bin_samples.max(1),
     };
     (overview, Arc::new(set))

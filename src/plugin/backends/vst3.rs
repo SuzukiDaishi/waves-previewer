@@ -404,6 +404,57 @@ mod native {
         let _ = <Steinberg::IPluginFactory as Interface>::IID;
     }
 
+    /// state blob を component / controller の両方に読み込む。
+    /// 失敗してもパラメータ適用で補えるため非致命扱い (ログのみ)。
+    unsafe fn load_component_state(
+        component: &ComPtr<IComponent>,
+        controller: &ComPtr<IEditController>,
+        state_blob_b64: &str,
+    ) {
+        let Ok(data) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(state_blob_b64)
+        else {
+            eprintln!("[vst3] state blob decode failed (non-fatal)");
+            return;
+        };
+        if data.is_empty() {
+            return;
+        }
+        let buf = Arc::new(Mutex::new(data));
+        let stream_wrapper = ComWrapper::new(MemoryStream::new(buf));
+        if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
+            let load_r = component.setState(stream_ptr.as_ptr());
+            if load_r != Steinberg::kResultOk && load_r != Steinberg::kResultTrue {
+                eprintln!("[vst3] component.setState failed: {load_r} (non-fatal)");
+            }
+            let _ = stream_ptr.seek(0, 0, ptr::null_mut());
+            let ctrl_r = controller.setComponentState(stream_ptr.as_ptr());
+            if ctrl_r != Steinberg::kResultOk && ctrl_r != Steinberg::kResultTrue {
+                eprintln!("[vst3] controller.setComponentState failed: {ctrl_r} (non-fatal)");
+            }
+        }
+        std::mem::forget(stream_wrapper);
+    }
+
+    /// component.getState() の結果を base64 で返す。失敗時は None。
+    unsafe fn save_component_state(component: &ComPtr<IComponent>) -> Option<String> {
+        let save_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stream_wrapper = ComWrapper::new(MemoryStream::new(save_buf.clone()));
+        let mut out = None;
+        if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
+            let save_r = component.getState(stream_ptr.as_ptr());
+            if save_r == Steinberg::kResultOk || save_r == Steinberg::kResultTrue {
+                let data = save_buf.lock().unwrap().clone();
+                if !data.is_empty() {
+                    out = Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode(&data));
+                }
+            } else {
+                eprintln!("[vst3] component.getState failed: {save_r} (non-fatal)");
+            }
+        }
+        std::mem::forget(stream_wrapper);
+        out
+    }
+
     fn candidate_binaries(plugin_path: &Path) -> Vec<PathBuf> {
         if plugin_path.is_file() {
             return vec![plugin_path.to_path_buf()];
@@ -1017,22 +1068,7 @@ mod native {
             let _ = controller.setComponentHandler(handler.as_ptr());
 
             if let Some(b64) = state_blob_b64 {
-                if let Ok(data) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64) {
-                    let buf = Arc::new(Mutex::new(data));
-                    let stream_wrapper = ComWrapper::new(MemoryStream::new(buf));
-                    if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
-                        let load_r = component.setState(stream_ptr.as_ptr());
-                        if load_r != Steinberg::kResultOk && load_r != Steinberg::kResultTrue {
-                            eprintln!("[vst3] component.setState failed: {load_r} (non-fatal)");
-                        }
-                        let _ = stream_ptr.seek(0, 0, ptr::null_mut());
-                        let ctrl_r = controller.setComponentState(stream_ptr.as_ptr());
-                        if ctrl_r != Steinberg::kResultOk && ctrl_r != Steinberg::kResultTrue {
-                            eprintln!("[vst3] controller.setComponentState failed: {ctrl_r} (non-fatal)");
-                        }
-                    }
-                    std::mem::forget(stream_wrapper);
-                }
+                load_component_state(&component, &controller, b64);
             }
 
             if let (Some(comp_cp), Some(ctrl_cp)) = (
@@ -1187,24 +1223,7 @@ mod native {
 
             let _ = processor.setProcessing(0);
 
-            {
-                let save_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
-                let stream_wrapper = ComWrapper::new(MemoryStream::new(save_buf.clone()));
-                if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
-                    let save_r = component.getState(stream_ptr.as_ptr());
-                    if save_r == Steinberg::kResultOk || save_r == Steinberg::kResultTrue {
-                        let data = save_buf.lock().unwrap().clone();
-                        if !data.is_empty() {
-                            saved_state_b64 = Some(
-                                base64::engine::general_purpose::STANDARD_NO_PAD.encode(&data),
-                            );
-                        }
-                    } else {
-                        eprintln!("[vst3] component.getState failed: {save_r} (non-fatal)");
-                    }
-                }
-                std::mem::forget(stream_wrapper);
-            }
+            saved_state_b64 = save_component_state(&component);
 
             let _ = component.setActive(0);
             if !controller_from_component {
@@ -1347,9 +1366,26 @@ mod native {
                 std::mem::forget(ctrl_cp);
             }
             let mut ui_params = collect_controller_params(&controller);
+            // 前回保存した state を復元してから明示パラメータを上書きする。
+            // これを行わないと GUI が毎回初期状態で開き、編集内容が失われる。
+            if let Some(b64) = state_blob_b64 {
+                load_component_state(&component, &controller, b64);
+            }
             for p in params {
                 if let Some(pid) = parse_param_id(&p.id) {
                     let _ = controller.setParamNormalized(pid, p.normalized.clamp(0.0, 1.0) as f64);
+                }
+            }
+            // collect_controller_params はデフォルト値を normalized に入れているため、
+            // state 復元 + パラメータ適用後の実際の値で上書きする。
+            // (デフォルト値のまま返すと呼び出し側の draft がリセットされる)
+            for p in ui_params.iter_mut() {
+                if let Some(pid) = parse_param_id(&p.id) {
+                    let mut value = controller.getParamNormalized(pid) as f32;
+                    if !value.is_finite() {
+                        value = 0.0;
+                    }
+                    p.normalized = value.clamp(0.0, 1.0);
                 }
             }
 
@@ -1467,6 +1503,10 @@ mod native {
             pump_gui_window_messages();
             if unsafe { IsWindow(session.hwnd) } == 0 {
                 let snapshot = read_param_snapshot(&session.controller, &session.param_ids);
+                // GUI での編集を失わないよう、最新の component state を保存して返す
+                if let Some(next) = unsafe { save_component_state(&session.component) } {
+                    session.state_blob_b64 = Some(next);
+                }
                 return Ok((
                     Vec::new(),
                     Some(snapshot),
@@ -1578,6 +1618,11 @@ mod native {
         mut session: GuiSession,
     ) -> Result<(Option<Vec<PluginParamValue>>, Option<String>), String> {
         let snapshot = read_param_snapshot(&session.controller, &session.param_ids);
+        // terminate 前に最新の component state を保存する。
+        // これを行わないと GUI で編集した内容 (パラメータ以外の state 含む) が失われる。
+        if let Some(next) = unsafe { save_component_state(&session.component) } {
+            session.state_blob_b64 = Some(next);
+        }
         #[cfg(windows)]
         unsafe {
             if let Some(frame) = session.frame.take() {

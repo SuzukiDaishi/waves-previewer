@@ -171,68 +171,80 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
         }
         return Err(err);
     };
+    // stdout/stderr は子プロセスの実行中から別スレッドで吸い出す。
+    // 応答 (state blob 込みで数百 KB を超え得る) がパイプバッファを超えると、
+    // 終了後にまとめて読む方式では子の write がブロックして永久に exit せず、
+    // タイムアウト扱いで kill されてしまう。
+    let stdout_handle = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut err| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            buf
+        })
+    });
+    // 書き込み失敗 (broken pipe 等) は子が先に異常終了したケースなので、
+    // ここでは即エラーにせず exit status / stderr からエラーを組み立てる。
+    let mut stdin_error: Option<String> = None;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .map_err(|e| format!("worker stdin write failed: {e}"))?;
+        if let Err(e) = stdin.write_all(&payload) {
+            stdin_error = Some(format!("worker stdin write failed: {e}"));
+        }
     }
 
     let deadline = Instant::now() + timeout;
-    loop {
+    let wait_result: Result<std::process::ExitStatus, String> = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr);
-                }
-                if let Ok(resp) = serde_json::from_slice::<WorkerResponse>(&stdout) {
-                    if cleanup_temp {
-                        let _ = std::fs::remove_file(&worker_path);
-                    }
-                    return Ok(resp);
-                }
-                if !status.success() {
-                    let err = shorten_err(&stderr);
-                    if cleanup_temp {
-                        let _ = std::fs::remove_file(&worker_path);
-                    }
-                    return Err(if err.is_empty() {
-                        format!("worker exited with status {status}")
-                    } else {
-                        err
-                    });
-                }
-                let decoded = serde_json::from_slice(&stdout)
-                    .map_err(|e| format!("decode worker output failed: {e}"));
-                if cleanup_temp {
-                    let _ = std::fs::remove_file(&worker_path);
-                }
-                return decoded;
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     WORKER_TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed);
                     let _ = child.kill();
                     let _ = child.wait();
-                    if cleanup_temp {
-                        let _ = std::fs::remove_file(&worker_path);
-                    }
-                    return Err(format!("worker timeout after {} ms", timeout.as_millis()));
+                    break Err(format!("worker timeout after {} ms", timeout.as_millis()));
                 }
                 std::thread::sleep(Duration::from_millis(8));
             }
             Err(e) => {
-                if cleanup_temp {
-                    let _ = std::fs::remove_file(&worker_path);
-                }
-                return Err(format!("wait worker failed: {e}"));
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(format!("wait worker failed: {e}"));
             }
         }
+    };
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    if cleanup_temp {
+        let _ = std::fs::remove_file(&worker_path);
     }
+    let status = wait_result?;
+    if let Ok(resp) = serde_json::from_slice::<WorkerResponse>(&stdout) {
+        return Ok(resp);
+    }
+    if !status.success() {
+        let err = shorten_err(&stderr);
+        return Err(if !err.is_empty() {
+            err
+        } else if let Some(stdin_err) = stdin_error {
+            stdin_err
+        } else {
+            format!("worker exited with status {status}")
+        });
+    }
+    if let Some(stdin_err) = stdin_error {
+        return Err(stdin_err);
+    }
+    serde_json::from_slice(&stdout).map_err(|e| format!("decode worker output failed: {e}"))
 }
 
 pub fn run_request(request: &WorkerRequest) -> Result<WorkerResponse, String> {

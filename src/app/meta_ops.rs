@@ -307,8 +307,15 @@ impl super::WavesPreviewer {
             self.meta_sort_last_applied = Some(now);
             ctx.request_repaint();
         } else {
-            // Keep pumping frames until the next sort window opens.
-            ctx.request_repaint();
+            // Wake up again exactly when the next sort window opens instead of
+            // forcing max-rate repaints until then.
+            let elapsed = self
+                .meta_sort_last_applied
+                .map(|last| now.duration_since(last))
+                .unwrap_or_default();
+            let interval =
+                std::time::Duration::from_millis(crate::app::META_SORT_MIN_INTERVAL_MS);
+            ctx.request_repaint_after(interval.saturating_sub(elapsed));
         }
     }
 
@@ -370,10 +377,14 @@ impl super::WavesPreviewer {
             }
         }
         if refilter {
-            self.apply_filter_from_search();
-            self.apply_sort();
-            self.meta_sort_pending = false;
-            self.meta_sort_last_applied = Some(std::time::Instant::now());
+            // Transcripts can stream in once per frame for thousands of files;
+            // debounce the O(n) refilter + sort instead of running them inline.
+            // Keep the existing deadline so a steady stream cannot starve it.
+            self.search_dirty = true;
+            if self.search_deadline.is_none() {
+                self.search_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
+            }
             ctx.request_repaint();
         } else {
             if meta_sort_dirty && self.sort_key_uses_meta() {

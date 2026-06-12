@@ -190,7 +190,7 @@ mod native {
     }
 
     fn select_descriptor(
-        bundle: &PluginBundle,
+        bundle: &PluginEntry,
         plugin_path: &Path,
     ) -> Result<(CString, String, Vec<String>), String> {
         let factory = bundle
@@ -227,14 +227,14 @@ mod native {
         plugin_path: &Path,
     ) -> Result<
         (
-            PluginBundle,
+            PluginEntry,
             PluginInstance<ClapHostHandlers>,
             String,
             Vec<String>,
         ),
         String,
     > {
-        let bundle = unsafe { PluginBundle::load(plugin_path) }
+        let bundle = unsafe { PluginEntry::load(plugin_path) }
             .map_err(|e| format!("clap load failed: {e}"))?;
         let (plugin_id, plugin_name, features) = select_descriptor(&bundle, plugin_path)?;
         let host_info = host_info()?;
@@ -483,7 +483,7 @@ mod native {
     }
 
     fn first_descriptor_name_and_id(plugin_path: &Path) -> Result<(String, String), String> {
-        let bundle = unsafe { PluginBundle::load(plugin_path) }
+        let bundle = unsafe { PluginEntry::load(plugin_path) }
             .map_err(|e| format!("clap load failed: {e}"))?;
         let (_, name, _) = select_descriptor(&bundle, plugin_path)?;
         let factory = bundle
@@ -510,7 +510,7 @@ mod native {
     }
 
     fn first_descriptor_features(plugin_path: &Path) -> Result<Vec<String>, String> {
-        let bundle = unsafe { PluginBundle::load(plugin_path) }
+        let bundle = unsafe { PluginEntry::load(plugin_path) }
             .map_err(|e| format!("clap load failed: {e}"))?;
         let factory = bundle
             .get_plugin_factory()
@@ -655,7 +655,12 @@ mod native {
             handle.get_extension::<PluginState>()
         };
 
-        maybe_load_state(&mut instance, state_ext, state_blob_b64)?;
+        // state 復元失敗は非致命。パラメータ適用で補えるため、
+        // ここで処理全体を失敗させると generic フォールバック (実質パススルー) に落ちて
+        // 「エフェクトが反映されない」状態になってしまう。
+        if let Err(err) = maybe_load_state(&mut instance, state_ext, state_blob_b64) {
+            eprintln!("[clap] state load failed (non-fatal): {err}");
+        }
         if let Some(params_ext) = params_ext {
             if !ui_params.is_empty() {
                 apply_param_values_inactive(&mut instance, params_ext, &specs, params);
@@ -776,7 +781,7 @@ mod native {
     }
 
     pub(crate) struct GuiSession {
-        _bundle: PluginBundle,
+        _bundle: PluginEntry,
         instance: PluginInstance<ClapHostHandlers>,
         gui_ext: PluginGui,
         gui_open: bool,
@@ -868,7 +873,10 @@ mod native {
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
-            while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
+            // hwnd を指定するとホストウィンドウ宛のメッセージしか処理されず、
+            // 埋め込まれたプラグイン子ウィンドウの描画・入力が止まる。
+            // VST3 側と同様にスレッド全体のメッセージを処理する。
+            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -895,7 +903,10 @@ mod native {
             handle.get_extension::<PluginState>()
         };
 
-        maybe_load_state(&mut instance, state_ext, state_blob_b64)?;
+        // state 復元失敗で GUI オープン全体を失敗させない (パラメータ適用で補う)
+        if let Err(err) = maybe_load_state(&mut instance, state_ext, state_blob_b64) {
+            eprintln!("[clap] state load failed (non-fatal): {err}");
+        }
         if let Some(params_ext) = params_ext {
             if !specs.is_empty() {
                 apply_param_values_inactive(&mut instance, params_ext, &specs, params);
@@ -958,6 +969,21 @@ mod native {
         for item in &snapshot {
             if let Some(pid) = parse_param_id(&item.id) {
                 last_values.insert(pid.get(), item.normalized.clamp(0.0, 1.0));
+            }
+        }
+
+        // ui_params は state 復元・パラメータ適用より前に収集した値のままなので、
+        // 適用後の実際の値で上書きする。古い値のまま返すと呼び出し側の draft が
+        // 巻き戻り「パラメータが反映されない」状態になる。
+        {
+            let snapshot_by_id: HashMap<&str, f32> = snapshot
+                .iter()
+                .map(|item| (item.id.as_str(), item.normalized))
+                .collect();
+            for p in ui_params.iter_mut() {
+                if let Some(value) = snapshot_by_id.get(p.id.as_str()) {
+                    p.normalized = value.clamp(0.0, 1.0);
+                }
             }
         }
 

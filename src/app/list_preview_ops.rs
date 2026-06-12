@@ -354,7 +354,14 @@ impl super::WavesPreviewer {
             return;
         };
         let mut keep_rx = true;
+        // Frame budget: decoded prefetch buffers can pile up while the UI is
+        // busy; cap the work per frame and continue next frame.
+        let mut processed = 0usize;
         loop {
+            if processed >= 16 {
+                break;
+            }
+            processed += 1;
             match rx.try_recv() {
                 Ok(msg) => {
                     self.list_preview_prefetch_inflight.remove(&msg.path);
@@ -385,9 +392,19 @@ impl super::WavesPreviewer {
         };
         let mut keep_rx = true;
         let mut pending_to_start: Option<PathBuf> = None;
+        // Frame budget: each chunk may swap audio buffers; if a backlog formed
+        // (slow frame, many chunks) finish the rest next frame instead of
+        // stalling this one. At least one message is always processed.
+        let drain_started = std::time::Instant::now();
+        let drain_budget = std::time::Duration::from_millis(4);
+        let mut processed = 0usize;
         loop {
+            if processed > 0 && drain_started.elapsed() >= drain_budget {
+                break;
+            }
             match rx.try_recv() {
                 Ok(res) => {
+                    processed += 1;
                     let latest_job = res.job_id == self.list_preview_job_id;
                     if latest_job {
                         self.list_preview_partial_ready = !res.is_final;

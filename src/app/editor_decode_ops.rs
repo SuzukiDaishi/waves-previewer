@@ -80,11 +80,13 @@ impl super::WavesPreviewer {
                             let decoded_frames = chans.first().map(|c| c.len()).unwrap_or(0);
                             let (waveform_minmax, waveform_pyramid) =
                                 Self::build_editor_waveform_cache(&chans, decoded_frames);
+                            let chans_arc = std::sync::Arc::new(chans.clone());
                             return tx
                                 .send(EditorDecodeResult {
                                     path: path_for_thread.clone(),
                                     event: EditorDecodeEvent::FinalReady,
                                     channels: chans,
+                                    channels_arc: Some(chans_arc),
                                     waveform_minmax,
                                     waveform_pyramid,
                                     loading_waveform_minmax: Vec::new(),
@@ -107,6 +109,7 @@ impl super::WavesPreviewer {
                                 path: path_for_thread.clone(),
                                 event: EditorDecodeEvent::Progress,
                                 channels: Vec::new(),
+                                channels_arc: None,
                                 waveform_minmax: Vec::new(),
                                 waveform_pyramid: None,
                                 loading_waveform_minmax: Self::build_loading_overview_from_channels(
@@ -143,6 +146,7 @@ impl super::WavesPreviewer {
                             path: path_for_thread,
                             event: EditorDecodeEvent::Failed,
                             channels: Vec::new(),
+                            channels_arc: None,
                             waveform_minmax: Vec::new(),
                             waveform_pyramid: None,
                             loading_waveform_minmax: Vec::new(),
@@ -217,6 +221,7 @@ impl super::WavesPreviewer {
                             path: path_for_thread.clone(),
                             event: EditorDecodeEvent::Progress,
                             channels: Vec::new(),
+                            channels_arc: None,
                             waveform_minmax: Vec::new(),
                             waveform_pyramid: None,
                             loading_waveform_minmax,
@@ -296,6 +301,7 @@ impl super::WavesPreviewer {
                                     path: path_for_thread.clone(),
                                     event: EditorDecodeEvent::Progress,
                                     channels: Vec::new(),
+                                    channels_arc: None,
                                     waveform_minmax: Vec::new(),
                                     waveform_pyramid: None,
                                     loading_waveform_minmax,
@@ -330,6 +336,7 @@ impl super::WavesPreviewer {
                             path: path_for_thread,
                             event: EditorDecodeEvent::Failed,
                             channels: Vec::new(),
+                            channels_arc: None,
                             waveform_minmax: Vec::new(),
                             waveform_pyramid: None,
                             loading_waveform_minmax: Vec::new(),
@@ -364,6 +371,7 @@ impl super::WavesPreviewer {
                     path: path_for_thread.clone(),
                     event: EditorDecodeEvent::Progress,
                     channels: Vec::new(),
+                    channels_arc: None,
                     waveform_minmax: Vec::new(),
                     waveform_pyramid: None,
                     loading_waveform_minmax: loading_waveform_minmax.clone(),
@@ -402,6 +410,7 @@ impl super::WavesPreviewer {
                     path: path_for_thread.clone(),
                     event: EditorDecodeEvent::Progress,
                     channels: Vec::new(),
+                    channels_arc: None,
                     waveform_minmax: Vec::new(),
                     waveform_pyramid: None,
                     loading_waveform_minmax,
@@ -422,10 +431,14 @@ impl super::WavesPreviewer {
                     Self::build_editor_waveform_cache(&channels, decoded_frames);
                 let finalize_waveform_ms =
                     finalize_waveform_started.elapsed().as_secs_f32() * 1000.0;
+                // Clone here (worker thread) so the UI thread can adopt both the
+                // owned buffer and the shared Arc without a deep copy.
+                let channels_arc = std::sync::Arc::new(channels.clone());
                 let _ = tx.send(EditorDecodeResult {
                     path: path_for_thread,
                     event: EditorDecodeEvent::FinalReady,
                     channels,
+                    channels_arc: Some(channels_arc),
                     waveform_minmax,
                     waveform_pyramid,
                     loading_waveform_minmax: Vec::new(),
@@ -501,10 +514,12 @@ impl super::WavesPreviewer {
             let decoded_frames = channels.first().map(|c| c.len()).unwrap_or(0);
             let (waveform_minmax, waveform_pyramid) =
                 Self::build_editor_waveform_cache(&channels, decoded_frames);
+            let channels_arc = std::sync::Arc::new(channels.clone());
             let _ = tx.send(EditorDecodeResult {
                 path: path_for_thread,
                 event: EditorDecodeEvent::FinalReady,
                 channels,
+                channels_arc: Some(channels_arc),
                 waveform_minmax,
                 waveform_pyramid,
                 loading_waveform_minmax: Vec::new(),
@@ -559,10 +574,12 @@ impl super::WavesPreviewer {
             let decoded_frames = channels.first().map(|c| c.len()).unwrap_or(0);
             let (waveform_minmax, waveform_pyramid) =
                 Self::build_editor_waveform_cache(&channels, decoded_frames);
+            let channels_arc = std::sync::Arc::new(channels.clone());
             let _ = tx.send(EditorDecodeResult {
                 path: path_for_thread,
                 event: EditorDecodeEvent::FinalReady,
                 channels,
+                channels_arc: Some(channels_arc),
                 waveform_minmax,
                 waveform_pyramid,
                 loading_waveform_minmax: Vec::new(),
@@ -696,7 +713,12 @@ impl super::WavesPreviewer {
                                 tab.preview_overlay = None;
                                 let old_audio_len = tab.samples_len;
                                 tab.ch_samples = res.channels;
-                                tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
+                                // Prefer the worker-built Arc; cloning the full
+                                // buffer here would stall the UI thread.
+                                tab.ch_samples_arc = match res.channels_arc {
+                                    Some(arc) => arc,
+                                    None => std::sync::Arc::new(tab.ch_samples.clone()),
+                                };
                                 tab.buffer_sample_rate = res.buffer_sample_rate.max(1);
                                 tab.samples_len =
                                     tab.ch_samples.first().map(|c| c.len()).unwrap_or(0);
