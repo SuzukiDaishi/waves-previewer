@@ -1025,7 +1025,7 @@ mod native {
         let frame_count = out_channels.get(0).map(|c| c.len()).unwrap_or(0);
         let ch_count = out_channels.len().max(1);
         let block = max_block_size.clamp(16, 4096);
-        let mut saved_state_b64: Option<String> = None;
+        let saved_state_b64: Option<String>;
 
         unsafe {
             let loaded = ManuallyDrop::new(load_factory(&binary)?);
