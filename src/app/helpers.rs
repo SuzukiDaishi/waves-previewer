@@ -151,24 +151,39 @@ pub fn format_system_time_local(st: std::time::SystemTime) -> String {
     dt.format("%Y-%m-%d %H:%M").to_string()
 }
 
+/// Compile the search highlight regex once; reuse via
+/// `WavesPreviewer::cached_highlight_regex()` instead of rebuilding per label.
+pub fn build_highlight_regex(query: &str, use_regex: bool) -> Option<regex::Regex> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    if use_regex {
+        RegexBuilder::new(q).case_insensitive(true).build().ok()
+    } else {
+        RegexBuilder::new(&regex::escape(q))
+            .case_insensitive(true)
+            .build()
+            .ok()
+    }
+}
+
+#[allow(dead_code)]
 pub fn highlight_text_job(
     text: &str,
     query: &str,
     use_regex: bool,
     style: &egui::Style,
 ) -> Option<LayoutJob> {
-    let q = query.trim();
-    if q.is_empty() {
-        return None;
-    }
-    let re = if use_regex {
-        RegexBuilder::new(q).case_insensitive(true).build().ok()?
-    } else {
-        RegexBuilder::new(&regex::escape(q))
-            .case_insensitive(true)
-            .build()
-            .ok()?
-    };
+    let re = build_highlight_regex(query, use_regex)?;
+    highlight_text_job_with_regex(text, &re, style)
+}
+
+pub fn highlight_text_job_with_regex(
+    text: &str,
+    re: &regex::Regex,
+    style: &egui::Style,
+) -> Option<LayoutJob> {
     let mut matches = Vec::new();
     for m in re.find_iter(text) {
         matches.push((m.start(), m.end()));

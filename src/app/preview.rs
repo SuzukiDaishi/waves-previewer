@@ -261,6 +261,7 @@ impl WavesPreviewer {
             source_tool: tool,
             timeline_len: timeline_len.max(1),
             detail_kind: PreviewOverlayDetailKind::OverviewOnly,
+            revision: PreviewOverlay::next_revision(),
         }
     }
 
@@ -1010,6 +1011,7 @@ impl WavesPreviewer {
             source_tool: tool,
             timeline_len,
             detail_kind: PreviewOverlayDetailKind::FullSample,
+            revision: PreviewOverlay::next_revision(),
         }
     }
 }

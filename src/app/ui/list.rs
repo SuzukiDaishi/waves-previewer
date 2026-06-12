@@ -216,9 +216,11 @@ impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
             amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
-            highlight_text_job,
+            highlight_text_job_with_regex,
         };
         let cols = self.list_columns;
+        // Compile the search highlight regex once per frame instead of per row.
+        let highlight_re = self.cached_highlight_regex();
         let metrics = self.list_view_metrics(ui);
         let text_height = metrics.text_height;
         let row_h = metrics.row_h;
@@ -258,7 +260,7 @@ impl crate::app::WavesPreviewer {
                             ),
                             None => return,
                         };
-                        if !is_virtual && !path_owned.is_file() {
+                        if !is_virtual && !self.path_is_file_cached(&path_owned) {
                             missing_paths.push(path_owned.clone());
                             return;
                         }
@@ -596,12 +598,10 @@ impl crate::app::WavesPreviewer {
                                 } else {
                                     transcript_text
                                 };
-                                let label = if let Some(job) = highlight_text_job(
-                                    display,
-                                    &self.search_query,
-                                    self.search_use_regex,
-                                    ui.style(),
-                                ) {
+                                let label = if let Some(job) = highlight_re
+                                    .as_ref()
+                                    .and_then(|re| highlight_text_job_with_regex(display, re, ui.style()))
+                                {
                                     egui::Label::new(job).sense(Sense::click()).truncate()
                                 } else {
                                     egui::Label::new(

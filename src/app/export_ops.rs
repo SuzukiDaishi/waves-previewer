@@ -473,7 +473,7 @@ impl super::WavesPreviewer {
         let resample_quality = crate::wave::ResampleQuality::Best;
         // Transcript sidecar export toggle is deprecated for now.
         let export_srt = false;
-        let transcript_cache: HashMap<PathBuf, super::types::Transcript> = self
+        let transcript_cache: HashMap<PathBuf, std::sync::Arc<super::types::Transcript>> = self
             .items
             .iter()
             .filter_map(|item| {
@@ -485,11 +485,13 @@ impl super::WavesPreviewer {
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
             let write_transcript_sidecar =
-                |src: &Path, dst: &Path, cache: &HashMap<PathBuf, super::types::Transcript>| {
+                |src: &Path,
+                 dst: &Path,
+                 cache: &HashMap<PathBuf, std::sync::Arc<super::types::Transcript>>| {
                     if !export_srt {
                         return;
                     }
-                    let transcript = cache.get(src).cloned().or_else(|| {
+                    let transcript = cache.get(src).map(|t| (**t).clone()).or_else(|| {
                         super::transcript::srt_path_for_audio(src)
                             .and_then(|p| super::transcript::load_srt(&p))
                     });

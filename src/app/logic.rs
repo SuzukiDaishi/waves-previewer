@@ -8,8 +8,8 @@ use std::sync::Arc;
 use walkdir::WalkDir;
 
 use super::types::{
-    EditorDecodeStage, EditorDecodeStrategy, EditorDecodeUiStatus, EditorTab, OfflineRenderSpec,
-    ProcessingResult, ProcessingState, ProcessingTarget, RateMode, ScanMessage,
+    EditorDecodeStage, EditorDecodeStrategy, EditorDecodeUiStatus, EditorTab, MediaId,
+    OfflineRenderSpec, ProcessingResult, ProcessingState, ProcessingTarget, RateMode, ScanMessage,
     ScanRequestKind, SortDir, SortKey,
 };
 
@@ -38,24 +38,6 @@ impl super::WavesPreviewer {
         (waveform_minmax, Some(waveform_pyramid))
     }
 
-    fn option_num_order(a: Option<f32>, b: Option<f32>, dir: SortDir) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        match (a, b) {
-            (Some(va), Some(vb)) => {
-                let ord = va.partial_cmp(&vb).unwrap_or(Ordering::Equal);
-                match dir {
-                    SortDir::Asc => ord,
-                    SortDir::Desc => ord.reverse(),
-                    SortDir::None => Ordering::Equal,
-                }
-            }
-            // Unknown values are always placed at the bottom in both directions.
-            (None, Some(_)) => Ordering::Greater,
-            (Some(_), None) => Ordering::Less,
-            (None, None) => Ordering::Equal,
-        }
-    }
-
     fn option_num_order_f64(a: Option<f64>, b: Option<f64>, dir: SortDir) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (a, b) {
@@ -67,6 +49,7 @@ impl super::WavesPreviewer {
                     SortDir::None => Ordering::Equal,
                 }
             }
+            // Unknown values are always placed at the bottom in both directions.
             (None, Some(_)) => Ordering::Greater,
             (Some(_), None) => Ordering::Less,
             (None, None) => Ordering::Equal,
@@ -2533,172 +2516,133 @@ impl super::WavesPreviewer {
         if dir == SortDir::None {
             self.files = self.original_files.clone();
         } else {
-            // Capture shared references to keep sort_by borrow-friendly.
+            use std::borrow::Cow;
+            use std::cmp::Ordering;
+            use std::time::UNIX_EPOCH;
+
+            // Decorate-sort-undecorate: compute one sort key per row up front
+            // (O(n) hash lookups) so the O(n log n) comparisons stay cheap.
+            enum RowKey<'a> {
+                Str(Cow<'a, str>),
+                Num(Option<f64>),
+                Missing,
+            }
+
             let items = &self.items;
             let item_index = &self.item_index;
             let lufs_override = &self.lufs_override;
             let external_cols = &self.external_visible_columns;
             let sample_rate_override = &self.sample_rate_override;
             let bit_depth_override = &self.bit_depth_override;
-            self.files.sort_by(|a, b| {
-                use std::cmp::Ordering;
-                use std::time::UNIX_EPOCH;
-                let pa_idx = match item_index.get(a) {
-                    Some(idx) => *idx,
-                    None => return Ordering::Equal,
-                };
-                let pb_idx = match item_index.get(b) {
-                    Some(idx) => *idx,
-                    None => return Ordering::Equal,
-                };
-                let pa_item = &items[pa_idx];
-                let pb_item = &items[pb_idx];
-                let ma = pa_item.meta.as_ref();
-                let mb = pb_item.meta.as_ref();
-                let ord = match key {
-                    SortKey::File => {
-                        Self::string_order(&pa_item.display_name, &pb_item.display_name, dir)
-                    }
-                    SortKey::Folder => {
-                        Self::string_order(&pa_item.display_folder, &pb_item.display_folder, dir)
-                    }
-                    SortKey::Transcript => {
-                        let sa = pa_item
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.full_text.as_str())
-                            .unwrap_or("");
-                        let sb = pb_item
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.full_text.as_str())
-                            .unwrap_or("");
-                        Self::string_order(sa, sb, dir)
-                    }
-                    SortKey::Type => {
-                        let sa = Self::list_type_sort_key(pa_item);
-                        let sb = Self::list_type_sort_key(pb_item);
-                        Self::string_order(sa.as_ref(), sb.as_ref(), dir)
-                    }
-                    SortKey::Length => Self::option_num_order(
-                        ma.and_then(|m| m.duration_secs).filter(|v| v.is_finite()),
-                        mb.and_then(|m| m.duration_secs).filter(|v| v.is_finite()),
-                        dir,
-                    ),
-                    SortKey::Channels => Self::option_num_order(
-                        ma.map(|m| m.channels as f32).filter(|v| *v > 0.0),
-                        mb.map(|m| m.channels as f32).filter(|v| *v > 0.0),
-                        dir,
-                    ),
-                    SortKey::SampleRate => Self::option_num_order(
-                        sample_rate_override
-                            .get(&pa_item.path)
-                            .copied()
-                            .or_else(|| ma.map(|m| m.sample_rate))
-                            .filter(|v| *v > 0)
-                            .map(|v| v as f32),
-                        sample_rate_override
-                            .get(&pb_item.path)
-                            .copied()
-                            .or_else(|| mb.map(|m| m.sample_rate))
-                            .filter(|v| *v > 0)
-                            .map(|v| v as f32),
-                        dir,
-                    ),
-                    SortKey::Bits => Self::option_num_order(
-                        bit_depth_override
-                            .get(&pa_item.path)
-                            .copied()
-                            .map(|v| v.bits_per_sample())
-                            .or_else(|| ma.map(|m| m.bits_per_sample))
-                            .filter(|v| *v > 0)
-                            .map(|v| v as f32),
-                        bit_depth_override
-                            .get(&pb_item.path)
-                            .copied()
-                            .map(|v| v.bits_per_sample())
-                            .or_else(|| mb.map(|m| m.bits_per_sample))
-                            .filter(|v| *v > 0)
-                            .map(|v| v as f32),
-                        dir,
-                    ),
-                    SortKey::BitRate => Self::option_num_order(
-                        ma.and_then(|m| m.bit_rate_bps)
-                            .map(|v| v as f32)
-                            .filter(|v| *v > 0.0),
-                        mb.and_then(|m| m.bit_rate_bps)
-                            .map(|v| v as f32)
-                            .filter(|v| *v > 0.0),
-                        dir,
-                    ),
-                    SortKey::Level => Self::option_num_order(
-                        ma.and_then(|m| m.peak_db).filter(|v| v.is_finite()),
-                        mb.and_then(|m| m.peak_db).filter(|v| v.is_finite()),
-                        dir,
-                    ),
-                    // LUFS sorting uses effective value: override if present, else base + gain.
-                    SortKey::Lufs => {
-                        let ga = pa_item.pending_gain_db;
-                        let gb = pb_item.pending_gain_db;
-                        let va = if let Some(v) = lufs_override.get(&pa_item.path).copied() {
-                            v
-                        } else {
-                            ma.and_then(|m| m.lufs_i.map(|x| x + ga))
-                                .unwrap_or(f32::NAN)
-                        };
-                        let vb = if let Some(v) = lufs_override.get(&pb_item.path).copied() {
-                            v
-                        } else {
-                            mb.and_then(|m| m.lufs_i.map(|x| x + gb))
-                                .unwrap_or(f32::NAN)
-                        };
-                        Self::option_num_order(
-                            if va.is_finite() { Some(va) } else { None },
-                            if vb.is_finite() { Some(vb) } else { None },
-                            dir,
-                        )
-                    }
-                    SortKey::Bpm => Self::option_num_order(
-                        ma.and_then(|m| m.bpm).filter(|v| v.is_finite() && *v > 0.0),
-                        mb.and_then(|m| m.bpm).filter(|v| v.is_finite() && *v > 0.0),
-                        dir,
-                    ),
-                    SortKey::CreatedAt => Self::option_num_order_f64(
-                        ma.and_then(|m| m.created_at)
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs_f64()),
-                        mb.and_then(|m| m.created_at)
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs_f64()),
-                        dir,
-                    ),
-                    SortKey::ModifiedAt => Self::option_num_order_f64(
-                        ma.and_then(|m| m.modified_at)
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs_f64()),
-                        mb.and_then(|m| m.modified_at)
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs_f64()),
-                        dir,
-                    ),
-                    SortKey::External(idx) => {
-                        let Some(col) = external_cols.get(idx) else {
-                            return Ordering::Equal;
-                        };
-                        let sa = pa_item.external.get(col).map(|v| v.as_str()).unwrap_or("");
-                        let sb = pb_item.external.get(col).map(|v| v.as_str()).unwrap_or("");
-                        Self::string_order(sa, sb, dir)
-                    }
+
+            let mut decorated: Vec<(RowKey<'_>, &str, &Path, MediaId)> = self
+                .files
+                .iter()
+                .map(|&id| {
+                    let item = item_index.get(&id).and_then(|&idx| items.get(idx));
+                    let Some(item) = item else {
+                        return (RowKey::Missing, "", Path::new(""), id);
+                    };
+                    let m = item.meta.as_ref();
+                    let row_key = match key {
+                        SortKey::File => RowKey::Str(Cow::Borrowed(item.display_name.as_str())),
+                        SortKey::Folder => {
+                            RowKey::Str(Cow::Borrowed(item.display_folder.as_str()))
+                        }
+                        SortKey::Transcript => RowKey::Str(Cow::Borrowed(
+                            item.transcript
+                                .as_ref()
+                                .map(|t| t.full_text.as_str())
+                                .unwrap_or(""),
+                        )),
+                        SortKey::Type => RowKey::Str(Self::list_type_sort_key(item)),
+                        SortKey::Length => RowKey::Num(
+                            m.and_then(|m| m.duration_secs)
+                                .filter(|v| v.is_finite())
+                                .map(|v| v as f64),
+                        ),
+                        SortKey::Channels => RowKey::Num(
+                            m.map(|m| m.channels as f64).filter(|v| *v > 0.0),
+                        ),
+                        SortKey::SampleRate => RowKey::Num(
+                            sample_rate_override
+                                .get(&item.path)
+                                .copied()
+                                .or_else(|| m.map(|m| m.sample_rate))
+                                .filter(|v| *v > 0)
+                                .map(|v| v as f64),
+                        ),
+                        SortKey::Bits => RowKey::Num(
+                            bit_depth_override
+                                .get(&item.path)
+                                .copied()
+                                .map(|v| v.bits_per_sample())
+                                .or_else(|| m.map(|m| m.bits_per_sample))
+                                .filter(|v| *v > 0)
+                                .map(|v| v as f64),
+                        ),
+                        SortKey::BitRate => RowKey::Num(
+                            m.and_then(|m| m.bit_rate_bps)
+                                .map(|v| v as f64)
+                                .filter(|v| *v > 0.0),
+                        ),
+                        SortKey::Level => RowKey::Num(
+                            m.and_then(|m| m.peak_db)
+                                .filter(|v| v.is_finite())
+                                .map(|v| v as f64),
+                        ),
+                        // LUFS sorting uses effective value: override if present, else base + gain.
+                        SortKey::Lufs => {
+                            let v = if let Some(v) = lufs_override.get(&item.path).copied() {
+                                v
+                            } else {
+                                m.and_then(|m| m.lufs_i.map(|x| x + item.pending_gain_db))
+                                    .unwrap_or(f32::NAN)
+                            };
+                            RowKey::Num(v.is_finite().then_some(v as f64))
+                        }
+                        SortKey::Bpm => RowKey::Num(
+                            m.and_then(|m| m.bpm)
+                                .filter(|v| v.is_finite() && *v > 0.0)
+                                .map(|v| v as f64),
+                        ),
+                        SortKey::CreatedAt => RowKey::Num(
+                            m.and_then(|m| m.created_at)
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs_f64()),
+                        ),
+                        SortKey::ModifiedAt => RowKey::Num(
+                            m.and_then(|m| m.modified_at)
+                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs_f64()),
+                        ),
+                        SortKey::External(idx) => match external_cols.get(idx) {
+                            Some(col) => RowKey::Str(Cow::Borrowed(
+                                item.external.get(col).map(|v| v.as_str()).unwrap_or(""),
+                            )),
+                            None => RowKey::Missing,
+                        },
+                    };
+                    (row_key, item.display_name.as_str(), item.path.as_path(), id)
+                })
+                .collect();
+
+            decorated.sort_by(|a, b| {
+                let ord = match (&a.0, &b.0) {
+                    (RowKey::Missing, _) | (_, RowKey::Missing) => return Ordering::Equal,
+                    (RowKey::Str(x), RowKey::Str(y)) => Self::string_order(x, y, dir),
+                    (RowKey::Num(x), RowKey::Num(y)) => Self::option_num_order_f64(*x, *y, dir),
+                    _ => Ordering::Equal,
                 };
                 if ord == Ordering::Equal {
-                    pa_item
-                        .display_name
-                        .cmp(&pb_item.display_name)
-                        .then(pa_item.path.cmp(&pb_item.path))
+                    a.1.cmp(b.1).then(a.2.cmp(b.2))
                 } else {
                     ord
                 }
             });
+
+            let sorted: Vec<MediaId> = decorated.into_iter().map(|entry| entry.3).collect();
+            self.files = sorted;
         }
 
         // restore selection to the same path if possible

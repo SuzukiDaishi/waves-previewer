@@ -3662,20 +3662,38 @@ impl crate::app::WavesPreviewer {
                                     let (startb, _endb, over_vis) = ov::map_visible_overlay(start_scaled, vis_scaled, overlay_total, buf.len());
                                     if over_vis > 0 {
                                         let bins = waveform_columns.column_count();
-                                        let bins_values = if unwrap_preview {
-                                            let loop_start = tab.loop_region.map(|(a, _)| a).unwrap_or(0);
-                                            ov::compute_overlay_bins_for_unwrap(
-                                                start,
-                                                visible_len,
-                                                base_total,
-                                                loop_start,
-                                                buf,
-                                                overlay_total,
-                                                bins,
-                                            )
-                                        } else {
-                                            ov::compute_overlay_bins_for_base_columns(start, visible_len, startb, over_vis, buf, bins)
+                                        // Binning scans every visible overlay sample (the whole
+                                        // buffer when zoomed out); cache by view parameters so a
+                                        // static viewport costs nothing per frame.
+                                        let loop_start = tab.loop_region.map(|(a, _)| a).unwrap_or(0);
+                                        let cache_key = crate::app::render::overlay_cache::OverlayBinsKey {
+                                            overlay_revision: overlay.revision,
+                                            buf_ptr: buf.as_ptr() as usize,
+                                            buf_len: buf.len(),
+                                            start,
+                                            visible_len,
+                                            startb,
+                                            over_vis,
+                                            bins,
+                                            unwrap_base_total: if unwrap_preview { base_total } else { 0 },
+                                            unwrap_loop_start: if unwrap_preview { loop_start } else { 0 },
+                                            unwrap_overlay_total: if unwrap_preview { overlay_total } else { 0 },
                                         };
+                                        let bins_values = self.overlay_bins_cache.get_or_compute(cache_key, || {
+                                            if unwrap_preview {
+                                                ov::compute_overlay_bins_for_unwrap(
+                                                    start,
+                                                    visible_len,
+                                                    base_total,
+                                                    loop_start,
+                                                    buf,
+                                                    overlay_total,
+                                                    bins,
+                                                )
+                                            } else {
+                                                ov::compute_overlay_bins_for_base_columns(start, visible_len, startb, over_vis, buf, bins)
+                                            }
+                                        });
                                         // Draw full overlay
                                         ov::draw_bins_locked(
                                             &painter,
