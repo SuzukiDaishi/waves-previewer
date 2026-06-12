@@ -118,12 +118,17 @@ pub fn detect_loop(
 
     // feature vector: block mean-abs + RMS per block
     progress_cb(0.15);
-    let bin_size = (len / config.coarse_bins).max(config.zero_cross_radius);
-    let n_bins = len / bin_size;
+    let bin_size = (len / config.coarse_bins.max(1))
+        .max(config.zero_cross_radius)
+        .max(1);
+    let n_bins = len.div_ceil(bin_size);
     let mut features: Vec<f32> = Vec::with_capacity(n_bins * 2);
     for b in 0..n_bins {
         let start = b * bin_size;
         let end = (start + bin_size).min(len);
+        if end <= start {
+            continue;
+        }
         let slice = &mono[start..end];
         let mean_abs: f32 = slice.iter().map(|x| x.abs()).sum::<f32>() / slice.len() as f32;
         let rms: f32 = (slice.iter().map(|x| x * x).sum::<f32>() / slice.len() as f32).sqrt();
@@ -143,26 +148,21 @@ pub fn detect_loop(
 
     // generate candidate boundary points
     progress_cb(0.25);
-    let mut candidate_points: Vec<usize> = Vec::new();
+    let mut protected_points: Vec<usize> = Vec::new();
+    let mut optional_points: Vec<usize> = Vec::new();
+    add_candidate_point(&mut protected_points, 0, len);
+    add_candidate_point(&mut protected_points, len, len);
 
     // existing loop marker as candidates
     if let Some((ls, le)) = existing_loop {
-        if ls < len {
-            candidate_points.push(ls);
-        }
-        if le < len {
-            candidate_points.push(le);
-        }
+        add_candidate_point(&mut protected_points, ls, len);
+        add_candidate_point(&mut protected_points, le, len);
     }
     // selection as candidate
     if let Some((ss, se)) = selection {
         let (a, b) = if ss <= se { (ss, se) } else { (se, ss) };
-        if a < len {
-            candidate_points.push(a);
-        }
-        if b < len {
-            candidate_points.push(b);
-        }
+        add_candidate_point(&mut protected_points, a, len);
+        add_candidate_point(&mut protected_points, b, len);
     }
 
     // RMS flux onset peaks
@@ -172,16 +172,36 @@ pub fn detect_loop(
     for b in 0..n_bins {
         let start = b * bin_size;
         let end = (start + bin_size).min(len);
+        if end <= start {
+            continue;
+        }
         let rms: f32 =
             (mono[start..end].iter().map(|x| x * x).sum::<f32>() / (end - start) as f32).sqrt();
         let df = (rms - prev_rms).max(0.0);
         flux.push((start + bin_size / 2, df));
         prev_rms = rms;
     }
-    // pick peaks from flux
+    // Pick strongest local peaks from flux. The threshold is relative to the file
+    // so quiet-but-structured material still contributes candidates.
+    let max_flux = flux.iter().map(|(_, v)| *v).fold(0.0f32, f32::max);
+    let flux_threshold = (max_flux * 0.12).max(0.001);
+    let mut flux_peaks: Vec<(usize, f32)> = Vec::new();
     for i in 1..flux.len().saturating_sub(1) {
-        if flux[i].1 > flux[i - 1].1 && flux[i].1 > flux[i + 1].1 && flux[i].1 > 0.01 {
-            candidate_points.push(flux[i].0);
+        if flux[i].1 > flux[i - 1].1 && flux[i].1 >= flux[i + 1].1 && flux[i].1 >= flux_threshold {
+            flux_peaks.push(flux[i]);
+        }
+    }
+    flux_peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let flux_spacing = hop.max(min_loop_samples / 16).max(1);
+    for (point, _) in flux_peaks {
+        if optional_points
+            .iter()
+            .all(|existing| existing.abs_diff(point) >= flux_spacing)
+        {
+            add_candidate_point(&mut optional_points, point, len);
+        }
+        if optional_points.len() >= config.candidate_limit.saturating_mul(2) {
+            break;
         }
     }
 
@@ -189,21 +209,13 @@ pub fn detect_loop(
     let grid_step = (len / 16).max(min_loop_samples / 4);
     let mut g = grid_step;
     while g < len {
-        candidate_points.push(g);
+        add_candidate_point(&mut optional_points, g, len);
         g += grid_step;
     }
 
-    // sort and deduplicate nearby points
-    candidate_points.sort_unstable();
-    candidate_points.dedup_by(|a, b| if a.abs_diff(*b) < hop { true } else { false });
-
-    // limit candidates
     let max_pts = config.candidate_limit * 2;
-    if candidate_points.len() > max_pts {
-        // keep evenly spaced
-        let step = candidate_points.len() / max_pts;
-        candidate_points = candidate_points.into_iter().step_by(step.max(1)).collect();
-    }
+    let candidate_points =
+        build_candidate_points(protected_points, optional_points, len, hop.max(1), max_pts);
 
     if cancel.load(Ordering::Relaxed) {
         return Err("Cancelled".to_string());
@@ -289,20 +301,26 @@ pub fn detect_loop(
         );
         let (rs, re) = best;
         // local fine search
-        let (fs, fe) =
-            refine_boundary(&mono, rs, re, config.local_fine_radius, 8, refine_window, sr);
+        let (fs, fe) = refine_boundary(
+            &mono,
+            rs,
+            re,
+            config.local_fine_radius,
+            8,
+            refine_window,
+            sr,
+        );
 
         // zero-cross snap
         let snapped_start = snap_to_zero_cross_fwd(&mono, fs, config.zero_cross_radius);
         let snapped_end = snap_to_zero_cross_fwd(&mono, fe, config.zero_cross_radius);
-
-        // re-score after snap
-        let final_score = score_loop_boundary(&mono, snapped_start, snapped_end, match_window, sr);
-        // if snap hurt the score significantly, keep unsnapped
-        let (final_start, final_end, final_score) = if final_score < cand.score - 0.10 {
-            (fs, fe, score_loop_boundary(&mono, fs, fe, match_window, sr))
+        let unsnapped_score = score_loop_boundary(&mono, fs, fe, match_window, sr);
+        let snapped_score =
+            score_loop_boundary(&mono, snapped_start, snapped_end, match_window, sr);
+        let (final_start, final_end, final_score) = if snapped_score + 0.02 < unsnapped_score {
+            (fs, fe, unsnapped_score)
         } else {
-            (snapped_start, snapped_end, final_score)
+            (snapped_start, snapped_end, snapped_score)
         };
 
         cand.start = final_start;
@@ -336,7 +354,8 @@ fn score_loop_boundary(mono: &[f32], start: usize, end: usize, window: usize, sr
         return 0.0;
     }
     // compare window before end with window after start
-    let w = window.min(start).min(len - end);
+    let loop_len = end - start;
+    let w = window.min(loop_len).min(len);
     if w < (sr / 100).max(64) {
         return 0.0;
     }
@@ -363,13 +382,50 @@ fn score_loop_boundary(mono: &[f32], start: usize, end: usize, window: usize, sr
     // normalize correlation
     let norm_corr = (corr / (rms_tail * rms_head)).clamp(-1.0, 1.0);
 
-    // loudness difference penalty
+    // RMS-normalized difference and loudness matching keep drifty material from
+    // being rejected by correlation alone.
+    let rms_error = (tail
+        .iter()
+        .zip(head.iter())
+        .map(|(a, b)| {
+            let d = a - b;
+            d * d
+        })
+        .sum::<f32>()
+        / w as f32)
+        .sqrt();
+    let ref_rms = ((rms_tail + rms_head) * 0.5).max(1e-9);
+    let error_score = (1.0 - (rms_error / (ref_rms * 2.0))).clamp(0.0, 1.0);
+
+    // loudness difference score
     let loudness_ratio = (rms_tail / rms_head).max(rms_head / rms_tail);
-    let loudness_penalty = ((loudness_ratio - 1.0) * 0.3).clamp(0.0, 0.5);
+    let loudness_score = (1.0 - ((loudness_ratio - 1.0) * 0.35)).clamp(0.0, 1.0);
 
     // map correlation [-1,1] to [0,1]
-    let score = (norm_corr + 1.0) * 0.5 - loudness_penalty;
+    let corr_score = (norm_corr + 1.0) * 0.5;
+    let seam_w = w.min((sr / 20).max(64));
+    let seam_score = rms_error_similarity(&tail[w - seam_w..], &head[..seam_w]);
+    let score = corr_score * 0.52 + error_score * 0.24 + loudness_score * 0.14 + seam_score * 0.10;
     score.clamp(0.0, 1.0)
+}
+
+fn rms_error_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let mut err = 0.0f32;
+    let mut rms_a = 0.0f32;
+    let mut rms_b = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()).take(n) {
+        let d = x - y;
+        err += d * d;
+        rms_a += x * x;
+        rms_b += y * y;
+    }
+    let err = (err / n as f32).sqrt();
+    let ref_rms = (((rms_a / n as f32).sqrt() + (rms_b / n as f32).sqrt()) * 0.5).max(1e-9);
+    (1.0 - (err / (ref_rms * 2.0))).clamp(0.0, 1.0)
 }
 
 fn refine_boundary(
@@ -383,7 +439,7 @@ fn refine_boundary(
 ) -> (usize, usize) {
     let len = mono.len();
     let s_lo = start.saturating_sub(radius);
-    let s_hi = (start + radius).min(len);
+    let s_hi = (start + radius).min(len.saturating_sub(1));
     let e_lo = end.saturating_sub(radius);
     let e_hi = (end + radius).min(len);
 
@@ -391,9 +447,9 @@ fn refine_boundary(
     let mut best = (start, end);
 
     let mut s = s_lo;
-    while s < s_hi {
+    while s <= s_hi {
         let mut e = e_lo;
-        while e < e_hi {
+        while e <= e_hi {
             if e > s {
                 let sc = score_loop_boundary(mono, s, e, window, sr);
                 if sc > best_score {
@@ -401,11 +457,63 @@ fn refine_boundary(
                     best = (s, e);
                 }
             }
-            e += stride;
+            e = e.saturating_add(stride.max(1));
+            if e == usize::MAX {
+                break;
+            }
         }
-        s += stride;
+        s = s.saturating_add(stride.max(1));
+        if s == usize::MAX {
+            break;
+        }
     }
     best
+}
+
+fn add_candidate_point(points: &mut Vec<usize>, sample: usize, len: usize) {
+    let sample = sample.min(len);
+    if !points.contains(&sample) {
+        points.push(sample);
+    }
+}
+
+fn build_candidate_points(
+    mut protected_points: Vec<usize>,
+    mut optional_points: Vec<usize>,
+    len: usize,
+    spacing: usize,
+    max_pts: usize,
+) -> Vec<usize> {
+    protected_points.sort_unstable();
+    protected_points.dedup();
+    protected_points.retain(|p| *p <= len);
+    optional_points.sort_unstable();
+    optional_points.dedup();
+    optional_points.retain(|p| *p <= len);
+
+    let mut out = protected_points;
+    let target_len = max_pts.max(out.len()).max(2);
+    for point in optional_points {
+        if out
+            .iter()
+            .any(|existing| existing.abs_diff(point) < spacing)
+        {
+            continue;
+        }
+        out.push(point);
+        if out.len() >= target_len {
+            break;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    if !out.contains(&0) {
+        out.insert(0, 0);
+    }
+    if !out.contains(&len) {
+        out.push(len);
+    }
+    out
 }
 
 fn snap_to_zero_cross_fwd(mono: &[f32], pos: usize, radius: usize) -> usize {
@@ -460,6 +568,23 @@ mod tests {
         let n = (sr as f32 * dur_secs) as usize;
         (0..n)
             .map(|i| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / sr as f32).sin())
+            .collect()
+    }
+
+    fn textured(sr: usize, dur_secs: f32, amp: f32, offset: f32) -> Vec<f32> {
+        let n = (sr as f32 * dur_secs) as usize;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                let a = (2.0 * std::f32::consts::PI * 173.0 * t + offset).sin();
+                let b = (2.0 * std::f32::consts::PI * 421.0 * t + offset * 0.37).sin();
+                let c = if (t * 11.0 + offset).fract() < 0.08 {
+                    0.18
+                } else {
+                    0.0
+                };
+                ((a * 0.62 + b * 0.28) * amp + c).clamp(-0.95, 0.95)
+            })
             .collect()
     }
 
@@ -728,6 +853,62 @@ mod tests {
         )
         .unwrap();
         assert!(!result.is_empty(), "selection hint should yield candidates");
+    }
+
+    #[test]
+    fn test_score_allows_whole_file_edges() {
+        let sr = 44100usize;
+        let edge = textured(sr, 0.10, 0.55, 0.0);
+        let middle = textured(sr, 1.20, 0.35, 1.1);
+        let mut audio = Vec::new();
+        audio.extend_from_slice(&edge);
+        audio.extend_from_slice(&middle);
+        audio.extend(edge.iter().map(|v| *v * 0.82));
+
+        let score = score_loop_boundary(&audio, 0, audio.len(), sr / 10, sr);
+        assert!(
+            score > 0.60,
+            "whole-file edge loop should be scoreable, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_whole_file_loop_keeps_end_at_len_candidate() {
+        let sr = 44100usize;
+        let edge = textured(sr, 0.12, 0.50, 0.2);
+        let middle = textured(sr, 1.35, 0.30, 2.4);
+        let mut audio = Vec::new();
+        audio.extend_from_slice(&edge);
+        audio.extend_from_slice(&middle);
+        audio.extend_from_slice(&edge);
+        let len = audio.len();
+        let ch = vec![audio];
+        let config = LoopDetectConfig {
+            min_loop_secs: 1.0,
+            match_window_secs: 0.12,
+            candidate_limit: 8,
+            zero_cross_radius: 64,
+            local_coarse_radius: 128,
+            local_fine_radius: 32,
+            coarse_bins: 32,
+            ..Default::default()
+        };
+        let result = detect_loop(
+            &ch,
+            sr as u32,
+            &config,
+            None,
+            None,
+            &make_cancel(),
+            &mut |_| {},
+        )
+        .unwrap();
+        let best = result.first().expect("candidate");
+        assert!(
+            best.start <= sr / 100 && best.end >= len - sr / 100,
+            "whole-file edge candidate should stay near [0, len], got {:?}",
+            best
+        );
     }
 
     // -----------------------------------------------------------------------

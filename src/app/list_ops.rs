@@ -99,7 +99,10 @@ impl super::WavesPreviewer {
         for entry in WalkDir::new(dir)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
+            .filter_entry(|e| {
+                !Self::is_internal_temp_cache_path(e.path())
+                    && (!skip_dotfiles || !Self::is_dotfile_path(e.path()))
+            })
         {
             if let Ok(e) = entry {
                 if e.file_type().is_file() {

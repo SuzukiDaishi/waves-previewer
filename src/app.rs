@@ -626,6 +626,7 @@ pub struct WavesPreviewer {
     show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,
+    recent_sessions: Vec<PathBuf>,
     project_open_pending: Option<PathBuf>,
     project_open_state: Option<ProjectOpenState>,
     theme_mode: ThemeMode,

@@ -744,6 +744,7 @@ impl super::WavesPreviewer {
                                     old_spp,
                                     new_display_len,
                                 );
+                                Self::editor_clamp_ranges(tab);
                                 Self::invalidate_editor_viewport_cache(tab);
                                 decode_update_tab = Some(idx);
                                 decode_refresh_preview = Some(idx);
@@ -855,7 +856,9 @@ impl super::WavesPreviewer {
             for (idx, path) in marker_updates {
                 let file_sr = self.sample_rate_for_path(&path, out_sr);
                 if let Some(tab) = self.tabs.get_mut(idx) {
-                    Self::set_loop_region_from_file_markers(tab, &path, file_sr, out_sr);
+                    if tab.loop_region.is_none() && tab.loop_markers_saved.is_none() {
+                        Self::set_loop_region_from_file_markers(tab, &path, file_sr, out_sr);
+                    }
                     Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
                 }
             }

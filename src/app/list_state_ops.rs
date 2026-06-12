@@ -13,6 +13,10 @@ impl WavesPreviewer {
             .unwrap_or(false)
     }
 
+    pub(super) fn is_internal_temp_cache_path(path: &Path) -> bool {
+        super::temp_audio_ops::is_neowaves_internal_temp_path(path)
+    }
+
     pub(super) fn is_decode_failed_path(&self, path: &Path) -> bool {
         self.meta_for_path(path)
             .and_then(|m| m.decode_error.as_ref())

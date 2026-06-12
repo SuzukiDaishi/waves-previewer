@@ -39,6 +39,26 @@ impl WavesPreviewer {
                 }
                 ui.close();
             }
+            let recent_sessions = self.recent_session_paths_for_menu();
+            if !recent_sessions.is_empty() {
+                ui.menu_button("Recent Sessions", |ui| {
+                    for (idx, path) in recent_sessions.iter().enumerate() {
+                        let name = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("session.nwsess");
+                        let label = format!("{}  {}", idx + 1, name);
+                        if ui
+                            .button(label)
+                            .on_hover_text(path.display().to_string())
+                            .clicked()
+                        {
+                            self.queue_project_open(path.clone());
+                            ui.close();
+                        }
+                    }
+                });
+            }
             if ui.button("Session Save (Ctrl+S)").clicked() {
                 if let Err(err) = self.save_project() {
                     self.debug_log(format!("session save error: {err}"));
@@ -55,7 +75,9 @@ impl WavesPreviewer {
                 ui.close();
             }
             if ui.button("Session Close").clicked() {
-                self.close_project();
+                if let Err(err) = self.close_project_with_autosave() {
+                    self.debug_log(format!("session close save error: {err}"));
+                }
                 ui.close();
             }
             ui.separator();

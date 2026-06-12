@@ -209,6 +209,13 @@ mod kittest_suite {
         dir
     }
 
+    fn now_millis() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    }
+
     fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
         let frames = ((sr as f32) * secs).max(1.0) as usize;
         let mut left = Vec::with_capacity(frames);
@@ -402,6 +409,29 @@ mod kittest_suite {
             }
             if start.elapsed() > TAB_READY_TIMEOUT {
                 panic!("tab decode timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_project_path(harness: &mut Harness<'static, WavesPreviewer>, path: &Path) {
+        let expected = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            let current = harness
+                .state()
+                .test_project_path()
+                .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)));
+            if current.as_ref() == Some(&expected) {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!(
+                    "project open timeout: expected {} current {:?}",
+                    expected.display(),
+                    current
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -991,10 +1021,7 @@ mod kittest_suite {
     }
 
     #[cfg(feature = "kittest_render")]
-    fn assert_inspector_labels_inside(
-        harness: &Harness<'static, WavesPreviewer>,
-        labels: &[&str],
-    ) {
+    fn assert_inspector_labels_inside(harness: &Harness<'static, WavesPreviewer>, labels: &[&str]) {
         let inspector = harness
             .state()
             .test_editor_inspector_rect()
@@ -1061,7 +1088,10 @@ mod kittest_suite {
             .unwrap_or_else(|| panic!("{label}: meter rect"));
         let red = strong_red_pixels_in_rect(image, volume.expand(2.0))
             + strong_red_pixels_in_rect(image, meter.expand(2.0));
-        assert_eq!(red, 0, "{label} volume/meter area should not contain strong red pixels");
+        assert_eq!(
+            red, 0,
+            "{label} volume/meter area should not contain strong red pixels"
+        );
     }
 
     #[cfg(feature = "kittest_render")]
@@ -1146,6 +1176,48 @@ mod kittest_suite {
     }
 
     #[test]
+    fn temp_cache_audio_files_are_hidden_from_list_scan() {
+        let dir = make_temp_dir("temp_cache_hidden");
+        let normal = dir.join("normal.wav");
+        neowaves::wave::export_channels_audio(&[vec![0.0, 0.1, 0.0]], 48_000, &normal)
+            .expect("write normal wav");
+        let cache_dir = std::env::temp_dir().join("NeoWaves").join("drag");
+        std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+        let cache = cache_dir.join(format!(
+            "nwcache_kittest_{}_{}.wav",
+            std::process::id(),
+            now_millis()
+        ));
+        neowaves::wave::export_channels_audio(&[vec![0.0, 0.2, 0.0]], 48_000, &cache)
+            .expect("write cache wav");
+        let mut cfg = StartupConfig::default();
+        cfg.open_files = vec![normal.clone(), cache.clone()];
+        let mut harness = harness_with_startup(cfg);
+        wait_for_scan(&mut harness);
+
+        let listed_paths: Vec<PathBuf> = harness
+            .state()
+            .files
+            .iter()
+            .filter_map(|id| {
+                harness
+                    .state()
+                    .item_index
+                    .get(id)
+                    .and_then(|idx| harness.state().items.get(*idx))
+                    .map(|item| item.path.clone())
+            })
+            .collect();
+
+        assert!(listed_paths.contains(&normal));
+        assert!(
+            !listed_paths.contains(&cache),
+            "internal temp cache should not appear in List"
+        );
+        let _ = std::fs::remove_file(cache);
+    }
+
+    #[test]
     fn top_menu_smoke() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
@@ -1217,10 +1289,7 @@ mod kittest_suite {
             egui::Shape::Rect(rect_shape) => {
                 if rect_shape.stroke.color == egui::Color32::from_rgb(255, 0, 0) {
                     hits.push((
-                        format!(
-                            "red rect_stroke width={}",
-                            rect_shape.stroke.width
-                        ),
+                        format!("red rect_stroke width={}", rect_shape.stroke.width),
                         rect_shape.rect,
                     ));
                 }
@@ -1294,7 +1363,10 @@ mod kittest_suite {
                 modifiers: Modifiers::default(),
             });
             harness.run_steps(1);
-            assert_no_id_clash_text(&harness, &format!("during single-row point scroll down step {i}"));
+            assert_no_id_clash_text(
+                &harness,
+                &format!("during single-row point scroll down step {i}"),
+            );
         }
         for i in 0..30 {
             harness.event(egui::Event::MouseWheel {
@@ -1304,7 +1376,10 @@ mod kittest_suite {
                 modifiers: Modifiers::default(),
             });
             harness.run_steps(1);
-            assert_no_id_clash_text(&harness, &format!("during single-row point scroll up step {i}"));
+            assert_no_id_clash_text(
+                &harness,
+                &format!("during single-row point scroll up step {i}"),
+            );
         }
     }
 
@@ -1314,15 +1389,26 @@ mod kittest_suite {
     fn id_clash_detection_sanity_check() {
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
             let id = egui::Id::new("kittest_sanity_clash");
-            ui.interact(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)), id, egui::Sense::click());
-            ui.interact(egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(10.0, 10.0)), id, egui::Sense::click());
+            ui.interact(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+                id,
+                egui::Sense::click(),
+            );
+            ui.interact(
+                egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(10.0, 10.0)),
+                id,
+                egui::Sense::click(),
+            );
         });
         harness.run();
         let mut hits = Vec::new();
         for clipped in &harness.output().shapes {
             collect_id_clash_shapes(&clipped.shape, &mut hits);
         }
-        assert!(!hits.is_empty(), "expected id clash overlay to be detected: {hits:?}");
+        assert!(
+            !hits.is_empty(),
+            "expected id clash overlay to be detected: {hits:?}"
+        );
     }
 
     #[test]
@@ -1445,8 +1531,16 @@ mod kittest_suite {
             .test_set_mock_active_tab_processing("Rendering preview..."));
         harness.run_steps(3);
 
-        assert_rect_nearly_same(range_before, first_label_rect(&harness, "Range: -"), "range row");
-        assert_rect_nearly_same(tool_before, first_label_rect(&harness, "Tool"), "tool picker");
+        assert_rect_nearly_same(
+            range_before,
+            first_label_rect(&harness, "Range: -"),
+            "range row",
+        );
+        assert_rect_nearly_same(
+            tool_before,
+            first_label_rect(&harness, "Tool"),
+            "tool picker",
+        );
         harness.state_mut().test_clear_mock_processing();
     }
 
@@ -1521,7 +1615,11 @@ mod kittest_suite {
             .test_set_mock_auto_trim_running(0.55, "Auto Trim detecting sections... 55%"));
         harness.run_steps(3);
 
-        assert_rect_nearly_same(before, first_label_rect(&harness, "Auto Trim"), "Auto Trim header");
+        assert_rect_nearly_same(
+            before,
+            first_label_rect(&harness, "Auto Trim"),
+            "Auto Trim header",
+        );
         assert!(harness.state_mut().test_clear_mock_auto_trim());
     }
 
@@ -2125,6 +2223,118 @@ mod kittest_suite {
         harness.state_mut().test_set_auto_play_list_nav(true);
         harness.state_mut().test_load_prefs_from_path(&prefs);
         assert!(!harness.state().test_auto_play_list_nav());
+    }
+
+    #[test]
+    fn recent_sessions_pref_roundtrip_shows_three_nwsess() {
+        let dir = make_temp_dir("recent_prefs");
+        let first = dir.join("first.nwsess");
+        let second = dir.join("second.nwsess");
+        let third = dir.join("third.nwsess");
+        let fourth = dir.join("fourth.nwsess");
+        let bad = dir.join("bad.nwproj");
+        for path in [&first, &second, &third, &fourth, &bad] {
+            std::fs::write(path, "placeholder").expect("write placeholder session");
+        }
+        let prefs = dir.join("prefs.txt");
+        let mut harness = harness_empty();
+        harness.state_mut().test_set_recent_session_paths(vec![
+            first.clone(),
+            second.clone(),
+            bad,
+            third.clone(),
+            fourth,
+        ]);
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness
+            .state_mut()
+            .test_set_recent_session_paths(Vec::new());
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+
+        let recents = harness.state().test_recent_session_paths();
+        assert_eq!(recents.len(), 3);
+        assert_eq!(recents[0], std::fs::canonicalize(&first).unwrap());
+        assert_eq!(recents[1], std::fs::canonicalize(&second).unwrap());
+        assert_eq!(recents[2], std::fs::canonicalize(&third).unwrap());
+    }
+
+    #[test]
+    fn recent_sessions_file_menu_click_opens_session() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let dir = make_temp_dir("recent_menu_open");
+        let sess = dir.join("recent_menu_open.nwsess");
+        assert!(harness.state_mut().test_save_session_to(&sess));
+        assert!(harness.state_mut().test_close_session_with_autosave());
+        harness.run_steps(2);
+
+        top_menu_button(&harness, "File").click();
+        harness.run_steps(1);
+        harness.get_by_label("Recent Sessions ⏵").click();
+        harness.run_steps(1);
+        harness.get_by_label("1  recent_menu_open.nwsess").click();
+        wait_for_project_path(&mut harness, &sess);
+        wait_for_tab_ready(&mut harness);
+
+        assert_eq!(
+            harness.state().test_project_path(),
+            Some(std::fs::canonicalize(&sess).unwrap_or(sess.clone()))
+        );
+    }
+
+    #[test]
+    fn recent_session_close_autosaves_and_reopens_editor_state() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let dir = make_temp_dir("recent_close_autosave");
+        let sess = dir.join("recent_close_autosave.nwsess");
+        assert!(harness.state_mut().test_save_session_to(&sess));
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
+        assert!(harness.state_mut().test_set_selection_frac(0.18, 0.33));
+        assert!(harness.state_mut().test_set_loop_region_frac(0.42, 0.64));
+        let base_spp = harness
+            .state()
+            .test_tab_samples_per_px()
+            .unwrap_or(128.0)
+            .max(4.0);
+        assert!(harness
+            .state_mut()
+            .test_set_tab_samples_per_px(base_spp * 0.35));
+        let view_offset = harness.state().tabs[harness.state().active_tab.unwrap()].samples_len / 5;
+        assert!(harness.state_mut().test_set_tab_view_offset(view_offset));
+        let saved_selection = harness.state().test_tab_selection();
+        let saved_loop = harness.state().test_loop_region();
+        let saved_view = harness.state().test_tab_view_offset();
+        let saved_path = harness.state().test_active_tab_path();
+
+        assert!(harness.state_mut().test_close_session_with_autosave());
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_project_path(), None);
+        assert!(harness.state().active_tab.is_none());
+        let recent = harness
+            .state()
+            .test_recent_session_paths()
+            .into_iter()
+            .next()
+            .expect("recent session");
+        assert_eq!(recent, std::fs::canonicalize(&sess).unwrap_or(sess.clone()));
+
+        assert!(harness.state_mut().test_open_session_from(&recent));
+        wait_for_tab_ready(&mut harness);
+
+        assert_eq!(harness.state().test_active_tool(), Some(ToolKind::LoopEdit));
+        assert_eq!(harness.state().test_tab_selection(), saved_selection);
+        assert_eq!(harness.state().test_loop_region(), saved_loop);
+        assert_eq!(harness.state().test_tab_view_offset(), saved_view);
+        let reopened_path = harness
+            .state()
+            .test_active_tab_path()
+            .and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)));
+        let saved_path = saved_path.and_then(|p| std::fs::canonicalize(&p).ok().or(Some(p)));
+        assert_eq!(reopened_path, saved_path);
     }
 
     #[test]
@@ -5530,7 +5740,9 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::Trim));
-        assert!(harness.state_mut().test_set_mock_editor_decode_progress(0.88));
+        assert!(harness
+            .state_mut()
+            .test_set_mock_editor_decode_progress(0.88));
         assert!(harness
             .state_mut()
             .test_set_mock_auto_trim_running(0.55, "Auto Trim detecting sections... 55%"));

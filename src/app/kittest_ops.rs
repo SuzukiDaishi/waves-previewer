@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::app::types::{
-    AutoTrimState, EffectGraphDocument, EffectGraphEdge, EffectGraphNode, EffectGraphNodeData,
-    EditorDecodeResult, EditorDecodeStage, EditorDecodeState, FileMeta, LoopDetectState, LoopMode,
-    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind,
-    ProcessingResult, ProcessingState, ProcessingTarget, RateMode, SampleValueKind, SortDir,
-    SortKey, ToolKind, ToolState, ViewMode,
+    AutoTrimState, EditorDecodeResult, EditorDecodeStage, EditorDecodeState, EffectGraphDocument,
+    EffectGraphEdge, EffectGraphNode, EffectGraphNodeData, FileMeta, LoopDetectState, LoopMode,
+    LoopXfadeShape, MusicAnalysisResult, MusicStemSet, PreviewOverlayDetailKind, ProcessingResult,
+    ProcessingState, ProcessingTarget, RateMode, SampleValueKind, SortDir, SortKey, ToolKind,
+    ToolState, ViewMode,
 };
 
 #[cfg(feature = "kittest")]
@@ -104,6 +104,26 @@ impl super::WavesPreviewer {
 
     pub fn test_load_prefs_from_path(&mut self, path: &Path) {
         self.load_prefs_from_path(path);
+    }
+
+    pub fn test_recent_session_paths(&self) -> Vec<PathBuf> {
+        self.recent_session_paths_for_menu()
+    }
+
+    pub fn test_set_recent_session_paths(&mut self, paths: Vec<PathBuf>) {
+        self.set_recent_sessions_from_prefs(paths);
+    }
+
+    pub fn test_add_recent_session_path_no_persist(&mut self, path: &Path) -> bool {
+        self.insert_recent_session_path(path)
+    }
+
+    pub fn test_project_path(&self) -> Option<PathBuf> {
+        self.project_path.clone()
+    }
+
+    pub fn test_close_session_with_autosave(&mut self) -> bool {
+        self.close_project_with_autosave().is_ok()
     }
 
     pub fn test_pending_gain_count(&self) -> usize {
@@ -261,8 +281,7 @@ impl super::WavesPreviewer {
         let path = tab.path.clone();
         let (_tx, rx) = std::sync::mpsc::channel::<EditorDecodeResult>();
         let total_source_frames = 100_000usize;
-        let streaming_progress = ((progress.clamp(0.15, 0.92) - 0.15) / 0.77)
-            .clamp(0.0, 1.0);
+        let streaming_progress = ((progress.clamp(0.15, 0.92) - 0.15) / 0.77).clamp(0.0, 1.0);
         let decoded_source_frames =
             ((total_source_frames as f32) * streaming_progress).round() as usize;
         self.editor_decode_state = Some(EditorDecodeState {

@@ -34,6 +34,65 @@ fn external_key_rule_to_project(rule: super::types::ExternalKeyRule) -> &'static
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_session_unit_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ms,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn close_project_with_autosave_writes_existing_session_and_closes() {
+        let dir = temp_dir("close_save");
+        let session = dir.join("saved.nwsess");
+        let mut app = crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+            .expect("headless app");
+        app.project_path = Some(session.clone());
+
+        app.close_project_with_autosave().expect("close saves");
+
+        assert!(session.is_file(), "session should be written before close");
+        assert_eq!(app.project_path, None);
+        let text = std::fs::read_to_string(&session).expect("read session");
+        assert!(text.contains("version = 1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn close_project_with_autosave_keeps_session_open_on_save_error() {
+        let dir = temp_dir("close_save_error");
+        let blocked = dir.join("blocked.nwsess");
+        std::fs::create_dir_all(&blocked).expect("create blocked session dir");
+        let mut app = crate::app::WavesPreviewer::new_headless(crate::StartupConfig::default())
+            .expect("headless app");
+        app.project_path = Some(blocked.clone());
+
+        let err = app
+            .close_project_with_autosave()
+            .expect_err("directory session path should fail");
+
+        assert!(!err.is_empty());
+        assert_eq!(app.project_path, Some(blocked));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn external_key_rule_from_project(raw: &str) -> super::types::ExternalKeyRule {
     match raw.trim().to_ascii_lowercase().as_str() {
         "stem" => super::types::ExternalKeyRule::Stem,
@@ -146,6 +205,69 @@ fn apply_virtual_ops(channels: &mut [Vec<f32>], ops: &[VirtualOp]) {
 }
 
 impl super::WavesPreviewer {
+    const RECENT_SESSION_LIMIT: usize = 3;
+
+    pub(super) fn normalize_recent_session_path(path: &Path) -> Option<PathBuf> {
+        let is_nwsess = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("nwsess"))
+            .unwrap_or(false);
+        if !is_nwsess || !path.is_file() {
+            return None;
+        }
+        std::fs::canonicalize(path)
+            .ok()
+            .or_else(|| Some(path.to_path_buf()))
+    }
+
+    pub(super) fn set_recent_sessions_from_prefs(&mut self, paths: Vec<PathBuf>) {
+        self.recent_sessions.clear();
+        for path in paths {
+            let Some(path) = Self::normalize_recent_session_path(&path) else {
+                continue;
+            };
+            if !self.recent_sessions.iter().any(|p| p == &path) {
+                self.recent_sessions.push(path);
+            }
+            if self.recent_sessions.len() >= Self::RECENT_SESSION_LIMIT {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn insert_recent_session_path(&mut self, path: &Path) -> bool {
+        let Some(path) = Self::normalize_recent_session_path(path) else {
+            return false;
+        };
+        self.recent_sessions.retain(|existing| existing != &path);
+        self.recent_sessions.insert(0, path);
+        self.recent_sessions.truncate(Self::RECENT_SESSION_LIMIT);
+        true
+    }
+
+    pub(super) fn recent_session_paths_for_menu(&self) -> Vec<PathBuf> {
+        self.recent_sessions
+            .iter()
+            .filter_map(|path| Self::normalize_recent_session_path(path))
+            .take(Self::RECENT_SESSION_LIMIT)
+            .collect()
+    }
+
+    pub(super) fn add_recent_session_path(&mut self, path: &Path) {
+        if self.insert_recent_session_path(path) {
+            self.save_prefs();
+        }
+    }
+
+    pub(super) fn close_project_with_autosave(&mut self) -> Result<(), String> {
+        if self.project_path.is_some() {
+            self.save_project()?;
+        }
+        self.close_project();
+        Ok(())
+    }
+
     pub(super) fn queue_project_open(&mut self, path: PathBuf) {
         self.project_open_pending = Some(path);
         self.project_open_state = Some(ProjectOpenState {
@@ -651,7 +773,8 @@ impl super::WavesPreviewer {
             let _ = std::fs::create_dir_all(parent);
         }
         std::fs::write(&path, text).map_err(|e| e.to_string())?;
-        self.project_path = Some(path);
+        self.project_path = Some(path.clone());
+        self.add_recent_session_path(&path);
         // Recorded virtual items have just been persisted as sidecar audio above;
         // their backing temp WAVs in %TEMP% are no longer needed.
         self.clear_recording_temp_files();
@@ -1326,7 +1449,9 @@ impl super::WavesPreviewer {
                         t.preview_overlay = Some(overlay);
                         t.preview_audio_tool = preview_tool;
                     }
-                    Self::editor_clamp_ranges(t);
+                    if t.samples_len > 0 {
+                        Self::editor_clamp_ranges(t);
+                    }
                 }
             }
         }
@@ -1379,6 +1504,7 @@ impl super::WavesPreviewer {
         } else {
             self.workspace_view = super::types::WorkspaceView::List;
         }
+        self.add_recent_session_path(&project_path);
         Ok(())
     }
 

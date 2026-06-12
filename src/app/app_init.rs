@@ -267,6 +267,7 @@ impl WavesPreviewer {
             show_transcription_settings: false,
             show_first_save_prompt: false,
             project_path: None,
+            recent_sessions: Vec::new(),
             project_open_pending: None,
             project_open_state: None,
             theme_mode: ThemeMode::Dark,
@@ -335,6 +336,7 @@ impl WavesPreviewer {
             recording_tab: RecordingTabState::default(),
         };
         app.load_prefs();
+        app.cleanup_neowaves_temp_cache_files();
         app.refresh_audio_output_devices();
         if app.audio_output_device_name.is_some() {
             let preferred = app.audio_output_device_name.clone();

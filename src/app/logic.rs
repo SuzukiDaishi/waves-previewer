@@ -1075,7 +1075,8 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn should_skip_path(&self, path: &Path) -> bool {
-        self.skip_dotfiles && Self::is_dotfile_path(path)
+        Self::is_internal_temp_cache_path(path)
+            || (self.skip_dotfiles && Self::is_dotfile_path(path))
     }
 
     pub(super) fn cache_dirty_tab_at(&mut self, idx: usize) {
@@ -2912,7 +2913,8 @@ impl super::WavesPreviewer {
                 |tx: &std::sync::mpsc::Sender<ScanMessage>, visited: usize, matched: usize| {
                     tx.send(ScanMessage::Progress { visited, matched })
                 };
-            let flush_batch = |tx: &std::sync::mpsc::Sender<ScanMessage>, batch: &mut Vec<PathBuf>| {
+            let flush_batch = |tx: &std::sync::mpsc::Sender<ScanMessage>,
+                               batch: &mut Vec<PathBuf>| {
                 if batch.is_empty() {
                     return Ok(());
                 }
@@ -2941,7 +2943,10 @@ impl super::WavesPreviewer {
                     for entry in WalkDir::new(root)
                         .follow_links(false)
                         .into_iter()
-                        .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
+                        .filter_entry(|e| {
+                            !Self::is_internal_temp_cache_path(e.path())
+                                && (!skip_dotfiles || !Self::is_dotfile_path(e.path()))
+                        })
                     {
                         if let Ok(e) = entry {
                             visited = visited.saturating_add(1);
@@ -2951,6 +2956,9 @@ impl super::WavesPreviewer {
                                 return;
                             }
                             if e.file_type().is_file() {
+                                if Self::is_internal_temp_cache_path(e.path()) {
+                                    continue;
+                                }
                                 if let Some(ext) = e.path().extension().and_then(|s| s.to_str()) {
                                     if audio_io::is_supported_extension(ext) {
                                         if skip_dotfiles && Self::is_dotfile_path(e.path()) {
@@ -2975,6 +2983,9 @@ impl super::WavesPreviewer {
                 }
                 ScanRequestKind::Explicit { paths } => {
                     for path in paths {
+                        if Self::is_internal_temp_cache_path(&path) {
+                            continue;
+                        }
                         if path.is_file() {
                             visited = visited.saturating_add(1);
                             if visited % progress_interval == 0
@@ -2988,14 +2999,8 @@ impl super::WavesPreviewer {
                                     .and_then(|s| s.to_str())
                                     .map(audio_io::is_supported_extension)
                                     .unwrap_or(false)
-                                && push_file(
-                                    &tx,
-                                    path,
-                                    &mut seen,
-                                    &mut matched,
-                                    &mut batch,
-                                )
-                                .is_err()
+                                && push_file(&tx, path, &mut seen, &mut matched, &mut batch)
+                                    .is_err()
                             {
                                 return;
                             }
@@ -3003,7 +3008,10 @@ impl super::WavesPreviewer {
                             for entry in WalkDir::new(path)
                                 .follow_links(false)
                                 .into_iter()
-                                .filter_entry(|e| !skip_dotfiles || !Self::is_dotfile_path(e.path()))
+                                .filter_entry(|e| {
+                                    !Self::is_internal_temp_cache_path(e.path())
+                                        && (!skip_dotfiles || !Self::is_dotfile_path(e.path()))
+                                })
                             {
                                 if let Ok(e) = entry {
                                     visited = visited.saturating_add(1);
@@ -3013,11 +3021,15 @@ impl super::WavesPreviewer {
                                         return;
                                     }
                                     if e.file_type().is_file() {
+                                        if Self::is_internal_temp_cache_path(e.path()) {
+                                            continue;
+                                        }
                                         if let Some(ext) =
                                             e.path().extension().and_then(|s| s.to_str())
                                         {
                                             if audio_io::is_supported_extension(ext) {
-                                                if skip_dotfiles && Self::is_dotfile_path(e.path()) {
+                                                if skip_dotfiles && Self::is_dotfile_path(e.path())
+                                                {
                                                     continue;
                                                 }
                                                 if push_file(

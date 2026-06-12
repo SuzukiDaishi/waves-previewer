@@ -56,13 +56,14 @@ impl super::WavesPreviewer {
             // keep capture stream alive in this thread
             let _cap = capture_stream;
 
-            let tmp_path = std::env::temp_dir().join(format!(
-                "neowaves_rec_{}.wav",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            ));
+            let Some(tmp_path) =
+                super::temp_audio_ops::allocate_neowaves_temp_cache_path("recording", "wav")
+            else {
+                let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(
+                    "create recording cache path failed".into(),
+                ));
+                return;
+            };
 
             let spec = hound::WavSpec {
                 channels,
@@ -269,7 +270,7 @@ impl super::WavesPreviewer {
         if let Some(path) = finalized_path {
             self.recording_tab.last_recording_path = Some(path.clone());
             self.recording_tab.state = RecordingState::Idle;
-            self.recording_tab.progress_message = format!("Saved: {}", path.display());
+            self.recording_tab.progress_message = "Recording ready".to_string();
         }
 
         // update elapsed

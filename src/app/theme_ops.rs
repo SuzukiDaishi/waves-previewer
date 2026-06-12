@@ -80,7 +80,11 @@ impl WavesPreviewer {
             if let Some(root) = self.root.clone() {
                 self.start_scan_folder(root);
             } else {
-                self.items.retain(|item| !Self::is_dotfile_path(&item.path));
+                let skip_dotfiles = self.skip_dotfiles;
+                self.items.retain(|item| {
+                    !Self::is_internal_temp_cache_path(&item.path)
+                        && (!skip_dotfiles || !Self::is_dotfile_path(&item.path))
+                });
                 self.rebuild_item_indexes();
                 self.apply_filter_from_search();
                 self.apply_sort();
@@ -286,6 +290,7 @@ impl WavesPreviewer {
             return;
         };
         let mut plugin_paths = Vec::<PathBuf>::new();
+        let mut recent_sessions = Vec::<PathBuf>::new();
         let mut spectro_hop_loaded = false;
         let mut spectro_overlap_legacy: Option<f32> = None;
         for line in text.lines() {
@@ -488,6 +493,11 @@ impl WavesPreviewer {
                 }
             } else if let Some(rest) = line.strip_prefix("export_srt=") {
                 self.export_cfg.export_srt = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("recent_session=") {
+                let raw = rest.trim().trim_matches('"');
+                if !raw.is_empty() {
+                    recent_sessions.push(PathBuf::from(raw));
+                }
             } else if let Some(rest) = line.strip_prefix("plugin_search_path=") {
                 let raw = rest.trim().trim_matches('"');
                 if !raw.is_empty() {
@@ -551,6 +561,7 @@ impl WavesPreviewer {
             self.plugin_search_paths = plugin_paths;
             Self::normalize_plugin_search_paths(&mut self.plugin_search_paths);
         }
+        self.set_recent_sessions_from_prefs(recent_sessions);
         self.sanitize_transcript_ai_config();
     }
 
@@ -779,6 +790,12 @@ zoo_flip_manual={}\n",
             out.push_str(&path.to_string_lossy().replace('\n', " "));
             out.push('\n');
         }
+        for p in self.recent_session_paths_for_menu() {
+            let path_text = p.to_string_lossy().replace('\n', " ");
+            out.push_str("recent_session=");
+            out.push_str(&path_text);
+            out.push('\n');
+        }
         for p in &self.plugin_search_paths {
             let path_text = p.to_string_lossy().replace('\n', " ");
             out.push_str("plugin_search_path=");
@@ -789,5 +806,103 @@ zoo_flip_manual={}\n",
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(path, out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_recent_unit_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ms,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn touch(path: &std::path::Path) {
+        std::fs::write(path, "session placeholder").expect("touch session");
+    }
+
+    #[test]
+    fn recent_session_prefs_roundtrip_filters_dedupes_and_limits() {
+        let dir = temp_dir("prefs_roundtrip");
+        let first = dir.join("first.nwsess");
+        let second = dir.join("second.nwsess");
+        let third = dir.join("third.nwsess");
+        let fourth = dir.join("fourth.nwsess");
+        let legacy = dir.join("legacy.nwproj");
+        let missing = dir.join("missing.nwsess");
+        for path in [&first, &second, &third, &fourth, &legacy] {
+            touch(path);
+        }
+        let prefs = dir.join("prefs.txt");
+
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.set_recent_sessions_from_prefs(vec![
+            first.clone(),
+            second.clone(),
+            second.clone(),
+            legacy,
+            missing,
+            third.clone(),
+            fourth,
+        ]);
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.set_recent_sessions_from_prefs(Vec::new());
+        loaded.load_prefs_from_path(&prefs);
+
+        let expected = vec![
+            std::fs::canonicalize(first).expect("first canonical"),
+            std::fs::canonicalize(second).expect("second canonical"),
+            std::fs::canonicalize(third).expect("third canonical"),
+        ];
+        assert_eq!(loaded.recent_session_paths_for_menu(), expected);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recent_session_insert_moves_existing_to_front_without_duplicates() {
+        let dir = temp_dir("insert_order");
+        let first = dir.join("first.nwsess");
+        let second = dir.join("second.nwsess");
+        let third = dir.join("third.nwsess");
+        let fourth = dir.join("fourth.nwsess");
+        for path in [&first, &second, &third, &fourth] {
+            touch(path);
+        }
+
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.set_recent_sessions_from_prefs(Vec::new());
+        assert!(app.insert_recent_session_path(&first));
+        assert!(app.insert_recent_session_path(&second));
+        assert!(app.insert_recent_session_path(&third));
+        assert!(app.insert_recent_session_path(&second));
+        assert!(app.insert_recent_session_path(&fourth));
+
+        let expected = vec![
+            std::fs::canonicalize(fourth).expect("fourth canonical"),
+            std::fs::canonicalize(second).expect("second canonical"),
+            std::fs::canonicalize(third).expect("third canonical"),
+        ];
+        assert_eq!(app.recent_session_paths_for_menu(), expected);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

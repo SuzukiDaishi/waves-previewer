@@ -183,7 +183,12 @@ impl crate::app::WavesPreviewer {
                                 if let Some(root) = self.root.clone() {
                                     self.start_scan_folder(root);
                                 } else if self.skip_dotfiles {
-                                    self.items.retain(|item| !Self::is_dotfile_path(&item.path));
+                                    let skip_dotfiles = self.skip_dotfiles;
+                                    self.items.retain(|item| {
+                                        !Self::is_internal_temp_cache_path(&item.path)
+                                            && (!skip_dotfiles
+                                                || !Self::is_dotfile_path(&item.path))
+                                    });
                                     self.rebuild_item_indexes();
                                     self.apply_filter_from_search();
                                     self.apply_sort();

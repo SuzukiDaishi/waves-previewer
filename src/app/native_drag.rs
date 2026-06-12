@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use super::types::{MediaId, MediaSource};
 use super::{ExternalDragTempFile, PendingExternalDrag, WavesPreviewer};
@@ -47,6 +47,7 @@ impl WavesPreviewer {
     }
 
     pub(super) fn flush_pending_external_drag(&mut self, frame: &mut eframe::Frame) {
+        self.cleanup_neowaves_temp_cache_files();
         self.cleanup_external_drag_temp_files();
         let Some(pending) = self.pending_external_drag.take() else {
             return;
@@ -62,6 +63,13 @@ impl WavesPreviewer {
             self.set_external_drag_status("Drag failed: no files prepared");
             return;
         }
+        let paths = match canonicalize_drag_payload_paths(&prepared.paths) {
+            Ok(paths) => paths,
+            Err(err) => {
+                self.set_external_drag_status(format!("Drag failed: {err}"));
+                return;
+            }
+        };
         let now = Instant::now();
         for path in prepared.temp_paths {
             self.external_drag_temp_files
@@ -70,8 +78,17 @@ impl WavesPreviewer {
                     created_at: now,
                 });
         }
-        let count = prepared.paths.len();
-        match start_native_file_drag(frame, &prepared.paths) {
+        let count = paths.len();
+        let result = start_native_file_drag_guarded(|| start_native_file_drag(frame, &paths));
+        self.finish_external_drag_result(count, result);
+    }
+
+    fn finish_external_drag_result(
+        &mut self,
+        count: usize,
+        result: Result<NativeDragOutcome, String>,
+    ) {
+        match result {
             Ok(NativeDragOutcome::Dropped) => {
                 self.set_external_drag_status(format!("Dragged {count} file(s)"));
             }
@@ -226,28 +243,9 @@ impl WavesPreviewer {
         if audio.is_empty() {
             return Err(format!("{display_name}: audio is empty"));
         }
-        let dir = std::env::temp_dir().join("NeoWaves").join("drag");
-        std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("create drag temp dir failed: {err}"))?;
-        let safe = crate::app::helpers::sanitize_filename_component(display_name);
-        let base = Path::new(&safe)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("drag");
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mut path = None;
-        for attempt in 0..1000usize {
-            let candidate = dir.join(format!("{base}_{ts}_{attempt}.wav"));
-            if !candidate.exists() {
-                path = Some(candidate);
-                break;
-            }
-        }
-        let path = path.ok_or_else(|| "could not allocate unique drag temp path".to_string())?;
+        let _ = display_name;
+        let path = super::temp_audio_ops::allocate_neowaves_temp_cache_path("drag", "wav")
+            .ok_or_else(|| "could not allocate unique drag temp path".to_string())?;
         crate::wave::export_selection_wav(
             &audio.channels,
             sample_rate.max(1),
@@ -284,6 +282,28 @@ fn canonical_file_path(path: &Path) -> Result<PathBuf, String> {
         return Err(format!("not a file: {}", path.display()));
     }
     std::fs::canonicalize(path).map_err(|err| format!("canonicalize failed: {err}"))
+}
+
+fn canonicalize_drag_payload_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::with_capacity(paths.len());
+    let mut seen = HashSet::new();
+    for path in paths {
+        let canonical = canonical_file_path(path)?;
+        if seen.insert(canonical.clone()) {
+            out.push(canonical);
+        }
+    }
+    Ok(out)
+}
+
+fn start_native_file_drag_guarded<F>(start: F) -> Result<NativeDragOutcome, String>
+where
+    F: FnOnce() -> Result<NativeDragOutcome, String>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(start)) {
+        Ok(result) => result,
+        Err(_) => Err("native drag panicked".to_string()),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -333,6 +353,7 @@ pub(super) fn start_native_file_drag(
 mod tests {
     use super::*;
     use crate::app::types::{MediaItem, MediaStatus};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let ts = SystemTime::now()
@@ -443,6 +464,14 @@ mod tests {
         assert_eq!(prepared.temp_paths.len(), 1);
         assert_ne!(prepared.paths[0], std::fs::canonicalize(&wav).unwrap());
         assert!(prepared.paths[0].is_file());
+        assert!(
+            !prepared.paths[0]
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .contains("source"),
+            "drag cache file name should not expose source file name"
+        );
     }
 
     #[test]
@@ -505,5 +534,25 @@ mod tests {
         assert_eq!(prepared.temp_paths.len(), 2);
         assert_ne!(prepared.paths[0], prepared.paths[1]);
         assert!(prepared.paths.iter().all(|path| path.is_file()));
+    }
+
+    #[test]
+    fn external_drag_guard_converts_native_panic_to_error() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = start_native_file_drag_guarded(|| -> Result<NativeDragOutcome, String> {
+            panic!("simulated native drag panic");
+        });
+        std::panic::set_hook(hook);
+        let err = result.expect_err("panic should be converted into an error");
+        assert!(err.contains("native drag panicked"));
+    }
+
+    #[test]
+    fn external_drag_payload_canonicalize_rejects_missing_file() {
+        let dir = temp_dir("canonical_missing");
+        let missing = dir.join("missing.wav");
+        let err = canonicalize_drag_payload_paths(&[missing]).expect_err("missing path");
+        assert!(err.contains("not a file"));
     }
 }

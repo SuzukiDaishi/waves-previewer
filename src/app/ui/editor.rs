@@ -2259,7 +2259,7 @@ impl crate::app::WavesPreviewer {
             avail.y
         };
         {
-        let draw_editor_body = |ui: &mut egui::Ui| {
+            let draw_editor_body = |ui: &mut egui::Ui| {
                 let tab = &mut self.tabs[tab_idx];
                 let preview_ok = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
                 let simplified_preview_note = if !preview_ok {
@@ -4768,7 +4768,7 @@ impl crate::app::WavesPreviewer {
                         .id_salt(("editor_inspector_scroll", tab_idx))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                    let activity_h = 52.0;
+                    let activity_h = 72.0;
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), activity_h),
                         egui::Layout::top_down(egui::Align::Min),
@@ -4777,16 +4777,17 @@ impl crate::app::WavesPreviewer {
                             if let Some(status) = decode_status.as_ref() {
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new());
-                                    let label_w = (ui.available_width() - 76.0).max(64.0);
                                     ui.add_sized(
-                                        [label_w, 20.0],
+                                        [ui.available_width().max(64.0), 20.0],
                                         egui::Label::new(
                                             RichText::new(status.message.as_str()).strong(),
                                         )
                                         .truncate()
                                         .show_tooltip_when_elided(true),
                                     );
-                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Cancel").clicked() {
                                         cancel_decode = true;
                                     }
                                 });
@@ -4799,14 +4800,15 @@ impl crate::app::WavesPreviewer {
                             } else if let Some(apply_msg) = apply_msg.as_ref() {
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new());
-                                    let label_w = (ui.available_width() - 76.0).max(64.0);
                                     ui.add_sized(
-                                        [label_w, 20.0],
+                                        [ui.available_width().max(64.0), 20.0],
                                         egui::Label::new(RichText::new(apply_msg.as_str()).strong())
                                             .truncate()
                                             .show_tooltip_when_elided(true),
                                     );
-                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Cancel").clicked() {
                                         cancel_apply = true;
                                     }
                                 });
@@ -4814,30 +4816,32 @@ impl crate::app::WavesPreviewer {
                                 let elapsed = started_at.elapsed().as_secs_f32();
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new());
-                                    let label_w = (ui.available_width() - 76.0).max(64.0);
                                     ui.add_sized(
-                                        [label_w, 20.0],
+                                        [ui.available_width().max(64.0), 20.0],
                                         egui::Label::new(
                                             RichText::new(format!("{} ({:.1}s)", msg, elapsed)).weak(),
                                         )
                                         .truncate()
                                         .show_tooltip_when_elided(true),
                                     );
-                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Cancel").clicked() {
                                         cancel_processing = true;
                                     }
                                 });
                             } else if let Some(msg) = preview_msg.as_ref() {
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new());
-                                    let label_w = (ui.available_width() - 76.0).max(64.0);
                                     ui.add_sized(
-                                        [label_w, 20.0],
+                                        [ui.available_width().max(64.0), 20.0],
                                         egui::Label::new(RichText::new(msg.as_str()).weak())
                                             .truncate()
                                             .show_tooltip_when_elided(true),
                                     );
-                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Cancel").clicked() {
                                         cancel_preview = true;
                                     }
                                 });
@@ -4852,9 +4856,8 @@ impl crate::app::WavesPreviewer {
                                 let elapsed = started_at.elapsed().as_secs_f32();
                                 ui.horizontal(|ui| {
                                     ui.add(egui::Spinner::new());
-                                    let label_w = (ui.available_width() - 76.0).max(64.0);
                                     ui.add_sized(
-                                        [label_w, 20.0],
+                                        [ui.available_width().max(64.0), 20.0],
                                         egui::Label::new(
                                             RichText::new(format!(
                                                 "{}... ({:.1}s)",
@@ -4865,7 +4868,9 @@ impl crate::app::WavesPreviewer {
                                         .truncate()
                                         .show_tooltip_when_elided(true),
                                     );
-                                    if ui.add_sized([68.0, 22.0], egui::Button::new("Cancel")).clicked() {
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Cancel").clicked() {
                                         match current_view {
                                             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                                                 cancel_spectro = true;
@@ -4916,17 +4921,24 @@ impl crate::app::WavesPreviewer {
                         let start_sec = (a as f32 / sr).max(0.0);
                         let end_sec = (b as f32 / sr).max(0.0);
                         let len_sec = (len as f32 / sr).max(0.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "{kind}: {a}..{b} ({len} smp) / {}..{} ({})",
-                                crate::app::helpers::format_time_s(start_sec),
-                                crate::app::helpers::format_time_s(end_sec),
-                                crate::app::helpers::format_time_s(len_sec)
-                            ))
-                            .monospace(),
+                        let range_text = format!(
+                            "{kind}: {a}..{b} ({len} smp) / {}..{} ({})",
+                            crate::app::helpers::format_time_s(start_sec),
+                            crate::app::helpers::format_time_s(end_sec),
+                            crate::app::helpers::format_time_s(len_sec)
+                        );
+                        ui.add_sized(
+                            [ui.available_width(), 20.0],
+                            egui::Label::new(RichText::new(range_text).monospace())
+                                .truncate()
+                                .show_tooltip_when_elided(true),
                         );
                     } else {
-                        ui.label(RichText::new("Range: -").monospace().weak());
+                        ui.add_sized(
+                            [ui.available_width(), 20.0],
+                            egui::Label::new(RichText::new("Range: -").monospace().weak())
+                                .truncate(),
+                        );
                     }
                     ui.separator();
                     let leaf_view = tab.leaf_view_mode();
@@ -7417,8 +7429,12 @@ impl crate::app::WavesPreviewer {
                 if pending_music_apply_preview {
                     self.apply_music_preview_to_tab(tab_idx);
                 }
-                if stop_playback { self.audio.stop(); }
-                if need_restore_preview { self.clear_preview_if_any(tab_idx); }
+                if stop_playback {
+                    self.audio.stop();
+                }
+                if need_restore_preview {
+                    self.clear_preview_if_any(tab_idx);
+                }
                 if request_preview_refresh {
                     self.clear_heavy_preview_state();
                     self.clear_heavy_overlay_state();
@@ -7440,8 +7456,7 @@ impl crate::app::WavesPreviewer {
                             tab.view_offset_exact,
                             tab_samples_len,
                         );
-                        let clamped_seek =
-                            seek_geom.clamp_display_sample(seek_display);
+                        let clamped_seek = seek_geom.clamp_display_sample(seek_display);
                         if !seek_geom.contains_sample_center(clamped_seek) {
                             let centered = clamped_seek.saturating_sub(seek_geom.visible_count / 2);
                             Self::editor_set_view_offset_exact(
@@ -7452,7 +7467,9 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                 }
-                if let Some((tool_kind, mono)) = pending_preview { self.set_preview_mono(tab_idx, tool_kind, mono); }
+                if let Some((tool_kind, mono)) = pending_preview {
+                    self.set_preview_mono(tab_idx, tool_kind, mono);
+                }
             };
             if stacked_editor {
                 ui.vertical(|ui| {
