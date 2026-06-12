@@ -1401,7 +1401,9 @@ impl crate::app::WavesPreviewer {
         values: &[PluginParamValue],
     ) -> usize {
         let mut applied = 0usize;
-        for value in values.iter().take(64) {
+        // GUI クローズ時には全パラメータのスナップショットが届くため、
+        // 件数を打ち切るとパラメータ数の多いプラグインで値が反映されない。
+        for value in values {
             if let Some(param) = tab
                 .plugin_fx_draft
                 .params
@@ -1420,7 +1422,7 @@ impl crate::app::WavesPreviewer {
         values: &[PluginParamValue],
     ) -> usize {
         let mut applied = 0usize;
-        for value in values.iter().take(256) {
+        for value in values {
             if let Some(param) = config.params.iter_mut().find(|p| p.id == value.id) {
                 param.normalized = value.normalized.clamp(0.0, 1.0);
                 applied += 1;
