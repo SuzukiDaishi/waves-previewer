@@ -190,7 +190,7 @@ mod native {
     }
 
     fn select_descriptor(
-        bundle: &PluginBundle,
+        bundle: &PluginEntry,
         plugin_path: &Path,
     ) -> Result<(CString, String, Vec<String>), String> {
         let factory = bundle
@@ -227,14 +227,14 @@ mod native {
         plugin_path: &Path,
     ) -> Result<
         (
-            PluginBundle,
+            PluginEntry,
             PluginInstance<ClapHostHandlers>,
             String,
             Vec<String>,
         ),
         String,
     > {
-        let bundle = unsafe { PluginBundle::load(plugin_path) }
+        let bundle = unsafe { PluginEntry::load(plugin_path) }
             .map_err(|e| format!("clap load failed: {e}"))?;
         let (plugin_id, plugin_name, features) = select_descriptor(&bundle, plugin_path)?;
         let host_info = host_info()?;
@@ -483,7 +483,7 @@ mod native {
     }
 
     fn first_descriptor_name_and_id(plugin_path: &Path) -> Result<(String, String), String> {
-        let bundle = unsafe { PluginBundle::load(plugin_path) }
+        let bundle = unsafe { PluginEntry::load(plugin_path) }
             .map_err(|e| format!("clap load failed: {e}"))?;
         let (_, name, _) = select_descriptor(&bundle, plugin_path)?;
         let factory = bundle
@@ -510,7 +510,7 @@ mod native {
     }
 
     fn first_descriptor_features(plugin_path: &Path) -> Result<Vec<String>, String> {
-        let bundle = unsafe { PluginBundle::load(plugin_path) }
+        let bundle = unsafe { PluginEntry::load(plugin_path) }
             .map_err(|e| format!("clap load failed: {e}"))?;
         let factory = bundle
             .get_plugin_factory()
@@ -776,7 +776,7 @@ mod native {
     }
 
     pub(crate) struct GuiSession {
-        _bundle: PluginBundle,
+        _bundle: PluginEntry,
         instance: PluginInstance<ClapHostHandlers>,
         gui_ext: PluginGui,
         gui_open: bool,

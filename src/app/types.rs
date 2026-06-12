@@ -65,7 +65,9 @@ pub struct MediaItem {
     pub meta: Option<FileMeta>,
     pub pending_gain_db: f32,
     pub status: MediaStatus,
-    pub transcript: Option<Transcript>,
+    /// Arc so cloning a `MediaItem` (the list view clones one per visible row)
+    /// does not deep-copy the full transcript text and segments.
+    pub transcript: Option<Arc<Transcript>>,
     pub transcript_language: Option<String>,
     pub external: HashMap<String, String>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
@@ -793,9 +795,18 @@ pub struct PreviewOverlay {
     pub source_tool: ToolKind,
     pub timeline_len: usize,
     pub detail_kind: PreviewOverlayDetailKind,
+    /// Monotonically increasing id distinguishing overlay payloads. Used as a
+    /// render-cache key; buffer pointers alone can collide when the allocator
+    /// reuses a freed block of identical size.
+    pub revision: u64,
 }
 
 impl PreviewOverlay {
+    pub fn next_revision() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
     pub fn is_full_sample(&self) -> bool {
         self.detail_kind == PreviewOverlayDetailKind::FullSample && !self.channels.is_empty()
     }
@@ -1375,6 +1386,9 @@ pub struct EditorDecodeResult {
     pub path: PathBuf,
     pub event: EditorDecodeEvent,
     pub channels: Vec<Vec<f32>>,
+    /// Same audio as `channels`, cloned on the worker thread so the UI thread
+    /// does not deep-copy the full buffer when adopting a `FinalReady` result.
+    pub channels_arc: Option<Arc<Vec<Vec<f32>>>>,
     pub waveform_minmax: Vec<(f32, f32)>,
     pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub loading_waveform_minmax: Vec<(f32, f32)>,

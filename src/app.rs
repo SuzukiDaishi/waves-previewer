@@ -493,6 +493,16 @@ pub struct WavesPreviewer {
     pub wave_row_h: f32,
     pub list_columns: ListColumnConfig,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
+    /// TTL cache for `Path::is_file()` checks in the list view. Probing the
+    /// filesystem for every visible row on every frame stalls the UI thread,
+    /// especially on network shares.
+    fs_exists_cache: HashMap<PathBuf, (bool, std::time::Instant)>,
+    /// Compiled highlight regex for the current `(search_query, search_use_regex)`.
+    /// `None` inner value means the query does not compile / is empty.
+    search_highlight_cache: Option<(String, bool, Option<regex::Regex>)>,
+    /// Cached overlay min/max columns for the editor preview overlay, keyed by
+    /// view parameters. Avoids re-scanning the whole overlay buffer per frame.
+    overlay_bins_cache: render::overlay_cache::OverlayBinsCache,
     show_list_art_window: bool,
     list_art_window_path: Option<PathBuf>,
     list_art_window_texture: Option<egui::TextureHandle>,

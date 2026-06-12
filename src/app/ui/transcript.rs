@@ -1,4 +1,4 @@
-use egui::{text::LayoutJob, RichText, Sense};
+use egui::{RichText, Sense};
 
 impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_transcript_window(&mut self, ctx: &egui::Context) {
@@ -27,6 +27,8 @@ impl crate::app::WavesPreviewer {
                     return;
                 };
                 let mut seek_ms: Option<u64> = None;
+                // Compile the highlight regex once per frame, not per segment.
+                let highlight_re = self.cached_highlight_regex();
                 ui.separator();
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for seg in &transcript.segments {
@@ -39,12 +41,13 @@ impl crate::app::WavesPreviewer {
                                 seek_ms = Some(seg.start_ms);
                             }
                             let text = seg.text.as_str();
-                            let label = if let Some(job) = highlight_job(
-                                text,
-                                &self.search_query,
-                                self.search_use_regex,
-                                ui.style(),
-                            ) {
+                            let label = if let Some(job) = highlight_re.as_ref().and_then(|re| {
+                                crate::app::helpers::highlight_text_job_with_regex(
+                                    text,
+                                    re,
+                                    ui.style(),
+                                )
+                            }) {
                                 egui::Label::new(job).wrap()
                             } else {
                                 egui::Label::new(RichText::new(text)).wrap()
@@ -70,11 +73,3 @@ fn format_timestamp_ms(ms: u64) -> String {
     format!("{m}:{s:02}.{ms:03}")
 }
 
-fn highlight_job(
-    text: &str,
-    query: &str,
-    use_regex: bool,
-    style: &egui::Style,
-) -> Option<LayoutJob> {
-    crate::app::helpers::highlight_text_job(text, query, use_regex, style)
-}

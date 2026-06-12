@@ -19,6 +19,31 @@ impl WavesPreviewer {
             .is_some()
     }
 
+    /// `Path::is_file()` with a short TTL cache. The list view calls this for
+    /// every visible row; doing a real stat() per row per frame stalls the UI
+    /// thread (badly so on network shares). Stale entries refresh within 2s.
+    pub(super) fn path_is_file_cached(&mut self, path: &Path) -> bool {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        let now = std::time::Instant::now();
+        if let Some((exists, checked_at)) = self.fs_exists_cache.get(path) {
+            if now.duration_since(*checked_at) < TTL {
+                return *exists;
+            }
+        }
+        let exists = path.is_file();
+        // Bound memory on very large lists; entries repopulate on demand.
+        if self.fs_exists_cache.len() >= 100_000 {
+            self.fs_exists_cache.clear();
+        }
+        self.fs_exists_cache.insert(path.to_path_buf(), (exists, now));
+        exists
+    }
+
+    /// Drop a single cached existence entry (call after deleting/renaming a file).
+    pub(super) fn invalidate_fs_exists_cache_for_path(&mut self, path: &Path) {
+        self.fs_exists_cache.remove(path);
+    }
+
     pub(super) fn item_for_id(&self, id: MediaId) -> Option<&MediaItem> {
         self.item_index
             .get(&id)
@@ -184,7 +209,7 @@ impl WavesPreviewer {
 
     pub(super) fn transcript_for_path(&self, path: &Path) -> Option<&Transcript> {
         self.item_for_path(path)
-            .and_then(|item| item.transcript.as_ref())
+            .and_then(|item| item.transcript.as_deref())
     }
 
     pub(super) fn set_transcript_for_path(
@@ -194,7 +219,7 @@ impl WavesPreviewer {
     ) -> bool {
         let has_transcript = transcript.is_some();
         if let Some(item) = self.item_for_path_mut(path) {
-            item.transcript = transcript;
+            item.transcript = transcript.map(std::sync::Arc::new);
             if item.transcript.is_none() {
                 item.transcript_language = None;
             }
