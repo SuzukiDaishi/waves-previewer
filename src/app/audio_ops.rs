@@ -1,5 +1,7 @@
+use std::time::{Duration, Instant};
+
 use super::helpers::db_to_amp;
-use super::WavesPreviewer;
+use super::{AudioDeviceSnapshot, WavesPreviewer, AUDIO_DEVICE_POLL_INTERVAL_MS};
 
 impl WavesPreviewer {
     pub(super) fn ensure_output_sample_rate(&mut self, preferred_sr: Option<u32>) -> bool {
@@ -14,10 +16,7 @@ impl WavesPreviewer {
             return true;
         }
 
-        let requested = self
-            .audio_output_device_name
-            .clone()
-            .or_else(|| self.audio.output_device_name().map(|v| v.to_string()));
+        let requested = self.audio_output_device_name.clone();
         let try_engine = crate::audio::AudioEngine::new_with_output_device_name_and_sample_rate(
             requested.as_deref(),
             Some(preferred_sr),
@@ -25,12 +24,8 @@ impl WavesPreviewer {
         match try_engine {
             Ok(engine) => {
                 let actual_sr = engine.shared.out_sample_rate.max(1);
-                let actual = engine
-                    .output_device_name()
-                    .map(|v| v.to_string())
-                    .filter(|v| !v.trim().is_empty());
                 self.audio = engine;
-                self.audio_output_device_name = requested.or(actual);
+                self.audio_output_device_name = requested;
                 self.audio_output_error = if actual_sr != preferred_sr {
                     Some(format!(
                         "Preferred output sample rate {preferred_sr}Hz is not available on current output device. Using {actual_sr}Hz."
@@ -124,31 +119,162 @@ impl WavesPreviewer {
         }
         match crate::audio::AudioEngine::list_output_devices() {
             Ok(devices) => {
-                self.audio_output_devices = devices;
-                if let Some(name) = self.audio_output_device_name.clone() {
-                    if !self.audio_output_devices.iter().any(|d| d == &name) {
-                        if let Some(resolved) =
-                            crate::audio::AudioEngine::resolve_output_device_name_for_list(
-                                &name,
-                                &self.audio_output_devices,
-                            )
-                        {
-                            self.audio_output_device_name = Some(resolved);
-                            self.audio_output_error = None;
-                            return;
-                        }
-                        self.audio_output_error = Some(format!(
-                            "Output device not available: {name}. Using default."
-                        ));
-                        self.audio_output_device_name = None;
-                    }
-                }
+                self.apply_audio_output_devices_list(devices);
             }
             Err(err) => {
                 self.audio_output_devices.clear();
                 self.audio_output_error = Some(format!("Failed to list output devices: {err}"));
             }
         }
+    }
+
+    fn apply_audio_output_devices_list(&mut self, devices: Vec<String>) {
+        self.audio_output_devices = devices;
+        let Some(name) = self.audio_output_device_name.clone() else {
+            if self
+                .audio_output_error
+                .as_deref()
+                .map(|err| err.starts_with("Failed to list output devices:"))
+                .unwrap_or(false)
+            {
+                self.audio_output_error = None;
+            }
+            return;
+        };
+        if self.audio_output_devices.iter().any(|d| d == &name) {
+            if self
+                .audio_output_error
+                .as_deref()
+                .map(|err| err.starts_with("Output device not available:"))
+                .unwrap_or(false)
+            {
+                self.audio_output_error = None;
+            }
+            return;
+        }
+        if let Some(resolved) = crate::audio::AudioEngine::resolve_output_device_name_for_list(
+            &name,
+            &self.audio_output_devices,
+        ) {
+            self.audio_output_device_name = Some(resolved);
+            self.audio_output_error = None;
+            return;
+        }
+        self.audio_output_error = Some(format!("Output device not available: {name}."));
+    }
+
+    fn capture_audio_device_snapshot() -> AudioDeviceSnapshot {
+        let output_devices =
+            crate::audio::AudioEngine::list_output_devices().map_err(|err| err.to_string());
+        let default_output_name = crate::audio::AudioEngine::default_output_device_name()
+            .ok()
+            .flatten();
+        let input_devices = crate::audio_capture::list_input_devices();
+        let default_input_id =
+            crate::audio_capture::default_input_device_info().map(|info| info.id);
+        AudioDeviceSnapshot {
+            output_devices,
+            default_output_name,
+            input_devices,
+            default_input_id,
+        }
+    }
+
+    pub(super) fn tick_audio_device_watch(&mut self, now: Instant) {
+        self.drain_audio_device_watch();
+        if !self.audio.has_output_stream()
+            || self.audio_device_watch.rx.is_some()
+            || now < self.audio_device_watch.next_poll_at
+        {
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.audio_device_watch.rx = Some(rx);
+        self.audio_device_watch.next_poll_at =
+            now + Duration::from_millis(AUDIO_DEVICE_POLL_INTERVAL_MS);
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::capture_audio_device_snapshot());
+        });
+    }
+
+    fn drain_audio_device_watch(&mut self) {
+        let Some(rx) = self.audio_device_watch.rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(snapshot) => self.apply_audio_device_snapshot(snapshot),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.audio_device_watch.rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
+    pub(super) fn apply_audio_device_snapshot(&mut self, snapshot: AudioDeviceSnapshot) {
+        match snapshot.output_devices {
+            Ok(devices) => self.apply_audio_output_devices_list(devices),
+            Err(err) => {
+                self.audio_output_devices.clear();
+                self.audio_output_error = Some(format!("Failed to list output devices: {err}"));
+            }
+        }
+
+        self.audio_device_watch.last_default_output_name = snapshot.default_output_name.clone();
+        self.audio_device_watch.last_default_input_id = snapshot.default_input_id.clone();
+        if self.recording_allows_device_list_refresh() {
+            self.recording_tab.input_devices = snapshot.input_devices;
+        }
+        self.apply_default_output_follow_for_snapshot(snapshot.default_output_name.as_deref());
+    }
+
+    fn recording_allows_device_list_refresh(&self) -> bool {
+        !matches!(
+            self.recording_tab.state,
+            crate::app::types::RecordingState::Recording
+                | crate::app::types::RecordingState::Paused
+                | crate::app::types::RecordingState::Finalizing
+        )
+    }
+
+    pub(super) fn default_output_follow_target(
+        &self,
+        default_output_name: Option<&str>,
+    ) -> Option<String> {
+        if self.audio_output_device_name.is_some()
+            || self.playback_is_playing_now()
+            || self.playback_session.is_playing
+            || !self.recording_allows_device_list_refresh()
+        {
+            return None;
+        }
+        let default_output_name = default_output_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())?;
+        let current_output_name = self
+            .audio
+            .output_device_name()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())?;
+        if current_output_name == default_output_name {
+            None
+        } else {
+            Some(default_output_name.to_string())
+        }
+    }
+
+    fn apply_default_output_follow_for_snapshot(
+        &mut self,
+        default_output_name: Option<&str>,
+    ) -> bool {
+        if self.audio.has_output_stream()
+            && self
+                .default_output_follow_target(default_output_name)
+                .is_some()
+        {
+            return self.apply_audio_output_device_selection_inner(None, false, false);
+        }
+        false
     }
 
     fn sync_after_audio_engine_replaced(&mut self) {
@@ -175,6 +301,15 @@ impl WavesPreviewer {
         &mut self,
         next: Option<String>,
         persist: bool,
+    ) -> bool {
+        self.apply_audio_output_device_selection_inner(next, persist, true)
+    }
+
+    fn apply_audio_output_device_selection_inner(
+        &mut self,
+        next: Option<String>,
+        persist: bool,
+        refresh_devices: bool,
     ) -> bool {
         let requested = next.and_then(|v| {
             let trimmed = v.trim();
@@ -210,15 +345,13 @@ impl WavesPreviewer {
             crate::audio::AudioEngine::new_with_output_device_name(requested.as_deref());
         match try_engine {
             Ok(engine) => {
-                let actual = engine
-                    .output_device_name()
-                    .map(|v| v.to_string())
-                    .filter(|v| !v.trim().is_empty());
                 self.audio = engine;
-                self.audio_output_device_name = requested.or(actual);
+                self.audio_output_device_name = requested;
                 self.audio_output_error = None;
                 self.sync_after_audio_engine_replaced();
-                self.refresh_audio_output_devices();
+                if refresh_devices {
+                    self.refresh_audio_output_devices();
+                }
                 if persist {
                     self.save_prefs();
                 }
@@ -234,7 +367,9 @@ impl WavesPreviewer {
                                 "Failed to switch output device: {err}. Fallback to default output."
                             ));
                             self.sync_after_audio_engine_replaced();
-                            self.refresh_audio_output_devices();
+                            if refresh_devices {
+                                self.refresh_audio_output_devices();
+                            }
                             if persist {
                                 self.save_prefs();
                             }

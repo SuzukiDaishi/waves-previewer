@@ -492,6 +492,14 @@ impl AudioEngine {
         Ok(names)
     }
 
+    pub(crate) fn default_output_device_name() -> Result<Option<String>> {
+        let host = cpal::default_host();
+        let Some(device) = host.default_output_device() else {
+            return Ok(None);
+        };
+        Ok(Self::device_display_name(&device))
+    }
+
     pub fn new_with_output_device_name(name: Option<&str>) -> Result<Self> {
         Self::new_with_output_device_name_and_sample_rate(name, None)
     }

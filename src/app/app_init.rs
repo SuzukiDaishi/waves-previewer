@@ -21,6 +21,7 @@ impl WavesPreviewer {
             audio_output_device_name: None,
             audio_output_devices: Vec::new(),
             audio_output_error: None,
+            audio_device_watch: AudioDeviceWatchState::default(),
             playback_rate: 1.0,
             playback_session: PlaybackSessionState::default(),
             playback_fx_state: None,
@@ -329,6 +330,7 @@ impl WavesPreviewer {
 
             debug: debug_state,
             debug_summary_seq: 0,
+            crash_reports: CrashReportState::default(),
             ipc_rx,
             #[cfg(feature = "kittest")]
             test_dialogs: TestDialogQueue::default(),
@@ -337,6 +339,7 @@ impl WavesPreviewer {
         };
         app.load_prefs();
         app.cleanup_neowaves_temp_cache_files();
+        app.refresh_crash_reports_on_startup();
         app.refresh_audio_output_devices();
         if app.audio_output_device_name.is_some() {
             let preferred = app.audio_output_device_name.clone();

@@ -6,6 +6,8 @@ use super::*;
 impl super::WavesPreviewer {
     pub(super) fn recording_refresh_devices(&mut self) {
         self.recording_tab.input_devices = crate::audio_capture::list_input_devices();
+        self.audio_device_watch.last_default_input_id =
+            crate::audio_capture::default_input_device_info().map(|info| info.id);
     }
 
     pub(super) fn start_recording(&mut self) {

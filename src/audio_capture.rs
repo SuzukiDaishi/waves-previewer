@@ -25,6 +25,21 @@ fn device_name(device: &cpal::Device) -> Option<String> {
     }
 }
 
+fn device_info(device: &cpal::Device) -> Option<RecordingDeviceInfo> {
+    let name = device_name(device)?;
+    let (channels, sr) = if let Ok(cfg) = device.default_input_config() {
+        (cfg.channels(), cfg.sample_rate())
+    } else {
+        (1, 44100)
+    };
+    Some(RecordingDeviceInfo {
+        id: name.clone(),
+        display_name: name,
+        channels,
+        default_sample_rate: sr,
+    })
+}
+
 pub fn list_input_devices() -> Vec<RecordingDeviceInfo> {
     let host = cpal::default_host();
     let Ok(devices) = host.input_devices() else {
@@ -32,22 +47,17 @@ pub fn list_input_devices() -> Vec<RecordingDeviceInfo> {
     };
     let mut out = Vec::new();
     for device in devices {
-        let Some(name) = device_name(&device) else {
-            continue;
-        };
-        let (channels, sr) = if let Ok(cfg) = device.default_input_config() {
-            (cfg.channels(), cfg.sample_rate())
-        } else {
-            (1, 44100)
-        };
-        out.push(RecordingDeviceInfo {
-            id: name.clone(),
-            display_name: name,
-            channels,
-            default_sample_rate: sr,
-        });
+        if let Some(info) = device_info(&device) {
+            out.push(info);
+        }
     }
     out
+}
+
+pub(crate) fn default_input_device_info() -> Option<RecordingDeviceInfo> {
+    let host = cpal::default_host();
+    let device = host.default_input_device()?;
+    device_info(&device)
 }
 
 pub fn start_microphone_capture(

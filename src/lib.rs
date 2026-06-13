@@ -3,6 +3,7 @@ pub mod audio;
 pub mod audio_capture;
 pub mod audio_io;
 pub mod cli;
+pub mod crash_report;
 pub mod ipc;
 pub mod loop_markers;
 pub mod markers;

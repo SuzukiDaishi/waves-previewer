@@ -98,6 +98,56 @@ impl super::WavesPreviewer {
         self.apply_audio_output_device_selection(next.map(|v| v.to_string()), persist)
     }
 
+    pub fn test_audio_output_default_follow_target(
+        &self,
+        default_output_name: Option<&str>,
+    ) -> Option<String> {
+        self.default_output_follow_target(default_output_name)
+    }
+
+    pub fn test_set_audio_playing_flag(&mut self, playing: bool) {
+        self.audio
+            .shared
+            .playing
+            .store(playing, std::sync::atomic::Ordering::Relaxed);
+        self.playback_session.is_playing = playing;
+    }
+
+    pub fn test_apply_audio_device_snapshot(
+        &mut self,
+        output_devices: Result<Vec<String>, String>,
+        default_output_name: Option<&str>,
+        input_devices: Vec<crate::audio_capture::RecordingDeviceInfo>,
+        default_input_id: Option<&str>,
+    ) {
+        self.apply_audio_device_snapshot(super::AudioDeviceSnapshot {
+            output_devices,
+            default_output_name: default_output_name.map(|v| v.to_string()),
+            input_devices,
+            default_input_id: default_input_id.map(|v| v.to_string()),
+        });
+    }
+
+    pub fn test_set_recording_input_device_pref(&mut self, id: Option<&str>) {
+        self.recording_tab.selected_mic_id = id.map(|v| v.to_string());
+    }
+
+    pub fn test_recording_input_device_pref(&self) -> Option<String> {
+        self.recording_tab.selected_mic_id.clone()
+    }
+
+    pub fn test_recording_input_device_ids(&self) -> Vec<String> {
+        self.recording_tab
+            .input_devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect()
+    }
+
+    pub fn test_last_default_input_id(&self) -> Option<String> {
+        self.audio_device_watch.last_default_input_id.clone()
+    }
+
     pub fn test_save_prefs_to_path(&self, path: &Path) {
         self.save_prefs_to_path(path);
     }
@@ -2449,6 +2499,32 @@ impl super::WavesPreviewer {
 
     pub fn test_debug_summary_text(&self) -> String {
         self.debug_summary()
+    }
+
+    pub fn test_crash_report_window_open(&self) -> bool {
+        self.crash_reports.window_open
+    }
+
+    pub fn test_crash_report_count(&self) -> usize {
+        self.crash_reports.reports.len()
+    }
+
+    pub fn test_open_crash_report_window(&mut self) {
+        self.open_crash_report_window();
+    }
+
+    pub fn test_mark_latest_crash_report_reviewed(&mut self) -> bool {
+        let Some(id) = self.crash_reports.reports.first().map(|report| report.id.clone()) else {
+            return false;
+        };
+        if crate::crash_report::acknowledge_report(&id).is_err() {
+            return false;
+        }
+        self.refresh_crash_reports();
+        if self.crash_reports.reports.is_empty() {
+            self.crash_reports.window_open = false;
+        }
+        true
     }
 
     pub fn test_effect_graph_workspace_open(&self) -> bool {

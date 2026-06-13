@@ -25,6 +25,7 @@ mod capture;
 mod cli_ops;
 mod cli_workspace;
 mod clipboard_ops;
+mod crash_report_ops;
 mod debug_ops;
 mod dialogs;
 mod editor_decode_ops;
@@ -118,6 +119,7 @@ const LIST_PREVIEW_PREFETCH_INFLIGHT_MAX: usize = 2;
 const LIST_BG_META_LARGE_THRESHOLD: usize = 8_000;
 const LIST_BG_META_INFLIGHT_LIMIT: usize = 192;
 const LIST_PLAY_EMIT_SECS: f32 = 0.75;
+const AUDIO_DEVICE_POLL_INTERVAL_MS: u64 = 1_000;
 const EDITOR_MIN_VERTICAL_ZOOM: f32 = 0.25;
 const EDITOR_MAX_VERTICAL_ZOOM: f32 = 32.0;
 const EDITOR_MIN_SAMPLES_PER_PX: f32 = 0.0025;
@@ -153,6 +155,32 @@ struct PendingExternalDrag {
 struct ExternalDragTempFile {
     path: PathBuf,
     created_at: std::time::Instant,
+}
+
+#[derive(Clone, Debug)]
+struct AudioDeviceSnapshot {
+    output_devices: Result<Vec<String>, String>,
+    default_output_name: Option<String>,
+    input_devices: Vec<RecordingDeviceInfo>,
+    default_input_id: Option<String>,
+}
+
+struct AudioDeviceWatchState {
+    next_poll_at: std::time::Instant,
+    rx: Option<std::sync::mpsc::Receiver<AudioDeviceSnapshot>>,
+    last_default_output_name: Option<String>,
+    last_default_input_id: Option<String>,
+}
+
+impl Default for AudioDeviceWatchState {
+    fn default() -> Self {
+        Self {
+            next_poll_at: std::time::Instant::now(),
+            rx: None,
+            last_default_output_name: None,
+            last_default_input_id: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -345,6 +373,13 @@ struct PlaybackFxResult {
     audio: Arc<AudioBuffer>,
 }
 
+#[derive(Default)]
+struct CrashReportState {
+    reports: Vec<crate::crash_report::CrashReportEntry>,
+    window_open: bool,
+    status: Option<String>,
+}
+
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
@@ -358,6 +393,7 @@ pub struct WavesPreviewer {
     audio_output_device_name: Option<String>,
     audio_output_devices: Vec<String>,
     audio_output_error: Option<String>,
+    audio_device_watch: AudioDeviceWatchState,
     pub playback_rate: f32,
     playback_session: PlaybackSessionState,
     playback_fx_state: Option<PlaybackFxRenderState>,
@@ -696,6 +732,7 @@ pub struct WavesPreviewer {
     // debug/automation
     debug: DebugState,
     debug_summary_seq: u64,
+    crash_reports: CrashReportState,
     ipc_rx: Option<std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ipc::IpcRequest>>>>,
     #[cfg(feature = "kittest")]
     test_dialogs: TestDialogQueue,

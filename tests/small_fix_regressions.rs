@@ -2,12 +2,14 @@
 mod small_fix_regressions {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use egui::{Key, Modifiers};
     use egui_kittest::{kittest::Queryable, Harness};
     use hound::{SampleFormat, WavSpec, WavWriter};
     use neowaves::app::ToolKind;
+    use neowaves::audio_capture::RecordingDeviceInfo;
     use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
 
@@ -29,11 +31,77 @@ mod small_fix_regressions {
         dir
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        old_value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let old_value = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.old_value.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn with_crash_report_dir<T>(tag: &str, f: impl FnOnce(&Path) -> T) -> T {
+        static CRASH_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = CRASH_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = make_temp_dir(tag);
+        let _guard = EnvVarGuard::set("NEOWAVES_CRASH_REPORT_DIR", &dir);
+        let result = f(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    fn write_fake_crash_report(dir: &Path, pid_suffix: &str) -> String {
+        std::fs::create_dir_all(dir).expect("create crash report dir");
+        let id = format!("crash_20260613_010203_{pid_suffix}");
+        let path = dir.join(format!("{id}.md"));
+        std::fs::write(
+            path,
+            format!(
+                "# NeoWaves Crash Report\n\n\
+                 - **Report ID:** {id}\n\
+                 - **Created At:** 2026-06-13 01:02:03 +09:00\n\
+                 - **NeoWaves Version:** test\n\
+                 - **Mode:** gui\n\
+                 - **Thread:** main\n\
+                 - **Panic Location:** src/app.rs:10:2\n\
+                 - **Panic Message:** fake panic for kittest\n"
+            ),
+        )
+        .expect("write fake crash report");
+        id
+    }
+
     fn harness_with_folder(dir: PathBuf) -> Harness<'static, WavesPreviewer> {
         let mut cfg = StartupConfig::default();
         cfg.open_folder = Some(dir);
         cfg.open_first = false;
         harness_with_startup(cfg)
+    }
+
+    fn rec_device(id: &str) -> RecordingDeviceInfo {
+        RecordingDeviceInfo {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            channels: 2,
+            default_sample_rate: 48_000,
+        }
     }
 
     fn wait_for_scan(harness: &mut Harness<'static, WavesPreviewer>) {
@@ -2137,6 +2205,52 @@ mod small_fix_regressions {
     }
 
     #[test]
+    fn crash_report_window_opens_for_unreviewed_report() {
+        with_crash_report_dir("crash_report_startup", |dir| {
+            write_fake_crash_report(dir, "111");
+
+            let harness = harness_default();
+            assert_eq!(harness.state().test_crash_report_count(), 1);
+            assert!(
+                harness.state().test_crash_report_window_open(),
+                "startup should open the crash report window when an unreviewed report exists"
+            );
+        });
+    }
+
+    #[test]
+    fn crash_report_mark_reviewed_hides_report() {
+        with_crash_report_dir("crash_report_reviewed", |dir| {
+            write_fake_crash_report(dir, "222");
+
+            let mut harness = harness_default();
+            assert_eq!(harness.state().test_crash_report_count(), 1);
+            assert!(harness.state_mut().test_mark_latest_crash_report_reviewed());
+            assert_eq!(harness.state().test_crash_report_count(), 0);
+            assert!(!harness.state().test_crash_report_window_open());
+            assert!(
+                neowaves::crash_report::list_unacknowledged_reports()
+                    .expect("list crash reports")
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn crash_report_tools_action_opens_empty_report_window() {
+        with_crash_report_dir("crash_report_tools", |_| {
+            let mut harness = harness_default();
+            assert_eq!(harness.state().test_crash_report_count(), 0);
+            assert!(!harness.state().test_crash_report_window_open());
+
+            harness.state_mut().test_open_crash_report_window();
+
+            assert!(harness.state().test_crash_report_window_open());
+            assert_eq!(harness.state().test_crash_report_count(), 0);
+        });
+    }
+
+    #[test]
     fn audio_output_device_pref_roundtrip_and_fallback() {
         let mut harness = harness_default();
         let dir = make_temp_dir("audio_output_prefs");
@@ -2178,7 +2292,162 @@ mod small_fix_regressions {
             Some("Device-A")
         );
 
+        assert!(harness
+            .state_mut()
+            .test_apply_audio_output_device_selection(None, false));
+        assert_eq!(
+            harness.state().test_audio_output_device_pref(),
+            None,
+            "Default output selection should stay stored as Default"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_audio_output_follow_policy_is_idle_only() {
+        let mut harness = harness_default();
+
+        assert_eq!(
+            harness
+                .state()
+                .test_audio_output_default_follow_target(Some("New Default"))
+                .as_deref(),
+            Some("New Default"),
+            "Default output should follow a changed OS default while idle"
+        );
+        assert_eq!(
+            harness
+                .state()
+                .test_audio_output_default_follow_target(Some("Test Output Device")),
+            None,
+            "matching default output does not need a switch"
+        );
+
+        harness
+            .state_mut()
+            .test_set_audio_output_device_pref(Some("Pinned Output"));
+        assert_eq!(
+            harness
+                .state()
+                .test_audio_output_default_follow_target(Some("New Default")),
+            None,
+            "explicit output selection must not follow OS default changes"
+        );
+
+        harness.state_mut().test_set_audio_output_device_pref(None);
+        harness.state_mut().test_set_audio_playing_flag(true);
+        assert_eq!(
+            harness
+                .state()
+                .test_audio_output_default_follow_target(Some("New Default")),
+            None,
+            "output default follow should be deferred while playback is active"
+        );
+
+        harness.state_mut().test_set_audio_playing_flag(false);
+        harness.state_mut().test_force_recording_started();
+        assert_eq!(
+            harness
+                .state()
+                .test_audio_output_default_follow_target(Some("New Default")),
+            None,
+            "output default follow should be deferred while recording is active"
+        );
+
+        harness.state_mut().test_discard_recording();
+        assert_eq!(
+            harness
+                .state()
+                .test_audio_output_default_follow_target(Some("New Default"))
+                .as_deref(),
+            Some("New Default")
+        );
+    }
+
+    #[test]
+    fn audio_device_snapshot_keeps_default_mic_and_explicit_output() {
+        let mut harness = harness_default();
+
+        harness
+            .state_mut()
+            .test_set_audio_output_device_pref(Some("Pinned Output"));
+        harness.state_mut().test_apply_audio_device_snapshot(
+            Ok(vec!["Other Output".to_string()]),
+            Some("Other Output"),
+            vec![rec_device("Mic A"), rec_device("Mic B")],
+            Some("Mic B"),
+        );
+        assert_eq!(
+            harness.state().test_audio_output_device_pref().as_deref(),
+            Some("Pinned Output"),
+            "explicit output device should not be reset to Default when unavailable"
+        );
+        assert_eq!(
+            harness.state().test_recording_input_device_pref(),
+            None,
+            "Default microphone selection should remain stored as Default"
+        );
+        assert_eq!(
+            harness.state().test_recording_input_device_ids(),
+            vec!["Mic A".to_string(), "Mic B".to_string()]
+        );
+        assert_eq!(
+            harness.state().test_last_default_input_id().as_deref(),
+            Some("Mic B")
+        );
+
+        harness
+            .state_mut()
+            .test_set_recording_input_device_pref(Some("Mic A"));
+        harness.state_mut().test_apply_audio_device_snapshot(
+            Ok(vec!["Other Output".to_string()]),
+            Some("Other Output"),
+            vec![rec_device("Mic C")],
+            Some("Mic C"),
+        );
+        assert_eq!(
+            harness
+                .state()
+                .test_recording_input_device_pref()
+                .as_deref(),
+            Some("Mic A"),
+            "explicit microphone selection should not follow OS default changes"
+        );
+    }
+
+    #[test]
+    fn audio_device_snapshot_defers_input_list_while_recording() {
+        let mut harness = harness_default();
+
+        harness.state_mut().test_apply_audio_device_snapshot(
+            Ok(vec!["Test Output Device".to_string()]),
+            Some("Test Output Device"),
+            vec![rec_device("Mic A")],
+            Some("Mic A"),
+        );
+        assert_eq!(
+            harness.state().test_recording_input_device_ids(),
+            vec!["Mic A".to_string()]
+        );
+
+        harness.state_mut().test_force_recording_started();
+        harness.state_mut().test_apply_audio_device_snapshot(
+            Ok(vec!["Test Output Device".to_string()]),
+            Some("Test Output Device"),
+            vec![rec_device("Mic B")],
+            Some("Mic B"),
+        );
+        assert_eq!(
+            harness.state().test_recording_input_device_ids(),
+            vec!["Mic A".to_string()],
+            "input device list should not change during active recording"
+        );
+        assert_eq!(
+            harness.state().test_last_default_input_id().as_deref(),
+            Some("Mic B"),
+            "latest default input can be remembered for the next idle refresh"
+        );
     }
 
     #[test]

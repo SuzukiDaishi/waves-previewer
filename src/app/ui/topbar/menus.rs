@@ -231,6 +231,10 @@ impl WavesPreviewer {
                 self.request_screenshot(ctx, path, false);
                 ui.close();
             }
+            if ui.button("Crash Reports...").clicked() {
+                self.open_crash_report_window();
+                ui.close();
+            }
             ui.separator();
             if ui.button("Debug Window (F12)").clicked() {
                 self.debug.cfg.enabled = true;

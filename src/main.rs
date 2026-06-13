@@ -1,11 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use neowaves::crash_report::{self, CrashReportMode};
 use neowaves::{app, cli, ipc};
 
 fn main() -> eframe::Result<()> {
+    crash_report::install_panic_hook(CrashReportMode::Unknown);
     let mut startup = match cli::parse_runtime_mode() {
-        cli::ParseOutcome::Run(cli::RuntimeMode::Gui(startup)) => startup,
+        cli::ParseOutcome::Run(cli::RuntimeMode::Gui(startup)) => {
+            crash_report::install_panic_hook(CrashReportMode::Gui);
+            startup
+        }
         cli::ParseOutcome::Run(cli::RuntimeMode::Cli(command)) => {
+            crash_report::install_panic_hook(CrashReportMode::Cli);
             if app::run_cli(command).is_err() {
                 std::process::exit(1);
             }

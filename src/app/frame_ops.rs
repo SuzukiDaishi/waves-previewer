@@ -71,6 +71,7 @@ impl WavesPreviewer {
         self.drain_auto_trim_results();
         self.drain_loop_detect_results();
         self.drain_recording_events();
+        self.tick_audio_device_watch(frame_started);
         self.drain_editor_apply_jobs(ctx);
         self.tick_virtual_trim_state(ctx);
         self.drain_plugin_jobs(ctx);
@@ -414,6 +415,7 @@ impl WavesPreviewer {
         self.ui_tool_confirm_dialog(ctx);
         self.run_frame_rename_dialogs(ctx);
         self.run_frame_resample_dialog(ctx);
+        self.ui_crash_report_window(ctx);
         self.ui_debug_window(ctx);
         self.handle_global_shortcuts(ctx);
         self.handle_clipboard_hotkeys(ctx);
