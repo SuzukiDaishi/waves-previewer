@@ -144,14 +144,19 @@ impl super::WavesPreviewer {
             PathBuf,
             (Vec<crate::markers::MarkerEntry>, Option<(usize, usize)>),
         > = HashMap::new();
-        let mut virtual_tasks: Vec<(
-            PathBuf,
-            PathBuf,
-            std::sync::Arc<crate::audio::AudioBuffer>,
-            f32,
-            u32,
-            u32,
-        )> = Vec::new();
+        struct VirtualSaveTask {
+            src: PathBuf,
+            dst: PathBuf,
+            audio: std::sync::Arc<crate::audio::AudioBuffer>,
+            gain_db: f32,
+            src_sr: u32,
+            target_sr: u32,
+            markers: Vec<crate::markers::MarkerEntry>,
+            loop_region: Option<(usize, usize)>,
+            write_markers: bool,
+            write_loop_markers: bool,
+        }
+        let mut virtual_tasks: Vec<VirtualSaveTask> = Vec::new();
         for i in indices {
             let Some(item) = self.item_for_row(i) else {
                 continue;
@@ -178,8 +183,18 @@ impl super::WavesPreviewer {
                     .export_cfg
                     .dest_folder
                     .clone()
-                    .or_else(|| self.resolve_virtual_export_parent(item))
+                    .or_else(|| {
+                        // A recording's virtual source points at a temp cache
+                        // file; saving next to it would bury the output in the
+                        // OS temp dir (and expose it to temp cleanup). Prefer the
+                        // open folder for those, falling back to temp only if no
+                        // folder is open.
+                        self.resolve_virtual_export_parent(item).filter(|p| {
+                            !super::temp_audio_ops::is_neowaves_internal_temp_path(p)
+                        })
+                    })
                     .or_else(|| self.root.clone())
+                    .or_else(|| self.resolve_virtual_export_parent(item))
                     .unwrap_or_else(|| PathBuf::from("."));
                 if let Err(err) = std::fs::create_dir_all(&parent) {
                     eprintln!(
@@ -249,7 +264,31 @@ impl super::WavesPreviewer {
                     .copied()
                     .unwrap_or(sr)
                     .max(1);
-                virtual_tasks.push((p, dst, audio, db, sr.max(1), target_sr));
+                // Carry over any markers / loop region the user added in the
+                // editor so a saved recording is a first-class file (and so the
+                // editor tab can be marked clean after the save).
+                let (markers, loop_region) = self
+                    .current_edit_annotation_snapshot(&p)
+                    .map(|snap| (snap.markers, snap.loop_region))
+                    .unwrap_or_default();
+                let write_markers = !markers.is_empty();
+                let write_loop_markers = loop_region.is_some();
+                if write_markers || write_loop_markers {
+                    edit_annotation_snapshots
+                        .insert(p.clone(), (markers.clone(), loop_region));
+                }
+                virtual_tasks.push(VirtualSaveTask {
+                    src: p.clone(),
+                    dst,
+                    audio,
+                    gain_db: db,
+                    src_sr: sr.max(1),
+                    target_sr,
+                    markers,
+                    loop_region,
+                    write_markers,
+                    write_loop_markers,
+                });
             } else {
                 let mut dirty_audio = false;
                 let mut markers_dirty = false;
@@ -452,22 +491,10 @@ impl super::WavesPreviewer {
         self.saving_edit_annotations = edit_annotation_snapshots;
         self.saving_virtual = virtual_tasks
             .iter()
-            .map(|(src, dst, _, _, _, _)| (src.clone(), dst.clone()))
+            .map(|task| (task.src.clone(), task.dst.clone()))
             .collect();
         self.saving_mode = Some(save_mode);
-        let virtual_jobs = virtual_tasks
-            .iter()
-            .map(|(src, dst, audio, db, sr, target_sr)| {
-                (
-                    src.clone(),
-                    dst.clone(),
-                    audio.clone(),
-                    *db,
-                    *sr,
-                    *target_sr,
-                )
-            })
-            .collect::<Vec<_>>();
+        let virtual_jobs = virtual_tasks;
         let edit_jobs = edit_tasks;
         // File export prioritizes output quality over realtime speed.
         let resample_quality = crate::wave::ResampleQuality::Best;
@@ -810,34 +837,90 @@ impl super::WavesPreviewer {
                     failed_paths.push(dst.clone());
                 }
             }
-            for (src, dst, audio, db, sr, target_sr) in virtual_jobs {
-                let mut channels = audio.channels.clone();
-                if db.abs() > 0.0001 {
-                    let gain = 10.0f32.powf(db / 20.0);
+            for task in virtual_jobs {
+                let src = task.src;
+                let dst = task.dst;
+                let mut channels = task.audio.channels.clone();
+                if task.gain_db.abs() > 0.0001 {
+                    let gain = 10.0f32.powf(task.gain_db / 20.0);
                     for ch in channels.iter_mut() {
                         for v in ch.iter_mut() {
                             *v *= gain;
                         }
                     }
                 }
-                let mut out_sr = sr.max(1);
-                if out_sr != target_sr.max(1) {
+                // Marker positions live in editor-buffer sample space (the
+                // unresampled source rate); the file is written at target_sr.
+                let marker_out_sr = task.src_sr.max(1);
+                let mut out_sr = task.src_sr.max(1);
+                let file_sr = task.target_sr.max(1);
+                if out_sr != file_sr {
                     for ch in channels.iter_mut() {
                         *ch = crate::wave::resample_quality(
                             ch,
                             out_sr,
-                            target_sr.max(1),
+                            file_sr,
                             resample_quality,
                         );
                     }
-                    out_sr = target_sr.max(1);
+                    out_sr = file_sr;
                 }
+                let max_file_samples = channels.first().map(|c| c.len() as u64);
                 let res = crate::wave::export_channels_audio(&channels, out_sr, &dst);
                 match res {
                     Ok(()) => {
-                        ok += 1;
-                        success_paths.push(dst.clone());
-                        write_transcript_sidecar(&src, &dst, &transcript_cache);
+                        let mut marker_ok = true;
+                        if task.write_markers {
+                            if let Err(err) = crate::markers::write_markers(
+                                &dst,
+                                marker_out_sr,
+                                file_sr,
+                                &task.markers,
+                            ) {
+                                eprintln!("virtual write markers failed {}: {err:?}", dst.display());
+                                marker_ok = false;
+                            }
+                        }
+                        if task.write_loop_markers {
+                            let mut loop_opt: Option<(u64, u64)> = None;
+                            if let Some((s, e)) = task.loop_region {
+                                if let Some((mut ls, mut le)) =
+                                    crate::wave::map_loop_markers_to_file_sr(
+                                        s,
+                                        e,
+                                        marker_out_sr,
+                                        file_sr,
+                                    )
+                                {
+                                    if let Some(max) = max_file_samples {
+                                        if max > 0 {
+                                            let max = max.min(u32::MAX as u64);
+                                            ls = (ls as u64).min(max) as u32;
+                                            le = (le as u64).min(max) as u32;
+                                        }
+                                    }
+                                    if le > ls {
+                                        loop_opt = Some((ls as u64, le as u64));
+                                    }
+                                }
+                            }
+                            if let Err(err) = crate::loop_markers::write_loop_markers(&dst, loop_opt)
+                            {
+                                eprintln!(
+                                    "virtual write loop markers failed {}: {err:?}",
+                                    dst.display()
+                                );
+                                marker_ok = false;
+                            }
+                        }
+                        if marker_ok {
+                            ok += 1;
+                            success_paths.push(dst.clone());
+                            write_transcript_sidecar(&src, &dst, &transcript_cache);
+                        } else {
+                            failed += 1;
+                            failed_paths.push(dst.clone());
+                        }
                     }
                     Err(err) => {
                         eprintln!(
@@ -1021,6 +1104,14 @@ impl super::WavesPreviewer {
                     }
                 }
                 for (src, dst) in &virtual_success {
+                    // Snapshot the annotations we actually persisted (keyed by
+                    // the pre-save virtual path) before replace_path_in_state
+                    // rewrites everything onto `dst`.
+                    let (saved_markers, saved_loop_region) = self
+                        .saving_edit_annotations
+                        .get(src)
+                        .cloned()
+                        .unwrap_or_else(|| (Vec::new(), None));
                     self.set_pending_gain_db_for_path(src, 0.0);
                     self.lufs_override.remove(src);
                     self.sample_rate_override.remove(src);
@@ -1032,6 +1123,12 @@ impl super::WavesPreviewer {
                     self.sample_rate_probe_cache.remove(dst);
                     self.bit_depth_override.remove(dst);
                     self.format_override.remove(dst);
+                    // The recording is now a real file on disk whose contents
+                    // match the editor buffer (audio + persisted markers/loop).
+                    // Clear the tab's dirty/edit state so it isn't stuck showing
+                    // phantom "unsaved edits" and so a follow-up save (e.g. after
+                    // a volume tweak) behaves like any normal file.
+                    self.mark_edit_saved_for_path(dst, &saved_markers, saved_loop_region);
                 }
                 match self.saving_mode.unwrap_or(self.export_cfg.save_mode) {
                     SaveMode::Overwrite => {

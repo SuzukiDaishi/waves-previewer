@@ -273,6 +273,9 @@ impl super::WavesPreviewer {
             self.recording_tab.last_recording_path = Some(path.clone());
             self.recording_tab.state = RecordingState::Idle;
             self.recording_tab.progress_message = "Recording ready".to_string();
+            // Worker thread has exited and dropped its sender; drop the now-dead
+            // receiver so we stop polling a disconnected channel every frame.
+            self.recording_tab.rx = None;
         }
 
         // update elapsed
@@ -301,7 +304,10 @@ impl super::WavesPreviewer {
     /// `VirtualSourceRef::FilePath` pointing at the temp WAV). Returns the new
     /// item's `__virtual__` path, reusing an existing item if one was already
     /// created for this recording.
-    fn ensure_virtual_item_for_recording(&mut self, tmp_path: &std::path::Path) -> Option<PathBuf> {
+    pub(super) fn ensure_virtual_item_for_recording(
+        &mut self,
+        tmp_path: &std::path::Path,
+    ) -> Option<PathBuf> {
         use crate::app::types::{VirtualSourceRef, VirtualState};
 
         if let Some(item) = self.items.iter().find(|item| {

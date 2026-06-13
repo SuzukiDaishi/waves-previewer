@@ -2803,6 +2803,25 @@ impl super::WavesPreviewer {
         self.recording_temp_files.len()
     }
 
+    /// Test-only: simulate the recording worker finalizing by pointing
+    /// `last_recording_path` at an already-written WAV, mirroring the
+    /// `RecordingWorkerMsg::Finalized` path without real capture hardware.
+    pub fn test_set_last_recording_path(&mut self, path: &Path) {
+        self.recording_tab.last_recording_path = Some(path.to_path_buf());
+        self.recording_tab.state = crate::app::types::RecordingState::Idle;
+    }
+
+    /// Test-only: mirrors the "Open in Editor" button in the Recording tab,
+    /// wrapping the finalized recording as a `(virtual)` item and opening it in
+    /// the editor. Returns the new virtual item's `__virtual__` path.
+    pub fn test_open_recording_in_editor(&mut self) -> Option<PathBuf> {
+        let tmp_path = self.recording_tab.last_recording_path.clone()?;
+        let item_path = self.ensure_virtual_item_for_recording(&tmp_path)?;
+        self.open_or_activate_tab(&item_path);
+        self.workspace_view = crate::app::types::WorkspaceView::Editor;
+        Some(item_path)
+    }
+
     /// Test-only: mirrors the "Tools > Recording..." menu action so the
     /// Recording workspace tab can be opened without driving the menu UI.
     pub fn test_open_recording_tab(&mut self) {
