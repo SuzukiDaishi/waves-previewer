@@ -151,6 +151,7 @@ impl super::WavesPreviewer {
             gain_db: f32,
             src_sr: u32,
             target_sr: u32,
+            wav_bit_depth: Option<crate::wave::WavBitDepth>,
             markers: Vec<crate::markers::MarkerEntry>,
             loop_region: Option<(usize, usize)>,
             write_markers: bool,
@@ -264,6 +265,23 @@ impl super::WavesPreviewer {
                     .copied()
                     .unwrap_or(sr)
                     .max(1);
+                // Honor the item's declared bit depth for WAV output so a clip
+                // from a 16/24-bit source isn't silently upgraded to 32-bit
+                // float (matches the list metadata and the file-save path).
+                let wav_bit_depth = self.bit_depth_override.get(&p).copied().or_else(|| {
+                    let bits = item
+                        .virtual_state
+                        .as_ref()
+                        .map(|v| v.bits_per_sample)
+                        .or_else(|| item.meta.as_ref().map(|m| m.bits_per_sample))
+                        .unwrap_or(0);
+                    match bits {
+                        16 => Some(crate::wave::WavBitDepth::Pcm16),
+                        24 => Some(crate::wave::WavBitDepth::Pcm24),
+                        32 => Some(crate::wave::WavBitDepth::Float32),
+                        _ => None,
+                    }
+                });
                 // Carry over any markers / loop region the user added in the
                 // editor so a saved recording is a first-class file (and so the
                 // editor tab can be marked clean after the save).
@@ -284,6 +302,7 @@ impl super::WavesPreviewer {
                     gain_db: db,
                     src_sr: sr.max(1),
                     target_sr,
+                    wav_bit_depth,
                     markers,
                     loop_region,
                     write_markers,
@@ -866,7 +885,12 @@ impl super::WavesPreviewer {
                     out_sr = file_sr;
                 }
                 let max_file_samples = channels.first().map(|c| c.len() as u64);
-                let res = crate::wave::export_channels_audio(&channels, out_sr, &dst);
+                let res = crate::wave::export_channels_audio_with_depth(
+                    &channels,
+                    out_sr,
+                    &dst,
+                    task.wav_bit_depth,
+                );
                 match res {
                     Ok(()) => {
                         let mut marker_ok = true;

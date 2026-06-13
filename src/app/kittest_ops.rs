@@ -2803,6 +2803,17 @@ impl super::WavesPreviewer {
         self.recording_temp_files.len()
     }
 
+    /// Test-only: length (frames) of the first virtual item's stored audio.
+    /// Used to verify that session save/restore preserves the *current* audio of
+    /// a virtual item (including destructive editor edits), not a stale snapshot.
+    pub fn test_first_virtual_audio_len(&self) -> Option<usize> {
+        self.items
+            .iter()
+            .find(|item| item.source == crate::app::types::MediaSource::Virtual)
+            .and_then(|item| item.virtual_audio.as_ref())
+            .map(|audio| audio.len())
+    }
+
     /// Test-only: simulate the recording worker finalizing by pointing
     /// `last_recording_path` at an already-written WAV, mirroring the
     /// `RecordingWorkerMsg::Finalized` path without real capture hardware.

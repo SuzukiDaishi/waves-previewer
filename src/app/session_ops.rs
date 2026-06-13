@@ -447,9 +447,16 @@ impl super::WavesPreviewer {
                 .map(|state| virtual_ops_to_project(&state.op_chain))
                 .unwrap_or_default();
             let mut sidecar_audio: Option<String> = None;
-            let needs_sidecar = item.virtual_audio.is_some();
+            // Snapshot the item's *current* audio (including destructive editor
+            // edits sitting in a dirty tab / edited_cache), not the possibly
+            // stale `virtual_audio`. The sidecar is the authoritative copy used
+            // on restore, so it must reflect what the user actually sees.
+            let current_audio = self
+                .edited_audio_for_path(&item.path)
+                .or_else(|| item.virtual_audio.clone());
+            let needs_sidecar = current_audio.is_some();
             if needs_sidecar {
-                if let Some(audio) = item.virtual_audio.as_ref() {
+                if let Some(audio) = current_audio.as_ref() {
                     let sr = item
                         .virtual_state
                         .as_ref()
@@ -916,87 +923,105 @@ impl super::WavesPreviewer {
                     let source = virtual_source_from_project(&entry.source, &base_dir);
                     let op_chain = virtual_ops_from_project(&entry.op_chain);
                     let mut channels_opt: Option<Vec<Vec<f32>>> = None;
+                    // The op_chain only reconstructs the final audio from a *raw*
+                    // source (decoded file / parent virtual). The sidecar, by
+                    // contrast, already stores the post-edit audio, so ops must
+                    // NOT be re-applied to it. Track where the channels came from.
+                    let mut channels_from_raw_source = false;
                     let mut sample_rate = entry.sample_rate.max(1);
                     let bits_per_sample = entry.bits_per_sample.max(16);
-                    match &source {
-                        VirtualSourceRef::FilePath(src_path) => {
-                            if src_path.is_file() {
-                                if let Ok((channels, sr)) =
-                                    crate::audio_io::decode_audio_multi(src_path)
-                                {
-                                    channels_opt = Some(channels);
-                                    sample_rate = sr.max(1);
-                                } else {
-                                    missing_errors.push(format!(
-                                        "Virtual source decode failed: {}",
-                                        src_path.display()
-                                    ));
-                                }
-                            } else {
-                                missing_errors.push(format!(
-                                    "Missing virtual source: {}",
-                                    src_path.display()
-                                ));
+
+                    // 1) Prefer the sidecar snapshot: it is the exact current
+                    //    audio of the virtual item, including destructive editor
+                    //    edits (gain/fade/normalize/trim) the op_chain cannot
+                    //    express. Reconstruct from source only when it's absent.
+                    if let Some(raw) = entry.sidecar_audio.as_ref() {
+                        match load_sidecar_audio(&project_path, raw) {
+                            Ok((channels, sr, _)) => {
+                                channels_opt = Some(channels);
+                                sample_rate = sr.max(1);
                             }
-                        }
-                        VirtualSourceRef::VirtualPath(src_path) => {
-                            if let Some(src_item) = self.item_for_path(src_path) {
-                                if let Some(audio) = src_item.virtual_audio.as_ref() {
-                                    channels_opt = Some(audio.channels.clone());
-                                    sample_rate = src_item
-                                        .virtual_state
-                                        .as_ref()
-                                        .map(|state| state.sample_rate)
-                                        .or_else(|| src_item.meta.as_ref().map(|m| m.sample_rate))
-                                        .filter(|v| *v > 0)
-                                        .unwrap_or(sample_rate);
-                                } else {
-                                    next_pending.push(entry);
-                                    continue;
-                                }
-                            } else {
+                            Err(err) => {
                                 missing_errors.push(format!(
-                                    "Missing virtual source item: {}",
-                                    src_path.display()
+                                    "Virtual sidecar decode failed: {raw} ({err})"
                                 ));
-                            }
-                        }
-                        VirtualSourceRef::Sidecar(_) => {
-                            let sidecar_raw = entry
-                                .sidecar_audio
-                                .as_ref()
-                                .or(entry.source.path.as_ref())
-                                .cloned();
-                            if let Some(raw) = sidecar_raw {
-                                if let Ok((channels, sr, _)) =
-                                    load_sidecar_audio(&project_path, &raw)
-                                {
-                                    channels_opt = Some(channels);
-                                    sample_rate = sr.max(1);
-                                } else {
-                                    missing_errors
-                                        .push(format!("Virtual sidecar decode failed: {}", raw));
-                                }
                             }
                         }
                     }
+
+                    // 2) Fallback: rebuild from the raw source + op_chain.
                     if channels_opt.is_none() {
-                        if let Some(raw) = entry
-                            .sidecar_audio
-                            .as_ref()
-                            .or(entry.source.path.as_ref())
-                            .cloned()
-                        {
-                            if let Ok((channels, sr, _)) = load_sidecar_audio(&project_path, &raw) {
-                                channels_opt = Some(channels);
-                                sample_rate = sr.max(1);
+                        match &source {
+                            VirtualSourceRef::FilePath(src_path) => {
+                                if src_path.is_file() {
+                                    if let Ok((channels, sr)) =
+                                        crate::audio_io::decode_audio_multi(src_path)
+                                    {
+                                        channels_opt = Some(channels);
+                                        channels_from_raw_source = true;
+                                        sample_rate = sr.max(1);
+                                    } else {
+                                        missing_errors.push(format!(
+                                            "Virtual source decode failed: {}",
+                                            src_path.display()
+                                        ));
+                                    }
+                                } else {
+                                    missing_errors.push(format!(
+                                        "Missing virtual source: {}",
+                                        src_path.display()
+                                    ));
+                                }
+                            }
+                            VirtualSourceRef::VirtualPath(src_path) => {
+                                if let Some(src_item) = self.item_for_path(src_path) {
+                                    if let Some(audio) = src_item.virtual_audio.as_ref() {
+                                        channels_opt = Some(audio.channels.clone());
+                                        channels_from_raw_source = true;
+                                        sample_rate = src_item
+                                            .virtual_state
+                                            .as_ref()
+                                            .map(|state| state.sample_rate)
+                                            .or_else(|| {
+                                                src_item.meta.as_ref().map(|m| m.sample_rate)
+                                            })
+                                            .filter(|v| *v > 0)
+                                            .unwrap_or(sample_rate);
+                                    } else {
+                                        next_pending.push(entry);
+                                        continue;
+                                    }
+                                } else {
+                                    missing_errors.push(format!(
+                                        "Missing virtual source item: {}",
+                                        src_path.display()
+                                    ));
+                                }
+                            }
+                            VirtualSourceRef::Sidecar(_) => {
+                                // Sidecar-kind sources keep their tag in source.path
+                                // (the sidecar_audio field was already tried above).
+                                if let Some(raw) = entry.source.path.as_ref() {
+                                    if let Ok((channels, sr, _)) =
+                                        load_sidecar_audio(&project_path, raw)
+                                    {
+                                        channels_opt = Some(channels);
+                                        sample_rate = sr.max(1);
+                                    } else {
+                                        missing_errors.push(format!(
+                                            "Virtual sidecar decode failed: {raw}"
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }
                     let Some(mut channels) = channels_opt else {
                         continue;
                     };
-                    apply_virtual_ops(&mut channels, &op_chain);
+                    if channels_from_raw_source {
+                        apply_virtual_ops(&mut channels, &op_chain);
+                    }
                     let desired_sr = entry.sample_rate.max(1);
                     if sample_rate != desired_sr {
                         for ch in channels.iter_mut() {

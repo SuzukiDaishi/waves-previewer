@@ -73,6 +73,46 @@ fn wait_for_tab_ready(harness: &mut Harness<'static, WavesPreviewer>) {
     }
 }
 
+fn wait_for_scan(harness: &mut Harness<'static, WavesPreviewer>) {
+    let start = Instant::now();
+    loop {
+        harness.run_steps(1);
+        if !harness.state().files.is_empty() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(20) {
+            panic!("scan timeout");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn newest_file_with_ext(dir: &Path, ext: &str) -> Option<PathBuf> {
+    let mut latest: Option<(SystemTime, PathBuf)> = None;
+    for ent in std::fs::read_dir(dir).ok()? {
+        let ent = ent.ok()?;
+        let p = ent.path();
+        let matches = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case(ext))
+            .unwrap_or(false);
+        if !matches {
+            continue;
+        }
+        let modified = ent
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        match &latest {
+            Some((ts, _)) if modified <= *ts => {}
+            _ => latest = Some((modified, p)),
+        }
+    }
+    latest.map(|(_, p)| p)
+}
+
 fn wait_for_export_finish(harness: &mut Harness<'static, WavesPreviewer>) {
     let start = Instant::now();
     loop {
@@ -292,6 +332,68 @@ fn recording_trim_save_overwrite_then_volume_overwrite() {
         (0.40..0.60).contains(&ratio),
         "overwrite re-save must apply the -6 dB volume change \
          (peak_before={peak_before:.4} peak_after={peak_after:.4} ratio={ratio:.3})"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A virtual clip trimmed from a 16-bit source must export as 16-bit WAV
+/// (matching the source / list metadata), not be silently upgraded to 32-bit
+/// float.
+#[test]
+fn virtual_trim_from_16bit_source_exports_16bit() {
+    let dir = make_temp_dir("vbits16");
+    let src = dir.join("src16.wav");
+    let chans = synth_stereo(48_000, 2.0, 220.0, 440.0);
+    neowaves::wave::export_channels_audio_with_depth(
+        &chans,
+        48_000,
+        &src,
+        Some(neowaves::wave::WavBitDepth::Pcm16),
+    )
+    .expect("write 16-bit source");
+    assert_eq!(
+        neowaves::audio_io::read_audio_info(&src)
+            .map(|i| i.bits_per_sample)
+            .unwrap_or(0),
+        16
+    );
+    let export_dir = dir.join("exports");
+    std::fs::create_dir_all(&export_dir).expect("create export dir");
+
+    let mut harness = harness_with_folder(dir.clone());
+    wait_for_scan(&mut harness);
+    assert!(harness.state_mut().test_open_first_tab());
+    wait_for_tab_ready(&mut harness);
+    // Non-destructive "add trim as virtual" carries the source bit depth.
+    assert!(harness.state_mut().test_add_trim_virtual_frac(0.2, 0.7));
+    harness.run_steps(3);
+    harness.state_mut().test_switch_to_list();
+
+    let virtual_path = harness
+        .state()
+        .test_selected_path()
+        .cloned()
+        .expect("virtual item selected");
+    assert!(harness.state_mut().test_select_path(&virtual_path));
+    harness.state_mut().test_set_export_first_prompt(false);
+    harness.state_mut().test_set_export_save_mode_overwrite(false);
+    harness.state_mut().test_set_export_conflict("rename");
+    harness
+        .state_mut()
+        .test_set_export_dest_folder(Some(&export_dir));
+    harness.state_mut().test_set_export_name_template("clip16");
+    harness.state_mut().test_trigger_save_selected();
+    wait_for_export_finish(&mut harness);
+    harness.run_steps(3);
+
+    let out = newest_file_with_ext(&export_dir, "wav").expect("missing exported wav");
+    let bits = neowaves::audio_io::read_audio_info(&out)
+        .map(|i| i.bits_per_sample)
+        .unwrap_or(0);
+    assert_eq!(
+        bits, 16,
+        "virtual clip from a 16-bit source should export as 16-bit (got {bits})"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
