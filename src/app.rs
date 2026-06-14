@@ -1163,21 +1163,31 @@ impl WavesPreviewer {
             self.playback_stop_if_editor_source_invalidated(path.as_path());
         }
         self.cache_dirty_tab_at(idx);
+        let prev_active = self.active_tab;
         self.tabs.remove(idx);
         if !self.tabs.is_empty() {
-            let new_active = if idx < self.tabs.len() {
-                idx
-            } else {
-                self.tabs.len() - 1
+            // Preserve the *identity* of the previously-active tab. Closing a
+            // different (background) tab must not switch which tab is active,
+            // nor trigger a needless re-activation/decode of it.
+            let closed_active = prev_active == Some(idx);
+            let new_active = match prev_active {
+                // Closed the active tab: fall to its right neighbour (clamped).
+                Some(a) if a == idx => a.min(self.tabs.len() - 1),
+                // Active tab sat after the closed one: its index shifts down 1.
+                Some(a) if a > idx => a - 1,
+                // Active tab sat before the closed one: index is unchanged.
+                Some(a) => a,
+                None => idx.min(self.tabs.len() - 1),
             };
             self.active_tab = Some(new_active);
-            if self.workspace_view == WorkspaceView::Editor {
-                self.workspace_view = WorkspaceView::Editor;
-            }
-            if let Some(tab) = self.tabs.get(new_active) {
-                let path = tab.path.clone();
-                self.debug_mark_tab_switch_start(&path);
-                self.queue_tab_activation(path);
+            // Only re-activate (re-target playback/decode) when the active tab
+            // actually changed, i.e. the active tab itself was the one closed.
+            if closed_active {
+                if let Some(tab) = self.tabs.get(new_active) {
+                    let path = tab.path.clone();
+                    self.debug_mark_tab_switch_start(&path);
+                    self.queue_tab_activation(path);
+                }
             }
         } else {
             self.active_tab = None;
