@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use crate::app::helpers::db_to_color;
 use crate::app::types::{
-    EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphNodeData, EffectGraphNodeKind,
-    EffectGraphNodeRunPhase, EffectGraphPlaybackTarget, EffectGraphPortKey, EffectGraphSeverity,
-    EffectGraphSpectrumMode,
+    EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphNodeCategory, EffectGraphNodeData,
+    EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphPlaybackTarget,
+    EffectGraphPortDirection, EffectGraphPortKey, EffectGraphSeverity, EffectGraphSpectrumMode,
 };
 
 const EFFECT_GRAPH_MONITOR_DOWNMIX_NOTE: &str = "Preview monitor downmixes >2ch to stereo";
@@ -71,6 +71,20 @@ fn format_frequency_axis_label(hz: f32) -> String {
     } else {
         format!("{hz:.0} Hz")
     }
+}
+
+/// Pin label resolved from the node's port spec. Falls back to parsing the
+/// raw port-id string for ports that no longer exist on the node (dangling
+/// edges from old sessions).
+fn effect_graph_pin_label(
+    data: &EffectGraphNodeData,
+    direction: EffectGraphPortDirection,
+    port_id: &str,
+) -> String {
+    data.spec()
+        .port(direction, port_id)
+        .map(|port| port.label.to_string())
+        .unwrap_or_else(|| effect_graph_port_label(port_id))
 }
 
 fn effect_graph_port_label(port_id: &str) -> String {
@@ -596,33 +610,21 @@ impl crate::app::WavesPreviewer {
 
     fn ui_effect_graph_node_palette(&mut self, ui: &mut egui::Ui) {
         ui.heading("Nodes");
-        let standard_kinds = [
-            EffectGraphNodeKind::Input,
-            EffectGraphNodeKind::Output,
-            EffectGraphNodeKind::Gain,
-            EffectGraphNodeKind::Loudness,
-            EffectGraphNodeKind::MonoMix,
-            EffectGraphNodeKind::PitchShift,
-            EffectGraphNodeKind::TimeStretch,
-            EffectGraphNodeKind::Speed,
-            EffectGraphNodeKind::PluginFx,
-        ];
-        let debug_kinds = [
-            EffectGraphNodeKind::DebugWaveform,
-            EffectGraphNodeKind::DebugSpectrum,
-        ];
-        let routing_kinds = [
-            EffectGraphNodeKind::Duplicate,
-            EffectGraphNodeKind::SplitChannels,
-            EffectGraphNodeKind::CombineChannels,
-        ];
+        // Palette entries derive from the node spec table; new kinds show up
+        // automatically once their spec declares a category.
+        let kinds_in = |category: EffectGraphNodeCategory| {
+            EffectGraphNodeKind::ALL
+                .into_iter()
+                .filter(move |kind| kind.spec().category == category)
+        };
         let canvas_world = self
             .effect_graph
             .canvas
             .last_canvas_pointer_world
             .unwrap_or([140.0, 140.0]);
         let mut add_button = |ui: &mut egui::Ui, kind: EffectGraphNodeKind| {
-            let can_add = match kind {
+            let spec = kind.spec();
+            let can_add = match spec.kind {
                 EffectGraphNodeKind::Input => !self
                     .effect_graph
                     .draft
@@ -637,7 +639,7 @@ impl crate::app::WavesPreviewer {
                     .any(|node| matches!(&node.data, EffectGraphNodeData::Output)),
                 _ => true,
             };
-            let label = EffectGraphNodeData::default_for_kind(kind).display_name();
+            let label = spec.display_name;
             let resp = ui.add_enabled(can_add, egui::Button::new(label));
             if resp.clicked() {
                 let _ = self.effect_graph_add_node(kind, canvas_world);
@@ -647,7 +649,7 @@ impl crate::app::WavesPreviewer {
             }
         };
         ui.label(RichText::new("Effects").strong());
-        for kind in standard_kinds {
+        for kind in kinds_in(EffectGraphNodeCategory::Standard) {
             add_button(ui, kind);
         }
         ui.separator();
@@ -657,12 +659,12 @@ impl crate::app::WavesPreviewer {
                 .small()
                 .color(Color32::from_rgb(140, 154, 168)),
         );
-        for kind in debug_kinds {
+        for kind in kinds_in(EffectGraphNodeCategory::Debug) {
             add_button(ui, kind);
         }
         ui.separator();
         ui.label(RichText::new("Routing").strong());
-        for kind in routing_kinds {
+        for kind in kinds_in(EffectGraphNodeCategory::Routing) {
             add_button(ui, kind);
         }
         if self.effect_graph.canvas.drag_palette_kind.is_some() {
@@ -1087,7 +1089,7 @@ impl crate::app::WavesPreviewer {
                     .data
                     .input_ports()
                     .iter()
-                    .map(|port_id| (*port_id).to_string())
+                    .map(|port| port.id.to_string())
                     .collect::<Vec<_>>();
                 ports.sort_by(|left, right| {
                     let left_slot = slot_labels.and_then(|labels| labels.get(left).copied());
@@ -1110,14 +1112,14 @@ impl crate::app::WavesPreviewer {
                 node.data
                     .input_ports()
                     .iter()
-                    .map(|port_id| (*port_id).to_string())
+                    .map(|port| port.id.to_string())
                     .collect::<Vec<_>>()
             };
             let ordered_output_ports = node
                 .data
                 .output_ports()
                 .iter()
-                .map(|port_id| (*port_id).to_string())
+                .map(|port| port.id.to_string())
                 .collect::<Vec<_>>();
             let distribute = |ports: &[String], x: f32| -> Vec<(EffectGraphPortKey, egui::Pos2)> {
                 if ports.is_empty() {
@@ -1317,9 +1319,19 @@ impl crate::app::WavesPreviewer {
                     ) {
                     node_display_labels
                         .and_then(|labels| labels.get(&port_key.port_id).cloned())
-                        .unwrap_or_else(|| effect_graph_port_label(&port_key.port_id))
+                        .unwrap_or_else(|| {
+                            effect_graph_pin_label(
+                                &node.data,
+                                EffectGraphPortDirection::Input,
+                                &port_key.port_id,
+                            )
+                        })
                 } else {
-                    effect_graph_port_label(&port_key.port_id)
+                    effect_graph_pin_label(
+                        &node.data,
+                        EffectGraphPortDirection::Input,
+                        &port_key.port_id,
+                    )
                 };
                 painter.text(
                     egui::pos2(pin_pos.x + 10.0, pin_pos.y),
@@ -1364,14 +1376,23 @@ impl crate::app::WavesPreviewer {
                 painter.text(
                     egui::pos2(pin_pos.x - 10.0, pin_pos.y),
                     egui::Align2::RIGHT_CENTER,
-                    effect_graph_port_label(&port_key.port_id),
+                    effect_graph_pin_label(
+                        &node.data,
+                        EffectGraphPortDirection::Output,
+                        &port_key.port_id,
+                    ),
                     egui::TextStyle::Small.resolve(ui.style()),
                     Color32::from_rgb(180, 194, 208),
                 );
                 if matches!(&node.data, EffectGraphNodeData::SplitChannels)
                     && self.effect_graph.tester.last_input_bus.is_some()
                 {
-                    let port_index = effect_graph_port_sort_index(&port_key.port_id);
+                    let port_index = node
+                        .data
+                        .output_ports()
+                        .iter()
+                        .position(|port| port.id == port_key.port_id)
+                        .unwrap_or(usize::MAX);
                     if port_index != usize::MAX {
                         let (badge, color) = if port_index < split_live_width {
                             ("live", Color32::from_rgb(132, 210, 154))

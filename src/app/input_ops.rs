@@ -556,7 +556,6 @@ impl super::WavesPreviewer {
             return;
         }
         let cmd_down = ctx.input(|i| i.modifiers.command);
-        let shift_down = ctx.input(|i| i.modifiers.shift);
         let z_down = ctx.input(|i| i.key_down(egui::Key::Z));
         let y_down = ctx.input(|i| i.key_down(egui::Key::Y));
         let combo_down = cmd_down && (z_down || y_down);
@@ -572,8 +571,7 @@ impl super::WavesPreviewer {
         });
         let redo_y = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
         let redo = redo_z || redo_y;
-        self.undo_z_was_down =
-            cmd_down && ((shift_down && z_down) || (!shift_down && z_down) || y_down);
+        self.undo_z_was_down = cmd_down && (z_down || y_down);
         if !(undo || redo) {
             return;
         }

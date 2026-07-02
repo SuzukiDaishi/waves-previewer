@@ -1519,6 +1519,7 @@ impl WavesPreviewer {
             total_frames: Some(frames as u64),
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
+            peak_db_estimate: false,
             lufs_i,
             bpm,
             created_at: None,

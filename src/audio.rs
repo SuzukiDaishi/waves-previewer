@@ -31,6 +31,10 @@ impl AudioBuffer {
         }
     }
 
+    /// Length of the first channel. Channels are expected to be equal-length;
+    /// if they are not, render/analysis code (e.g. `min_channel_len` in
+    /// waveform_pyramid) uses the shortest channel instead, and playback
+    /// clamps per channel, repeating the last sample of a shorter channel.
     pub fn len(&self) -> usize {
         self.channels.first().map(|c| c.len()).unwrap_or(0)
     }
@@ -47,12 +51,7 @@ impl AudioBuffer {
 pub struct SharedAudio {
     pub samples: ArcSwapOption<AudioBuffer>, // multi-channel samples in [-1, 1]
     streamed_wav: ArcSwapOption<MappedWavSource>,
-    swap_prev_samples: ArcSwapOption<AudioBuffer>,
-    swap_prev_pos_f: AtomicF64,
-    swap_xfade_frames_left: std::sync::atomic::AtomicUsize,
-    swap_xfade_total_frames: std::sync::atomic::AtomicUsize,
-    pub vol: AtomicF32,       // 0.0..1.0 linear gain
-    pub file_gain: AtomicF32, // per-file gain factor (can be > 1.0)
+    pub vol: AtomicF32, // 0.0..1.0 linear gain
     pub playing: std::sync::atomic::AtomicBool,
     pub play_pos: std::sync::atomic::AtomicUsize,
     pub play_pos_f: AtomicF64, // high-precision fractional playhead for rate-converted playback
@@ -268,9 +267,6 @@ fn read_mapped_wav_header(file: &mut File, path: &Path) -> Result<Option<MappedW
 }
 
 impl AudioEngine {
-    #[allow(dead_code)]
-    const SWAP_XFADE_FRAMES: usize = 96;
-
     fn loop_xfade_uses_through_zero(style: u8) -> bool {
         style >= 2
     }
@@ -286,12 +282,22 @@ impl AudioEngine {
         }
     }
 
-    fn wrap_loop_position(mut pos_f: f64, loop_start: usize, loop_end: usize) -> f64 {
+    /// Wrap the playhead into the loop. `xfade_skip` is the crossfade length for
+    /// blend styles: their tail window already plays the head content mixed in,
+    /// so the wrap must land past it (`start + xfade`) or that content repeats.
+    /// Dip styles (fade out, then fade in) pass 0 and wrap to `start`.
+    fn wrap_loop_position(
+        mut pos_f: f64,
+        loop_start: usize,
+        loop_end: usize,
+        xfade_skip: f64,
+    ) -> f64 {
         let start = loop_start as f64;
         let end = loop_end as f64;
         let loop_len = (end - start).max(1.0);
+        let skip = xfade_skip.clamp(0.0, loop_len - 1.0);
         while pos_f >= end {
-            pos_f = start + (pos_f - end);
+            pos_f = start + skip + (pos_f - end);
         }
         while pos_f < start {
             pos_f += loop_len;
@@ -329,16 +335,16 @@ impl AudioEngine {
             let head = sample_at(start + rel);
             return tail * w_out + head * w_in;
         }
-        if pos_f >= start && pos_f < start + xfade_f {
+        // Dip styles fade the head back in after the wrap. Blend styles already
+        // consumed the head content inside the tail-window crossfade (and the
+        // wrap skips past it), so the head region plays dry — blending here too
+        // would apply the crossfade twice and smear the seam over 2x the width.
+        if uses_dip && pos_f >= start && pos_f < start + xfade_f {
             let rel = (pos_f - start).clamp(0.0, xfade_f);
             let t = (rel / denom).clamp(0.0, 1.0) as f32;
-            let (w_out, w_in) = Self::loop_xfade_weights(style, t);
+            let (_w_out, w_in) = Self::loop_xfade_weights(style, t);
             let head = sample_at(pos_f);
-            if uses_dip {
-                return head * w_in;
-            }
-            let tail = sample_at(end - xfade_f + rel);
-            return tail * w_out + head * w_in;
+            return head * w_in;
         }
         sample_at(pos_f)
     }
@@ -409,12 +415,7 @@ impl AudioEngine {
         Arc::new(SharedAudio {
             samples: ArcSwapOption::from(None),
             streamed_wav: ArcSwapOption::from(None),
-            swap_prev_samples: ArcSwapOption::from(None),
-            swap_prev_pos_f: AtomicF64::new(0.0),
-            swap_xfade_frames_left: std::sync::atomic::AtomicUsize::new(0),
-            swap_xfade_total_frames: std::sync::atomic::AtomicUsize::new(0),
             vol: AtomicF32::new(1.0),
-            file_gain: AtomicF32::new(1.0),
             playing: std::sync::atomic::AtomicBool::new(false),
             play_pos: std::sync::atomic::AtomicUsize::new(0),
             play_pos_f: AtomicF64::new(0.0),
@@ -658,14 +659,22 @@ impl AudioEngine {
                     } else {
                         0
                     };
+                    let xfade_skip =
+                        if xfade > 0 && !Self::loop_xfade_uses_through_zero(loop_xfade_shape) {
+                            xfade as f64
+                        } else {
+                            0.0
+                        };
                     let mut meter_sum_sq = 0.0f64;
                     let mut meter_count = 0usize;
                     let mut pos = pos_f.floor() as usize;
                     for frame in data.chunks_mut(channels) {
                         if pos >= len {
                             if valid_loop {
-                                pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
-                                pos = loop_start;
+                                pos_f = Self::wrap_loop_position(
+                                    pos_f, loop_start, loop_end, xfade_skip,
+                                );
+                                pos = pos_f.floor() as usize;
                             } else {
                                 shared
                                     .playing
@@ -677,7 +686,8 @@ impl AudioEngine {
                             }
                         }
                         if valid_loop && pos >= loop_end {
-                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
+                            pos_f =
+                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
                             let src_ch = if src_channels == 1 {
@@ -708,7 +718,8 @@ impl AudioEngine {
                         }
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
-                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
+                            pos_f =
+                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
                         pos = pos_f.floor() as usize;
                     }
@@ -752,14 +763,22 @@ impl AudioEngine {
                     } else {
                         0
                     };
+                    let xfade_skip =
+                        if xfade > 0 && !Self::loop_xfade_uses_through_zero(loop_xfade_shape) {
+                            xfade as f64
+                        } else {
+                            0.0
+                        };
                     let mut meter_sum_sq = 0.0f64;
                     let mut meter_count = 0usize;
                     let mut pos = pos_f.floor() as usize;
                     for frame in data.chunks_mut(channels) {
                         if pos >= len {
                             if valid_loop {
-                                pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
-                                pos = loop_start;
+                                pos_f = Self::wrap_loop_position(
+                                    pos_f, loop_start, loop_end, xfade_skip,
+                                );
+                                pos = pos_f.floor() as usize;
                             } else {
                                 shared
                                     .playing
@@ -771,7 +790,8 @@ impl AudioEngine {
                             }
                         }
                         if valid_loop && pos >= loop_end {
-                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
+                            pos_f =
+                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
                             let src_ch = if src_channels == 1 {
@@ -800,7 +820,8 @@ impl AudioEngine {
                         }
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
-                            pos_f = Self::wrap_loop_position(pos_f, loop_start, loop_end);
+                            pos_f =
+                                Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
                         pos = pos_f.floor() as usize;
                     }
@@ -841,7 +862,6 @@ impl AudioEngine {
         let len = samples.len();
         self.shared.streamed_wav.store(None);
         self.shared.samples.store(Some(samples));
-        self.clear_swap_crossfade();
         self.shared
             .play_pos
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -904,7 +924,6 @@ impl AudioEngine {
         let new_len = samples.len();
         let (new_pos, new_pos_f) =
             Self::remap_pos_for_new_source(old_pos_f, from_sr, to_sr, new_len);
-        self.clear_swap_crossfade();
         self.shared.streamed_wav.store(None);
         self.shared.samples.store(Some(samples));
         self.shared
@@ -951,7 +970,6 @@ impl AudioEngine {
         let len = source.len();
         self.shared.samples.store(None);
         self.shared.streamed_wav.store(Some(source));
-        self.clear_swap_crossfade();
         self.shared
             .play_pos
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1026,7 +1044,6 @@ impl AudioEngine {
             .shared
             .play_pos
             .load(std::sync::atomic::Ordering::Relaxed);
-        self.clear_swap_crossfade();
         self.shared.streamed_wav.store(None);
         self.shared.samples.store(Some(samples));
         if pos >= new_len {
@@ -1068,14 +1085,6 @@ impl AudioEngine {
         self.shared
             .vol
             .store(v.clamp(0.0, 1.0), std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn set_file_gain(&self, g: f32) {
-        // allow >1.0 (up to, say, 16x = +24dB). Clamp to a reasonable upper bound.
-        let g = g.clamp(0.0, 16.0);
-        self.shared
-            .file_gain
-            .store(g, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn toggle_play(&self) {
@@ -1137,7 +1146,6 @@ impl AudioEngine {
         self.shared
             .meter_rms
             .store(0.0, std::sync::atomic::Ordering::Relaxed);
-        self.clear_swap_crossfade();
     }
 
     pub fn set_loop_enabled(&self, en: bool) {
@@ -1295,19 +1303,6 @@ impl AudioEngine {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn clear_swap_crossfade(&self) {
-        self.shared.swap_prev_samples.store(None);
-        self.shared
-            .swap_prev_pos_f
-            .store(0.0, std::sync::atomic::Ordering::Relaxed);
-        self.shared
-            .swap_xfade_frames_left
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.shared
-            .swap_xfade_total_frames
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub fn seek_to_sample(&self, pos: usize) {
         let len = self.current_source_len();
         if len > 0 {
@@ -1318,7 +1313,6 @@ impl AudioEngine {
             self.shared
                 .play_pos_f
                 .store(p as f64, std::sync::atomic::Ordering::Relaxed);
-            self.clear_swap_crossfade();
         }
     }
 
@@ -1341,7 +1335,6 @@ impl AudioEngine {
         self.shared
             .play_pos_f
             .store(new_pos_f, std::sync::atomic::Ordering::Relaxed);
-        self.clear_swap_crossfade();
     }
 }
 
@@ -1369,6 +1362,72 @@ mod tests {
                 .expect("write r");
         }
         writer.finalize().expect("finalize wav");
+    }
+
+    #[test]
+    fn loop_xfade_linear_blend_keeps_constant_signal_flat_across_seam() {
+        // A constant signal must pass through a linear (equal-gain) crossfade
+        // unchanged, including across the loop wrap.
+        let sample_at = |_: f64| 1.0f32;
+        let (start, end, xfade) = (100usize, 1000usize, 64usize);
+        let style = 0u8;
+        let mut pos_f = 900.0f64;
+        for _ in 0..300 {
+            let v = AudioEngine::sample_loop_with_xfade(pos_f, start, end, xfade, style, sample_at);
+            assert!((v - 1.0).abs() < 1e-4, "pos {pos_f} -> {v}");
+            pos_f += 1.0;
+            if pos_f >= end as f64 {
+                pos_f = AudioEngine::wrap_loop_position(pos_f, start, end, xfade as f64);
+            }
+        }
+    }
+
+    #[test]
+    fn loop_xfade_blend_is_continuous_at_wrap() {
+        // With a ramp signal, the value just before the loop end must line up
+        // with the value right after the wrap (which skips the consumed head).
+        let sample_at = |p: f64| p as f32;
+        let (start, end, xfade) = (0usize, 48_000usize, 128usize);
+        let style = 0u8;
+        let before = AudioEngine::sample_loop_with_xfade(
+            (end - 1) as f64,
+            start,
+            end,
+            xfade,
+            style,
+            sample_at,
+        );
+        let wrapped = AudioEngine::wrap_loop_position(end as f64, start, end, xfade as f64);
+        let after =
+            AudioEngine::sample_loop_with_xfade(wrapped, start, end, xfade, style, sample_at);
+        assert!(
+            (after - before).abs() <= 2.5,
+            "seam jump: {before} -> {after} (wrapped to {wrapped})"
+        );
+    }
+
+    #[test]
+    fn loop_xfade_dip_fades_through_zero_at_seam() {
+        let sample_at = |_: f64| 1.0f32;
+        let (start, end, xfade) = (100usize, 1000usize, 64usize);
+        let style = 2u8;
+        let at_end = AudioEngine::sample_loop_with_xfade(
+            (end - 1) as f64,
+            start,
+            end,
+            xfade,
+            style,
+            sample_at,
+        );
+        assert!(at_end.abs() < 1e-3, "tail must fade to zero: {at_end}");
+        let wrapped = AudioEngine::wrap_loop_position(end as f64, start, end, 0.0);
+        assert_eq!(wrapped, start as f64, "dip styles wrap to loop start");
+        let at_start =
+            AudioEngine::sample_loop_with_xfade(wrapped, start, end, xfade, style, sample_at);
+        assert!(
+            at_start.abs() < 1e-3,
+            "head must fade in from zero: {at_start}"
+        );
     }
 
     #[test]
@@ -1404,14 +1463,6 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             2,
             "buffer replace should preserve the integer playhead"
-        );
-        assert_eq!(
-            audio
-                .shared
-                .swap_xfade_frames_left
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "offline-only buffer replace should not arm swap crossfade"
         );
     }
 

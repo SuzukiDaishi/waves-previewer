@@ -1081,6 +1081,7 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         total_frames: None,
         rms_db: None,
         peak_db: None,
+        peak_db_estimate: false,
         lufs_i: None,
         bpm: None,
         created_at: None,
@@ -1596,7 +1597,11 @@ show_note_labels = false
         let p = deserialize_project(MINIMAL_TOML).unwrap();
         let s = serialize_project(&p).unwrap();
         let parsed: Result<toml::Value, _> = toml::from_str(&s);
-        assert!(parsed.is_ok(), "serialize output is not valid toml: {:?}", parsed.err());
+        assert!(
+            parsed.is_ok(),
+            "serialize output is not valid toml: {:?}",
+            parsed.err()
+        );
     }
 
     #[test]
@@ -1651,7 +1656,9 @@ show_note_labels = false
     fn serialize_large_file_list() {
         let p = deserialize_project(MINIMAL_TOML).unwrap();
         let mut p2 = p.clone();
-        p2.list.files = (0..200).map(|i| format!("/audio/track_{i:04}.wav")).collect();
+        p2.list.files = (0..200)
+            .map(|i| format!("/audio/track_{i:04}.wav"))
+            .collect();
         let s = serialize_project(&p2).unwrap();
         let p3 = deserialize_project(&s).unwrap();
         assert_eq!(p3.list.files.len(), 200);

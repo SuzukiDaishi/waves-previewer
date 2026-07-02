@@ -319,8 +319,9 @@ pub fn build_visible_minmax(samples: &[f32], bins: usize, out: &mut Vec<Peak>) {
     }
     out.reserve(bins.min(samples.len()));
     let len = samples.len();
-    let mut pos = 0.0f32;
-    let step = (len as f32 / bins as f32).max(1.0);
+    // f64: f32 mantissa cannot represent sample indices above 2^24 (~6 min at 48 kHz).
+    let mut pos = 0.0f64;
+    let step = (len as f64 / bins as f64).max(1.0);
     while (pos as usize) < len {
         let start = pos.floor() as usize;
         let mut end = (pos + step).floor() as usize;
@@ -367,8 +368,8 @@ pub fn build_mixdown_minmax_visible(
     let visible_len = end - start;
     out.reserve(bins.min(visible_len));
     let inv_channels = 1.0 / channels.len().max(1) as f32;
-    let mut pos = 0.0f32;
-    let step = (visible_len as f32 / bins as f32).max(1.0);
+    let mut pos = 0.0f64;
+    let step = (visible_len as f64 / bins as f64).max(1.0);
     while (pos as usize) < visible_len {
         let i0 = start + pos.floor() as usize;
         let mut i1 = start + (pos + step).floor() as usize;

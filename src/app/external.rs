@@ -317,8 +317,14 @@ mod tests {
 
     #[test]
     fn cell_string_trims_whitespace() {
-        assert_eq!(cell_to_string(&Data::String("  hello  ".to_string())), "hello");
-        assert_eq!(cell_to_string(&Data::String("no spaces".to_string())), "no spaces");
+        assert_eq!(
+            cell_to_string(&Data::String("  hello  ".to_string())),
+            "hello"
+        );
+        assert_eq!(
+            cell_to_string(&Data::String("no spaces".to_string())),
+            "no spaces"
+        );
         assert_eq!(cell_to_string(&Data::String(String::new())), "");
     }
 
@@ -332,8 +338,8 @@ mod tests {
 
     #[test]
     fn cell_float_fractional_four_decimal_places() {
-        // {:.4} rounds to 4 decimal places: 3.14159 → "3.1416"
-        assert_eq!(cell_to_string(&Data::Float(3.14159)), "3.1416");
+        // {:.4} rounds to 4 decimal places
+        assert_eq!(cell_to_string(&Data::Float(5.43219)), "5.4322");
         assert_eq!(cell_to_string(&Data::Float(1.23456789)), "1.2346");
         assert_eq!(cell_to_string(&Data::Float(0.1)), "0.1000");
     }

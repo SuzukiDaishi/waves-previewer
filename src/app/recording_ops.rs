@@ -22,19 +22,32 @@ impl super::WavesPreviewer {
         let (worker_tx, app_rx) = std::sync::mpsc::channel::<RecordingWorkerMsg>();
         // bounded channel for raw capture data (non-blocking callback)
         let (cap_tx, cap_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(256);
+        // channel for cpal stream errors (device unplugged etc.)
+        let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+        let overruns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let source = self.recording_tab.source.clone();
         let mic_id = self.recording_tab.selected_mic_id.clone();
 
         // Start capture stream
         let capture_result = match source {
-            RecordingSourceKind::Microphone | RecordingSourceKind::SystemAndMicrophone => {
-                audio_capture::start_microphone_capture(mic_id.as_deref(), cap_tx.clone())
-            }
+            RecordingSourceKind::Microphone => audio_capture::start_microphone_capture(
+                mic_id.as_deref(),
+                cap_tx.clone(),
+                err_tx.clone(),
+                overruns.clone(),
+            ),
+            // Mixing system audio with the microphone needs two synchronized
+            // streams; not implemented. The UI disables this option.
+            RecordingSourceKind::SystemAndMicrophone => Err(anyhow::anyhow!(
+                "System + Mic recording is not implemented yet"
+            )),
             #[cfg(target_os = "windows")]
-            RecordingSourceKind::System => {
-                audio_capture::start_wasapi_loopback_capture(cap_tx.clone())
-            }
+            RecordingSourceKind::System => audio_capture::start_wasapi_loopback_capture(
+                cap_tx.clone(),
+                err_tx.clone(),
+                overruns.clone(),
+            ),
             #[cfg(not(target_os = "windows"))]
             RecordingSourceKind::System => Err(anyhow::anyhow!(
                 "System audio capture is not supported on this platform"
@@ -86,6 +99,12 @@ impl super::WavesPreviewer {
 
             loop {
                 if cancel_worker.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(msg) = err_rx.try_recv() {
+                    // Stream broke (e.g. device unplugged): report it and stop,
+                    // finalizing whatever was captured so far.
+                    let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(msg));
                     break;
                 }
                 match cap_rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -167,6 +186,11 @@ impl super::WavesPreviewer {
         self.recording_tab.overview_block_secs = overview_block as f32 / sample_rate.max(1) as f32;
         self.recording_tab.level_l = 0.0;
         self.recording_tab.level_r = 0.0;
+        self.recording_tab.peak_hold_l = 0.0;
+        self.recording_tab.peak_hold_r = 0.0;
+        self.recording_tab.peak_hold_l_at = None;
+        self.recording_tab.peak_hold_r_at = None;
+        self.recording_tab.overrun_count = overruns;
         self.recording_tab.elapsed_secs = 0.0;
         self.recording_tab.progress_message = "Recording…".to_string();
     }
@@ -212,13 +236,47 @@ impl super::WavesPreviewer {
         self.recording_tab.last_recording_path = None;
         self.recording_tab.rx = None;
         self.recording_tab.waveform_overview.clear();
+        self.recording_tab.confirm_discard = false;
+        self.recording_tab.level_l = 0.0;
+        self.recording_tab.level_r = 0.0;
+        self.recording_tab.peak_hold_l = 0.0;
+        self.recording_tab.peak_hold_r = 0.0;
         self.recording_tab.progress_message = String::new();
+    }
+
+    /// Copies the finished temp recording to a user-chosen location.
+    pub(super) fn save_recording_as(&mut self) {
+        use crate::app::types::RecordingState;
+        let Some(src) = self.recording_tab.last_recording_path.clone() else {
+            return;
+        };
+        let default_name = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("recording.wav");
+        let Some(dest) = self.pick_recording_save_dialog(default_name) else {
+            return;
+        };
+        let dest = if dest.extension().is_none() {
+            dest.with_extension("wav")
+        } else {
+            dest
+        };
+        match std::fs::copy(&src, &dest) {
+            Ok(_) => {
+                self.recording_tab.progress_message = format!("Saved: {}", dest.display());
+            }
+            Err(err) => {
+                self.recording_tab.state = RecordingState::Error(format!("save failed: {err}"));
+            }
+        }
     }
 
     pub(super) fn drain_recording_events(&mut self) {
         use crate::app::types::{RecordingState, RecordingWorkerMsg};
 
         let mut finalized_path: Option<std::path::PathBuf> = None;
+        let mut error_msg: Option<String> = None;
 
         let Some(rx) = &self.recording_tab.rx else {
             // update elapsed
@@ -252,7 +310,7 @@ impl super::WavesPreviewer {
                         finalized_path = Some(path);
                     }
                     RecordingWorkerMsg::Error(msg) => {
-                        self.recording_tab.state = RecordingState::Error(msg);
+                        error_msg = Some(msg);
                     }
                 },
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -269,10 +327,19 @@ impl super::WavesPreviewer {
             }
         }
 
+        if let Some(msg) = error_msg {
+            self.recording_tab.state = RecordingState::Error(msg);
+        }
         if let Some(path) = finalized_path {
             self.recording_tab.last_recording_path = Some(path.clone());
-            self.recording_tab.state = RecordingState::Idle;
-            self.recording_tab.progress_message = "Recording ready".to_string();
+            if matches!(self.recording_tab.state, RecordingState::Error(_)) {
+                // Keep the error visible; the partial take is still available.
+                self.recording_tab.progress_message =
+                    "Recording stopped — partial take saved".to_string();
+            } else {
+                self.recording_tab.state = RecordingState::Idle;
+                self.recording_tab.progress_message = "Recording ready".to_string();
+            }
             // Worker thread has exited and dropped its sender; drop the now-dead
             // receiver so we stop polling a disconnected channel every frame.
             self.recording_tab.rx = None;

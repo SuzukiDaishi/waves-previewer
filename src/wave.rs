@@ -19,8 +19,8 @@ use vorbis_rs::VorbisEncoderBuilder;
 use crate::audio::AudioEngine;
 use crate::audio_io;
 use rubato::{
-    Async, FixedAsync, Fft, FixedSync, Resampler, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction as RubatoWindowFunction,
+    Async, Fft, FixedAsync, FixedSync, Resampler, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction as RubatoWindowFunction,
 };
 use signalsmith_stretch::Stretch;
 
@@ -265,9 +265,15 @@ fn resample_with_rubato(
     chunk_size: usize,
 ) -> Result<Vec<f32>> {
     let ratio = out_sr as f64 / in_sr as f64;
-    let resampler =
-        Async::<f32>::new_sinc(ratio, 2.0, &params, chunk_size.max(32), 1, FixedAsync::Input)
-            .map_err(|e| anyhow::anyhow!("rubato init failed: {e}"))?;
+    let resampler = Async::<f32>::new_sinc(
+        ratio,
+        2.0,
+        &params,
+        chunk_size.max(32),
+        1,
+        FixedAsync::Input,
+    )
+    .map_err(|e| anyhow::anyhow!("rubato init failed: {e}"))?;
     let result = resample_all_channels(&[mono.to_vec()], resampler)?;
     Ok(result.into_iter().next().unwrap_or_default())
 }
@@ -283,9 +289,15 @@ fn resample_channels_with_rubato(
         return Ok(Vec::new());
     }
     let ratio = out_sr as f64 / in_sr as f64;
-    let resampler =
-        Async::<f32>::new_sinc(ratio, 2.0, &params, chunk_size.max(32), chans.len(), FixedAsync::Input)
-            .map_err(|e| anyhow::anyhow!("rubato multi-channel init failed: {e}"))?;
+    let resampler = Async::<f32>::new_sinc(
+        ratio,
+        2.0,
+        &params,
+        chunk_size.max(32),
+        chans.len(),
+        FixedAsync::Input,
+    )
+    .map_err(|e| anyhow::anyhow!("rubato multi-channel init failed: {e}"))?;
     resample_all_channels(chans, resampler)
 }
 
@@ -401,8 +413,9 @@ pub fn build_minmax(out: &mut Vec<(f32, f32)>, samples: &[f32], bins: usize) {
         return;
     }
     let len = samples.len();
-    let step = (len as f32 / bins as f32).max(1.0);
-    let mut pos = 0.0f32;
+    // f64: f32 mantissa cannot represent sample indices above 2^24 (~6 min at 48 kHz).
+    let step = (len as f64 / bins as f64).max(1.0);
+    let mut pos = 0.0f64;
     for _ in 0..bins {
         let start = pos as usize;
         let end = (pos + step) as usize;
@@ -445,8 +458,8 @@ pub fn build_waveform_minmax_from_channels(
         return Vec::new();
     }
     let mut waveform = Vec::with_capacity(bins.min(len));
-    let step = (len as f32 / bins as f32).max(1.0);
-    let mut pos = 0.0f32;
+    let step = (len as f64 / bins as f64).max(1.0);
+    let mut pos = 0.0f64;
     let channel_count = channels.len() as f32;
     for _ in 0..bins {
         let start = pos as usize;
@@ -687,14 +700,9 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
     }
     let riff_size = (out.len().saturating_sub(8)) as u32;
     out[4..8].copy_from_slice(&riff_size.to_le_bytes());
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = parent.join("._wvp_tmp_smpl.wav");
-    if tmp.exists() {
-        let _ = fs::remove_file(&tmp);
-    }
+    let tmp = unique_sibling_tmp(path, "smpl", "wav");
     fs::write(&tmp, out)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
+    replace_file_with_tmp(&tmp, path, false)
 }
 
 #[derive(Clone)]
@@ -1043,14 +1051,14 @@ pub fn process_speed_offline(mono: &[f32], rate: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(out_len);
     let last = mono.len().saturating_sub(1);
     for i in 0..out_len {
-        let src_pos = (i as f32) * rate;
+        let src_pos = (i as f64) * (rate as f64);
         let i0 = src_pos.floor() as usize;
         if i0 >= last {
             out.push(*mono.last().unwrap_or(&0.0));
             continue;
         }
         let i1 = (i0 + 1).min(last);
-        let t = (src_pos - i0 as f32).clamp(0.0, 1.0);
+        let t = ((src_pos - i0 as f64) as f32).clamp(0.0, 1.0);
         out.push(mono[i0] * (1.0 - t) + mono[i1] * t);
     }
     out
@@ -1541,7 +1549,7 @@ fn interleave_i16(chans: &[Vec<f32>]) -> Vec<i16> {
 
 fn f32_to_i16(v: f32) -> i16 {
     let clamped = v.clamp(-1.0, 1.0);
-    (clamped * i16::MAX as f32) as i16
+    (clamped * i16::MAX as f32).round() as i16
 }
 
 fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
@@ -1632,6 +1640,55 @@ pub fn overwrite_audio_from_channels(
     overwrite_audio_from_channels_with_depth(chans, sample_rate, src, backup, None)
 }
 
+/// Allocate a unique temp path next to `src` so concurrent operations in the
+/// same directory never collide on a shared temp name.
+fn unique_sibling_tmp(src: &Path, tag: &str, ext: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        ".wvp_tmp_{}_{}_{}.{}",
+        std::process::id(),
+        n,
+        tag,
+        ext
+    ))
+}
+
+/// Replace `src` with the finished `tmp`, never leaving a window where the
+/// original is deleted and unrecoverable. Optionally keeps `<name>.bak`.
+fn replace_file_with_tmp(tmp: &Path, src: &Path, backup: bool) -> Result<()> {
+    use std::fs;
+    if backup {
+        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
+        let bak = src.with_file_name(format!("{}.bak", fname));
+        let _ = fs::remove_file(&bak);
+        let _ = fs::copy(src, &bak);
+    }
+    // Atomic on Unix; on Windows rename fails while the target still exists.
+    if fs::rename(tmp, src).is_ok() {
+        return Ok(());
+    }
+    // Park the original under a unique sidecar name, move the new file in,
+    // then drop the sidecar; on failure the original is restored.
+    let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
+    let sidecar = unique_sibling_tmp(src, "old", ext);
+    fs::rename(src, &sidecar)
+        .with_context(|| format!("park original for replace: {}", src.display()))?;
+    match fs::rename(tmp, src) {
+        Ok(()) => {
+            let _ = fs::remove_file(&sidecar);
+            Ok(())
+        }
+        Err(err) => {
+            let _ = fs::rename(&sidecar, src);
+            let _ = fs::remove_file(tmp);
+            Err(err).with_context(|| format!("replace file: {}", src.display()))
+        }
+    }
+}
+
 pub fn overwrite_audio_from_channels_with_depth(
     chans: &[Vec<f32>],
     sample_rate: u32,
@@ -1639,69 +1696,26 @@ pub fn overwrite_audio_from_channels_with_depth(
     backup: bool,
     wav_depth: Option<WavBitDepth>,
 ) -> Result<()> {
-    use std::fs;
-    let parent = src.parent().unwrap_or_else(|| Path::new("."));
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
-    let tmp = parent.join(format!("._wvp_tmp.{}", ext));
-    if tmp.exists() {
-        let _ = fs::remove_file(&tmp);
-    }
+    let tmp = unique_sibling_tmp(src, "ow", ext);
     export_channels_audio_with_depth(chans, sample_rate, &tmp, wav_depth)?;
     try_copy_audio_metadata_from_source(src, &tmp);
-    if backup {
-        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
-        let bak = src.with_file_name(format!("{}.bak", fname));
-        let _ = fs::remove_file(&bak);
-        let _ = fs::copy(src, &bak);
-    }
-    let _ = fs::remove_file(src);
-    fs::rename(&tmp, src)?;
-    Ok(())
+    replace_file_with_tmp(&tmp, src, backup)
 }
 
 // Overwrite: apply gain and replace the source file safely with optional .bak
 pub fn overwrite_gain_wav(src: &Path, gain_db: f32, backup: bool) -> Result<()> {
-    use std::fs;
-    let parent = src.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = parent.join("._wvp_tmp.wav");
-    if tmp.exists() {
-        let _ = fs::remove_file(&tmp);
-    }
+    let tmp = unique_sibling_tmp(src, "gain", "wav");
     export_gain_wav(src, &tmp, gain_db)?;
-    if backup {
-        // backup as "<original>.wav.bak"
-        let fname = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("backup.wav");
-        let bak = src.with_file_name(format!("{}.bak", fname));
-        let _ = fs::remove_file(&bak);
-        let _ = fs::copy(src, &bak);
-    }
-    let _ = fs::remove_file(src);
-    fs::rename(&tmp, src)?;
-    Ok(())
+    replace_file_with_tmp(&tmp, src, backup)
 }
 
 // Overwrite: apply gain and replace the source file safely with optional .bak (all supported formats)
 pub fn overwrite_gain_audio(src: &Path, gain_db: f32, backup: bool) -> Result<()> {
-    use std::fs;
-    let parent = src.parent().unwrap_or_else(|| Path::new("."));
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
-    let tmp = parent.join(format!("._wvp_tmp.{}", ext));
-    if tmp.exists() {
-        let _ = fs::remove_file(&tmp);
-    }
+    let tmp = unique_sibling_tmp(src, "gain", ext);
     export_gain_audio(src, &tmp, gain_db)?;
-    if backup {
-        let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
-        let bak = src.with_file_name(format!("{}.bak", fname));
-        let _ = fs::remove_file(&bak);
-        let _ = fs::copy(src, &bak);
-    }
-    let _ = fs::remove_file(src);
-    fs::rename(&tmp, src)?;
-    Ok(())
+    replace_file_with_tmp(&tmp, src, backup)
 }
 
 // ---- Loudness (LUFS) utilities ----
@@ -1861,7 +1875,7 @@ mod tests {
     use super::{
         encode_riff_wave_chunks, export_channels_audio, export_gain_audio, overwrite_gain_wav,
         parse_riff_wave_chunks, resample_channels_quality, resample_channels_with_rubato,
-        resample_quality, resample_quality_params, resample_with_rubato, ResampleQuality,
+        resample_quality_params, resample_with_rubato, unique_sibling_tmp, ResampleQuality,
         RiffWaveChunk, RubatoWindowFunction, SincInterpolationParameters,
     };
     use id3::TagLike;
@@ -1891,6 +1905,15 @@ mod tests {
             right.push((t * 330.0 * std::f32::consts::TAU).sin() * 0.25);
         }
         vec![left, right]
+    }
+
+    #[test]
+    fn unique_sibling_tmp_never_collides() {
+        let src = PathBuf::from("/some/dir/file.wav");
+        let a = unique_sibling_tmp(&src, "ow", "wav");
+        let b = unique_sibling_tmp(&src, "ow", "wav");
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), src.parent());
     }
 
     fn make_temp_dir(tag: &str) -> PathBuf {
@@ -1954,15 +1977,14 @@ mod tests {
         };
 
         // Multi-channel sinc path
-        let multi = resample_channels_with_rubato(&chans, in_sr, out_sr, params.clone(), chunk_size)
-            .expect("multi sinc failed");
+        let multi =
+            resample_channels_with_rubato(&chans, in_sr, out_sr, params.clone(), chunk_size)
+                .expect("multi sinc failed");
         // Per-channel sinc paths
-        let expected_left =
-            resample_with_rubato(&left, in_sr, out_sr, params.clone(), chunk_size)
-                .expect("left sinc failed");
-        let expected_right =
-            resample_with_rubato(&right, in_sr, out_sr, params, chunk_size)
-                .expect("right sinc failed");
+        let expected_left = resample_with_rubato(&left, in_sr, out_sr, params.clone(), chunk_size)
+            .expect("left sinc failed");
+        let expected_right = resample_with_rubato(&right, in_sr, out_sr, params, chunk_size)
+            .expect("right sinc failed");
 
         assert_eq!(multi.len(), 2);
         assert_eq!(multi[0].len(), expected_left.len());

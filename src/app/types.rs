@@ -1051,6 +1051,9 @@ pub struct FileMeta {
     #[allow(dead_code)]
     pub rms_db: Option<f32>,
     pub peak_db: Option<f32>,
+    /// True when `peak_db` was estimated from a short decode prefix rather
+    /// than the whole file (header-only metadata pass).
+    pub peak_db_estimate: bool,
     pub lufs_i: Option<f32>,
     pub bpm: Option<f32>,
     pub created_at: Option<SystemTime>,
@@ -1539,6 +1542,252 @@ pub enum EffectGraphNodeKind {
     DebugSpectrum,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphPortDirection {
+    Input,
+    Output,
+}
+
+/// Data type carried by a port. Every port is an audio bus today; the enum
+/// exists so connect-time compatibility checks have a structural hook when
+/// non-audio ports (e.g. control/parameter values) are added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphPortType {
+    Audio,
+}
+
+impl EffectGraphPortType {
+    pub fn can_connect_to(self, other: Self) -> bool {
+        matches!((self, other), (Self::Audio, Self::Audio))
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Audio => "audio",
+        }
+    }
+}
+
+/// Typed description of a node port. `id` must match the serialized edge port
+/// ids exactly ("in", "in1".."in8", "out", "out1"/"out2", "ch1".."ch8") —
+/// session/project files persist these strings.
+#[derive(Clone, Copy, Debug)]
+pub struct EffectGraphPortSpec {
+    pub id: &'static str,
+    /// Short pin label rendered next to the pin ("" for single ports).
+    pub label: &'static str,
+    pub direction: EffectGraphPortDirection,
+    pub data_type: EffectGraphPortType,
+}
+
+const fn effect_graph_audio_in(id: &'static str, label: &'static str) -> EffectGraphPortSpec {
+    EffectGraphPortSpec {
+        id,
+        label,
+        direction: EffectGraphPortDirection::Input,
+        data_type: EffectGraphPortType::Audio,
+    }
+}
+
+const fn effect_graph_audio_out(id: &'static str, label: &'static str) -> EffectGraphPortSpec {
+    EffectGraphPortSpec {
+        id,
+        label,
+        direction: EffectGraphPortDirection::Output,
+        data_type: EffectGraphPortType::Audio,
+    }
+}
+
+const EFFECT_GRAPH_NO_PORTS: &[EffectGraphPortSpec] = &[];
+const EFFECT_GRAPH_IN: &[EffectGraphPortSpec] = &[effect_graph_audio_in("in", "")];
+const EFFECT_GRAPH_OUT: &[EffectGraphPortSpec] = &[effect_graph_audio_out("out", "")];
+const EFFECT_GRAPH_COMBINE_INPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_in("in1", "1"),
+    effect_graph_audio_in("in2", "2"),
+    effect_graph_audio_in("in3", "3"),
+    effect_graph_audio_in("in4", "4"),
+    effect_graph_audio_in("in5", "5"),
+    effect_graph_audio_in("in6", "6"),
+    effect_graph_audio_in("in7", "7"),
+    effect_graph_audio_in("in8", "8"),
+];
+const EFFECT_GRAPH_DUPLICATE_OUTPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_out("out1", "1"),
+    effect_graph_audio_out("out2", "2"),
+];
+const EFFECT_GRAPH_SPLIT_OUTPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_out("ch1", "1"),
+    effect_graph_audio_out("ch2", "2"),
+    effect_graph_audio_out("ch3", "3"),
+    effect_graph_audio_out("ch4", "4"),
+    effect_graph_audio_out("ch5", "5"),
+    effect_graph_audio_out("ch6", "6"),
+    effect_graph_audio_out("ch7", "7"),
+    effect_graph_audio_out("ch8", "8"),
+];
+
+/// Palette grouping for node kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffectGraphNodeCategory {
+    Standard,
+    Debug,
+    Routing,
+}
+
+/// Static metadata for a node kind: single source of truth for display name,
+/// palette category and typed ports. UI, validation and execution all derive
+/// from this instead of hand-maintained parallel lists.
+#[derive(Clone, Copy, Debug)]
+pub struct EffectGraphNodeSpec {
+    pub kind: EffectGraphNodeKind,
+    pub display_name: &'static str,
+    pub category: EffectGraphNodeCategory,
+    pub inputs: &'static [EffectGraphPortSpec],
+    pub outputs: &'static [EffectGraphPortSpec],
+}
+
+impl EffectGraphNodeSpec {
+    pub fn port(
+        &self,
+        direction: EffectGraphPortDirection,
+        port_id: &str,
+    ) -> Option<&'static EffectGraphPortSpec> {
+        let ports = match direction {
+            EffectGraphPortDirection::Input => self.inputs,
+            EffectGraphPortDirection::Output => self.outputs,
+        };
+        ports
+            .iter()
+            .find(|port| port.direction == direction && port.id == port_id)
+    }
+}
+
+impl EffectGraphNodeKind {
+    /// All node kinds in palette order.
+    pub const ALL: [Self; 14] = [
+        Self::Input,
+        Self::Output,
+        Self::Gain,
+        Self::Loudness,
+        Self::MonoMix,
+        Self::PitchShift,
+        Self::TimeStretch,
+        Self::Speed,
+        Self::PluginFx,
+        Self::DebugWaveform,
+        Self::DebugSpectrum,
+        Self::Duplicate,
+        Self::SplitChannels,
+        Self::CombineChannels,
+    ];
+
+    // Exhaustive by construction: adding a kind fails to compile until a spec
+    // exists (no `_` arm).
+    pub fn spec(self) -> &'static EffectGraphNodeSpec {
+        use EffectGraphNodeCategory as Cat;
+        match self {
+            Self::Input => &EffectGraphNodeSpec {
+                kind: Self::Input,
+                display_name: "Input",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_NO_PORTS,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Output => &EffectGraphNodeSpec {
+                kind: Self::Output,
+                display_name: "Output",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_NO_PORTS,
+            },
+            Self::Gain => &EffectGraphNodeSpec {
+                kind: Self::Gain,
+                display_name: "Gain",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Loudness => &EffectGraphNodeSpec {
+                kind: Self::Loudness,
+                display_name: "LoudNorm",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::MonoMix => &EffectGraphNodeSpec {
+                kind: Self::MonoMix,
+                display_name: "Mono Mix",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::PitchShift => &EffectGraphNodeSpec {
+                kind: Self::PitchShift,
+                display_name: "PitchShift",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::TimeStretch => &EffectGraphNodeSpec {
+                kind: Self::TimeStretch,
+                display_name: "TimeStretch",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Speed => &EffectGraphNodeSpec {
+                kind: Self::Speed,
+                display_name: "Speed",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::PluginFx => &EffectGraphNodeSpec {
+                kind: Self::PluginFx,
+                display_name: "Plugin FX",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Duplicate => &EffectGraphNodeSpec {
+                kind: Self::Duplicate,
+                display_name: "Duplicate",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_DUPLICATE_OUTPUTS,
+            },
+            Self::SplitChannels => &EffectGraphNodeSpec {
+                kind: Self::SplitChannels,
+                display_name: "Split Channels",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_SPLIT_OUTPUTS,
+            },
+            Self::CombineChannels => &EffectGraphNodeSpec {
+                kind: Self::CombineChannels,
+                display_name: "Combine Channels",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_COMBINE_INPUTS,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::DebugWaveform => &EffectGraphNodeSpec {
+                kind: Self::DebugWaveform,
+                display_name: "Waveform",
+                category: Cat::Debug,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::DebugSpectrum => &EffectGraphNodeSpec {
+                kind: Self::DebugSpectrum,
+                display_name: "Spectrum",
+                category: Cat::Debug,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectGraphNodeData {
@@ -1598,23 +1847,12 @@ impl EffectGraphNodeData {
         }
     }
 
+    pub fn spec(&self) -> &'static EffectGraphNodeSpec {
+        self.kind().spec()
+    }
+
     pub fn display_name(&self) -> &'static str {
-        match self.kind() {
-            EffectGraphNodeKind::Input => "Input",
-            EffectGraphNodeKind::Output => "Output",
-            EffectGraphNodeKind::Gain => "Gain",
-            EffectGraphNodeKind::Loudness => "LoudNorm",
-            EffectGraphNodeKind::MonoMix => "Mono Mix",
-            EffectGraphNodeKind::PitchShift => "PitchShift",
-            EffectGraphNodeKind::TimeStretch => "TimeStretch",
-            EffectGraphNodeKind::Speed => "Speed",
-            EffectGraphNodeKind::PluginFx => "Plugin FX",
-            EffectGraphNodeKind::Duplicate => "Duplicate",
-            EffectGraphNodeKind::SplitChannels => "Split Channels",
-            EffectGraphNodeKind::CombineChannels => "Combine Channels",
-            EffectGraphNodeKind::DebugWaveform => "Waveform",
-            EffectGraphNodeKind::DebugSpectrum => "Spectrum",
-        }
+        self.spec().display_name
     }
 
     pub fn default_for_kind(kind: EffectGraphNodeKind) -> Self {
@@ -1643,50 +1881,28 @@ impl EffectGraphNodeData {
         }
     }
 
-    pub fn input_ports(&self) -> &'static [&'static str] {
-        match self {
-            Self::Input => &[],
-            Self::Output => &["in"],
-            Self::Gain { .. }
-            | Self::Loudness { .. }
-            | Self::MonoMix { .. }
-            | Self::PitchShift { .. }
-            | Self::TimeStretch { .. }
-            | Self::Speed { .. }
-            | Self::PluginFx { .. }
-            | Self::Duplicate
-            | Self::DebugWaveform { .. }
-            | Self::DebugSpectrum { .. }
-            | Self::SplitChannels => &["in"],
-            Self::CombineChannels => &["in1", "in2", "in3", "in4", "in5", "in6", "in7", "in8"],
-        }
+    pub fn input_ports(&self) -> &'static [EffectGraphPortSpec] {
+        self.spec().inputs
     }
 
-    pub fn output_ports(&self) -> &'static [&'static str] {
-        match self {
-            Self::Output => &[],
-            Self::Input
-            | Self::Gain { .. }
-            | Self::Loudness { .. }
-            | Self::MonoMix { .. }
-            | Self::PitchShift { .. }
-            | Self::TimeStretch { .. }
-            | Self::Speed { .. }
-            | Self::PluginFx { .. }
-            | Self::DebugWaveform { .. }
-            | Self::DebugSpectrum { .. }
-            | Self::CombineChannels => &["out"],
-            Self::Duplicate => &["out1", "out2"],
-            Self::SplitChannels => &["ch1", "ch2", "ch3", "ch4", "ch5", "ch6", "ch7", "ch8"],
-        }
+    pub fn output_ports(&self) -> &'static [EffectGraphPortSpec] {
+        self.spec().outputs
+    }
+
+    pub fn input_port(&self, port_id: &str) -> Option<&'static EffectGraphPortSpec> {
+        self.spec().port(EffectGraphPortDirection::Input, port_id)
+    }
+
+    pub fn output_port(&self, port_id: &str) -> Option<&'static EffectGraphPortSpec> {
+        self.spec().port(EffectGraphPortDirection::Output, port_id)
     }
 
     pub fn has_input_port(&self, port_id: &str) -> bool {
-        self.input_ports().iter().any(|port| *port == port_id)
+        self.input_port(port_id).is_some()
     }
 
     pub fn has_output_port(&self, port_id: &str) -> bool {
-        self.output_ports().iter().any(|port| *port == port_id)
+        self.output_port(port_id).is_some()
     }
 }
 
@@ -2959,6 +3175,16 @@ pub struct RecordingTabState {
     pub elapsed_secs: f32,
     pub level_l: f32,
     pub level_r: f32,
+    /// peak-hold values for the level meters (linear, runtime-only)
+    pub peak_hold_l: f32,
+    pub peak_hold_r: f32,
+    pub peak_hold_l_at: Option<std::time::Instant>,
+    pub peak_hold_r_at: Option<std::time::Instant>,
+    /// true while the "discard take?" confirmation modal is open
+    pub confirm_discard: bool,
+    /// capture buffers dropped because the worker fell behind (shared with the
+    /// cpal callback)
+    pub overrun_count: Arc<std::sync::atomic::AtomicUsize>,
     pub waveform_overview: Vec<(f32, f32)>,
     /// duration in seconds represented by each waveform_overview block (for grid drawing)
     pub overview_block_secs: f32,
@@ -2991,6 +3217,12 @@ impl Default for RecordingTabState {
             elapsed_secs: 0.0,
             level_l: 0.0,
             level_r: 0.0,
+            peak_hold_l: 0.0,
+            peak_hold_r: 0.0,
+            peak_hold_l_at: None,
+            peak_hold_r_at: None,
+            confirm_discard: false,
+            overrun_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             waveform_overview: Vec::new(),
             overview_block_secs: 0.0,
             progress_message: String::new(),

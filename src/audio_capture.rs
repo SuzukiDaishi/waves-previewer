@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct RecordingDeviceInfo {
@@ -63,6 +65,8 @@ pub(crate) fn default_input_device_info() -> Option<RecordingDeviceInfo> {
 pub fn start_microphone_capture(
     device_id: Option<&str>,
     tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    err_tx: std::sync::mpsc::Sender<String>,
+    overruns: Arc<AtomicUsize>,
 ) -> Result<CaptureStream> {
     let host = cpal::default_host();
 
@@ -89,7 +93,8 @@ pub fn start_microphone_capture(
     let fmt = cfg.sample_format();
     let stream_cfg: cpal::StreamConfig = cfg.into();
 
-    let stream = build_input_stream(&device, &stream_cfg, fmt, tx).context("build input stream")?;
+    let stream = build_input_stream(&device, &stream_cfg, fmt, tx, err_tx, overruns)
+        .context("build input stream")?;
     stream.play().context("start capture stream")?;
 
     Ok(CaptureStream {
@@ -104,15 +109,25 @@ fn build_input_stream(
     cfg: &cpal::StreamConfig,
     fmt: cpal::SampleFormat,
     tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    err_tx: std::sync::mpsc::Sender<String>,
+    overruns: Arc<AtomicUsize>,
 ) -> Result<cpal::Stream> {
-    let err_fn = |err| eprintln!("capture stream error: {err}");
+    // Surface stream errors (device unplugged etc.) to the recording worker
+    // instead of just stderr, so the UI can show them.
+    let err_fn = move |err: cpal::StreamError| {
+        let _ = err_tx.send(format!("capture stream error: {err}"));
+    };
+    // A full channel means the worker stalled; count the dropped buffer so the
+    // UI can warn about lost audio instead of failing silently.
     let stream = match fmt {
         cpal::SampleFormat::F32 => {
             let t = tx.clone();
             device.build_input_stream(
                 cfg,
                 move |data: &[f32], _| {
-                    let _ = t.try_send(data.to_vec());
+                    if t.try_send(data.to_vec()).is_err() {
+                        overruns.fetch_add(1, Ordering::Relaxed);
+                    }
                 },
                 err_fn,
                 None,
@@ -125,7 +140,9 @@ fn build_input_stream(
                 move |data: &[i16], _| {
                     let floats: Vec<f32> =
                         data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
-                    let _ = t.try_send(floats);
+                    if t.try_send(floats).is_err() {
+                        overruns.fetch_add(1, Ordering::Relaxed);
+                    }
                 },
                 err_fn,
                 None,
@@ -140,7 +157,9 @@ fn build_input_stream(
                         .iter()
                         .map(|&s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0)
                         .collect();
-                    let _ = t.try_send(floats);
+                    if t.try_send(floats).is_err() {
+                        overruns.fetch_add(1, Ordering::Relaxed);
+                    }
                 },
                 err_fn,
                 None,
@@ -158,6 +177,8 @@ fn build_input_stream(
 #[cfg(target_os = "windows")]
 pub fn start_wasapi_loopback_capture(
     tx: std::sync::mpsc::SyncSender<Vec<f32>>,
+    err_tx: std::sync::mpsc::Sender<String>,
+    overruns: Arc<AtomicUsize>,
 ) -> Result<CaptureStream> {
     let host = cpal::host_from_id(cpal::HostId::Wasapi).context("WASAPI host not available")?;
     let device = host
@@ -170,7 +191,7 @@ pub fn start_wasapi_loopback_capture(
     let sample_rate = cfg.sample_rate();
     let fmt = cfg.sample_format();
     let stream_cfg: cpal::StreamConfig = cfg.into();
-    let stream = build_input_stream(&device, &stream_cfg, fmt, tx)
+    let stream = build_input_stream(&device, &stream_cfg, fmt, tx, err_tx, overruns)
         .context("build WASAPI loopback stream")?;
     stream.play().context("start WASAPI loopback stream")?;
     Ok(CaptureStream {
