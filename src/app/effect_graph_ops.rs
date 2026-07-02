@@ -1202,9 +1202,9 @@ fn effect_graph_infer_flow_hints(
             .data
             .input_ports()
             .iter()
-            .filter_map(|port_id| {
+            .filter_map(|port| {
                 input_sources
-                    .get(&make_port_key(&node.id, port_id))
+                    .get(&make_port_key(&node.id, port.id))
                     .and_then(|source| output_hints.get(source))
                     .cloned()
             })
@@ -1227,7 +1227,7 @@ fn effect_graph_infer_flow_hints(
                     .into_iter()
                     .next()
                     .unwrap_or(EffectGraphChannelFlowHint::Unknown);
-                for port_id in node.data.output_ports().iter() {
+                for port in node.data.output_ports().iter() {
                     let output_hint = match &input_hint {
                         EffectGraphChannelFlowHint::PlainDense => {
                             EffectGraphChannelFlowHint::AutoPlaced {
@@ -1277,14 +1277,14 @@ fn effect_graph_infer_flow_hints(
                         },
                         other => other,
                     };
-                    output_hints.insert(make_port_key(&node.id, port_id), output_hint);
+                    output_hints.insert(make_port_key(&node.id, port.id), output_hint);
                 }
             }
             EffectGraphNodeData::SplitChannels => {
                 let input_hint = input_hints.first();
-                for (index, port_id) in node.data.output_ports().iter().enumerate() {
+                for (index, port) in node.data.output_ports().iter().enumerate() {
                     output_hints.insert(
-                        make_port_key(&node.id, port_id),
+                        make_port_key(&node.id, port.id),
                         split_flow_hint_for_index(input_hint, index),
                     );
                 }
@@ -1343,9 +1343,9 @@ fn effect_graph_combine_mode_for_node_from_maps(
         .data
         .input_ports()
         .iter()
-        .filter_map(|port_id| {
+        .filter_map(|port| {
             input_sources
-                .get(&make_port_key(&node.id, port_id))
+                .get(&make_port_key(&node.id, port.id))
                 .and_then(|source| flow_hints.get(source))
         })
         .collect::<Vec<_>>();
@@ -1361,17 +1361,17 @@ fn effect_graph_node_lane_hint(
         .data
         .input_ports()
         .iter()
-        .filter_map(|port_id| {
+        .filter_map(|port| {
             input_sources
-                .get(&make_port_key(&node.id, port_id))
+                .get(&make_port_key(&node.id, port.id))
                 .and_then(|source| flow_hints.get(source))
                 .and_then(flow_hint_lane_centroid)
         })
         .collect::<Vec<_>>();
     if lane_values.is_empty() {
-        lane_values.extend(node.data.output_ports().iter().filter_map(|port_id| {
+        lane_values.extend(node.data.output_ports().iter().filter_map(|port| {
             flow_hints
-                .get(&make_port_key(&node.id, port_id))
+                .get(&make_port_key(&node.id, port.id))
                 .and_then(flow_hint_lane_centroid)
         }));
     }
@@ -1388,8 +1388,8 @@ fn effect_graph_combine_slot_labels_for_node(
     flow_hints: &HashMap<EffectGraphPortKey, EffectGraphChannelFlowHint>,
 ) -> HashMap<String, usize> {
     let mut labels = HashMap::new();
-    for port_id in node.data.input_ports().iter() {
-        let Some(source) = input_sources.get(&make_port_key(&node.id, port_id)) else {
+    for port in node.data.input_ports().iter() {
+        let Some(source) = input_sources.get(&make_port_key(&node.id, port.id)) else {
             continue;
         };
         let Some(hint) = flow_hints.get(source) else {
@@ -1397,7 +1397,7 @@ fn effect_graph_combine_slot_labels_for_node(
         };
         let slot_indices = flow_hint_slot_indices(hint);
         if let Some(slot_index) = slot_indices.into_iter().min() {
-            labels.insert((*port_id).to_string(), slot_index);
+            labels.insert(port.id.to_string(), slot_index);
         }
     }
     labels
@@ -1409,8 +1409,8 @@ fn effect_graph_combine_display_labels_for_node(
     flow_hints: &HashMap<EffectGraphPortKey, EffectGraphChannelFlowHint>,
 ) -> HashMap<String, String> {
     let mut labels = HashMap::new();
-    for port_id in node.data.input_ports().iter() {
-        let Some(source) = input_sources.get(&make_port_key(&node.id, port_id)) else {
+    for port in node.data.input_ports().iter() {
+        let Some(source) = input_sources.get(&make_port_key(&node.id, port.id)) else {
             continue;
         };
         let Some(hint) = flow_hints.get(source) else {
@@ -1430,7 +1430,7 @@ fn effect_graph_combine_display_labels_for_node(
             EffectGraphChannelFlowHint::Unknown => None,
         };
         if let Some(label) = label {
-            labels.insert((*port_id).to_string(), label);
+            labels.insert(port.id.to_string(), label);
         }
     }
     labels
@@ -1810,6 +1810,8 @@ fn validate_effect_graph_document(
                     node_id: Some(node.id.clone()),
                 });
             }
+            // Exhaustive on purpose (no `_` arm): adding a node kind must fail
+            // to compile here until its validation rules are considered.
             EffectGraphNodeData::Input
             | EffectGraphNodeData::Output
             | EffectGraphNodeData::PluginFx { .. }
@@ -1817,8 +1819,13 @@ fn validate_effect_graph_document(
             | EffectGraphNodeData::MonoMix { .. }
             | EffectGraphNodeData::Duplicate
             | EffectGraphNodeData::SplitChannels
-            | EffectGraphNodeData::CombineChannels => {}
-            _ => {}
+            | EffectGraphNodeData::CombineChannels
+            | EffectGraphNodeData::Gain { .. }
+            | EffectGraphNodeData::PitchShift { .. }
+            | EffectGraphNodeData::TimeStretch { .. }
+            | EffectGraphNodeData::Speed { .. }
+            | EffectGraphNodeData::DebugWaveform { .. }
+            | EffectGraphNodeData::DebugSpectrum { .. } => {}
         }
     }
 
@@ -1968,13 +1975,13 @@ fn validate_effect_graph_document(
             .data
             .input_ports()
             .iter()
-            .filter(|port_id| input_count_for(port_id) > 0)
+            .filter(|port| input_count_for(port.id) > 0)
             .count();
         let connected_output_ports = node
             .data
             .output_ports()
             .iter()
-            .filter(|port_id| output_count_for(port_id) > 0)
+            .filter(|port| output_count_for(port.id) > 0)
             .count();
         match &node.data {
             EffectGraphNodeData::Input => {
@@ -2073,9 +2080,9 @@ fn validate_effect_graph_document(
                     .data
                     .input_ports()
                     .iter()
-                    .filter_map(|port_id| {
+                    .filter_map(|port| {
                         input_sources
-                            .get(&make_port_key(&node.id, port_id))
+                            .get(&make_port_key(&node.id, port.id))
                             .and_then(|source| flow_hints.get(source))
                     })
                     .collect::<Vec<_>>();
@@ -2786,7 +2793,7 @@ where
                             )
                         })?;
                 let max_len = channels_frame_len(&bus.channels);
-                for (index, port_id) in node.data.output_ports().iter().enumerate() {
+                for (index, port) in node.data.output_ports().iter().enumerate() {
                     let channel_layout = make_split_output_layout(&bus.channel_layout, index);
                     let output_bus = if let Some(channel) = bus.channels.get(index) {
                         EffectGraphAudioBus {
@@ -2801,7 +2808,7 @@ where
                             channel_layout,
                         }
                     };
-                    output_buses.insert(make_port_key(&node.id, port_id), output_bus);
+                    output_buses.insert(make_port_key(&node.id, port.id), output_bus);
                 }
             }
             EffectGraphNodeData::CombineChannels => {
@@ -2809,10 +2816,10 @@ where
                     .data
                     .input_ports()
                     .iter()
-                    .filter_map(|port_id| {
+                    .filter_map(|port| {
                         effect_graph_input_bus_for_port(
                             &node.id,
-                            port_id,
+                            port.id,
                             &input_sources,
                             &output_buses,
                         )
@@ -2890,7 +2897,14 @@ where
                         }
                         output_buses.insert(make_port_key(&node.id, "out"), adaptive_bus);
                     }
-                    EffectGraphCombineMode::Mixed => unreachable!(),
+                    // Guarded above, but return a proper node error instead of
+                    // panicking the whole render if the guard ever drifts.
+                    EffectGraphCombineMode::Mixed => {
+                        return Err(effect_graph_node_runtime_error(
+                            &node.id,
+                            "Combine Channels received an unsupported channel layout mix",
+                        ));
+                    }
                 }
             }
             EffectGraphNodeData::DebugWaveform { .. } => {
@@ -3429,6 +3443,13 @@ impl WavesPreviewer {
             if tab_idx < self.tabs.len() {
                 self.active_tab = Some(tab_idx);
                 self.workspace_view = WorkspaceView::Editor;
+                // Re-establish the restored tab's transport, like every other
+                // tab-switch path; the graph may have re-pointed playback.
+                if let Some(tab) = self.tabs.get(tab_idx) {
+                    let path = tab.path.clone();
+                    self.debug_mark_tab_switch_start(&path);
+                    self.queue_tab_activation(path);
+                }
                 return;
             }
         }
@@ -5112,19 +5133,36 @@ impl WavesPreviewer {
         else {
             return Err("target node not found".to_string());
         };
-        if !from_node.data.has_output_port(from_port_id) {
+        let Some(from_port) = from_node.data.output_port(from_port_id) else {
             return Err(format!(
                 "{} has no output port '{}'",
                 from_node.data.display_name(),
                 from_port_id
             ));
-        }
-        if !to_node.data.has_input_port(to_port_id) {
+        };
+        let Some(to_port) = to_node.data.input_port(to_port_id) else {
             return Err(format!(
                 "{} has no input port '{}'",
                 to_node.data.display_name(),
                 to_port_id
             ));
+        };
+        if !from_port.data_type.can_connect_to(to_port.data_type) {
+            return Err(format!(
+                "cannot connect {} output to {} input",
+                from_port.data_type.display_name(),
+                to_port.data_type.display_name()
+            ));
+        }
+        let already_connected = self.effect_graph.draft.edges.iter().any(|edge| {
+            edge.from_node_id == from_node_id
+                && edge.from_port_id == from_port_id
+                && edge.to_node_id == to_node_id
+                && edge.to_port_id == to_port_id
+        });
+        if already_connected {
+            // Re-dropping the same wire is a no-op; don't churn the undo stack.
+            return Ok(());
         }
         self.effect_graph_push_undo_snapshot();
         self.effect_graph.draft.edges.retain(|edge| {
@@ -5366,6 +5404,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn effect_graph_specs_cover_all_kinds_and_match_serialized_port_ids() {
+        use crate::app::types::{EffectGraphNodeKind, EffectGraphPortDirection};
+        // A document containing every node kind, serialized and read back,
+        // must resolve every port id against the spec table (serde compat:
+        // the specs' ids ARE the persisted strings).
+        let nodes = EffectGraphNodeKind::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| EffectGraphNode {
+                id: format!("node{index}"),
+                ui_pos: [0.0, 0.0],
+                ui_size: [200.0, 120.0],
+                data: EffectGraphNodeData::default_for_kind(kind),
+            })
+            .collect::<Vec<_>>();
+        let doc = doc_with_nodes(nodes, Vec::new());
+        let json = serde_json::to_string(&doc).expect("serialize doc");
+        let restored: EffectGraphDocument = serde_json::from_str(&json).expect("deserialize doc");
+        assert_eq!(restored.nodes.len(), EffectGraphNodeKind::ALL.len());
+        for node in &restored.nodes {
+            let spec = node.data.spec();
+            assert_eq!(spec.kind, node.data.kind());
+            for port in spec.inputs {
+                assert_eq!(port.direction, EffectGraphPortDirection::Input);
+                assert!(node.data.has_input_port(port.id));
+            }
+            for port in spec.outputs {
+                assert_eq!(port.direction, EffectGraphPortDirection::Output);
+                assert!(node.data.has_output_port(port.id));
+            }
+        }
+        // Edges with serde-defaulted port ids ("out"/"in") must resolve too.
+        let edge_json = r#"{"id":"e1","from_node_id":"a","to_node_id":"b"}"#;
+        let edge: EffectGraphEdge = serde_json::from_str(edge_json).expect("deserialize edge");
+        let gain = EffectGraphNodeData::default_for_kind(EffectGraphNodeKind::Gain);
+        assert!(gain.output_port(&edge.from_port_id).is_some());
+        assert!(gain.input_port(&edge.to_port_id).is_some());
+    }
+
     fn edge(
         id: &str,
         from_node_id: &str,
@@ -5451,8 +5529,14 @@ mod tests {
     fn effect_graph_plugin_fx_node_defaults_and_ports() {
         let data = EffectGraphNodeData::default_for_kind(EffectGraphNodeKind::PluginFx);
         assert_eq!(data.display_name(), "Plugin FX");
-        assert_eq!(data.input_ports(), &["in"]);
-        assert_eq!(data.output_ports(), &["out"]);
+        assert_eq!(
+            data.input_ports().iter().map(|p| p.id).collect::<Vec<_>>(),
+            &["in"]
+        );
+        assert_eq!(
+            data.output_ports().iter().map(|p| p.id).collect::<Vec<_>>(),
+            &["out"]
+        );
         let summary = node_parameter_summary(&data);
         assert!(summary.contains("No plugin selected"));
         assert!(summary.contains("0 params"));
@@ -5462,8 +5546,14 @@ mod tests {
     fn effect_graph_loudness_node_defaults_and_ports() {
         let data = EffectGraphNodeData::default_for_kind(EffectGraphNodeKind::Loudness);
         assert_eq!(data.display_name(), "LoudNorm");
-        assert_eq!(data.input_ports(), &["in"]);
-        assert_eq!(data.output_ports(), &["out"]);
+        assert_eq!(
+            data.input_ports().iter().map(|p| p.id).collect::<Vec<_>>(),
+            &["in"]
+        );
+        assert_eq!(
+            data.output_ports().iter().map(|p| p.id).collect::<Vec<_>>(),
+            &["out"]
+        );
         let summary = node_parameter_summary(&data);
         assert!(summary.contains("-14.0 LUFS"));
     }

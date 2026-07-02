@@ -868,13 +868,22 @@ impl crate::app::WavesPreviewer {
                                     Sense::click(),
                                 );
                                 let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let orig = self.meta_for_path(&path_owned).and_then(|m| m.peak_db);
+                                let (orig, is_estimate) = self
+                                    .meta_for_path(&path_owned)
+                                    .map(|m| (m.peak_db, m.peak_db_estimate))
+                                    .unwrap_or((None, false));
                                 let adj = orig.map(|db| db + gain_db);
                                 if let Some(db) = adj {
                                     ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
                                 }
                                 let text = adj
-                                    .map(|db| format!("{:.1}", db))
+                                    .map(|db| {
+                                        if is_estimate {
+                                            format!("~{:.1}", db)
+                                        } else {
+                                            format!("{:.1}", db)
+                                        }
+                                    })
                                     .unwrap_or_else(|| "...".into());
                                 let fid = egui::TextStyle::Monospace.resolve(ui.style());
                                 ui.painter().text(
@@ -884,6 +893,11 @@ impl crate::app::WavesPreviewer {
                                     fid,
                                     egui::Color32::WHITE,
                                 );
+                                let resp2 = if is_estimate && adj.is_some() {
+                                    resp2.on_hover_text("Estimated from the first 0.25 s")
+                                } else {
+                                    resp2
+                                };
                                 let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
                                 if resp2.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;

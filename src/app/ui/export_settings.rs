@@ -100,6 +100,70 @@ impl crate::app::WavesPreviewer {
                                 );
                             }
                             ui.separator();
+                            ui.label("Export Codecs:");
+                            let mut codec_changed = false;
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("MP3 Bitrate:");
+                                egui::ComboBox::from_id_salt("export_mp3_kbps")
+                                    .selected_text(format!(
+                                        "{} kbps",
+                                        self.export_cfg.codec.mp3_bitrate_kbps
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        for &kbps in crate::wave::MP3_BITRATES_KBPS {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut self.export_cfg.codec.mp3_bitrate_kbps,
+                                                    kbps,
+                                                    format!("{kbps} kbps"),
+                                                )
+                                                .changed()
+                                            {
+                                                codec_changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.label("AAC (M4A) Bitrate:");
+                                egui::ComboBox::from_id_salt("export_aac_kbps")
+                                    .selected_text(format!(
+                                        "{} kbps",
+                                        self.export_cfg.codec.aac_bitrate_kbps
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        for &kbps in crate::wave::AAC_BITRATES_KBPS {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut self.export_cfg.codec.aac_bitrate_kbps,
+                                                    kbps,
+                                                    format!("{kbps} kbps"),
+                                                )
+                                                .changed()
+                                            {
+                                                codec_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("OGG Vorbis Quality:");
+                                let mut q = self.export_cfg.codec.ogg_quality;
+                                if ui
+                                    .add(egui::Slider::new(&mut q, -0.2..=1.0).fixed_decimals(2))
+                                    .changed()
+                                {
+                                    self.export_cfg.codec.ogg_quality = q;
+                                    codec_changed = true;
+                                }
+                                ui.label(
+                                    RichText::new("(mono AAC uses half the stereo bitrate)")
+                                        .weak()
+                                        .small(),
+                                );
+                            });
+                            if codec_changed {
+                                self.save_prefs();
+                            }
+                            ui.separator();
                             ui.label("Appearance:");
                             let mut next_theme = self.theme_mode;
                             ui.horizontal(|ui| {

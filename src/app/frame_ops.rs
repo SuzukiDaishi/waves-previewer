@@ -113,15 +113,17 @@ impl WavesPreviewer {
                     RichText::new("List")
                 };
                 if ui.selectable_label(is_list, list_label).clicked() {
-                    if let Some(idx) = self.active_tab {
-                        self.clear_preview_if_any(idx);
+                    if !is_list {
+                        if let Some(idx) = self.active_tab {
+                            self.clear_preview_if_any(idx);
+                        }
+                        self.workspace_view = WorkspaceView::List;
+                        self.pending_editor_autoplay_path = None;
+                        self.pending_activate_path = None;
+                        self.pending_activate_kind = None;
+                        self.pending_activate_ready = false;
+                        self.audio.set_loop_enabled(false);
                     }
-                    self.workspace_view = WorkspaceView::List;
-                    self.pending_editor_autoplay_path = None;
-                    self.pending_activate_path = None;
-                    self.pending_activate_kind = None;
-                    self.pending_activate_ready = false;
-                    self.audio.set_loop_enabled(false);
                     self.request_list_focus(&ctx);
                 }
                 // Recording tab label
@@ -143,7 +145,16 @@ impl WavesPreviewer {
                         } else {
                             RichText::new("Recording")
                         };
-                        if ui.selectable_label(active, rec_label).clicked() {
+                        if ui.selectable_label(active, rec_label).clicked() && !active {
+                            // Leaving another workspace: drop its preview and any
+                            // pending editor activation, like the List switch does.
+                            if let Some(idx) = self.active_tab {
+                                self.clear_preview_if_any(idx);
+                            }
+                            self.pending_editor_autoplay_path = None;
+                            self.pending_activate_path = None;
+                            self.pending_activate_kind = None;
+                            self.pending_activate_ready = false;
                             self.workspace_view = WorkspaceView::Recording;
                         }
                         if ui
@@ -151,9 +162,24 @@ impl WavesPreviewer {
                             .on_hover_text("Close recording tab")
                             .clicked()
                         {
-                            self.discard_recording();
-                            self.recording_tab.tab_open = false;
-                            self.workspace_view = WorkspaceView::List;
+                            let take_in_progress = !matches!(
+                                self.recording_tab.state,
+                                crate::app::types::RecordingState::Idle
+                            );
+                            if take_in_progress {
+                                // Don't silently throw away a take: surface the
+                                // confirm modal (it renders in the recording view).
+                                self.workspace_view = WorkspaceView::Recording;
+                                self.recording_tab.confirm_discard = true;
+                            } else {
+                                self.discard_recording();
+                                self.recording_tab.tab_open = false;
+                                // Closing a background tab must not yank the user
+                                // out of whatever workspace is active.
+                                if active {
+                                    self.workspace_view = WorkspaceView::List;
+                                }
+                            }
                         }
                     });
                 }
@@ -165,7 +191,14 @@ impl WavesPreviewer {
                         } else {
                             RichText::new("Effect Graph")
                         };
-                        if ui.selectable_label(active, text).clicked() {
+                        if ui.selectable_label(active, text).clicked() && !active {
+                            if let Some(idx) = self.active_tab {
+                                self.clear_preview_if_any(idx);
+                            }
+                            self.pending_editor_autoplay_path = None;
+                            self.pending_activate_path = None;
+                            self.pending_activate_kind = None;
+                            self.pending_activate_ready = false;
                             self.workspace_view = WorkspaceView::EffectGraph;
                             self.effect_graph.workspace_open = true;
                             self.effect_graph.last_editor_tab = self.active_tab;
@@ -192,7 +225,9 @@ impl WavesPreviewer {
                         RichText::new(display)
                     };
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(active, text).clicked() {
+                        // Clicking the tab that is already active must not
+                        // re-run activation (it re-targets playback/decoding).
+                        if ui.selectable_label(active, text).clicked() && !active {
                             if let Some(prev) = self.active_tab {
                                 if prev != i {
                                     self.clear_preview_if_any(prev);

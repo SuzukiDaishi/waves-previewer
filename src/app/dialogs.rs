@@ -104,6 +104,21 @@ impl WavesPreviewer {
         }
     }
 
+    pub(super) fn pick_recording_save_dialog(&mut self, default_name: &str) -> Option<PathBuf> {
+        #[cfg(feature = "kittest")]
+        {
+            let _ = default_name;
+            return None;
+        }
+        #[cfg(not(feature = "kittest"))]
+        {
+            rfd::FileDialog::new()
+                .set_file_name(default_name)
+                .add_filter("WAV audio", &["wav"])
+                .save_file()
+        }
+    }
+
     pub(super) fn pick_list_csv_save_dialog(&mut self) -> Option<PathBuf> {
         #[cfg(feature = "kittest")]
         {

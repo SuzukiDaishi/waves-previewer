@@ -52,6 +52,7 @@ impl WavesPreviewer {
             conflict: ConflictPolicy::Rename,
             backup_bak: true,
             export_srt: false,
+            codec: Default::default(),
         };
 
         let prev_skip = self.skip_dotfiles;
@@ -493,6 +494,18 @@ impl WavesPreviewer {
                 }
             } else if let Some(rest) = line.strip_prefix("export_srt=") {
                 self.export_cfg.export_srt = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("export_mp3_kbps=") {
+                if let Ok(v) = rest.trim().parse::<u32>() {
+                    self.export_cfg.codec.mp3_bitrate_kbps = v.clamp(32, 320);
+                }
+            } else if let Some(rest) = line.strip_prefix("export_aac_kbps=") {
+                if let Ok(v) = rest.trim().parse::<u32>() {
+                    self.export_cfg.codec.aac_bitrate_kbps = v.clamp(32, 320);
+                }
+            } else if let Some(rest) = line.strip_prefix("export_ogg_quality=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    self.export_cfg.codec.ogg_quality = v.clamp(-0.2, 1.0);
+                }
             } else if let Some(rest) = line.strip_prefix("recent_session=") {
                 let raw = rest.trim().trim_matches('"');
                 if !raw.is_empty() {
@@ -710,6 +723,9 @@ transcript_compute_target={}\n\
 transcript_dml_device_id={}\n\
 transcript_cpu_intra_threads={}\n\
 export_srt={}\n\
+export_mp3_kbps={}\n\
+export_aac_kbps={}\n\
+export_ogg_quality={:.2}\n\
 zoo_enabled={}\n\
 zoo_walk_enabled={}\n\
 zoo_voice_enabled={}\n\
@@ -766,6 +782,9 @@ zoo_flip_manual={}\n",
             self.transcript_ai_cfg.dml_device_id,
             self.transcript_ai_cfg.cpu_intra_threads,
             export_srt,
+            self.export_cfg.codec.mp3_bitrate_kbps,
+            self.export_cfg.codec.aac_bitrate_kbps,
+            self.export_cfg.codec.ogg_quality,
             zoo_enabled,
             zoo_walk_enabled,
             zoo_voice_enabled,

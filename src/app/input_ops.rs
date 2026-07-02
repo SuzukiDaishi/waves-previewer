@@ -70,19 +70,25 @@ impl super::WavesPreviewer {
             }
             if let Some(idx) = target {
                 if idx == 0 {
-                    if let Some(prev) = self.active_tab {
-                        self.clear_preview_if_any(prev);
+                    if !self.is_list_workspace_active() {
+                        if let Some(prev) = self.active_tab {
+                            self.clear_preview_if_any(prev);
+                        }
+                        self.workspace_view = super::types::WorkspaceView::List;
+                        self.pending_editor_autoplay_path = None;
+                        self.pending_activate_path = None;
+                        self.pending_activate_kind = None;
+                        self.pending_activate_ready = false;
+                        self.audio.set_loop_enabled(false);
                     }
-                    self.workspace_view = super::types::WorkspaceView::List;
-                    self.pending_editor_autoplay_path = None;
-                    self.pending_activate_path = None;
-                    self.pending_activate_kind = None;
-                    self.pending_activate_ready = false;
-                    self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
                 } else {
                     let tab_idx = idx - 1;
-                    if tab_idx < self.tabs.len() {
+                    // Already on this tab: re-activating would re-target
+                    // playback/decoding for no reason.
+                    let already_active = self.workspace_view == super::types::WorkspaceView::Editor
+                        && self.active_tab == Some(tab_idx);
+                    if tab_idx < self.tabs.len() && !already_active {
                         if let Some(prev) = self.active_tab {
                             if prev != tab_idx {
                                 self.clear_preview_if_any(prev);
@@ -556,7 +562,6 @@ impl super::WavesPreviewer {
             return;
         }
         let cmd_down = ctx.input(|i| i.modifiers.command);
-        let shift_down = ctx.input(|i| i.modifiers.shift);
         let z_down = ctx.input(|i| i.key_down(egui::Key::Z));
         let y_down = ctx.input(|i| i.key_down(egui::Key::Y));
         let combo_down = cmd_down && (z_down || y_down);
@@ -572,8 +577,7 @@ impl super::WavesPreviewer {
         });
         let redo_y = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y));
         let redo = redo_z || redo_y;
-        self.undo_z_was_down =
-            cmd_down && ((shift_down && z_down) || (!shift_down && z_down) || y_down);
+        self.undo_z_was_down = cmd_down && (z_down || y_down);
         if !(undo || redo) {
             return;
         }

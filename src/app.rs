@@ -1165,6 +1165,13 @@ impl WavesPreviewer {
         self.cache_dirty_tab_at(idx);
         let prev_active = self.active_tab;
         self.tabs.remove(idx);
+        // The effect-graph workspace remembers which editor tab to restore by
+        // index; keep that index in sync with the removal too.
+        self.effect_graph.last_editor_tab = match self.effect_graph.last_editor_tab {
+            Some(t) if t == idx => None,
+            Some(t) if t > idx => Some(t - 1),
+            other => other,
+        };
         if !self.tabs.is_empty() {
             // Preserve the *identity* of the previously-active tab. Closing a
             // different (background) tab must not switch which tab is active,
@@ -1172,18 +1179,20 @@ impl WavesPreviewer {
             let closed_active = prev_active == Some(idx);
             let new_active = match prev_active {
                 // Closed the active tab: fall to its right neighbour (clamped).
-                Some(a) if a == idx => a.min(self.tabs.len() - 1),
+                Some(a) if a == idx => Some(a.min(self.tabs.len() - 1)),
                 // Active tab sat after the closed one: its index shifts down 1.
-                Some(a) if a > idx => a - 1,
+                Some(a) if a > idx => Some(a - 1),
                 // Active tab sat before the closed one: index is unchanged.
-                Some(a) => a,
-                None => idx.min(self.tabs.len() - 1),
+                Some(a) => Some(a),
+                // No editor tab was active (List/Recording/EffectGraph view):
+                // closing a background tab must not conjure one up.
+                None => None,
             };
-            self.active_tab = Some(new_active);
+            self.active_tab = new_active;
             // Only re-activate (re-target playback/decode) when the active tab
             // actually changed, i.e. the active tab itself was the one closed.
             if closed_active {
-                if let Some(tab) = self.tabs.get(new_active) {
+                if let Some(tab) = new_active.and_then(|i| self.tabs.get(i)) {
                     let path = tab.path.clone();
                     self.debug_mark_tab_switch_start(&path);
                     self.queue_tab_activation(path);
@@ -1519,6 +1528,7 @@ impl WavesPreviewer {
             total_frames: Some(frames as u64),
             rms_db: Some(rms_db),
             peak_db: Some(peak_db),
+            peak_db_estimate: false,
             lufs_i,
             bpm,
             created_at: None,

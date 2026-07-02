@@ -1845,6 +1845,7 @@ impl super::WavesPreviewer {
             total_frames: None,
             rms_db: None,
             peak_db: None,
+            peak_db_estimate: false,
             lufs_i: None,
             bpm: None,
             created_at: None,
@@ -2514,7 +2515,12 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_mark_latest_crash_report_reviewed(&mut self) -> bool {
-        let Some(id) = self.crash_reports.reports.first().map(|report| report.id.clone()) else {
+        let Some(id) = self
+            .crash_reports
+            .reports
+            .first()
+            .map(|report| report.id.clone())
+        else {
             return false;
         };
         if crate::crash_report::acknowledge_report(&id).is_err() {

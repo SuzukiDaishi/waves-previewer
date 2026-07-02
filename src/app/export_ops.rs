@@ -11,6 +11,41 @@ struct EditAnnotationSnapshot {
     loop_region: Option<(usize, usize)>,
 }
 
+/// Resolve a non-colliding destination for `ConflictPolicy::Rename`. Counts
+/// `_01`.. `_999`; if all exist, falls back to a timestamp suffix so the
+/// Rename policy never silently overwrites an existing file.
+fn next_renamed_export_path(orig: &Path) -> PathBuf {
+    let orig_ext = orig
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string();
+    let stem = orig
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out")
+        .to_string();
+    let with_suffix = |suffix: &str| {
+        let name = crate::app::helpers::sanitize_filename_component(&format!("{stem}_{suffix}"));
+        let mut dst = orig.with_file_name(name);
+        if !orig_ext.is_empty() {
+            dst.set_extension(&orig_ext);
+        }
+        dst
+    };
+    for idx in 1..=999u32 {
+        let dst = with_suffix(&format!("{idx:02}"));
+        if !dst.exists() {
+            return dst;
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    with_suffix(&stamp.to_string())
+}
+
 impl super::WavesPreviewer {
     fn resolve_virtual_export_parent(&self, item: &super::types::MediaItem) -> Option<PathBuf> {
         let mut current = item.virtual_state.as_ref().map(|v| v.source.clone())?;
@@ -42,6 +77,19 @@ impl super::WavesPreviewer {
     fn overwrite_backup_path(src: &Path) -> PathBuf {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
         src.with_file_name(format!("{}.bak", fname))
+    }
+
+    /// Bit depth to write when the user hasn't picked an explicit override,
+    /// derived from the source file's metadata so saving an edited 16/24-bit
+    /// file doesn't silently inflate it to 32-bit float.
+    fn wav_bit_depth_from_source_meta(&self, path: &Path) -> Option<crate::wave::WavBitDepth> {
+        let meta = self.meta_for_path(path)?;
+        match meta.bits_per_sample {
+            16 => Some(crate::wave::WavBitDepth::Pcm16),
+            24 => Some(crate::wave::WavBitDepth::Pcm24),
+            32 => Some(crate::wave::WavBitDepth::Float32),
+            _ => None,
+        }
     }
 
     fn current_edit_annotation_snapshot(&self, path: &Path) -> Option<EditAnnotationSnapshot> {
@@ -131,6 +179,9 @@ impl super::WavesPreviewer {
             format_override: Option<String>,
         }
         let cfg = self.export_cfg.clone();
+        // Encoders run on worker threads; publish the configured lossy-codec
+        // settings before spawning so they pick them up.
+        crate::wave::set_codec_export_options(cfg.codec);
         let format_override = cfg
             .format_override
             .as_ref()
@@ -190,9 +241,8 @@ impl super::WavesPreviewer {
                         // OS temp dir (and expose it to temp cleanup). Prefer the
                         // open folder for those, falling back to temp only if no
                         // folder is open.
-                        self.resolve_virtual_export_parent(item).filter(|p| {
-                            !super::temp_audio_ops::is_neowaves_internal_temp_path(p)
-                        })
+                        self.resolve_virtual_export_parent(item)
+                            .filter(|p| !super::temp_audio_ops::is_neowaves_internal_temp_path(p))
                     })
                     .or_else(|| self.root.clone())
                     .or_else(|| self.resolve_virtual_export_parent(item))
@@ -225,31 +275,7 @@ impl super::WavesPreviewer {
                         ConflictPolicy::Overwrite => {}
                         ConflictPolicy::Skip => continue,
                         ConflictPolicy::Rename => {
-                            let orig = dst.clone();
-                            let orig_ext = orig
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or(target_ext);
-                            let mut idx = 1u32;
-                            loop {
-                                let stem2 =
-                                    orig.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-                                let n = crate::app::helpers::sanitize_filename_component(&format!(
-                                    "{}_{:02}",
-                                    stem2, idx
-                                ));
-                                dst = orig.with_file_name(n);
-                                if !orig_ext.is_empty() {
-                                    dst.set_extension(orig_ext);
-                                }
-                                if !dst.exists() {
-                                    break;
-                                }
-                                idx += 1;
-                                if idx > 999 {
-                                    break;
-                                }
-                            }
+                            dst = next_renamed_export_path(&dst);
                         }
                     }
                 }
@@ -292,8 +318,7 @@ impl super::WavesPreviewer {
                 let write_markers = !markers.is_empty();
                 let write_loop_markers = loop_region.is_some();
                 if write_markers || write_loop_markers {
-                    edit_annotation_snapshots
-                        .insert(p.clone(), (markers.clone(), loop_region));
+                    edit_annotation_snapshots.insert(p.clone(), (markers.clone(), loop_region));
                 }
                 virtual_tasks.push(VirtualSaveTask {
                     src: p.clone(),
@@ -455,7 +480,10 @@ impl super::WavesPreviewer {
                         out_sr,
                         target_sr,
                         file_sr,
-                        wav_bit_depth: bit_override,
+                        // Preserve the source's bit depth unless the user set an
+                        // explicit convert override (mirrors the virtual-save path).
+                        wav_bit_depth: bit_override
+                            .or_else(|| self.wav_bit_depth_from_source_meta(&p)),
                         max_file_samples,
                         markers,
                         loop_region,
@@ -530,30 +558,32 @@ impl super::WavesPreviewer {
             .collect();
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
-            let write_transcript_sidecar =
-                |src: &Path,
-                 dst: &Path,
-                 cache: &HashMap<PathBuf, std::sync::Arc<super::types::Transcript>>| {
-                    if !export_srt {
-                        return;
-                    }
-                    let transcript = cache.get(src).map(|t| (**t).clone()).or_else(|| {
-                        super::transcript::srt_path_for_audio(src)
-                            .and_then(|p| super::transcript::load_srt(&p))
-                    });
-                    let Some(transcript) = transcript else {
-                        return;
-                    };
-                    let mut srt_path = dst.to_path_buf();
-                    srt_path.set_extension("srt");
-                    if let Err(err) = super::transcript::write_srt(&srt_path, &transcript) {
-                        eprintln!(
-                            "write transcript failed {} -> {}: {err:?}",
-                            src.display(),
-                            srt_path.display()
-                        );
-                    }
+            let write_transcript_sidecar = |src: &Path,
+                                            dst: &Path,
+                                            cache: &HashMap<
+                PathBuf,
+                std::sync::Arc<super::types::Transcript>,
+            >| {
+                if !export_srt {
+                    return;
+                }
+                let transcript = cache.get(src).map(|t| (**t).clone()).or_else(|| {
+                    super::transcript::srt_path_for_audio(src)
+                        .and_then(|p| super::transcript::load_srt(&p))
+                });
+                let Some(transcript) = transcript else {
+                    return;
                 };
+                let mut srt_path = dst.to_path_buf();
+                srt_path.set_extension("srt");
+                if let Err(err) = super::transcript::write_srt(&srt_path, &transcript) {
+                    eprintln!(
+                        "write transcript failed {} -> {}: {err:?}",
+                        src.display(),
+                        srt_path.display()
+                    );
+                }
+            };
             let mut ok = 0usize;
             let mut failed = 0usize;
             let mut success_paths = Vec::new();
@@ -607,30 +637,7 @@ impl super::WavesPreviewer {
                                     continue;
                                 }
                                 ConflictPolicy::Rename => {
-                                    let orig = dst.clone();
-                                    let orig_ext =
-                                        orig.extension().and_then(|e| e.to_str()).unwrap_or("");
-                                    let mut idx = 1u32;
-                                    loop {
-                                        let stem2 = orig
-                                            .file_stem()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or("out");
-                                        let n = crate::app::helpers::sanitize_filename_component(
-                                            &format!("{}_{:02}", stem2, idx),
-                                        );
-                                        dst = orig.with_file_name(n);
-                                        if !orig_ext.is_empty() {
-                                            dst.set_extension(orig_ext);
-                                        }
-                                        if !dst.exists() {
-                                            break;
-                                        }
-                                        idx += 1;
-                                        if idx > 999 {
-                                            break;
-                                        }
-                                    }
+                                    dst = next_renamed_export_path(&dst);
                                 }
                             }
                         }
@@ -707,30 +714,7 @@ impl super::WavesPreviewer {
                                     continue;
                                 }
                                 ConflictPolicy::Rename => {
-                                    let orig = dst.clone();
-                                    let orig_ext =
-                                        orig.extension().and_then(|e| e.to_str()).unwrap_or("");
-                                    let mut idx = 1u32;
-                                    loop {
-                                        let stem2 = orig
-                                            .file_stem()
-                                            .and_then(|s| s.to_str())
-                                            .unwrap_or("out");
-                                        let n = crate::app::helpers::sanitize_filename_component(
-                                            &format!("{}_{:02}", stem2, idx),
-                                        );
-                                        dst = orig.with_file_name(n);
-                                        if !orig_ext.is_empty() {
-                                            dst.set_extension(orig_ext);
-                                        }
-                                        if !dst.exists() {
-                                            break;
-                                        }
-                                        idx += 1;
-                                        if idx > 999 {
-                                            break;
-                                        }
-                                    }
+                                    dst = next_renamed_export_path(&dst);
                                 }
                             }
                         }
@@ -769,7 +753,48 @@ impl super::WavesPreviewer {
                             );
                         }
                     }
+                    let format_changed = dst != task.src;
                     let res = match save_mode {
+                        SaveMode::Overwrite if format_changed => {
+                            // Converting in place (e.g. foo.wav -> foo.mp3):
+                            // write the new-format file, carry the source's
+                            // metadata over, then retire the original so it
+                            // doesn't linger as an orphan next to the convert.
+                            let write = if dst.exists() {
+                                crate::wave::overwrite_audio_from_channels_with_depth(
+                                    &channels,
+                                    task.target_sr,
+                                    &dst,
+                                    false,
+                                    task.wav_bit_depth,
+                                )
+                            } else {
+                                crate::wave::export_channels_audio_with_depth(
+                                    &channels,
+                                    task.target_sr,
+                                    &dst,
+                                    task.wav_bit_depth,
+                                )
+                            };
+                            if write.is_ok() {
+                                if let Err(err) =
+                                    crate::wave::copy_audio_metadata_from_source(&task.src, &dst)
+                                {
+                                    eprintln!(
+                                        "copy metadata failed {} -> {}: {err:?}",
+                                        task.src.display(),
+                                        dst.display()
+                                    );
+                                }
+                                if cfg.backup_bak {
+                                    let bak = Self::overwrite_backup_path(&task.src);
+                                    let _ = std::fs::remove_file(&bak);
+                                    let _ = std::fs::copy(&task.src, &bak);
+                                }
+                                let _ = std::fs::remove_file(&task.src);
+                            }
+                            write
+                        }
                         SaveMode::Overwrite => {
                             crate::wave::overwrite_audio_from_channels_with_depth(
                                 &channels,
@@ -875,12 +900,7 @@ impl super::WavesPreviewer {
                 let file_sr = task.target_sr.max(1);
                 if out_sr != file_sr {
                     for ch in channels.iter_mut() {
-                        *ch = crate::wave::resample_quality(
-                            ch,
-                            out_sr,
-                            file_sr,
-                            resample_quality,
-                        );
+                        *ch = crate::wave::resample_quality(ch, out_sr, file_sr, resample_quality);
                     }
                     out_sr = file_sr;
                 }
@@ -901,7 +921,10 @@ impl super::WavesPreviewer {
                                 file_sr,
                                 &task.markers,
                             ) {
-                                eprintln!("virtual write markers failed {}: {err:?}", dst.display());
+                                eprintln!(
+                                    "virtual write markers failed {}: {err:?}",
+                                    dst.display()
+                                );
                                 marker_ok = false;
                             }
                         }
@@ -928,7 +951,8 @@ impl super::WavesPreviewer {
                                     }
                                 }
                             }
-                            if let Err(err) = crate::loop_markers::write_loop_markers(&dst, loop_opt)
+                            if let Err(err) =
+                                crate::loop_markers::write_loop_markers(&dst, loop_opt)
                             {
                                 eprintln!(
                                     "virtual write loop markers failed {}: {err:?}",
@@ -1019,6 +1043,7 @@ impl super::WavesPreviewer {
         if !crate::audio_io::is_supported_extension(&ext) {
             return;
         }
+        crate::wave::set_codec_export_options(self.export_cfg.codec);
         let mut targets: Vec<PathBuf> = Vec::new();
         for path in paths {
             if self.row_for_path(&path).is_some() {
@@ -1075,6 +1100,17 @@ impl super::WavesPreviewer {
                     let mut restore_batch: Vec<(PathBuf, PathBuf)> = Vec::new();
                     for src in &self.saving_sources {
                         if !success_set.contains(src) {
+                            continue;
+                        }
+                        let bak = Self::overwrite_backup_path(src);
+                        if bak.is_file() {
+                            restore_batch.push((src.clone(), bak));
+                        }
+                    }
+                    // Format-changing overwrites report success under the new
+                    // extension; their .bak still restores the original path.
+                    for (src, dst) in &self.saving_format_targets {
+                        if !success_set.contains(dst) {
                             continue;
                         }
                         let bak = Self::overwrite_backup_path(src);
