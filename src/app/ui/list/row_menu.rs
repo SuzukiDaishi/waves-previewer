@@ -179,6 +179,13 @@ impl WavesPreviewer {
                 ui.close();
             }
             if ui
+                .add_enabled(has_selection, egui::Button::new("To AIFF"))
+                .clicked()
+            {
+                self.spawn_convert_format_selected(selected.clone(), "aiff");
+                ui.close();
+            }
+            if ui
                 .add_enabled(has_selection, egui::Button::new("To MP3"))
                 .clicked()
             {

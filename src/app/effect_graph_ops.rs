@@ -3443,6 +3443,13 @@ impl WavesPreviewer {
             if tab_idx < self.tabs.len() {
                 self.active_tab = Some(tab_idx);
                 self.workspace_view = WorkspaceView::Editor;
+                // Re-establish the restored tab's transport, like every other
+                // tab-switch path; the graph may have re-pointed playback.
+                if let Some(tab) = self.tabs.get(tab_idx) {
+                    let path = tab.path.clone();
+                    self.debug_mark_tab_switch_start(&path);
+                    self.queue_tab_activation(path);
+                }
                 return;
             }
         }

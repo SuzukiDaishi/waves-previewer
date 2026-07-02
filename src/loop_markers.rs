@@ -12,6 +12,9 @@ const ITUNES_MEAN: &str = "com.apple.iTunes";
 pub fn read_loop_markers(path: &Path) -> Option<(u64, u64)> {
     match ext_lower(path)?.as_str() {
         "wav" => crate::wave::read_wav_loop_markers(path).map(|(s, e)| (s as u64, e as u64)),
+        "aiff" | "aif" => {
+            crate::wave::read_aiff_loop_markers(path).map(|(s, e)| (s as u64, e as u64))
+        }
         "mp3" => read_mp3_loop_markers(path).ok().flatten(),
         "m4a" => read_m4a_loop_markers(path).ok().flatten(),
         _ => None,
@@ -23,6 +26,10 @@ pub fn write_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<(
         Some("wav") => {
             let loop_opt = loop_opt.and_then(|(s, e)| u64_to_u32_pair(s, e));
             crate::wave::write_wav_loop_markers(path, loop_opt)
+        }
+        Some("aiff") | Some("aif") => {
+            let loop_opt = loop_opt.and_then(|(s, e)| u64_to_u32_pair(s, e));
+            crate::wave::write_aiff_loop_markers(path, loop_opt)
         }
         Some("mp3") => write_mp3_loop_markers(path, loop_opt),
         Some("m4a") => write_m4a_loop_markers(path, loop_opt),

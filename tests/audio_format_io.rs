@@ -73,7 +73,7 @@ fn assert_probe_and_decode(path: &std::path::Path) {
 fn audio_probe_decode_for_wav_mp3_m4a_ogg() {
     let dir = make_temp_dir("audio_probe_decode");
     let chans = synth_stereo(44_100, 0.20);
-    let formats = ["wav", "mp3", "m4a", "ogg"];
+    let formats = ["wav", "aiff", "mp3", "m4a", "ogg"];
     for ext in formats {
         let path = dir.join(format!("tone.{ext}"));
         neowaves::wave::export_channels_audio(&chans, 44_100, &path)

@@ -49,6 +49,12 @@ impl WavesPreviewer {
                         Color32::from_rgb(48, 96, 168),
                         Color32::from_rgb(120, 182, 255),
                     ),
+                    "aiff" | "aif" => (
+                        "AIFF".to_string(),
+                        "AIFF file".to_string(),
+                        Color32::from_rgb(88, 70, 150),
+                        Color32::from_rgb(176, 156, 244),
+                    ),
                     "mp3" => (
                         "MP3".to_string(),
                         "MP3 file".to_string(),

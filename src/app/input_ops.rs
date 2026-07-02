@@ -70,19 +70,25 @@ impl super::WavesPreviewer {
             }
             if let Some(idx) = target {
                 if idx == 0 {
-                    if let Some(prev) = self.active_tab {
-                        self.clear_preview_if_any(prev);
+                    if !self.is_list_workspace_active() {
+                        if let Some(prev) = self.active_tab {
+                            self.clear_preview_if_any(prev);
+                        }
+                        self.workspace_view = super::types::WorkspaceView::List;
+                        self.pending_editor_autoplay_path = None;
+                        self.pending_activate_path = None;
+                        self.pending_activate_kind = None;
+                        self.pending_activate_ready = false;
+                        self.audio.set_loop_enabled(false);
                     }
-                    self.workspace_view = super::types::WorkspaceView::List;
-                    self.pending_editor_autoplay_path = None;
-                    self.pending_activate_path = None;
-                    self.pending_activate_kind = None;
-                    self.pending_activate_ready = false;
-                    self.audio.set_loop_enabled(false);
                     self.request_list_focus(ctx);
                 } else {
                     let tab_idx = idx - 1;
-                    if tab_idx < self.tabs.len() {
+                    // Already on this tab: re-activating would re-target
+                    // playback/decoding for no reason.
+                    let already_active = self.workspace_view == super::types::WorkspaceView::Editor
+                        && self.active_tab == Some(tab_idx);
+                    if tab_idx < self.tabs.len() && !already_active {
                         if let Some(prev) = self.active_tab {
                             if prev != tab_idx {
                                 self.clear_preview_if_any(prev);

@@ -263,6 +263,7 @@ impl WavesPreviewer {
                 conflict: ConflictPolicy::Rename,
                 backup_bak: true,
                 export_srt: false,
+                codec: Default::default(),
             },
             show_export_settings: false,
             show_transcription_settings: false,

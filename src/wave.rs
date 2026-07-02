@@ -178,6 +178,287 @@ fn write_wav_range_with_depth(
     Ok(())
 }
 
+/// Encode a `u32` sample rate as the 80-bit IEEE 754 extended float used by
+/// the AIFF `COMM` chunk (1 sign + 15 exponent bits, bias 16383, then a 64-bit
+/// mantissa with an explicit integer bit).
+fn sample_rate_to_extended80(rate: u32) -> [u8; 10] {
+    let mut out = [0u8; 10];
+    if rate == 0 {
+        return out;
+    }
+    let value = rate as u64;
+    let shift = 63 - (63 - value.leading_zeros() as i32);
+    let exponent = (16383 + 63 - shift) as u16;
+    let mantissa = value << shift;
+    out[0..2].copy_from_slice(&exponent.to_be_bytes());
+    out[2..10].copy_from_slice(&mantissa.to_be_bytes());
+    out
+}
+
+/// Parse the 80-bit extended sample rate back to `u32` (test helper / reader).
+#[cfg(test)]
+fn extended80_to_sample_rate(bytes: &[u8; 10]) -> u32 {
+    let exponent = u16::from_be_bytes([bytes[0], bytes[1]]) & 0x7FFF;
+    let mantissa = u64::from_be_bytes(bytes[2..10].try_into().unwrap());
+    if exponent == 0 || mantissa == 0 {
+        return 0;
+    }
+    let shift = 16383 + 63 - exponent as i32;
+    if !(0..64).contains(&shift) {
+        return 0;
+    }
+    (mantissa >> shift) as u32
+}
+
+/// Write AIFF (16/24-bit big-endian PCM) or AIFF-C with `fl32` compression
+/// for 32-bit float, mirroring `write_wav_range_with_depth`'s channel and
+/// clamping behavior.
+fn write_aiff_with_depth(
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    dst: &Path,
+    depth: WavBitDepth,
+) -> Result<()> {
+    use std::io::Write;
+    let channels = chans.len().max(1);
+    let frames = chans.first().map(|c| c.len()).unwrap_or(0);
+    let bytes_per_sample = match depth {
+        WavBitDepth::Pcm16 => 2usize,
+        WavBitDepth::Pcm24 => 3,
+        WavBitDepth::Float32 => 4,
+    };
+    let is_float = matches!(depth, WavBitDepth::Float32);
+    let sound_len = frames * channels * bytes_per_sample;
+
+    let mut sound: Vec<u8> = Vec::with_capacity(sound_len);
+    for i in 0..frames {
+        for ci in 0..channels {
+            let v = chans
+                .get(ci)
+                .and_then(|c| c.get(i))
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(-1.0, 1.0);
+            match depth {
+                WavBitDepth::Pcm16 => {
+                    let q = (v * i16::MAX as f32).round() as i16;
+                    sound.extend_from_slice(&q.to_be_bytes());
+                }
+                WavBitDepth::Pcm24 => {
+                    let max_abs = 8_388_607.0f32;
+                    let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
+                    sound.extend_from_slice(&q.to_be_bytes()[1..4]);
+                }
+                WavBitDepth::Float32 => {
+                    sound.extend_from_slice(&v.to_be_bytes());
+                }
+            }
+        }
+    }
+
+    // COMM: base 18 bytes; AIFF-C appends compressionType + pascal-string name.
+    const FL32_NAME: &[u8] = b"\x0c32-bit float\x00"; // count 12 + chars + pad to even
+    let comm_len: u32 = if is_float {
+        18 + 4 + FL32_NAME.len() as u32
+    } else {
+        18
+    };
+    let ssnd_len: u32 = 8 + sound_len as u32;
+    let mut form_len: u32 =
+        4 /*form type*/ + (8 + comm_len) + (8 + ssnd_len) + (sound_len as u32 & 1);
+    if is_float {
+        form_len += 8 + 4; // FVER chunk
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(form_len as usize + 8);
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&form_len.to_be_bytes());
+    out.extend_from_slice(if is_float { b"AIFC" } else { b"AIFF" });
+    if is_float {
+        out.extend_from_slice(b"FVER");
+        out.extend_from_slice(&4u32.to_be_bytes());
+        out.extend_from_slice(&0xA280_5140u32.to_be_bytes()); // AIFC version 1 timestamp
+    }
+    out.extend_from_slice(b"COMM");
+    out.extend_from_slice(&comm_len.to_be_bytes());
+    out.extend_from_slice(&(channels as i16).to_be_bytes());
+    out.extend_from_slice(&(frames as u32).to_be_bytes());
+    out.extend_from_slice(&(depth.bits_per_sample() as i16).to_be_bytes());
+    out.extend_from_slice(&sample_rate_to_extended80(sample_rate.max(1)));
+    if is_float {
+        out.extend_from_slice(b"fl32");
+        out.extend_from_slice(FL32_NAME);
+    }
+    out.extend_from_slice(b"SSND");
+    out.extend_from_slice(&ssnd_len.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes()); // offset
+    out.extend_from_slice(&0u32.to_be_bytes()); // blockSize
+    out.extend_from_slice(&sound);
+    if sound_len & 1 == 1 {
+        out.push(0);
+    }
+
+    let mut file = std::fs::File::create(dst)
+        .with_context(|| format!("create aiff output: {}", dst.display()))?;
+    file.write_all(&out)?;
+    Ok(())
+}
+
+struct AiffChunk {
+    id: [u8; 4],
+    payload: Vec<u8>,
+}
+
+fn parse_aiff_chunks(path: &Path) -> Result<(bool, Vec<AiffChunk>)> {
+    use std::fs;
+    let data = fs::read(path).with_context(|| format!("read aiff chunks: {}", path.display()))?;
+    if data.len() < 12 || &data[0..4] != b"FORM" {
+        anyhow::bail!("not an AIFF file");
+    }
+    let form_type = &data[8..12];
+    let is_aifc = form_type == b"AIFC";
+    if !is_aifc && form_type != b"AIFF" {
+        anyhow::bail!("not an AIFF file");
+    }
+    let mut chunks = Vec::new();
+    let mut pos = 12usize;
+    while pos + 8 <= data.len() {
+        let id = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
+        let size = u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+            as usize;
+        let chunk_start = pos + 8;
+        let chunk_end = chunk_start.saturating_add(size).min(data.len());
+        chunks.push(AiffChunk {
+            id,
+            payload: data[chunk_start..chunk_end].to_vec(),
+        });
+        let advance = 8 + size + (size & 1);
+        if pos + advance <= pos {
+            break;
+        }
+        pos = pos.saturating_add(advance);
+    }
+    Ok((is_aifc, chunks))
+}
+
+fn encode_aiff_chunks(path: &Path, is_aifc: bool, chunks: &[AiffChunk]) -> Result<()> {
+    use std::fs;
+    let mut out = Vec::new();
+    out.extend_from_slice(b"FORM");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(if is_aifc { b"AIFC" } else { b"AIFF" });
+    for chunk in chunks {
+        out.extend_from_slice(&chunk.id);
+        out.extend_from_slice(&(chunk.payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(&chunk.payload);
+        if chunk.payload.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+    let form_size = (out.len().saturating_sub(8)) as u32;
+    out[4..8].copy_from_slice(&form_size.to_be_bytes());
+    let tmp = unique_sibling_tmp(path, "aiffmk", "aiff");
+    fs::write(&tmp, out)?;
+    replace_file_with_tmp(&tmp, path, false)
+}
+
+/// Read the sustain loop from AIFF `INST` + `MARK` chunks (the AIFF
+/// counterpart of the WAV `smpl` loop).
+pub fn read_aiff_loop_markers(path: &Path) -> Option<(u32, u32)> {
+    let (_, chunks) = parse_aiff_chunks(path).ok()?;
+    let inst = chunks.iter().find(|c| &c.id == b"INST")?;
+    if inst.payload.len() < 20 {
+        return None;
+    }
+    let play_mode = i16::from_be_bytes([inst.payload[8], inst.payload[9]]);
+    if play_mode == 0 {
+        return None;
+    }
+    let begin_id = i16::from_be_bytes([inst.payload[10], inst.payload[11]]);
+    let end_id = i16::from_be_bytes([inst.payload[12], inst.payload[13]]);
+    let mark = chunks.iter().find(|c| &c.id == b"MARK")?;
+    let mut positions = std::collections::HashMap::new();
+    let payload = &mark.payload;
+    if payload.len() < 2 {
+        return None;
+    }
+    let count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let mut pos = 2usize;
+    for _ in 0..count {
+        if pos + 6 > payload.len() {
+            break;
+        }
+        let id = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+        let sample = u32::from_be_bytes([
+            payload[pos + 2],
+            payload[pos + 3],
+            payload[pos + 4],
+            payload[pos + 5],
+        ]);
+        positions.insert(id, sample);
+        let name_len = *payload.get(pos + 6)? as usize;
+        let entry = 6 + 1 + name_len;
+        pos += entry + (entry & 1);
+    }
+    let start = *positions.get(&begin_id)?;
+    let end = *positions.get(&end_id)?;
+    (end > start).then_some((start, end))
+}
+
+/// Write (or clear) the sustain loop as AIFF `MARK` + `INST` chunks.
+pub fn write_aiff_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Result<()> {
+    let (is_aifc, mut chunks) = parse_aiff_chunks(path)?;
+    chunks.retain(|c| &c.id != b"MARK" && &c.id != b"INST");
+    // Insert before SSND: several readers treat the sound data as running to
+    // the end of the FORM, so trailing chunks would be misread as audio.
+    let insert_at = chunks
+        .iter()
+        .position(|c| &c.id == b"SSND")
+        .unwrap_or(chunks.len());
+    if let Some((start, end)) = loop_opt.filter(|(s, e)| e > s) {
+        let mut mark = Vec::new();
+        mark.extend_from_slice(&2u16.to_be_bytes());
+        for (id, sample, name) in [(1i16, start, b"beg loop".as_slice()), (2, end, b"end loop")] {
+            mark.extend_from_slice(&id.to_be_bytes());
+            mark.extend_from_slice(&sample.to_be_bytes());
+            mark.push(name.len() as u8);
+            mark.extend_from_slice(name);
+            if (1 + name.len()) & 1 == 1 {
+                mark.push(0);
+            }
+        }
+        chunks.insert(
+            insert_at,
+            AiffChunk {
+                id: *b"MARK",
+                payload: mark,
+            },
+        );
+        let mut inst = Vec::with_capacity(20);
+        inst.push(60); // baseNote (C4)
+        inst.push(0); // detune
+        inst.push(0); // lowNote
+        inst.push(127); // highNote
+        inst.push(1); // lowVelocity
+        inst.push(127); // highVelocity
+        inst.extend_from_slice(&0i16.to_be_bytes()); // gain
+        inst.extend_from_slice(&1i16.to_be_bytes()); // sustain: forward loop
+        inst.extend_from_slice(&1i16.to_be_bytes()); // sustain begin marker id
+        inst.extend_from_slice(&2i16.to_be_bytes()); // sustain end marker id
+        inst.extend_from_slice(&0i16.to_be_bytes()); // release: no loop
+        inst.extend_from_slice(&0i16.to_be_bytes());
+        inst.extend_from_slice(&0i16.to_be_bytes());
+        chunks.insert(
+            insert_at + 1,
+            AiffChunk {
+                id: *b"INST",
+                payload: inst,
+            },
+        );
+    }
+    encode_aiff_chunks(path, is_aifc, &chunks)
+}
+
 pub fn resample_linear(mono: &[f32], in_sr: u32, out_sr: u32) -> Vec<f32> {
     if in_sr == out_sr || mono.is_empty() {
         return mono.to_vec();
@@ -1149,11 +1430,18 @@ pub fn export_gain_audio(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("unsupported format: {}", src.display()))?;
     match fmt.as_str() {
         "wav" => export_gain_wav(src, dst, gain_db),
+        "aiff" | "aif" => export_gain_aiff(src, dst, gain_db),
         "mp3" => export_gain_mp3(src, dst, gain_db),
         "m4a" => export_gain_m4a(src, dst, gain_db),
         "ogg" => export_gain_ogg(src, dst, gain_db),
         _ => anyhow::bail!("unsupported format: {}", fmt),
     }
+}
+
+fn export_gain_aiff(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    let (mut chans, in_sr) = decode_wav_multi(src)?;
+    apply_gain_in_place(&mut chans, gain_db);
+    write_aiff_with_depth(&chans, in_sr, dst, WavBitDepth::Float32)
 }
 
 fn export_gain_mp3(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
@@ -1180,6 +1468,62 @@ fn export_gain_ogg(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     encode_ogg_vorbis(dst, &chans, in_sr)
 }
 
+/// App-wide lossy-encoder settings. Exports run on worker threads far from the
+/// UI config, so the active settings are published here before spawning jobs;
+/// encoders read them at encode time. Defaults match the previous hardcoded
+/// values (MP3 192 kbps, AAC 192/96 kbps stereo/mono, Vorbis library default).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CodecExportOptions {
+    pub mp3_bitrate_kbps: u32,
+    pub aac_bitrate_kbps: u32,
+    /// Vorbis perceptual quality in [-0.2, 1.0].
+    pub ogg_quality: f32,
+}
+
+impl Default for CodecExportOptions {
+    fn default() -> Self {
+        Self {
+            mp3_bitrate_kbps: 192,
+            aac_bitrate_kbps: 192,
+            ogg_quality: 0.5,
+        }
+    }
+}
+
+pub const MP3_BITRATES_KBPS: &[u32] = &[96, 128, 160, 192, 224, 256, 320];
+pub const AAC_BITRATES_KBPS: &[u32] = &[96, 128, 160, 192, 256, 320];
+
+fn codec_export_options_cell() -> &'static std::sync::RwLock<CodecExportOptions> {
+    static OPTS: std::sync::OnceLock<std::sync::RwLock<CodecExportOptions>> =
+        std::sync::OnceLock::new();
+    OPTS.get_or_init(|| std::sync::RwLock::new(CodecExportOptions::default()))
+}
+
+pub fn set_codec_export_options(opts: CodecExportOptions) {
+    if let Ok(mut guard) = codec_export_options_cell().write() {
+        *guard = opts;
+    }
+}
+
+pub fn codec_export_options() -> CodecExportOptions {
+    codec_export_options_cell()
+        .read()
+        .map(|guard| *guard)
+        .unwrap_or_default()
+}
+
+fn mp3_bitrate_from_kbps(kbps: u32) -> Mp3Bitrate {
+    match kbps {
+        0..=96 => Mp3Bitrate::Kbps96,
+        97..=128 => Mp3Bitrate::Kbps128,
+        129..=160 => Mp3Bitrate::Kbps160,
+        161..=192 => Mp3Bitrate::Kbps192,
+        193..=224 => Mp3Bitrate::Kbps224,
+        225..=256 => Mp3Bitrate::Kbps256,
+        _ => Mp3Bitrate::Kbps320,
+    }
+}
+
 fn pick_format(src: &Path, dst: &Path) -> Option<String> {
     if let Some(ext) = ext_lower(dst) {
         if audio_io::is_supported_extension(&ext) {
@@ -1196,6 +1540,12 @@ fn ext_lower(path: &Path) -> Option<String> {
 }
 
 fn normalize_channels_for_encode(chans: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    if chans.len() > 2 {
+        eprintln!(
+            "lossy export: keeping the first 2 of {} channels (mp3/m4a/ogg are stereo-only)",
+            chans.len()
+        );
+    }
     match chans.len() {
         0 => Vec::new(),
         1 => vec![chans[0].clone()],
@@ -1235,6 +1585,10 @@ fn encode_ogg_vorbis(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
         .with_context(|| format!("create ogg output: {}", dst.display()))?;
     let mut builder = VorbisEncoderBuilder::new(sample_rate, channels, &mut output)
         .map_err(|e| anyhow::anyhow!("ogg encoder init: {e}"))?;
+    let target_quality = codec_export_options().ogg_quality.clamp(-0.2, 1.0);
+    builder.bitrate_management_strategy(vorbis_rs::VorbisBitrateManagementStrategy::QualityVbr {
+        target_quality,
+    });
     let mut encoder = builder
         .build()
         .map_err(|e| anyhow::anyhow!("ogg encoder build: {e}"))?;
@@ -1282,7 +1636,9 @@ fn encode_mp3(chans: &[Vec<f32>], in_sr: u32) -> Result<Vec<u8>> {
         }
     }
     builder
-        .set_brate(Mp3Bitrate::Kbps192)
+        .set_brate(mp3_bitrate_from_kbps(
+            codec_export_options().mp3_bitrate_kbps,
+        ))
         .map_err(|e| anyhow::anyhow!("mp3 bitrate: {e:?}"))?;
     builder
         .set_quality(Mp3Quality::Best)
@@ -1329,7 +1685,14 @@ fn encode_aac_to_mp4(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     }
     let freq_index = freq_index.context("unsupported AAC sample rate")?;
     let channels = chans.len();
-    let bitrate = if channels == 1 { 96_000 } else { 192_000 };
+    let bitrate_kbps = codec_export_options().aac_bitrate_kbps.clamp(32, 320);
+    // Halve for mono so the default (192 kbps stereo) keeps the previous
+    // 96 kbps mono behavior.
+    let bitrate = if channels == 1 {
+        (bitrate_kbps / 2).max(32) * 1000
+    } else {
+        bitrate_kbps * 1000
+    };
     let params = AacEncoderParams {
         bit_rate: AacBitRate::Cbr(bitrate),
         sample_rate: sr,
@@ -1472,7 +1835,14 @@ fn encode_aac_to_adts(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> 
         sr = target;
     }
     let channels = chans.len();
-    let bitrate = if channels == 1 { 96_000 } else { 192_000 };
+    let bitrate_kbps = codec_export_options().aac_bitrate_kbps.clamp(32, 320);
+    // Halve for mono so the default (192 kbps stereo) keeps the previous
+    // 96 kbps mono behavior.
+    let bitrate = if channels == 1 {
+        (bitrate_kbps / 2).max(32) * 1000
+    } else {
+        bitrate_kbps * 1000
+    };
     let params = AacEncoderParams {
         bit_rate: AacBitRate::Cbr(bitrate),
         sample_rate: sr,
@@ -1619,6 +1989,12 @@ pub fn export_channels_audio_with_depth(
             let len = chans.first().map(|c| c.len()).unwrap_or(0);
             export_selection_wav_with_depth(chans, sample_rate, (0, len), dst, wav_depth)
         }
+        "aiff" | "aif" => write_aiff_with_depth(
+            chans,
+            sample_rate,
+            dst,
+            wav_depth.unwrap_or(WavBitDepth::Float32),
+        ),
         "mp3" => {
             let data = encode_mp3(chans, sample_rate)?;
             std::fs::write(dst, data)?;
@@ -1914,6 +2290,64 @@ mod tests {
         let b = unique_sibling_tmp(&src, "ow", "wav");
         assert_ne!(a, b);
         assert_eq!(a.parent(), src.parent());
+    }
+
+    #[test]
+    fn extended80_sample_rate_round_trips() {
+        for rate in [8_000u32, 22_050, 44_100, 48_000, 96_000, 192_000] {
+            let bytes = super::sample_rate_to_extended80(rate);
+            assert_eq!(
+                super::extended80_to_sample_rate(&bytes),
+                rate,
+                "rate {rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn aiff_export_round_trips_all_depths() {
+        let dir = make_temp_dir("aiff_roundtrip");
+        let chans = synth_stereo(48_000, 0.25);
+        for (depth, tolerance) in [
+            (super::WavBitDepth::Pcm16, 1.0 / 32_768.0 * 2.0),
+            (super::WavBitDepth::Pcm24, 1.0 / 8_388_608.0 * 2.0),
+            (super::WavBitDepth::Float32, 1e-6),
+        ] {
+            let dst = dir.join(format!("take_{}.aiff", depth.suffix()));
+            super::write_aiff_with_depth(&chans, 48_000, &dst, depth).expect("write aiff");
+            let info = crate::audio_io::read_audio_info(&dst).expect("probe aiff");
+            assert_eq!(info.sample_rate, 48_000, "{depth:?}");
+            assert_eq!(info.channels, 2, "{depth:?}");
+            let (decoded, sr) = crate::audio_io::decode_audio_multi(&dst).expect("decode aiff");
+            assert_eq!(sr, 48_000);
+            assert_eq!(decoded.len(), 2);
+            assert_eq!(decoded[0].len(), chans[0].len(), "{depth:?}");
+            for (a, b) in decoded[0].iter().zip(chans[0].iter()) {
+                assert!(
+                    (a - b).abs() <= tolerance,
+                    "{depth:?}: decoded {a} vs source {b}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn aiff_loop_markers_round_trip_and_clear() {
+        let dir = make_temp_dir("aiff_loops");
+        let chans = synth_stereo(44_100, 0.1);
+        let dst = dir.join("loop.aiff");
+        super::write_aiff_with_depth(&chans, 44_100, &dst, super::WavBitDepth::Pcm16)
+            .expect("write aiff");
+        assert_eq!(super::read_aiff_loop_markers(&dst), None);
+        super::write_aiff_loop_markers(&dst, Some((100, 2_000))).expect("write loop");
+        assert_eq!(super::read_aiff_loop_markers(&dst), Some((100, 2_000)));
+        // The file must stay decodable after the chunk rewrite.
+        let (decoded, _) = crate::audio_io::decode_audio_multi(&dst).expect("decode aiff");
+        assert_eq!(decoded[0].len(), chans[0].len());
+        super::write_aiff_loop_markers(&dst, None).expect("clear loop");
+        assert_eq!(super::read_aiff_loop_markers(&dst), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn make_temp_dir(tag: &str) -> PathBuf {

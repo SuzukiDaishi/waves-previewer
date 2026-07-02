@@ -257,10 +257,17 @@ impl super::WavesPreviewer {
         let Some(dest) = self.pick_recording_save_dialog(default_name) else {
             return;
         };
-        let dest = if dest.extension().is_none() {
-            dest.with_extension("wav")
-        } else {
+        // The temp take is a WAV byte stream; copying it under another
+        // extension would produce a mislabeled, undecodable file.
+        let is_wav = dest
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("wav"))
+            .unwrap_or(false);
+        let dest = if is_wav {
             dest
+        } else {
+            dest.with_extension("wav")
         };
         match std::fs::copy(&src, &dest) {
             Ok(_) => {

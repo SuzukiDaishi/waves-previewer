@@ -20,7 +20,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::sample::SampleFormat;
 use symphonia::default::{get_codecs, get_probe};
 
-pub const SUPPORTED_EXTS: &[&str] = &["wav", "mp3", "m4a", "ogg"];
+pub const SUPPORTED_EXTS: &[&str] = &["wav", "aiff", "aif", "mp3", "m4a", "ogg"];
 pub const EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES: usize = 16_384;
 
 fn io_trace_enabled() -> bool {

@@ -2564,6 +2564,8 @@ pub struct ExportConfig {
     pub conflict: ConflictPolicy,
     pub backup_bak: bool,
     pub export_srt: bool,
+    /// Lossy-encoder settings (MP3/AAC bitrate, Vorbis quality).
+    pub codec: crate::wave::CodecExportOptions,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -36,7 +36,7 @@ fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
 fn audio_convert_matrix_wav_mp3_m4a_ogg() {
     let dir = make_temp_dir("audio_convert_matrix");
     let chans = synth_stereo(44_100, 0.18);
-    let formats = ["wav", "mp3", "m4a", "ogg"];
+    let formats = ["wav", "aiff", "mp3", "m4a", "ogg"];
 
     let mut sources: Vec<(String, PathBuf)> = Vec::new();
     for ext in formats {

@@ -99,7 +99,10 @@ fn closing_first_background_tab_keeps_active_tab() {
     open_three_tabs(&mut harness, &[a.clone(), _b.clone(), c.clone()]);
 
     // Active tab is c (last opened).
-    assert_eq!(harness.state().test_active_tab_path().as_deref(), Some(c.as_path()));
+    assert_eq!(
+        harness.state().test_active_tab_path().as_deref(),
+        Some(c.as_path())
+    );
 
     // Close a (the first, background tab).
     assert!(harness.state_mut().test_close_tab_for_path(&a));
@@ -124,7 +127,10 @@ fn closing_last_background_tab_keeps_active_tab() {
     // Re-activate a (idx 0), leaving c (idx 2) as a background tab.
     assert!(harness.state_mut().test_open_tab_for_path(&a));
     harness.run_steps(1);
-    assert_eq!(harness.state().test_active_tab_path().as_deref(), Some(a.as_path()));
+    assert_eq!(
+        harness.state().test_active_tab_path().as_deref(),
+        Some(a.as_path())
+    );
 
     // Close c (a later, background tab).
     assert!(harness.state_mut().test_close_tab_for_path(&c));
@@ -149,7 +155,10 @@ fn closing_active_tab_falls_to_neighbour() {
     // Make the middle tab (b) active, then close it.
     assert!(harness.state_mut().test_open_tab_for_path(&b));
     harness.run_steps(1);
-    assert_eq!(harness.state().test_active_tab_path().as_deref(), Some(b.as_path()));
+    assert_eq!(
+        harness.state().test_active_tab_path().as_deref(),
+        Some(b.as_path())
+    );
 
     assert!(harness.state_mut().test_close_tab_for_path(&b));
     harness.run_steps(1);
@@ -167,6 +176,33 @@ fn closing_active_tab_falls_to_neighbour() {
         "closing the active middle tab should activate its right neighbour"
     );
     assert!(active.as_deref() != Some(a.as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn closing_background_tab_from_list_view_keeps_no_active_tab() {
+    let dir = make_temp_dir("close_bg_from_list");
+    let [a, b, c] = write_three(&dir);
+    let mut harness = harness_with_folder(dir.clone());
+    open_three_tabs(&mut harness, &[a.clone(), b.clone(), c.clone()]);
+
+    // Go back to the list: no editor tab is active there.
+    harness.state_mut().test_switch_to_list_workspace();
+    harness.state_mut().active_tab = None;
+    harness.run_steps(1);
+
+    // Closing a background tab from the list must not conjure up an
+    // "active" editor tab out of thin air.
+    assert!(harness.state_mut().test_close_tab_for_path(&b));
+    harness.run_steps(1);
+
+    assert_eq!(harness.state().tabs.len(), 2);
+    assert_eq!(
+        harness.state().active_tab,
+        None,
+        "no tab was active before the close, so none may be active after"
+    );
+    assert!(!harness.state().test_is_editor_workspace_active());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

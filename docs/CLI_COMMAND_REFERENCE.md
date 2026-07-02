@@ -518,7 +518,7 @@ Modes:
 
 Inputs:
 
-- `--format <wav|mp3|m4a|ogg>`
+- `--format <wav|aiff|mp3|m4a|ogg>`
 - `--gain-db <db>`
 - `--loop-start-sample <n>`
 - `--loop-end-sample <n>`

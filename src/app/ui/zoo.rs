@@ -70,7 +70,7 @@ impl crate::app::WavesPreviewer {
             ui.horizontal(|ui| {
                 if ui.button("Select Voice...").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("audio", &["wav", "mp3", "m4a", "ogg"])
+                        .add_filter("audio", crate::audio_io::SUPPORTED_EXTS)
                         .pick_file()
                     {
                         self.set_zoo_voice_path(Some(path));
