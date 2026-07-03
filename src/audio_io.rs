@@ -20,7 +20,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::sample::SampleFormat;
 use symphonia::default::{get_codecs, get_probe};
 
-pub const SUPPORTED_EXTS: &[&str] = &["wav", "aiff", "aif", "mp3", "m4a", "ogg"];
+pub const SUPPORTED_EXTS: &[&str] = &["wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg"];
 pub const EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES: usize = 16_384;
 
 fn io_trace_enabled() -> bool {
@@ -1447,6 +1447,7 @@ pub fn read_audio_bpm(path: &Path) -> Option<f32> {
         "m4a" => read_bpm_m4a(path),
         "mp3" => read_bpm_id3(path),
         "wav" => read_bpm_wav(path),
+        "flac" => crate::flac_meta::read_flac_bpm(path),
         _ => None,
     }
 }
@@ -1456,11 +1457,12 @@ pub fn read_embedded_artwork(path: &Path) -> Option<Vec<u8>> {
     match ext.to_ascii_lowercase().as_str() {
         "m4a" => read_artwork_m4a(path),
         "mp3" | "wav" => read_artwork_id3(path),
+        "flac" => crate::flac_meta::read_flac_artwork(path),
         _ => None,
     }
 }
 
-fn parse_bpm_text(text: &str) -> Option<f32> {
+pub(crate) fn parse_bpm_text(text: &str) -> Option<f32> {
     let mut buf = String::new();
     let mut started = false;
     for ch in text.trim().chars() {

@@ -1100,6 +1100,7 @@ pub fn copy_audio_metadata_from_source(src: &Path, dst: &Path) -> Result<()> {
         (Some("wav"), Some("wav")) => merge_wav_metadata_from_source(src, dst),
         (Some("mp3"), Some("mp3")) => copy_mp3_metadata_from_source(src, dst),
         (Some("m4a"), Some("m4a")) => copy_m4a_metadata_from_source(src, dst),
+        (Some("flac"), Some("flac")) => crate::flac_meta::copy_flac_metadata_from_source(src, dst),
         _ => Ok(()),
     }
 }
@@ -1431,6 +1432,7 @@ pub fn export_gain_audio(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     match fmt.as_str() {
         "wav" => export_gain_wav(src, dst, gain_db),
         "aiff" | "aif" => export_gain_aiff(src, dst, gain_db),
+        "flac" => export_gain_flac(src, dst, gain_db),
         "mp3" => export_gain_mp3(src, dst, gain_db),
         "m4a" => export_gain_m4a(src, dst, gain_db),
         "ogg" => export_gain_ogg(src, dst, gain_db),
@@ -1442,6 +1444,23 @@ fn export_gain_aiff(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
     let (mut chans, in_sr) = decode_wav_multi(src)?;
     apply_gain_in_place(&mut chans, gain_db);
     write_aiff_with_depth(&chans, in_sr, dst, WavBitDepth::Float32)
+}
+
+fn export_gain_flac(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    let (mut chans, in_sr) = decode_wav_multi(src)?;
+    apply_gain_in_place(&mut chans, gain_db);
+    // Keep a 16-bit source at 16-bit; everything else gets FLAC's practical
+    // maximum of 24-bit (FLAC has no float representation).
+    let depth = match audio_io::read_audio_info(src)
+        .map(|info| info.bits_per_sample)
+        .unwrap_or(0)
+    {
+        1..=16 => WavBitDepth::Pcm16,
+        _ => WavBitDepth::Pcm24,
+    };
+    encode_flac(dst, &chans, in_sr, Some(depth))?;
+    try_copy_audio_metadata_from_source(src, dst);
+    Ok(())
 }
 
 fn export_gain_mp3(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
@@ -1610,6 +1629,106 @@ fn encode_ogg_vorbis(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
     encoder
         .finish()
         .map_err(|e| anyhow::anyhow!("ogg finalize: {e}"))?;
+    Ok(())
+}
+
+/// Encode to FLAC. FLAC stores integers only, so `Float32` (and unspecified)
+/// depths are written as 24-bit PCM; `Pcm16` stays 16-bit. All channel counts
+/// FLAC supports (up to 8) pass through unchanged.
+fn encode_flac(
+    dst: &Path,
+    chans: &[Vec<f32>],
+    sample_rate: u32,
+    depth: Option<WavBitDepth>,
+) -> Result<()> {
+    use flacenc::component::BitRepr;
+    use flacenc::error::Verify;
+    if chans.is_empty() {
+        anyhow::bail!("empty channels");
+    }
+    if chans.len() > 8 {
+        anyhow::bail!("flac export supports up to 8 channels, got {}", chans.len());
+    }
+    let bits_per_sample: usize = match depth {
+        Some(WavBitDepth::Pcm16) => 16,
+        _ => 24,
+    };
+    let channels = chans.len();
+    // FLAC's minimum block size is 16 samples; pad ultra-short clips with
+    // trailing silence rather than failing.
+    const FLAC_MIN_BLOCK: usize = 16;
+    let source_frames = chans.iter().map(|c| c.len()).min().unwrap_or(0);
+    if source_frames == 0 {
+        anyhow::bail!("empty channels");
+    }
+    let frames = source_frames.max(FLAC_MIN_BLOCK);
+    let max_abs = ((1i64 << (bits_per_sample - 1)) - 1) as f32;
+    let bytes_per_sample = bits_per_sample / 8;
+    let mut md5 = <md5::Md5 as md5::Digest>::new();
+    let mut interleaved: Vec<i32> = Vec::with_capacity(frames * channels);
+    for i in 0..frames {
+        for ch in chans {
+            let v = ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
+            let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
+            md5::Digest::update(&mut md5, &q.to_le_bytes()[0..bytes_per_sample]);
+            interleaved.push(q);
+        }
+    }
+    let md5_digest: [u8; 16] = md5::Digest::finalize(md5).into();
+    let config = flacenc::config::Encoder::default()
+        .into_verified()
+        .map_err(|e| anyhow::anyhow!("flac encoder config: {e:?}"))?;
+    // Encode frame-by-frame instead of via `encode_with_fixed_block_size`:
+    // that helper pads the final partial block up to a full block, which
+    // appends silence and changes the decoded length. It also feeds the
+    // padding into the MD5 digest, so the digest is computed here instead.
+    let block_size = config.block_size;
+    let mut stream_info = flacenc::component::StreamInfo::new(
+        sample_rate.max(1) as usize,
+        channels,
+        bits_per_sample,
+    )
+    .map_err(|e| anyhow::anyhow!("flac stream init: {e:?}"))?;
+    stream_info.set_md5_digest(&md5_digest);
+    let mut stream = flacenc::component::Stream::with_stream_info(stream_info);
+    let mut pos = 0usize;
+    let mut frame_number = 0usize;
+    while pos < frames {
+        let this_block = (frames - pos).min(block_size);
+        let mut framebuf = flacenc::source::FrameBuf::with_size(channels, this_block)
+            .map_err(|e| anyhow::anyhow!("flac frame buffer: {e:?}"))?;
+        let chunk = &interleaved[pos * channels..(pos + this_block) * channels];
+        {
+            use flacenc::source::Fill;
+            framebuf
+                .fill_interleaved(chunk)
+                .map_err(|e| anyhow::anyhow!("flac frame fill: {e:?}"))?;
+        }
+        let frame =
+            flacenc::encode_fixed_size_frame(&config, &framebuf, frame_number, stream.stream_info())
+                .map_err(|e| anyhow::anyhow!("flac encode: {e:?}"))?;
+        // add_frame accumulates total_samples and min/max block/frame sizes.
+        stream.add_frame(frame);
+        pos += this_block;
+        frame_number += 1;
+    }
+    let mut sink = flacenc::bitsink::ByteSink::new();
+    stream
+        .write(&mut sink)
+        .map_err(|e| anyhow::anyhow!("flac write: {e:?}"))?;
+    let mut bytes = sink.as_slice().to_vec();
+    // This is a fixed-block-size stream whose final frame may be shorter.
+    // `Stream::add_frame` folds that last frame into STREAMINFO's
+    // min_block_size, which (per spec) excludes the last block; a mismatched
+    // pair makes readers treat the stream as variable-block-size and reject
+    // the fixed-strategy frame headers. Patch min_block_size (bytes 8..10:
+    // magic 4 + block header 4) back to the nominal block size.
+    if frames > block_size && bytes.len() >= 12 {
+        let min_block = (block_size as u16).to_be_bytes();
+        bytes[8..10].copy_from_slice(&min_block);
+    }
+    std::fs::write(dst, bytes)
+        .with_context(|| format!("create flac output: {}", dst.display()))?;
     Ok(())
 }
 
@@ -1995,6 +2114,7 @@ pub fn export_channels_audio_with_depth(
             dst,
             wav_depth.unwrap_or(WavBitDepth::Float32),
         ),
+        "flac" => encode_flac(dst, chans, sample_rate, wav_depth),
         "mp3" => {
             let data = encode_mp3(chans, sample_rate)?;
             std::fs::write(dst, data)?;
@@ -2350,6 +2470,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn export_flac_roundtrip_preserves_audio_and_loop_metadata() {
+        let dir = make_temp_dir("flac_roundtrip");
+        let src = dir.join("source.flac");
+        let chans = synth_stereo(48_000, 1.0);
+        export_channels_audio(&chans, 48_000, &src).expect("export flac");
+
+        let (decoded, sr) = crate::audio_io::decode_audio_multi(&src).expect("decode flac");
+        assert_eq!(sr, 48_000);
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].len(), chans[0].len());
+        // Default depth is 24-bit PCM; quantization error stays tiny.
+        let max_diff = decoded[0]
+            .iter()
+            .zip(chans[0].iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff < 1.0e-3, "flac roundtrip drifted: {max_diff}");
+
+        crate::loop_markers::write_loop_markers(&src, Some((1_000, 2_000)))
+            .expect("write flac loop");
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&src),
+            Some((1_000, 2_000))
+        );
+        // The file must stay decodable after the metadata rewrite.
+        let (redecoded, _) =
+            crate::audio_io::decode_audio_multi(&src).expect("decode flac after meta rewrite");
+        assert_eq!(redecoded[0].len(), decoded[0].len());
+
+        // Gain export to a new FLAC carries the loop comments over.
+        let dst = dir.join("out.flac");
+        export_gain_audio(&src, &dst, -3.0).expect("export gain flac");
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&dst),
+            Some((1_000, 2_000))
+        );
+        crate::loop_markers::write_loop_markers(&dst, None).expect("clear flac loop");
+        assert_eq!(crate::loop_markers::read_loop_markers(&dst), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ogg_loop_markers_fall_back_to_sidecar() {
+        let dir = make_temp_dir("ogg_loop_sidecar");
+        let src = dir.join("source.ogg");
+        export_channels_audio(&synth_stereo(48_000, 0.5), 48_000, &src).expect("export ogg");
+
+        crate::loop_markers::write_loop_markers(&src, Some((100, 900)))
+            .expect("write ogg loop sidecar");
+        assert!(dir.join("source.loop.json").is_file());
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&src),
+            Some((100, 900))
+        );
+        crate::loop_markers::write_loop_markers(&src, None).expect("clear ogg loop sidecar");
+        assert!(!dir.join("source.loop.json").exists());
+        assert_eq!(crate::loop_markers::read_loop_markers(&src), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn make_temp_dir(tag: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let now_ns = SystemTime::now()
@@ -2600,4 +2783,5 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 }

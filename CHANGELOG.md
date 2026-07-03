@@ -4,6 +4,15 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### FLAC Support + Format/Metadata Matrix (Latest)
+- Added FLAC decode via symphonia (`flac` feature) and FLAC encode via `flacenc` (16/24-bit; 32-bit float sources are quantized to 24-bit since FLAC has no float representation).
+- FLAC now works across list/editor load, save/overwrite, format convert ("To FLAC"), gain export, and virtual-item export; list shows a FLAC badge.
+- Loop markers for FLAC are stored as Vorbis comments (`LOOPSTART`/`LOOPEND`, same convention as MP3/M4A); BPM (`BPM`/`TEMPO` comment) and cover art (`PICTURE` block) are read.
+- FLAC→FLAC saves carry `VORBIS_COMMENT` + `PICTURE` blocks over (stream-dependent `SEEKTABLE`/`CUESHEET` are intentionally dropped).
+- OGG loop markers no longer fail the whole save: formats without in-file loop support now fall back to a `<stem>.loop.json` sidecar (read + write).
+- Installer: added missing `.aiff`/`.aif`/`.ogg` file associations and new `.flac`.
+- Documented the per-format support matrix and export policy for unsupported metadata in `docs/FORMAT_SUPPORT.md`; updated README format list.
+
 ### CLI Replacement / MCP Removal
 - Added docs-first CLI replacement specs under `docs/CLI_*.md`.
 - Default startup remains GUI; headless automation now enters through `--cli`.

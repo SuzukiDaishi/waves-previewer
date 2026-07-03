@@ -186,6 +186,13 @@ impl WavesPreviewer {
                 ui.close();
             }
             if ui
+                .add_enabled(has_selection, egui::Button::new("To FLAC"))
+                .clicked()
+            {
+                self.spawn_convert_format_selected(selected.clone(), "flac");
+                ui.close();
+            }
+            if ui
                 .add_enabled(has_selection, egui::Button::new("To MP3"))
                 .clicked()
             {
