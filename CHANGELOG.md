@@ -4,7 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
-### Inspector Overhaul: Loop Edit / Auto Trim / Tempogram / Chromagram (Latest)
+### UI Overhaul: Effect Graph, Resizable Panels, Seam Check, MiniMeter (Latest)
+- Effect Graph console now docks under the canvas only (left palette stays full height), with a drag-resizable, height-clamped panel so it can no longer swallow half the window; rows are monospace, severity-colored, truncated with tooltips, and the header shows a validation-issue count.
+- Effect Graph nodes restyled: soft drop shadow, accent-tinted header with underline, slimmer status border with a selection glow, pill-shaped elapsed-time badge, ringed port pins, and cables with a dark underlay for depth. Left/right panels gained sane min/max resize ranges.
+- Editor inspector width is drag-resizable via a divider between canvas and inspector (remembered for the session); Effect Graph side panels are also clamped-resizable.
+- Loop Inspector replaced with a real seam-continuity check: the audio running into the loop end and out of the loop start is drawn as one continuous trace joined at the jump, with the crossfaded result overlaid, a log-scale window zoom (2–250 ms), auto-gain, and a click-risk verdict (amplitude step vs. local motion).
+- New MiniMeter strip fills the empty space under the editor overview: realtime oscilloscope, log-frequency spectrum analyzer with hue-swept bars, and a peak/RMS meter with peak-hold, all following the playhead.
+
+### Inspector Overhaul: Loop Edit / Auto Trim / Tempogram / Chromagram
 - Loop Edit no longer overflows the inspector: a mis-nested layout row swallowed the Apply button and the whole Auto Detect section into one wrapping row; crossfade controls now sit on two rows, loop-range readouts truncate with tooltips, and detect candidates render as fixed-width color-coded rows.
 - Loop auto-detect scoring got stricter and more musical: anti-correlated seams no longer earn a baseline score, a long-range loudness-envelope similarity term rewards structurally matching sections, near-silent seams are penalized, and refined candidates deduplicate within ~20 ms so the list shows distinct alternatives.
 - Auto Trim is now live: thresholds are sliders with units and plain-language tooltips, the measured noise floor / peak / effective threshold are shown in dB after a run, and edits re-run detection automatically (debounced) so the selected ranges update as you drag.

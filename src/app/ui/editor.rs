@@ -206,7 +206,11 @@ impl crate::app::WavesPreviewer {
         (applied, editing)
     }
 
-    fn build_loop_seam_preview(tab: &EditorTab, sample_rate: u32) -> Option<LoopSeamPreview> {
+    fn build_loop_seam_preview(
+        tab: &EditorTab,
+        sample_rate: u32,
+        window_secs: f32,
+    ) -> Option<LoopSeamPreview> {
         if tab.active_tool != ToolKind::LoopEdit {
             return None;
         }
@@ -229,10 +233,10 @@ impl crate::app::WavesPreviewer {
         let sr = sample_rate.max(1);
         let effective_xfade_samples =
             Self::effective_loop_xfade_samples(start, end, available_len, tab.loop_xfade_samples);
-        let base_side_samples = ((sr as f32) * 0.12).round() as usize;
+        let base_side_samples = ((sr as f32) * window_secs.max(0.002)).round() as usize;
         let side_samples = base_side_samples
             .max(effective_xfade_samples.saturating_mul(2))
-            .clamp(256, 16_384);
+            .clamp(64, 48_000);
         let clamped_end = end.min(available_len);
         let left_start = clamped_end.saturating_sub(side_samples);
         let right_end = start.saturating_add(side_samples).min(available_len);
@@ -890,13 +894,45 @@ impl crate::app::WavesPreviewer {
         changed.then_some((next_zoom, next_center))
     }
 
-    fn draw_loop_seam_preview(
-        ui: &mut egui::Ui,
-        preview: &LoopSeamPreview,
-        vertical_zoom: f32,
-        vertical_view_center: f32,
-    ) {
-        let desired = egui::vec2(ui.available_width().max(120.0), 84.0);
+    /// Seam-continuity check: the tail running into the loop end and the
+    /// head starting at the loop start drawn as ONE continuous trace, joined
+    /// at the jump. A smooth line across the center means the loop connects;
+    /// a step or kink means an audible click. The crossfaded result (if any)
+    /// is overlaid in green, and the amplitude jump at the joint is reported.
+    fn draw_loop_seam_join(ui: &mut egui::Ui, preview: &LoopSeamPreview, window_ms: f32) {
+        let sr = preview.sample_rate.max(1) as f32;
+        let want = ((window_ms / 1000.0) * sr).round().max(16.0) as usize;
+        let n = want
+            .min(preview.raw_left.len())
+            .min(preview.raw_right.len())
+            .max(2);
+        let tail = &preview.raw_left[preview.raw_left.len() - n..];
+        let head = &preview.raw_right[..n];
+
+        // What actually plays across the jump (with crossfade baked) if staged.
+        let blended: Option<Vec<f32>> = match (&preview.blended_left, &preview.blended_right) {
+            (Some(left), Some(right)) if left.len() >= n && right.len() >= n => {
+                let mut joined = Vec::with_capacity(n * 2);
+                joined.extend_from_slice(&left[left.len() - n..]);
+                joined.extend_from_slice(&right[..n]);
+                Some(joined)
+            }
+            _ => None,
+        };
+        let mut joined_raw = Vec::with_capacity(n * 2);
+        joined_raw.extend_from_slice(tail);
+        joined_raw.extend_from_slice(head);
+
+        // Auto gain: scale the visible window to fill the lane so small
+        // discontinuities stay visible regardless of material loudness.
+        let peak = joined_raw
+            .iter()
+            .chain(blended.iter().flatten())
+            .fold(0.0f32, |acc, v| acc.max(v.abs()))
+            .max(1.0e-6);
+        let gain = 0.92 / peak;
+
+        let desired = egui::vec2(ui.available_width().max(160.0), 120.0);
         let (resp, painter) = ui.allocate_painter(desired, Sense::hover());
         let rect = resp.rect;
         painter.rect_filled(rect, 6.0, Color32::from_rgb(15, 18, 24));
@@ -906,35 +942,23 @@ impl crate::app::WavesPreviewer {
             Stroke::new(1.0, Color32::from_rgb(52, 62, 78)),
             egui::StrokeKind::Outside,
         );
-        let wave_rect = rect.shrink2(egui::vec2(10.0, 8.0));
+        let wave_rect = rect.shrink2(egui::vec2(8.0, 8.0));
         let wave_rect = egui::Rect::from_min_max(
             wave_rect.min,
-            egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
+            egui::pos2(wave_rect.max.x, wave_rect.max.y - 26.0),
         );
-        let footer_y = rect.bottom() - 10.0;
-        let seam_x = wave_rect.center().x;
-        let half_gap = 6.0;
-        let left_rect = egui::Rect::from_min_max(
-            wave_rect.min,
-            egui::pos2(seam_x - half_gap, wave_rect.max.y),
-        );
-        let right_rect = egui::Rect::from_min_max(
-            egui::pos2(seam_x + half_gap, wave_rect.min.y),
-            wave_rect.max,
-        );
+        let mid_y = wave_rect.center().y;
+        let amp_to_y =
+            |v: f32| -> f32 { mid_y - (v * gain).clamp(-1.0, 1.0) * wave_rect.height() * 0.5 };
+        // Zero line + jump marker.
         painter.line_segment(
             [
-                egui::pos2(
-                    wave_rect.left(),
-                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
-                ),
-                egui::pos2(
-                    wave_rect.right(),
-                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
-                ),
+                egui::pos2(wave_rect.left(), mid_y),
+                egui::pos2(wave_rect.right(), mid_y),
             ],
             Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 36)),
         );
+        let seam_x = wave_rect.center().x;
         painter.line_segment(
             [
                 egui::pos2(seam_x, wave_rect.top()),
@@ -942,147 +966,440 @@ impl crate::app::WavesPreviewer {
             ],
             Stroke::new(1.5, Color32::from_rgb(255, 196, 72)),
         );
-        let draw_half = |painter: &egui::Painter,
-                         samples: &[f32],
-                         target_rect: egui::Rect,
-                         stroke: Stroke,
-                         stem_col: Color32| {
-            let bins = target_rect.width().round().max(8.0) as usize;
-            let mut tmp = Vec::new();
-            build_minmax(&mut tmp, samples, bins);
-            if tmp.is_empty() {
+        let draw_trace = |painter: &egui::Painter, samples: &[f32], stroke: Stroke| {
+            let total = samples.len();
+            if total < 2 {
                 return;
             }
-            let denom = (tmp.len().saturating_sub(1)).max(1) as f32;
-            let mut points = Vec::with_capacity(tmp.len());
-            for (i, (mn, mx)) in tmp.iter().enumerate() {
-                let x = egui::lerp(target_rect.x_range(), i as f32 / denom);
-                let y_min =
-                    Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mn);
-                let y_max =
-                    Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mx);
-                painter.line_segment(
-                    [egui::pos2(x, y_min), egui::pos2(x, y_max)],
-                    Stroke::new(1.0, stem_col),
-                );
-                points.push(egui::pos2(
-                    x,
-                    Self::waveform_y_from_amp(
-                        wave_rect,
-                        vertical_zoom,
-                        vertical_view_center,
-                        (mn + mx) * 0.5,
-                    ),
-                ));
-            }
-            if points.len() >= 2 {
+            let width_px = wave_rect.width().max(8.0);
+            if total as f32 <= width_px * 1.5 {
+                // Per-sample polyline: continuity (steps/kinks) stays visible.
+                let denom = (total - 1) as f32;
+                let points: Vec<egui::Pos2> = samples
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| {
+                        egui::pos2(
+                            egui::lerp(wave_rect.x_range(), i as f32 / denom),
+                            amp_to_y(v),
+                        )
+                    })
+                    .collect();
                 painter.add(egui::Shape::line(points, stroke));
+            } else {
+                let bins = width_px as usize;
+                let mut tmp = Vec::new();
+                build_minmax(&mut tmp, samples, bins);
+                let denom = (tmp.len().saturating_sub(1)).max(1) as f32;
+                let mut mids = Vec::with_capacity(tmp.len());
+                for (i, (mn, mx)) in tmp.iter().enumerate() {
+                    let x = egui::lerp(wave_rect.x_range(), i as f32 / denom);
+                    painter.line_segment(
+                        [egui::pos2(x, amp_to_y(*mn)), egui::pos2(x, amp_to_y(*mx))],
+                        Stroke::new(1.0, stroke.color.gamma_multiply(0.4)),
+                    );
+                    mids.push(egui::pos2(x, amp_to_y((mn + mx) * 0.5)));
+                }
+                painter.add(egui::Shape::line(mids, stroke));
             }
         };
-        let raw_stem = Color32::from_rgba_unmultiplied(112, 160, 255, 48);
-        let raw_line = Stroke::new(1.2, Color32::from_rgb(120, 176, 255));
-        draw_half(&painter, &preview.raw_left, left_rect, raw_line, raw_stem);
-        draw_half(&painter, &preview.raw_right, right_rect, raw_line, raw_stem);
-        if let (Some(left), Some(right)) = (&preview.blended_left, &preview.blended_right) {
-            let blend_stem = Color32::from_rgba_unmultiplied(88, 255, 224, 32);
-            let blend_line = Stroke::new(1.8, Color32::from_rgb(92, 255, 224));
-            draw_half(&painter, left, left_rect, blend_line, blend_stem);
-            draw_half(&painter, right, right_rect, blend_line, blend_stem);
+        draw_trace(
+            &painter,
+            &joined_raw,
+            Stroke::new(1.2, Color32::from_rgb(120, 176, 255)),
+        );
+        if let Some(blended) = &blended {
+            draw_trace(
+                &painter,
+                blended,
+                Stroke::new(1.6, Color32::from_rgb(92, 255, 224)),
+            );
         }
         let label_font = TextStyle::Small.resolve(ui.style());
         painter.text(
-            left_rect.left_top(),
+            wave_rect.left_top(),
             egui::Align2::LEFT_TOP,
-            "End",
+            "\u{2192} loop end",
             label_font.clone(),
             Color32::from_rgb(185, 190, 204),
         );
         painter.text(
-            right_rect.right_top(),
+            wave_rect.right_top(),
             egui::Align2::RIGHT_TOP,
-            "Start",
+            "loop start \u{2192}",
             label_font.clone(),
             Color32::from_rgb(185, 190, 204),
         );
-        let window_ms = (preview.raw_left.len().max(preview.raw_right.len()) as f32
-            / preview.sample_rate as f32)
-            * 1000.0;
-        let xfade_ms =
-            (preview.effective_xfade_samples as f32 / preview.sample_rate as f32) * 1000.0;
-        let mode_label = if preview.uses_through_zero {
-            "fade to 0"
+
+        // Click-risk metric on what actually plays across the jump.
+        let judged = blended.as_deref().unwrap_or(&joined_raw);
+        let step = (judged[n] - judged[n - 1]).abs();
+        // Compare against the local per-sample motion so steady material with
+        // a big jump is flagged while busy material isn't over-penalized.
+        let mut local_motion = 0.0f32;
+        let mut count = 0usize;
+        for w in judged[n.saturating_sub(64)..(n + 64).min(judged.len())].windows(2) {
+            local_motion += (w[1] - w[0]).abs();
+            count += 1;
+        }
+        let local_motion = local_motion / count.max(1) as f32;
+        let ratio = step / local_motion.max(1.0e-6);
+        let (verdict, verdict_color) = if step < peak * 0.004 || ratio < 1.5 {
+            ("seam OK", Color32::from_rgb(120, 220, 140))
+        } else if step < peak * 0.02 || ratio < 4.0 {
+            ("small step", Color32::from_rgb(240, 200, 90))
         } else {
-            "crossfade"
+            ("click risk", Color32::from_rgb(240, 120, 120))
         };
+        let xfade_ms =
+            (preview.effective_xfade_samples as f32 / preview.sample_rate.max(1) as f32) * 1000.0;
+        let mode_label = if preview.effective_xfade_samples == 0 {
+            "no xfade".to_string()
+        } else if preview.uses_through_zero {
+            format!("fade-to-0 {xfade_ms:.0} ms")
+        } else {
+            format!("xfade {xfade_ms:.0} ms")
+        };
+        let footer_y = rect.bottom() - 10.0;
         painter.text(
-            egui::pos2(rect.center().x, footer_y),
-            egui::Align2::CENTER_CENTER,
-            format!("{mode_label} / window {window_ms:.1} ms / xfade {xfade_ms:.1} ms"),
+            egui::pos2(rect.left() + 10.0, footer_y),
+            egui::Align2::LEFT_CENTER,
+            format!("{verdict} (\u{0394}{step:.4})"),
+            label_font.clone(),
+            verdict_color,
+        );
+        painter.text(
+            egui::pos2(rect.right() - 10.0, footer_y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{mode_label} \u{00B7} \u{00B1}{window_ms:.0} ms"),
             label_font,
             Color32::from_rgb(150, 162, 184),
         );
     }
 
-    fn draw_loop_window_preview(
+    /// Cached forward FFT for the mini meter (per-thread, one size).
+    fn mini_meter_fft(buffer: &mut [rustfft::num_complex::Complex<f32>]) {
+        use std::cell::RefCell;
+        thread_local! {
+            static FFT: RefCell<Option<(usize, std::sync::Arc<dyn rustfft::Fft<f32>>)>> =
+                const { RefCell::new(None) };
+        }
+        FFT.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            let need = buffer.len();
+            if slot.as_ref().map(|(n, _)| *n != need).unwrap_or(true) {
+                let mut planner = rustfft::FftPlanner::new();
+                *slot = Some((need, planner.plan_fft_forward(need)));
+            }
+            if let Some((_, fft)) = slot.as_ref() {
+                fft.process(buffer);
+            }
+        });
+    }
+
+    /// Realtime "mini meter" strip under the editor: oscilloscope, spectrum
+    /// analyzer and peak/RMS meter of the audio around the playhead. Fills the
+    /// otherwise empty space below the overview navigator.
+    fn draw_editor_mini_meter(
         ui: &mut egui::Ui,
-        samples: &[f32],
-        sample_rate: u32,
-        accent: Color32,
-        vertical_zoom: f32,
-        vertical_view_center: f32,
+        tab: &EditorTab,
+        playhead_display: usize,
+        playing: bool,
     ) {
-        let desired = egui::vec2(ui.available_width().max(96.0), 84.0);
-        let (resp, painter) = ui.allocate_painter(desired, Sense::hover());
+        let h = ui.available_height().clamp(64.0, 210.0);
+        let w = ui.available_width().max(160.0);
+        if tab.ch_samples.is_empty() || tab.samples_len == 0 {
+            return;
+        }
+        let (resp, painter) = ui.allocate_painter(egui::vec2(w, h), Sense::hover());
         let rect = resp.rect;
-        painter.rect_filled(rect, 6.0, Color32::from_rgb(15, 18, 24));
+        painter.rect_filled(rect, 6.0, Color32::from_rgb(11, 12, 16));
         painter.rect_stroke(
             rect,
             6.0,
-            Stroke::new(1.0, Color32::from_rgb(52, 62, 78)),
+            Stroke::new(1.0, Color32::from_rgb(40, 46, 56)),
             egui::StrokeKind::Outside,
         );
-        if samples.is_empty() {
+
+        let sr = tab.buffer_sample_rate.max(1) as f32;
+        let buf_len = tab
+            .ch_samples
+            .iter()
+            .map(|c| c.len())
+            .min()
+            .unwrap_or(0)
+            .min(tab.samples_len);
+        if buf_len == 0 {
             return;
         }
-        let wave_rect = rect.shrink2(egui::vec2(10.0, 8.0));
-        let wave_rect = egui::Rect::from_min_max(
-            wave_rect.min,
-            egui::pos2(wave_rect.max.x, wave_rect.max.y - 14.0),
+        let end = playhead_display.clamp(1, buf_len);
+        let n_fft = 2048usize;
+        let scope_n = ((sr * 0.04) as usize).clamp(256, 8192);
+        let level_n = ((sr * 0.05) as usize).clamp(256, 8192);
+        let need = n_fft.max(scope_n).max(level_n).min(buf_len);
+        let start = end.saturating_sub(need);
+        let inv_ch = 1.0 / tab.ch_samples.len().max(1) as f32;
+        let mono: Vec<f32> = (start..end)
+            .map(|i| {
+                tab.ch_samples
+                    .iter()
+                    .map(|c| c.get(i).copied().unwrap_or(0.0))
+                    .sum::<f32>()
+                    * inv_ch
+            })
+            .collect();
+
+        let pad = 6.0;
+        let gap = 8.0;
+        let inner = rect.shrink(pad);
+        let level_w = 66.0f32.min(inner.width() * 0.25);
+        let scope_w = ((inner.width() - level_w - gap * 2.0) * 0.34).max(40.0);
+        let spectrum_w = (inner.width() - level_w - scope_w - gap * 2.0).max(40.0);
+        let scope_rect = egui::Rect::from_min_size(inner.min, egui::vec2(scope_w, inner.height()));
+        let spectrum_rect = egui::Rect::from_min_size(
+            egui::pos2(scope_rect.right() + gap, inner.top()),
+            egui::vec2(spectrum_w, inner.height()),
         );
+        let level_rect = egui::Rect::from_min_size(
+            egui::pos2(spectrum_rect.right() + gap, inner.top()),
+            egui::vec2(level_w, inner.height()),
+        );
+        let label_font = egui::FontId::monospace(9.0);
+        let label_col = Color32::from_rgb(120, 132, 150);
+        let panel_bg = Color32::from_rgb(16, 18, 23);
+
+        // ---- Oscilloscope -------------------------------------------------
+        painter.rect_filled(scope_rect, 4.0, panel_bg);
+        let scope_take = scope_n.min(mono.len());
+        if scope_take >= 2 {
+            let scope = &mono[mono.len() - scope_take..];
+            let peak = scope.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+            let gain = (0.85 / peak.max(1.0e-4)).min(24.0);
+            let mid_y = scope_rect.center().y;
+            let denom = (scope_take - 1) as f32;
+            let mut last: Option<egui::Pos2> = None;
+            let step = (scope_take as f32 / scope_rect.width().max(1.0)).max(1.0);
+            let mut i = 0.0f32;
+            while (i as usize) < scope_take {
+                let idx = i as usize;
+                let v = (scope[idx] * gain).clamp(-1.0, 1.0);
+                let pt = egui::pos2(
+                    egui::lerp(scope_rect.x_range(), idx as f32 / denom),
+                    mid_y - v * scope_rect.height() * 0.48,
+                );
+                if let Some(prev) = last {
+                    let heat = v.abs().powf(0.6);
+                    painter.line_segment(
+                        [prev, pt],
+                        Stroke::new(
+                            1.2,
+                            crate::app::helpers::lerp_color(
+                                Color32::from_rgb(96, 200, 255),
+                                Color32::from_rgb(255, 96, 128),
+                                heat,
+                            ),
+                        ),
+                    );
+                }
+                last = Some(pt);
+                i += step;
+            }
+        }
+        painter.text(
+            scope_rect.left_top() + egui::vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            "SCOPE",
+            label_font.clone(),
+            label_col,
+        );
+
+        // ---- Spectrum -----------------------------------------------------
+        painter.rect_filled(spectrum_rect, 4.0, panel_bg);
+        let fft_take = n_fft.min(mono.len());
+        if fft_take >= 128 {
+            let mut buffer: Vec<rustfft::num_complex::Complex<f32>> = (0..n_fft)
+                .map(|i| {
+                    let sample = if i < fft_take {
+                        let src = mono[mono.len() - fft_take + i];
+                        let t = i as f32 / (fft_take.saturating_sub(1)).max(1) as f32;
+                        let hann = 0.5 - 0.5 * (std::f32::consts::TAU * t).cos();
+                        src * hann
+                    } else {
+                        0.0
+                    };
+                    rustfft::num_complex::Complex { re: sample, im: 0.0 }
+                })
+                .collect();
+            Self::mini_meter_fft(&mut buffer);
+            let bins = n_fft / 2;
+            let db_floor = -84.0f32;
+            let scale = 2.0 / fft_take as f32;
+            let nyquist = sr * 0.5;
+            let f_lo = 28.0f32;
+            let f_hi = nyquist.max(f_lo * 2.0);
+            let cols = spectrum_rect.width().max(8.0) as usize;
+            for x in 0..cols {
+                let t0 = x as f32 / cols as f32;
+                let t1 = (x + 1) as f32 / cols as f32;
+                let f0 = f_lo * (f_hi / f_lo).powf(t0);
+                let f1 = f_lo * (f_hi / f_lo).powf(t1);
+                let b0 = ((f0 / nyquist) * bins as f32) as usize;
+                let b1 = (((f1 / nyquist) * bins as f32) as usize).max(b0 + 1);
+                let mut mag = 0.0f32;
+                for b in b0..b1.min(bins) {
+                    mag = mag.max(buffer[b].norm() * scale);
+                }
+                let db = 20.0 * mag.max(1.0e-9).log10();
+                let norm = ((db - db_floor) / -db_floor).clamp(0.0, 1.0);
+                if norm <= 0.002 {
+                    continue;
+                }
+                let x0 = spectrum_rect.left() + t0 * spectrum_rect.width();
+                let bar_h = norm * (spectrum_rect.height() - 12.0);
+                // Hue sweep blue -> red across the log-frequency axis.
+                let hue = 0.62 - 0.62 * t0;
+                let color: Color32 =
+                    egui::ecolor::Hsva::new(hue, 0.78, 0.55 + 0.45 * norm, 1.0).into();
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, spectrum_rect.bottom() - bar_h),
+                        egui::pos2(
+                            (x0 + (spectrum_rect.width() / cols as f32).max(1.0)).min(spectrum_rect.right()),
+                            spectrum_rect.bottom(),
+                        ),
+                    ),
+                    0.0,
+                    color,
+                );
+            }
+            for (freq, label) in [(100.0f32, "100"), (1_000.0, "1k"), (10_000.0, "10k")] {
+                if freq >= f_lo && freq <= f_hi {
+                    let t = (freq / f_lo).ln() / (f_hi / f_lo).ln();
+                    let x = spectrum_rect.left() + t * spectrum_rect.width();
+                    painter.line_segment(
+                        [
+                            egui::pos2(x, spectrum_rect.bottom() - 4.0),
+                            egui::pos2(x, spectrum_rect.bottom()),
+                        ],
+                        Stroke::new(1.0, label_col),
+                    );
+                    painter.text(
+                        egui::pos2(x + 2.0, spectrum_rect.bottom() - 4.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        label_font.clone(),
+                        label_col,
+                    );
+                }
+            }
+        }
+        painter.text(
+            spectrum_rect.left_top() + egui::vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            "SPECTRUM",
+            label_font.clone(),
+            label_col,
+        );
+
+        // ---- Peak / RMS meter ---------------------------------------------
+        painter.rect_filled(level_rect, 4.0, panel_bg);
+        let level_take = level_n.min(mono.len());
+        let (peak, rms) = if level_take > 0 {
+            let win = &mono[mono.len() - level_take..];
+            let peak = win.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+            let rms =
+                (win.iter().map(|v| v * v).sum::<f32>() / level_take as f32).sqrt();
+            (peak, rms)
+        } else {
+            (0.0, 0.0)
+        };
+        let db_of = |v: f32| 20.0 * v.max(1.0e-6).log10();
+        let meter_floor = -60.0f32;
+        let norm_of = |db: f32| ((db - meter_floor) / -meter_floor).clamp(0.0, 1.0);
+        // Peak hold with slow decay, kept in egui temp memory.
+        let hold_id = egui::Id::new(("mini_meter_peak_hold", &tab.path));
+        let now = ui.input(|i| i.time);
+        let (mut hold_db, last_t): (f32, f64) = ui
+            .ctx()
+            .data_mut(|d| *d.get_temp_mut_or(hold_id, (meter_floor, now)));
+        let dt = (now - last_t).max(0.0) as f32;
+        hold_db = (hold_db - dt * 12.0).max(db_of(peak));
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(hold_id, (hold_db, now)));
+
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(level_rect.left() + 8.0, level_rect.top() + 14.0),
+            egui::pos2(level_rect.left() + 24.0, level_rect.bottom() - 16.0),
+        );
+        painter.rect_filled(bar_rect, 2.0, Color32::from_rgb(24, 27, 33));
+        let zone = |lo_db: f32, hi_db: f32, color: Color32, level_db: f32| {
+            let lo = norm_of(lo_db);
+            let hi = norm_of(hi_db.min(level_db));
+            if hi > lo {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(bar_rect.left(), bar_rect.bottom() - hi * bar_rect.height()),
+                        egui::pos2(bar_rect.right(), bar_rect.bottom() - lo * bar_rect.height()),
+                    ),
+                    1.0,
+                    color,
+                );
+            }
+        };
+        let peak_db = db_of(peak);
+        zone(meter_floor, -18.0, Color32::from_rgb(88, 200, 120), peak_db);
+        zone(-18.0, -6.0, Color32::from_rgb(235, 200, 90), peak_db);
+        zone(-6.0, 0.0, Color32::from_rgb(240, 100, 100), peak_db);
+        // RMS tick inside the bar, hold line above.
+        let rms_y = bar_rect.bottom() - norm_of(db_of(rms)) * bar_rect.height();
         painter.line_segment(
             [
-                egui::pos2(
-                    wave_rect.left(),
-                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
-                ),
-                egui::pos2(
-                    wave_rect.right(),
-                    Self::waveform_center_y(wave_rect, vertical_zoom, vertical_view_center),
-                ),
+                egui::pos2(bar_rect.left(), rms_y),
+                egui::pos2(bar_rect.right(), rms_y),
             ],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 140, 170, 30)),
+            Stroke::new(1.5, Color32::WHITE),
         );
-        let bins = wave_rect.width().round().max(8.0) as usize;
-        let mut tmp = Vec::new();
-        build_minmax(&mut tmp, samples, bins);
-        let denom = (tmp.len().saturating_sub(1)).max(1) as f32;
-        for (idx, (mn, mx)) in tmp.iter().enumerate() {
-            let x = egui::lerp(wave_rect.x_range(), idx as f32 / denom);
-            let y0 = Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mx);
-            let y1 = Self::waveform_y_from_amp(wave_rect, vertical_zoom, vertical_view_center, *mn);
-            painter.line_segment(
-                [egui::pos2(x, y0), egui::pos2(x, y1)],
-                Stroke::new(1.1, accent.gamma_multiply(0.45)),
+        let hold_y = bar_rect.bottom() - norm_of(hold_db) * bar_rect.height();
+        painter.line_segment(
+            [
+                egui::pos2(bar_rect.left(), hold_y),
+                egui::pos2(bar_rect.right() + 4.0, hold_y),
+            ],
+            Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+        );
+        for db in [0.0f32, -6.0, -18.0, -36.0] {
+            let y = bar_rect.bottom() - norm_of(db) * bar_rect.height();
+            painter.text(
+                egui::pos2(bar_rect.right() + 6.0, y),
+                egui::Align2::LEFT_CENTER,
+                format!("{db:.0}"),
+                label_font.clone(),
+                label_col,
             );
         }
-        let ms = (samples.len() as f32 / sample_rate.max(1) as f32) * 1000.0;
         painter.text(
-            egui::pos2(rect.center().x, rect.bottom() - 10.0),
-            egui::Align2::CENTER_CENTER,
-            format!("{ms:.1} ms"),
-            TextStyle::Small.resolve(ui.style()),
-            Color32::from_rgb(150, 162, 184),
+            level_rect.left_top() + egui::vec2(4.0, 2.0),
+            egui::Align2::LEFT_TOP,
+            "PEAK",
+            label_font.clone(),
+            label_col,
         );
+        painter.text(
+            egui::pos2(level_rect.center().x, level_rect.bottom() - 2.0),
+            egui::Align2::CENTER_BOTTOM,
+            if peak_db <= meter_floor + 0.5 {
+                "-inf dB".to_string()
+            } else {
+                format!("{peak_db:+.1} dB")
+            },
+            label_font,
+            Color32::from_rgb(200, 210, 224),
+        );
+
+        if playing {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
     }
 
     fn find_zero_cross_display(&self, tab_idx: usize, cur: usize, dir: i32) -> usize {
@@ -2265,15 +2582,28 @@ impl crate::app::WavesPreviewer {
         // waveform never collapses to a zero-width strip.
         let stacked_editor = avail.x < 860.0;
         let min_canvas_w = 320.0f32;
-        let min_inspector_w = 280.0f32;
-        let max_inspector_w = 340.0f32;
+        let min_inspector_w = 240.0f32;
+        // User-resizable inspector width (drag the divider between canvas and
+        // inspector); remembered for the session via egui memory.
+        let inspector_width_id = egui::Id::new("editor_inspector_width");
+        let stored_inspector_w: f32 = ctx
+            .data_mut(|d| *d.get_temp_mut_or(inspector_width_id, 310.0f32));
+        let max_inspector_w = (avail.x * 0.5).max(min_inspector_w);
         let split_spacing = ui.spacing().item_spacing.x;
-        let split_avail_w = (avail.x - split_spacing).max(0.0);
+        let divider_w = if stacked_editor { 0.0 } else { 6.0 };
+        let split_avail_w = if stacked_editor {
+            (avail.x - split_spacing).max(0.0)
+        } else {
+            (avail.x - split_spacing * 2.0 - divider_w).max(0.0)
+        };
         let inspector_w = if stacked_editor {
             split_avail_w.max(1.0)
         } else {
             let available = (split_avail_w - min_canvas_w).max(min_inspector_w);
-            available.min(max_inspector_w).min(split_avail_w)
+            stored_inspector_w
+                .clamp(min_inspector_w, max_inspector_w)
+                .min(available)
+                .min(split_avail_w)
         };
         let canvas_w = if stacked_editor {
             split_avail_w.max(1.0)
@@ -4770,6 +5100,16 @@ impl crate::app::WavesPreviewer {
                 ) {
                     Self::editor_set_view_offset(tab, next_view);
                 }
+                // MiniMeter: realtime scope/spectrum/level strip in the
+                // leftover space below the navigator.
+                if ui.available_height() >= 64.0 && !tab.loading {
+                    let playing = self
+                        .audio
+                        .shared
+                        .playing
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    Self::draw_editor_mini_meter(ui, tab, playhead_display_now, playing);
+                }
             }
 
             if tab.loading {
@@ -4819,6 +5159,37 @@ impl crate::app::WavesPreviewer {
                 },
                 ); // end canvas UI
 
+                // Divider: drag to resize the inspector.
+                if !stacked_editor {
+                    let (divider_rect, divider_resp) = ui.allocate_exact_size(
+                        egui::vec2(6.0, inspector_area_h),
+                        egui::Sense::drag(),
+                    );
+                    let hovered = divider_resp.hovered() || divider_resp.dragged();
+                    if hovered {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    ui.painter().vline(
+                        divider_rect.center().x,
+                        divider_rect.y_range(),
+                        egui::Stroke::new(
+                            if hovered { 2.0 } else { 1.0 },
+                            if hovered {
+                                Color32::from_rgb(90, 170, 255)
+                            } else {
+                                ui.visuals().widgets.noninteractive.bg_stroke.color
+                            },
+                        ),
+                    );
+                    if divider_resp.dragged() {
+                        let delta = divider_resp.drag_delta().x;
+                        ui.ctx().data_mut(|d| {
+                            let w: &mut f32 = d.get_temp_mut_or(inspector_width_id, 310.0f32);
+                            *w = (*w - delta).clamp(min_inspector_w, max_inspector_w);
+                        });
+                        ui.ctx().request_repaint();
+                    }
+                }
                 // Inspector area (right)
                 let inspector_rect = egui::Rect::from_min_size(
                     ui.cursor().min,
@@ -5491,41 +5862,48 @@ impl crate::app::WavesPreviewer {
                                             }
                                         }
 
+                                        Self::inspector_section(ui, "Seam Check");
+                                        let seam_window_id =
+                                            egui::Id::new(("loop_seam_window_ms", tab_idx));
+                                        let mut seam_window_ms: f32 = ui
+                                            .ctx()
+                                            .data_mut(|d| *d.get_temp_mut_or(seam_window_id, 40.0f32));
+                                        ui.horizontal(|ui| {
+                                            ui.label("Window")
+                                                .on_hover_text(
+                                                    "How much audio to show on each side of the loop jump",
+                                                );
+                                            ui.spacing_mut().slider_width =
+                                                (ui.available_width() - 20.0).clamp(80.0, 200.0);
+                                            let resp = ui.add(
+                                                egui::Slider::new(&mut seam_window_ms, 2.0..=250.0)
+                                                    .suffix(" ms")
+                                                    .logarithmic(true)
+                                                    .fixed_decimals(0),
+                                            );
+                                            if resp.changed() {
+                                                ui.ctx().data_mut(|d| {
+                                                    d.insert_temp(seam_window_id, seam_window_ms)
+                                                });
+                                            }
+                                        });
                                         if let Some(seam_preview) = Self::build_loop_seam_preview(
                                             tab,
                                             self.audio.shared.out_sample_rate,
+                                            seam_window_ms / 1000.0,
                                         ) {
-                                            Self::inspector_section(ui, "Seam Preview");
-                                            ui.columns(3, |cols| {
-                                                cols[0].label("Pre-Loop window");
-                                                Self::draw_loop_window_preview(
-                                                    &mut cols[0],
-                                                    &seam_preview.raw_left,
-                                                    seam_preview.sample_rate,
-                                                    Color32::from_rgb(120, 176, 255),
-                                                    tab.vertical_zoom,
-                                                    tab.vertical_view_center,
-                                                );
-                                                cols[1].label("Seam preview");
-                                                Self::draw_loop_seam_preview(
-                                                    &mut cols[1],
-                                                    &seam_preview,
-                                                    tab.vertical_zoom,
-                                                    tab.vertical_view_center,
-                                                );
-                                                cols[2].label("Post-Loop window");
-                                                Self::draw_loop_window_preview(
-                                                    &mut cols[2],
-                                                    &seam_preview.raw_right,
-                                                    seam_preview.sample_rate,
-                                                    Color32::from_rgb(92, 255, 224),
-                                                    tab.vertical_zoom,
-                                                    tab.vertical_view_center,
-                                                );
-                                            });
+                                            Self::draw_loop_seam_join(
+                                                ui,
+                                                &seam_preview,
+                                                seam_window_ms,
+                                            );
                                         } else {
-                                            Self::inspector_section(ui, "Seam Preview");
-                                            ui.label(RichText::new("Set a loop range to preview the seam").weak());
+                                            ui.label(
+                                                RichText::new(
+                                                    "Set a loop range to check the seam",
+                                                )
+                                                .weak(),
+                                            );
                                         }
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):

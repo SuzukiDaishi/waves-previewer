@@ -415,17 +415,12 @@ impl crate::app::WavesPreviewer {
         self.handle_effect_graph_shortcuts(ctx);
         self.ui_effect_graph_unsaved_prompt(ctx);
 
-        egui::Panel::bottom("effect_graph_console_panel")
-            .resizable(true)
-            .default_size(self.effect_graph.bottom_panel_height)
-            .show_inside(ui, |ui| {
-                self.effect_graph.bottom_panel_height = ui.max_rect().height();
-                self.ui_effect_graph_console(ui);
-            });
-
+        // Side panels first so the console only spans the canvas area, then a
+        // height-clamped console under the canvas. All three are drag-resizable.
         egui::Panel::right("effect_graph_tester_panel")
             .resizable(true)
             .default_size(self.effect_graph.right_panel_width)
+            .size_range(egui::Rangef::new(220.0, 520.0))
             .show_inside(ui, |ui| {
                 self.effect_graph.right_panel_width = ui.max_rect().width();
                 self.ui_effect_graph_tester(ui);
@@ -434,6 +429,7 @@ impl crate::app::WavesPreviewer {
         egui::Panel::left("effect_graph_library_panel")
             .resizable(true)
             .default_size(self.effect_graph.left_panel_width)
+            .size_range(egui::Rangef::new(180.0, 460.0))
             .show_inside(ui, |ui| {
                 self.effect_graph.left_panel_width = ui.max_rect().width();
                 ui.vertical(|ui| {
@@ -441,6 +437,15 @@ impl crate::app::WavesPreviewer {
                     ui.separator();
                     self.ui_effect_graph_node_palette(ui);
                 });
+            });
+
+        let console_max = (ui.available_height() * 0.45).max(120.0);
+        egui::Panel::bottom("effect_graph_console_panel")
+            .resizable(true)
+            .default_size(self.effect_graph.bottom_panel_height.clamp(90.0, console_max))
+            .size_range(egui::Rangef::new(72.0, console_max))
+            .show_inside(ui, |ui| {
+                self.ui_effect_graph_console(ui);
             });
 
         self.ui_effect_graph_canvas(ui, ctx);
@@ -830,54 +835,80 @@ impl crate::app::WavesPreviewer {
     }
 
     fn ui_effect_graph_console(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
         ui.horizontal(|ui| {
-            ui.heading("Console");
-            if ui.button("Clear").clicked() {
-                self.effect_graph.console.lines.clear();
+            ui.label(RichText::new("Console").strong());
+            let issues = self.effect_graph.validation.len();
+            if issues > 0 {
+                ui.label(
+                    RichText::new(format!("{issues} issue(s)"))
+                        .color(Color32::from_rgb(255, 210, 120))
+                        .small(),
+                );
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Clear").clicked() {
+                    self.effect_graph.console.lines.clear();
+                }
+            });
         });
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for issue in self.effect_graph.validation.clone() {
-                let color = match issue.severity {
-                    EffectGraphSeverity::Info => Color32::from_rgb(150, 190, 255),
-                    EffectGraphSeverity::Warning => Color32::from_rgb(255, 210, 120),
-                    EffectGraphSeverity::Error => Color32::from_rgb(240, 120, 120),
-                };
-                ui.horizontal(|ui| {
-                    if let Some(node_id) = issue.node_id.clone() {
-                        if ui.small_button("Go").clicked() {
-                            self.effect_graph.canvas.focus_node_id = Some(node_id);
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(false)
+            .show(ui, |ui| {
+                for issue in self.effect_graph.validation.clone() {
+                    let color = match issue.severity {
+                        EffectGraphSeverity::Info => Color32::from_rgb(150, 190, 255),
+                        EffectGraphSeverity::Warning => Color32::from_rgb(255, 210, 120),
+                        EffectGraphSeverity::Error => Color32::from_rgb(240, 120, 120),
+                    };
+                    ui.horizontal(|ui| {
+                        if let Some(node_id) = issue.node_id.clone() {
+                            if ui.small_button("Go").clicked() {
+                                self.effect_graph.canvas.focus_node_id = Some(node_id);
+                            }
                         }
-                    }
-                    ui.label(
-                        RichText::new(format!("[{}] {}", issue.code, issue.message)).color(color),
-                    );
-                });
-            }
-            for line in self.effect_graph.console.lines.iter().rev() {
-                let color = match line.severity {
-                    EffectGraphSeverity::Info => Color32::from_rgb(180, 200, 220),
-                    EffectGraphSeverity::Warning => Color32::from_rgb(255, 210, 120),
-                    EffectGraphSeverity::Error => Color32::from_rgb(240, 120, 120),
-                };
-                ui.horizontal(|ui| {
-                    if let Some(node_id) = line.node_id.clone() {
-                        if ui.small_button("Go").clicked() {
-                            self.effect_graph.canvas.focus_node_id = Some(node_id);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("[{}] {}", issue.code, issue.message))
+                                    .monospace()
+                                    .color(color),
+                            )
+                            .truncate()
+                            .show_tooltip_when_elided(true),
+                        );
+                    });
+                }
+                for line in self.effect_graph.console.lines.iter().rev() {
+                    let color = match line.severity {
+                        EffectGraphSeverity::Info => Color32::from_rgb(170, 182, 196),
+                        EffectGraphSeverity::Warning => Color32::from_rgb(255, 210, 120),
+                        EffectGraphSeverity::Error => Color32::from_rgb(240, 120, 120),
+                    };
+                    ui.horizontal(|ui| {
+                        if let Some(node_id) = line.node_id.clone() {
+                            if ui.small_button("Go").clicked() {
+                                self.effect_graph.canvas.focus_node_id = Some(node_id);
+                            }
                         }
-                    }
-                    ui.label(
-                        RichText::new(format!(
-                            "[{}] [{}] {}",
-                            format_console_timestamp(line.timestamp_unix_ms),
-                            line.scope,
-                            line.message
-                        ))
-                        .color(color),
-                    );
-                });
-            }
-        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{}  {:<6} {}",
+                                    format_console_timestamp(line.timestamp_unix_ms),
+                                    line.scope,
+                                    line.message
+                                ))
+                                .monospace()
+                                .color(color),
+                            )
+                            .truncate()
+                            .show_tooltip_when_elided(true),
+                        );
+                    });
+                }
+            });
     }
 
     fn ui_effect_graph_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1187,6 +1218,11 @@ impl crate::app::WavesPreviewer {
             for step in 0..24 {
                 points.push(cubic_point(*start, c1, c2, *end, step as f32 / 23.0));
             }
+            // Dark underlay gives cables depth against the grid.
+            painter.add(egui::Shape::line(
+                points.clone(),
+                Stroke::new(4.0, Color32::from_black_alpha(120)),
+            ));
             painter.add(egui::Shape::line(
                 points,
                 Stroke::new(2.0, Color32::from_rgb(110, 170, 255)),
@@ -1251,30 +1287,78 @@ impl crate::app::WavesPreviewer {
                 Some(EffectGraphNodeRunPhase::Success) => Color32::from_rgb(110, 210, 144),
                 _ => accent,
             };
-            painter.rect_filled(rect, 10.0, Color32::from_rgb(32, 36, 42));
-            painter.rect_filled(title_rect, 10.0, Color32::from_rgb(44, 50, 58));
+            let corner = 8.0 * zoom.clamp(0.6, 1.2);
+            // Soft drop shadow lifts cards off the grid.
+            painter.rect_filled(
+                rect.translate(egui::vec2(0.0, 3.0)).expand(1.5),
+                corner + 2.0,
+                Color32::from_black_alpha(90),
+            );
+            let body_fill = Color32::from_rgb(30, 33, 40);
+            let header_fill = crate::app::helpers::lerp_color(
+                Color32::from_rgb(36, 40, 48),
+                accent,
+                0.22,
+            );
+            painter.rect_filled(rect, corner, body_fill);
+            painter.rect_filled(
+                title_rect,
+                egui::CornerRadius {
+                    nw: corner as u8,
+                    ne: corner as u8,
+                    sw: 0,
+                    se: 0,
+                },
+                header_fill,
+            );
+            // Accent underline separates header from body.
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left() + 1.0, title_rect.bottom()),
+                    egui::pos2(rect.right() - 1.0, title_rect.bottom()),
+                ],
+                Stroke::new(2.0, accent),
+            );
             painter.rect_stroke(
                 rect,
-                10.0,
-                Stroke::new(if selected { 3.0 } else { 2.0 }, border),
+                corner,
+                Stroke::new(if selected { 2.5 } else { 1.2 }, border),
                 StrokeKind::Outside,
             );
+            if selected {
+                painter.rect_stroke(
+                    rect.expand(3.0),
+                    corner + 3.0,
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(border.r(), border.g(), border.b(), 90)),
+                    StrokeKind::Outside,
+                );
+            }
             painter.text(
                 egui::pos2(title_rect.left() + 10.0, title_rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 node.data.display_name(),
                 egui::TextStyle::Button.resolve(ui.style()),
-                Color32::WHITE,
+                Color32::from_rgb(235, 240, 246),
             );
             if let Some(status) = status {
                 if let Some(elapsed_ms) = status.elapsed_ms {
-                    painter.text(
-                        egui::pos2(title_rect.right() - 10.0, title_rect.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        format!("{elapsed_ms:.0} ms"),
-                        egui::TextStyle::Small.resolve(ui.style()),
-                        Color32::from_rgb(210, 220, 230),
+                    let badge_text = format!("{elapsed_ms:.0} ms");
+                    let font = egui::TextStyle::Small.resolve(ui.style());
+                    let galley = painter.layout_no_wrap(
+                        badge_text.clone(),
+                        font.clone(),
+                        Color32::from_rgb(214, 224, 234),
                     );
+                    let pad = egui::vec2(6.0, 2.0);
+                    let badge_rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            title_rect.right() - galley.size().x - pad.x * 2.0 - 6.0,
+                            title_rect.center().y - galley.size().y * 0.5 - pad.y,
+                        ),
+                        galley.size() + pad * 2.0,
+                    );
+                    painter.rect_filled(badge_rect, badge_rect.height() * 0.5, Color32::from_black_alpha(110));
+                    painter.galley(badge_rect.min + pad, galley, Color32::from_rgb(214, 224, 234));
                 }
             }
 
@@ -1311,7 +1395,9 @@ impl crate::app::WavesPreviewer {
             }
 
             for (port_key, pin_pos) in node_input_pins.iter() {
-                painter.circle_filled(*pin_pos, 6.5, Color32::from_rgb(230, 238, 246));
+                painter.circle_filled(*pin_pos, 7.0, Color32::from_rgb(18, 20, 24));
+                painter.circle_filled(*pin_pos, 5.0, Color32::from_rgb(196, 212, 228));
+                painter.circle_stroke(*pin_pos, 7.0, Stroke::new(1.0, Color32::from_rgb(70, 80, 92)));
                 let input_label = if matches!(&node.data, EffectGraphNodeData::CombineChannels)
                     && matches!(
                         combine_mode,
@@ -1372,7 +1458,9 @@ impl crate::app::WavesPreviewer {
                 }
             }
             for (port_key, pin_pos) in node_output_pins.iter() {
-                painter.circle_filled(*pin_pos, 6.5, Color32::from_rgb(110, 170, 255));
+                painter.circle_filled(*pin_pos, 7.0, Color32::from_rgb(18, 20, 24));
+                painter.circle_filled(*pin_pos, 5.0, Color32::from_rgb(110, 170, 255));
+                painter.circle_stroke(*pin_pos, 7.0, Stroke::new(1.0, Color32::from_rgb(70, 80, 92)));
                 painter.text(
                     egui::pos2(pin_pos.x - 10.0, pin_pos.y),
                     egui::Align2::RIGHT_CENTER,
