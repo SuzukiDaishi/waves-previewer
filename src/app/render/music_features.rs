@@ -154,11 +154,16 @@ pub fn compute_chromagram(
             }
         }
     }
-    let values = apply_cens_smoothing(&raw_values, stft.frames, 12, CHROMA_CENS_SMOOTH_WIN);
+    // Key/mode estimation runs on the CENS-smoothed profile (robust against
+    // transients), but the *displayed* values stay per-frame normalized raw
+    // chroma: CENS's 41-frame smoothing plus level quantization washed the
+    // visualization out so much that chord changes were invisible.
+    let cens = apply_cens_smoothing(&raw_values, stft.frames, 12, CHROMA_CENS_SMOOTH_WIN);
+    let values = raw_values;
 
     let mut profile = [0.0f32; 12];
     for frame in 0..stft.frames {
-        let row = &values[frame * 12..(frame + 1) * 12];
+        let row = &cens[frame * 12..(frame + 1) * 12];
         for (idx, value) in row.iter().enumerate() {
             profile[idx] += *value;
         }
@@ -576,10 +581,15 @@ fn compute_local_tempogram_acf(onset: &[f32], lags: &[usize], win_length: usize)
             }
             row[lag_idx] = acc.max(0.0);
         }
-        let row_max = row.iter().copied().fold(0.0f32, f32::max).max(1.0e-9);
-        for value in row.iter_mut() {
-            *value = (*value / row_max).clamp(0.0, 1.0);
-        }
+    }
+    // Normalize by the global maximum instead of per-frame: per-frame
+    // normalization lit up silent/weak passages with full-brightness noise,
+    // which made the tempogram unreadable. Globally scaled, dark regions now
+    // genuinely mean "no rhythmic energy here".
+    let global_max = values.iter().copied().fold(0.0f32, f32::max).max(1.0e-9);
+    let inv = 1.0 / global_max;
+    for value in &mut values {
+        *value = (*value * inv).clamp(0.0, 1.0);
     }
     values
 }

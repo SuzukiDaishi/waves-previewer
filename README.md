@@ -3,7 +3,12 @@
 NeoWaves は大量の音声ファイルを素早く一覧表示し、即試聴・編集できる軽量オーディオリストエディタです。UI は `eframe/egui`、オーディオ出力は `cpal` を使用しています。
 
 対応フォーマット（デコード）:
-- WAV / MP3 / M4A (isomp4) / AAC / ALAC
+- WAV / AIFF / FLAC / MP3 / M4A (isomp4) / AAC / ALAC / OGG (Vorbis)
+
+対応フォーマット（エンコード / 書き出し）:
+- WAV / AIFF / FLAC / MP3 / M4A (AAC) / OGG (Vorbis)
+
+フォーマットごとのメタ情報（loop marker / marker / BPM / artwork など）の対応状況は `docs/FORMAT_SUPPORT.md` を参照してください。
 
 ---
 

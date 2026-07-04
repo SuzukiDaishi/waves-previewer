@@ -55,6 +55,12 @@ impl WavesPreviewer {
                         Color32::from_rgb(88, 70, 150),
                         Color32::from_rgb(176, 156, 244),
                     ),
+                    "flac" => (
+                        "FLAC".to_string(),
+                        "FLAC file".to_string(),
+                        Color32::from_rgb(34, 116, 116),
+                        Color32::from_rgb(110, 214, 214),
+                    ),
                     "mp3" => (
                         "MP3".to_string(),
                         "MP3 file".to_string(),

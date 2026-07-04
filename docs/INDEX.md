@@ -8,6 +8,7 @@
   - ARCHITECTURE: docs/ARCHITECTURE.md
   - DESIGN: docs/DESIGN.md
   - UX Notes: docs/UX.md
+  - FORMAT SUPPORT (codec/metadata matrix): docs/FORMAT_SUPPORT.md
 
 - Editing
   - EDITING (spec/notes): docs/EDITING.md

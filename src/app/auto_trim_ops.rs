@@ -41,14 +41,20 @@ impl super::WavesPreviewer {
             selected_ranges
         };
 
-        let (tx, rx) =
-            std::sync::mpsc::channel::<(u64, Result<auto_trim::AutoTrimOutcome, String>)>();
+        let (tx, rx) = std::sync::mpsc::channel::<AutoTrimWorkerResult>();
 
         std::thread::spawn(move || {
+            // Whole-buffer level stats so the UI can show noise floor / peak /
+            // effective threshold in dB regardless of which ranges were scanned.
+            let stats = auto_trim::analyze_levels(&ch_samples, &config);
             let mut detected: Vec<(usize, usize)> = Vec::new();
             for &(start, end) in &ranges {
                 if cancel_thread.load(Ordering::Relaxed) {
-                    let _ = tx.send((generation, Err("Cancelled".to_string())));
+                    let _ = tx.send(AutoTrimWorkerResult {
+                        generation,
+                        outcome: Err("Cancelled".to_string()),
+                        stats,
+                    });
                     return;
                 }
                 if end <= start {
@@ -82,7 +88,11 @@ impl super::WavesPreviewer {
                         }
                     }
                     Err(msg) if msg == "Cancelled" => {
-                        let _ = tx.send((generation, Err(msg)));
+                        let _ = tx.send(AutoTrimWorkerResult {
+                            generation,
+                            outcome: Err(msg),
+                            stats,
+                        });
                         return;
                     }
                     Err(_) => {}
@@ -90,25 +100,66 @@ impl super::WavesPreviewer {
             }
             detected.sort();
             detected.dedup();
-            if detected.is_empty() {
-                let _ = tx.send((generation, Err("No active region detected".to_string())));
-                return;
-            }
-            let _ = tx.send((
+            let outcome = if detected.is_empty() {
+                Err("No active region detected".to_string())
+            } else {
+                Ok(auto_trim::AutoTrimOutcome::MultiRange(detected))
+            };
+            let _ = tx.send(AutoTrimWorkerResult {
                 generation,
-                Ok(auto_trim::AutoTrimOutcome::MultiRange(detected)),
-            ));
+                outcome,
+                stats,
+            });
         });
 
+        // Keep previous stats/result visible while the re-run is in flight so
+        // live parameter tweaks don't blank the panel.
+        let prev = tab.auto_trim_state.take();
         tab.auto_trim_state = Some(AutoTrimState {
             generation,
             running: true,
             progress: 0.0,
             message: "Analyzing…".to_string(),
-            result: None,
+            result: prev.as_ref().and_then(|s| s.result.clone()),
+            stats: prev.as_ref().and_then(|s| s.stats),
+            last_config: Some(tab.auto_trim_config.clone()),
+            config_dirty_at: None,
             cancel,
             rx: Some(rx),
         });
+    }
+
+    /// Debounced live re-run: fires a fresh Auto Trim when the config was
+    /// edited after a completed run and the user paused for a moment.
+    pub(super) fn poll_auto_trim_live_rerun(&mut self) {
+        const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+        let mut rerun: Vec<usize> = Vec::new();
+        for (idx, tab) in self.tabs.iter_mut().enumerate() {
+            let Some(state) = &mut tab.auto_trim_state else {
+                continue;
+            };
+            if state.running {
+                continue;
+            }
+            let Some(dirty_at) = state.config_dirty_at else {
+                continue;
+            };
+            if dirty_at.elapsed() < DEBOUNCE {
+                continue;
+            }
+            state.config_dirty_at = None;
+            if state
+                .last_config
+                .as_ref()
+                .map(|c| *c != tab.auto_trim_config)
+                .unwrap_or(true)
+            {
+                rerun.push(idx);
+            }
+        }
+        for idx in rerun {
+            self.start_auto_trim(idx);
+        }
     }
 
     pub(super) fn cancel_auto_trim(&mut self, tab_idx: usize) {
@@ -134,9 +185,16 @@ impl super::WavesPreviewer {
                 continue;
             };
             match rx.try_recv() {
-                Ok((gen, result)) => {
+                Ok(AutoTrimWorkerResult {
+                    generation: gen,
+                    outcome: result,
+                    stats,
+                }) => {
                     if gen == state.generation {
                         state.running = false;
+                        if stats.is_some() {
+                            state.stats = stats;
+                        }
                         match result {
                             Ok(auto_trim::AutoTrimOutcome::Single(r)) => {
                                 state.message = r.message.clone();

@@ -69,6 +69,7 @@ impl WavesPreviewer {
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
         self.drain_auto_trim_results();
+        self.poll_auto_trim_live_rerun();
         self.drain_loop_detect_results();
         self.drain_recording_events();
         self.tick_audio_device_watch(frame_started);

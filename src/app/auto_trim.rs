@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AutoTrimConfig {
     pub block_size: usize,
     pub hop_size: usize,
@@ -13,6 +13,18 @@ pub struct AutoTrimConfig {
     pub min_active_secs: f32,
     pub gap_merge_secs: f32,
     pub zero_cross_radius: usize,
+}
+
+/// Level statistics derived from the analyzed buffer; lets the UI show the
+/// user where the noise floor / peak sit and which threshold is in effect.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutoTrimLevelStats {
+    pub peak_db: f32,
+    pub noise_floor_db: f32,
+    pub threshold_db: f32,
+    /// true when noise floor ≈ median (content throughout); only the
+    /// peak-relative threshold applies then.
+    pub uniform_signal: bool,
 }
 
 impl Default for AutoTrimConfig {
@@ -135,14 +147,7 @@ pub fn auto_trim_sections(
 
     // mono downmix
     progress_cb(0.05);
-    let mono: Vec<f32> = if ch_samples.len() == 1 {
-        ch_samples[0].clone()
-    } else {
-        let n = ch_samples.len() as f32;
-        (0..len)
-            .map(|i| ch_samples.iter().map(|c| c[i]).sum::<f32>() / n)
-            .collect()
-    };
+    let mono = downmix_mono(ch_samples, len);
 
     if cancel.load(Ordering::Relaxed) {
         return Err("Cancelled".to_string());
@@ -150,54 +155,17 @@ pub fn auto_trim_sections(
 
     // block RMS computation
     progress_cb(0.15);
-    let n_blocks = (len.saturating_sub(block_size)) / hop_size + 1;
-    let mut block_rms: Vec<f32> = Vec::with_capacity(n_blocks);
-    for b in 0..n_blocks {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Cancelled".to_string());
-        }
-        let start = b * hop_size;
-        let end = (start + block_size).min(len);
-        let sum_sq: f32 = mono[start..end].iter().map(|x| x * x).sum();
-        let rms = (sum_sq / (end - start) as f32).sqrt();
-        block_rms.push(rms);
-    }
+    let block_rms = compute_block_rms(&mono, block_size, hop_size);
 
     if block_rms.is_empty() {
         return Err("Audio too short".to_string());
     }
 
-    // peak RMS
-    let peak_rms = block_rms.iter().cloned().fold(0.0f32, f32::max);
-    if peak_rms < 1e-9 {
-        return Err("All silence".to_string());
-    }
-
-    // noise floor from low percentile
     progress_cb(0.30);
-    let mut sorted_rms = block_rms.clone();
-    sorted_rms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let percentile_idx =
-        ((sorted_rms.len() as f32 * config.noise_percentile) as usize).min(sorted_rms.len() - 1);
-    let noise_floor_rms = sorted_rms[percentile_idx].max(1e-9);
-    let median_idx = sorted_rms.len() / 2;
-    let median_rms = sorted_rms[median_idx];
-
-    // If signal is very uniform (noise_floor ≈ median), the audio is already content throughout.
-    // Use a relative threshold in dB from peak instead.
-    let uniform_signal = (median_rms / noise_floor_rms) < 1.5; // < 3.5 dB difference
-
-    // threshold = max(noise_floor * 10^(above_db/20), peak * 10^(-below_db/20))
-    let factor_above = 10.0f32.powf(config.threshold_above_noise_db / 20.0);
-    let factor_below = 10.0f32.powf(-config.threshold_below_peak_db / 20.0);
-    let threshold_noise = noise_floor_rms * factor_above;
-    let threshold_peak = peak_rms * factor_below;
-    // For uniform signals, only use the peak-relative threshold to avoid marking everything inactive
-    let threshold = if uniform_signal {
-        threshold_peak
-    } else {
-        threshold_noise.max(threshold_peak)
+    let Some(levels) = derive_threshold(&block_rms, config) else {
+        return Err("All silence".to_string());
     };
+    let threshold = levels.threshold_rms;
 
     // active block mask
     progress_cb(0.40);
@@ -303,6 +271,110 @@ pub fn auto_trim_sections(
     progress_cb(1.0);
 
     Ok(sections)
+}
+
+fn downmix_mono(ch_samples: &[Vec<f32>], len: usize) -> Vec<f32> {
+    if ch_samples.len() == 1 {
+        return ch_samples[0].clone();
+    }
+    let n = ch_samples.len() as f32;
+    (0..len)
+        .map(|i| ch_samples.iter().map(|c| c[i]).sum::<f32>() / n)
+        .collect()
+}
+
+fn compute_block_rms(mono: &[f32], block_size: usize, hop_size: usize) -> Vec<f32> {
+    let len = mono.len();
+    let block_size = block_size.max(1).min(len.max(1));
+    let hop_size = hop_size.max(1);
+    if len == 0 {
+        return Vec::new();
+    }
+    let n_blocks = (len.saturating_sub(block_size)) / hop_size + 1;
+    let mut block_rms: Vec<f32> = Vec::with_capacity(n_blocks);
+    for b in 0..n_blocks {
+        let start = b * hop_size;
+        let end = (start + block_size).min(len);
+        let sum_sq: f32 = mono[start..end].iter().map(|x| x * x).sum();
+        block_rms.push((sum_sq / (end - start) as f32).sqrt());
+    }
+    block_rms
+}
+
+struct ThresholdLevels {
+    peak_rms: f32,
+    noise_floor_rms: f32,
+    threshold_rms: f32,
+    uniform_signal: bool,
+}
+
+/// Shared threshold derivation: `None` when the buffer is entirely silent.
+fn derive_threshold(block_rms: &[f32], config: &AutoTrimConfig) -> Option<ThresholdLevels> {
+    if block_rms.is_empty() {
+        return None;
+    }
+    let peak_rms = block_rms.iter().cloned().fold(0.0f32, f32::max);
+    if peak_rms < 1e-9 {
+        return None;
+    }
+    let mut sorted_rms = block_rms.to_vec();
+    sorted_rms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let percentile_idx =
+        ((sorted_rms.len() as f32 * config.noise_percentile) as usize).min(sorted_rms.len() - 1);
+    let noise_floor_rms = sorted_rms[percentile_idx].max(1e-9);
+    let median_rms = sorted_rms[sorted_rms.len() / 2];
+
+    // If signal is very uniform (noise_floor ≈ median), the audio is already content throughout.
+    // Use a relative threshold in dB from peak instead.
+    let uniform_signal = (median_rms / noise_floor_rms) < 1.5; // < 3.5 dB difference
+
+    // threshold = max(noise_floor * 10^(above_db/20), peak * 10^(-below_db/20))
+    let factor_above = 10.0f32.powf(config.threshold_above_noise_db / 20.0);
+    let factor_below = 10.0f32.powf(-config.threshold_below_peak_db / 20.0);
+    let threshold_noise = noise_floor_rms * factor_above;
+    let threshold_peak = peak_rms * factor_below;
+    // For uniform signals, only use the peak-relative threshold to avoid marking everything inactive
+    let threshold_rms = if uniform_signal {
+        threshold_peak
+    } else {
+        threshold_noise.max(threshold_peak)
+    };
+    Some(ThresholdLevels {
+        peak_rms,
+        noise_floor_rms,
+        threshold_rms,
+        uniform_signal,
+    })
+}
+
+fn db_of(rms: f32) -> f32 {
+    20.0 * rms.max(1e-9).log10()
+}
+
+/// Compute the level stats the UI shows next to the threshold controls.
+/// Cheap (single pass) and side-effect free; `None` for empty/silent audio.
+pub fn analyze_levels(ch_samples: &[Vec<f32>], config: &AutoTrimConfig) -> Option<AutoTrimLevelStats> {
+    if ch_samples.is_empty() || ch_samples[0].is_empty() {
+        return None;
+    }
+    let len = ch_samples
+        .iter()
+        .filter(|ch| !ch.is_empty())
+        .map(|ch| ch.len())
+        .min()
+        .unwrap_or(0);
+    if len == 0 {
+        return None;
+    }
+    let mono = downmix_mono(ch_samples, len);
+    let block_rms = compute_block_rms(&mono, config.block_size, config.hop_size);
+    let levels = derive_threshold(&block_rms, config)?;
+    Some(AutoTrimLevelStats {
+        peak_db: db_of(levels.peak_rms),
+        noise_floor_db: db_of(levels.noise_floor_rms),
+        threshold_db: db_of(levels.threshold_rms),
+        uniform_signal: levels.uniform_signal,
+    })
 }
 
 fn merge_overlapping_sections(
