@@ -341,8 +341,21 @@ pub fn detect_loop(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    final_candidates
-        .dedup_by(|a, b| a.start.abs_diff(b.start) < 512 && a.end.abs_diff(b.end) < 512);
+    // Refinement pulls nearby seeds onto the same optimum; treat boundaries
+    // within ~20ms as duplicates so the list shows distinct alternatives.
+    let dedup_radius = (sr / 50).max(512);
+    let mut deduped: Vec<LoopDetectCandidate> = Vec::with_capacity(final_candidates.len());
+    for cand in final_candidates {
+        let dup = deduped.iter().any(|kept| {
+            kept.start.abs_diff(cand.start) < dedup_radius
+                && kept.end.abs_diff(cand.end) < dedup_radius
+        });
+        if !dup {
+            deduped.push(cand);
+        }
+    }
+    let mut final_candidates = deduped;
+    final_candidates.truncate(config.candidate_limit);
 
     progress_cb(1.0);
     Ok(final_candidates)
@@ -401,12 +414,82 @@ fn score_loop_boundary(mono: &[f32], start: usize, end: usize, window: usize, sr
     let loudness_ratio = (rms_tail / rms_head).max(rms_head / rms_tail);
     let loudness_score = (1.0 - ((loudness_ratio - 1.0) * 0.35)).clamp(0.0, 1.0);
 
-    // map correlation [-1,1] to [0,1]
-    let corr_score = (norm_corr + 1.0) * 0.5;
+    // Anti-correlated seams are worse than uncorrelated ones; giving corr=-1 a
+    // 0.0 and corr=0 a 0.5 baseline used to inflate junk pairs. Treat negative
+    // correlation as zero instead of remapping [-1,1] to [0,1].
+    let corr_score = norm_corr.max(0.0);
     let seam_w = w.min((sr / 20).max(64));
     let seam_score = rms_error_similarity(&tail[w - seam_w..], &head[..seam_w]);
-    let score = corr_score * 0.52 + error_score * 0.24 + loudness_score * 0.14 + seam_score * 0.10;
+    // Structural check on a longer horizon: the loudness envelope entering the
+    // loop end should match the envelope entering the loop start. Phase-blind,
+    // so it rewards musically matching sections even when raw samples drift.
+    let env_w = (window.saturating_mul(4)).min(loop_len).min(len);
+    let envelope_score = envelope_similarity(
+        &mono[end - env_w..end],
+        &mono[start..start + env_w],
+        (sr / 50).max(64),
+    );
+    let score = corr_score * 0.40
+        + error_score * 0.18
+        + loudness_score * 0.10
+        + seam_score * 0.10
+        + envelope_score * 0.22;
+
+    // A seam sitting in near-silence matches trivially; keep such candidates
+    // but rank them below seams with actual content (input is peak-normalized).
+    let silence_floor = 10.0f32.powf(-50.0 / 20.0);
+    let score = if rms_tail < silence_floor && rms_head < silence_floor {
+        score * 0.6
+    } else {
+        score
+    };
     score.clamp(0.0, 1.0)
+}
+
+/// Pearson correlation of coarse RMS envelopes of `a` and `b` mapped to [0,1].
+/// Blocks of `block` samples; robust to phase/waveform detail differences.
+fn envelope_similarity(a: &[f32], b: &[f32], block: usize) -> f32 {
+    let n = a.len().min(b.len());
+    let block = block.max(1);
+    let blocks = n / block;
+    if blocks < 4 {
+        // Too short to say anything about structure; fall back to neutral so
+        // the other terms dominate.
+        return 0.5;
+    }
+    let mut env_a = Vec::with_capacity(blocks);
+    let mut env_b = Vec::with_capacity(blocks);
+    for i in 0..blocks {
+        let s = i * block;
+        let e = s + block;
+        let ra = (a[s..e].iter().map(|x| x * x).sum::<f32>() / block as f32).sqrt();
+        let rb = (b[s..e].iter().map(|x| x * x).sum::<f32>() / block as f32).sqrt();
+        env_a.push(ra);
+        env_b.push(rb);
+    }
+    let mean_a = env_a.iter().sum::<f32>() / blocks as f32;
+    let mean_b = env_b.iter().sum::<f32>() / blocks as f32;
+    let mut cov = 0.0f32;
+    let mut var_a = 0.0f32;
+    let mut var_b = 0.0f32;
+    for i in 0..blocks {
+        let da = env_a[i] - mean_a;
+        let db = env_b[i] - mean_b;
+        cov += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+    if var_a <= 1e-12 || var_b <= 1e-12 {
+        // Flat envelopes (steady tone/silence): judge by level match instead.
+        let ratio = if mean_a <= 1e-9 && mean_b <= 1e-9 {
+            1.0
+        } else {
+            (mean_a.min(mean_b) / mean_a.max(mean_b).max(1e-9)).clamp(0.0, 1.0)
+        };
+        return ratio;
+    }
+    let pearson = (cov / (var_a.sqrt() * var_b.sqrt())).clamp(-1.0, 1.0);
+    ((pearson + 1.0) * 0.5).clamp(0.0, 1.0)
 }
 
 fn rms_error_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -1131,6 +1214,69 @@ mod tests {
             let len_s = c.end.saturating_sub(c.start) as f32 / sr as f32;
             assert!(len_s >= 0.5 - 0.05, "candidate too short: {}s", len_s);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Scoring: silence seams rank below real-content seams
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_silent_seam_scores_below_content_seam() {
+        let sr = 44100usize;
+        // Loopable content with an exact repeat: [edge][middle][edge]
+        let edge = textured(sr, 0.2, 0.6, 0.3);
+        let middle = textured(sr, 1.0, 0.4, 1.7);
+        let mut content = Vec::new();
+        content.extend_from_slice(&edge);
+        content.extend_from_slice(&middle);
+        content.extend_from_slice(&edge);
+        let content_score = score_loop_boundary(&content, 0, content.len(), sr / 5, sr);
+
+        // Same layout but the seam windows are near-silence.
+        let quiet = vec![0.00001f32; (sr as f32 * 0.2) as usize];
+        let mut silent_seam = Vec::new();
+        silent_seam.extend_from_slice(&quiet);
+        silent_seam.extend_from_slice(&middle);
+        silent_seam.extend_from_slice(&quiet);
+        let silent_score = score_loop_boundary(&silent_seam, 0, silent_seam.len(), sr / 5, sr);
+
+        assert!(
+            silent_score < content_score,
+            "silent seam {silent_score} should rank below content seam {content_score}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scoring: matching long-range envelope beats mismatched envelope
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_envelope_mismatch_lowers_score() {
+        let sr = 44100usize;
+        // True loop: audio approaching `end` matches audio approaching `start`.
+        let section = textured(sr, 0.6, 0.5, 0.9);
+        let mut looped = Vec::new();
+        looped.extend_from_slice(&section);
+        looped.extend_from_slice(&textured(sr, 1.0, 0.35, 2.2));
+        looped.extend_from_slice(&section);
+        let loop_score = score_loop_boundary(&looped, 0, looped.len(), sr / 10, sr);
+
+        // Mismatch: end region has a rising burst pattern absent at the start.
+        let mut mismatched = looped.clone();
+        let n = mismatched.len();
+        let burst_len = (sr as f32 * 0.4) as usize;
+        for i in 0..burst_len {
+            let t = i as f32 / burst_len as f32;
+            let idx = n - burst_len + i;
+            mismatched[idx] = (mismatched[idx] * (1.0 - t)
+                + 0.9 * t * ((i as f32 * 0.5).sin()))
+            .clamp(-1.0, 1.0);
+        }
+        let mismatch_score = score_loop_boundary(&mismatched, 0, mismatched.len(), sr / 10, sr);
+        assert!(
+            mismatch_score < loop_score,
+            "mismatched envelope {mismatch_score} should score below true loop {loop_score}"
+        );
     }
 
     // -----------------------------------------------------------------------

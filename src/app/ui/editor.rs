@@ -300,6 +300,38 @@ impl crate::app::WavesPreviewer {
         LABELS[bin.min(LABELS.len() - 1)]
     }
 
+    /// Uniform inspector section header: accent bar + strong title + thin rule.
+    fn inspector_section(ui: &mut egui::Ui, title: &str) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, 1.5, Color32::from_rgb(90, 170, 255));
+            ui.label(RichText::new(title).strong());
+        });
+        let full = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(full, 1.0), egui::Sense::hover());
+        ui.painter().hline(
+            rect.x_range(),
+            rect.center().y,
+            egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+        );
+        ui.add_space(2.0);
+    }
+
+    /// Small labelled confidence meter used by analysis panels.
+    fn inspector_confidence_bar(ui: &mut egui::Ui, confidence: f32) {
+        let confidence = confidence.clamp(0.0, 1.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Confidence").weak());
+            let bar = egui::ProgressBar::new(confidence)
+                .desired_width((ui.available_width() - 44.0).max(48.0))
+                .desired_height(10.0);
+            ui.add(bar);
+            ui.label(RichText::new(format!("{:.0}%", confidence * 100.0)).monospace());
+        });
+    }
+
     fn editor_view_label(view: ViewMode) -> &'static str {
         match view {
             ViewMode::Waveform => "Wave",
@@ -2912,7 +2944,7 @@ impl crate::app::WavesPreviewer {
                                 Color32::GRAY,
                             );
                         }
-                        if !tab.show_waveform_overlay {
+                        {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
                             let tick_stroke = egui::Stroke::new(1.0, tick_col);
@@ -2922,16 +2954,20 @@ impl crate::app::WavesPreviewer {
                                 tab.vertical_view_center,
                                 &self.spectro_cfg,
                             );
+                            let visible_frac_of = |frac: f32| {
+                                if (visible_max - visible_min).abs() < f32::EPSILON {
+                                    0.0
+                                } else {
+                                    ((frac - visible_min) / (visible_max - visible_min))
+                                        .clamp(0.0, 1.0)
+                                }
+                            };
                             for bpm in [30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 240.0, 300.0] {
                                 let frac = tempogram_data
                                     .as_ref()
                                     .and_then(|data| Self::tempogram_axis_position(data, bpm))
                                     .unwrap_or(((bpm - 30.0) / 270.0).clamp(0.0, 1.0));
-                                let visible_frac = if (visible_max - visible_min).abs() < f32::EPSILON {
-                                    0.0
-                                } else {
-                                    ((frac - visible_min) / (visible_max - visible_min)).clamp(0.0, 1.0)
-                                };
+                                let visible_frac = visible_frac_of(frac);
                                 let y = lane_rect.bottom() - visible_frac * lane_rect.height();
                                 painter.line_segment(
                                     [
@@ -2947,6 +2983,31 @@ impl crate::app::WavesPreviewer {
                                     fid.clone(),
                                     tick_col,
                                 );
+                            }
+                            // Estimated BPM guide: horizontal accent line across
+                            // the lane so the ridge can be read directly.
+                            if let Some(data) = tempogram_data.as_ref() {
+                                if let Some(bpm) = data.estimated_bpm {
+                                    if let Some(frac) = Self::tempogram_axis_position(data, bpm) {
+                                        let y = lane_rect.bottom()
+                                            - visible_frac_of(frac) * lane_rect.height();
+                                        let accent = Color32::from_rgb(120, 220, 160);
+                                        painter.line_segment(
+                                            [
+                                                egui::pos2(lane_rect.left(), y),
+                                                egui::pos2(lane_rect.right(), y),
+                                            ],
+                                            egui::Stroke::new(1.0, accent),
+                                        );
+                                        painter.text(
+                                            egui::pos2(lane_rect.right() - 4.0, y - 2.0),
+                                            egui::Align2::RIGHT_BOTTOM,
+                                            format!("\u{2248} {bpm:.1} BPM"),
+                                            fid.clone(),
+                                            accent,
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -3019,7 +3080,7 @@ impl crate::app::WavesPreviewer {
                                 Color32::GRAY,
                             );
                         }
-                        if !tab.show_waveform_overlay {
+                        {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let tick_col = Color32::from_rgb(140, 150, 165);
                             let tick_stroke = egui::Stroke::new(1.0, tick_col);
@@ -3029,12 +3090,13 @@ impl crate::app::WavesPreviewer {
                                 tab.vertical_view_center,
                                 &self.spectro_cfg,
                             );
+                            let estimated_key = chromagram_data
+                                .as_ref()
+                                .and_then(|data| data.estimated_key.as_deref());
                             for bin in 0..12 {
-                                let frac = if 11 == 0 {
-                                    0.0
-                                } else {
-                                    bin as f32 / 11.0
-                                };
+                                // Labels sit at each band's center, matching the
+                                // equal-height bands the image renderer paints.
+                                let frac = (bin as f32 + 0.5) / 12.0;
                                 let visible_frac = if (visible_max - visible_min).abs() < f32::EPSILON {
                                     0.0
                                 } else {
@@ -3048,12 +3110,18 @@ impl crate::app::WavesPreviewer {
                                     ],
                                     tick_stroke,
                                 );
+                                let label = Self::chroma_label_for_bin(bin);
+                                let is_key = estimated_key == Some(label);
                                 painter.text(
                                     egui::pos2(rect.left() + 2.0, y),
                                     egui::Align2::LEFT_CENTER,
-                                    Self::chroma_label_for_bin(bin),
+                                    label,
                                     fid.clone(),
-                                    tick_col,
+                                    if is_key {
+                                        Color32::from_rgb(120, 220, 160)
+                                    } else {
+                                        tick_col
+                                    },
                                 );
                             }
                         }
@@ -4768,6 +4836,11 @@ impl crate::app::WavesPreviewer {
                         .id_salt(("editor_inspector_scroll", tab_idx))
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                    {
+                        let style = ui.style_mut();
+                        style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                        style.spacing.button_padding = egui::vec2(8.0, 4.0);
+                    }
                     let activity_h = 72.0;
                     ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), activity_h),
@@ -5023,8 +5096,7 @@ impl crate::app::WavesPreviewer {
                                 stop_playback = true;
                                 tab.active_tool = tool;
                             }
-                            ui.separator();
-                            ui.label(RichText::new(tool_label(tab.active_tool)).strong());
+                            Self::inspector_section(ui, tool_label(tab.active_tool));
                             match tab.active_tool {
                                 // Seek/Select removed: seeking is always available on the canvas
                                 ToolKind::LoopEdit => {
@@ -5033,55 +5105,50 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        ui.label("Loop marker range");
-                                        if let Some((a0, b0)) =
-                                            Self::normalized_loop_range(tab.loop_region_applied)
-                                        {
-                                            let (a, b) = (a0, b0);
-                                            let len = b.saturating_sub(a);
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Applied Loop: {a}..{b} ({len} smp)"
-                                                ))
-                                                .monospace()
-                                                .weak(),
-                                            );
-                                        } else {
-                                            ui.label(
-                                                RichText::new("Applied Loop: -")
-                                                    .monospace()
-                                                    .weak(),
-                                            );
-                                        }
-                                        if let Some((a0, b0)) =
-                                            Self::normalized_loop_range(tab.loop_region)
-                                        {
-                                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                            let len = b.saturating_sub(a);
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "Editing Loop: {a}..{b} ({len} smp)"
-                                                ))
-                                                    .monospace(),
-                                            );
-                                        } else {
-                                            ui.label(
-                                                RichText::new("Editing Loop: -")
-                                                    .monospace()
-                                                    .weak(),
-                                            );
-                                        }
-                                        if let Some((a0, b0)) = tab.selection {
-                                            let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
-                                            let len = b.saturating_sub(a);
-                                            ui.label(
-                                                RichText::new(format!("Range: {a}..{b} ({len} smp)"))
-                                                    .monospace()
-                                                    .weak(),
-                                            );
-                                        } else {
-                                            ui.label(RichText::new("Range: -").monospace().weak());
-                                        }
+                                        Self::inspector_section(ui, "Loop Range");
+                                        // Fixed-width rows: long sample counts truncate
+                                        // with a tooltip instead of widening the panel.
+                                        let loop_info_row =
+                                            |ui: &mut egui::Ui,
+                                             name: &str,
+                                             range: Option<(usize, usize)>,
+                                             strong: bool| {
+                                                let text = match range {
+                                                    Some((a0, b0)) => {
+                                                        let (a, b) =
+                                                            if a0 <= b0 { (a0, b0) } else { (b0, a0) };
+                                                        format!(
+                                                            "{name} {a}..{b} ({} smp)",
+                                                            b.saturating_sub(a)
+                                                        )
+                                                    }
+                                                    None => format!("{name} -"),
+                                                };
+                                                let rich = if strong && range.is_some() {
+                                                    RichText::new(text).monospace()
+                                                } else {
+                                                    RichText::new(text).monospace().weak()
+                                                };
+                                                ui.add_sized(
+                                                    [ui.available_width(), 16.0],
+                                                    egui::Label::new(rich)
+                                                        .truncate()
+                                                        .show_tooltip_when_elided(true),
+                                                );
+                                            };
+                                        loop_info_row(
+                                            ui,
+                                            "Applied",
+                                            Self::normalized_loop_range(tab.loop_region_applied),
+                                            false,
+                                        );
+                                        loop_info_row(
+                                            ui,
+                                            "Editing",
+                                            Self::normalized_loop_range(tab.loop_region),
+                                            true,
+                                        );
+                                        loop_info_row(ui, "Range", tab.selection, false);
                                         let effective_cf = tab
                                             .loop_region
                                             .map(|(a, b)| {
@@ -5134,10 +5201,11 @@ impl crate::app::WavesPreviewer {
                                             ui.label(loop_status_text);
                                         });
                                         // Crossfade controls (duration in ms + shape)
+                                        Self::inspector_section(ui, "Crossfade");
                                         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
                                         let mut x_ms = (tab.loop_xfade_samples as f32 / sr) * 1000.0;
                                         ui.horizontal_wrapped(|ui| {
-                                            ui.label("Xfade (ms):");
+                                            ui.label("Length");
                                             let resp_x = ui.add(egui::DragValue::new(&mut x_ms).range(0.0..=5000.0).speed(5.0).fixed_decimals(1));
                                             if (resp_x.gained_focus() || resp_x.drag_started()) && pending_edit_undo.is_none() {
                                                 pending_edit_undo = Some(Self::capture_undo_state(tab));
@@ -5147,15 +5215,18 @@ impl crate::app::WavesPreviewer {
                                                 tab.loop_xfade_samples = samp;
                                                 apply_pending_loop = true;
                                             }
+                                            ui.label(RichText::new("ms").weak());
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
                                             let mut use_dip = Self::loop_xfade_uses_through_zero(tab.loop_xfade_shape);
-                                            ui.label("Mode:");
+                                            ui.label("Mode");
                                             egui::ComboBox::from_id_salt(("xfade_mode", tab_idx))
                                                 .selected_text(if use_dip { "Fade to 0" } else { "Crossfade" })
                                                 .show_ui(ui, |ui| {
                                                     ui.selectable_value(&mut use_dip, false, "Crossfade");
                                                     ui.selectable_value(&mut use_dip, true, "Fade to 0");
                                                 });
-                                            ui.label("Shape:");
+                                            ui.label("Shape");
                                             let mut shp = tab.loop_xfade_shape;
                                             let mut use_equal = matches!(
                                                 shp,
@@ -5251,7 +5322,7 @@ impl crate::app::WavesPreviewer {
                                                 tab.pending_loop_unwrap = Some(repeat);
                                                 tab.preview_audio_tool = None;
                                                 tab.preview_overlay = None;
-                                            }                                        ui.horizontal_wrapped(|ui| {
+                                            }
                                             let effective_cf = tab
                                                 .loop_region
                                                 .map(|(a, b)| {
@@ -5285,8 +5356,7 @@ impl crate::app::WavesPreviewer {
                                         });
 
                                         // Auto Loop Detection
-                                        ui.separator();
-                                        ui.label(RichText::new("Auto Detect").strong());
+                                        Self::inspector_section(ui, "Auto Detect");
                                         let ld_running = tab
                                             .loop_detect_state
                                             .as_ref()
@@ -5384,7 +5454,8 @@ impl crate::app::WavesPreviewer {
                                                 );
                                             },
                                         );
-                                        // Candidate list
+                                        // Candidate list: fixed-width rows that
+                                        // truncate instead of widening the panel.
                                         let sr = tab.buffer_sample_rate.max(1) as f32;
                                         for (ci, (cs, ce, score, conf)) in
                                             ld_candidates.iter().enumerate()
@@ -5392,31 +5463,39 @@ impl crate::app::WavesPreviewer {
                                             let selected = ci == ld_selected;
                                             let len_secs =
                                                 ce.saturating_sub(*cs) as f32 / sr;
+                                            let quality_color = match conf.as_str() {
+                                                "High" => Color32::from_rgb(120, 220, 140),
+                                                "Medium" => Color32::from_rgb(240, 200, 90),
+                                                _ => Color32::from_rgb(170, 170, 180),
+                                            };
                                             let label = format!(
-                                                "{conf} {score:.2}  {:.2}s..{:.2}s ({:.2}s)",
+                                                "{score:.2} \u{2502} {:.2}s \u{2192} {:.2}s ({:.2}s)",
                                                 *cs as f32 / sr,
                                                 *ce as f32 / sr,
                                                 len_secs,
                                             );
-                                            ui.horizontal(|ui| {
-                                                if ui
-                                                    .selectable_label(selected, &label)
-                                                    .clicked()
-                                                {
-                                                    do_apply_loop_candidate =
-                                                        Some((tab_idx, ci));
-                                                }
-                                            });
+                                            let resp = ui.add_sized(
+                                                [ui.available_width(), 18.0],
+                                                egui::Button::selectable(
+                                                    selected,
+                                                    RichText::new(label)
+                                                        .monospace()
+                                                        .color(quality_color),
+                                                ),
+                                            );
+                                            if resp
+                                                .on_hover_text(format!("{conf} confidence"))
+                                                .clicked()
+                                            {
+                                                do_apply_loop_candidate = Some((tab_idx, ci));
+                                            }
                                         }
-
-                                        });
 
                                         if let Some(seam_preview) = Self::build_loop_seam_preview(
                                             tab,
                                             self.audio.shared.out_sample_rate,
                                         ) {
-                                            ui.separator();
-                                            ui.label("Loop inspector");
+                                            Self::inspector_section(ui, "Seam Preview");
                                             ui.columns(3, |cols| {
                                                 cols[0].label("Pre-Loop window");
                                                 Self::draw_loop_window_preview(
@@ -5445,8 +5524,8 @@ impl crate::app::WavesPreviewer {
                                                 );
                                             });
                                         } else {
-                                            ui.separator();
-                                            ui.label(RichText::new("Loop inspector: -").weak());
+                                            Self::inspector_section(ui, "Seam Preview");
+                                            ui.label(RichText::new("Set a loop range to preview the seam").weak());
                                         }
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):
@@ -5727,8 +5806,7 @@ impl crate::app::WavesPreviewer {
                                         });
 
                                         // Auto Trim
-                                        ui.separator();
-                                        ui.label(RichText::new("Auto Trim").strong());
+                                        Self::inspector_section(ui, "Auto Trim");
                                         let at_running = tab
                                             .auto_trim_state
                                             .as_ref()
@@ -5739,91 +5817,180 @@ impl crate::app::WavesPreviewer {
                                             .as_ref()
                                             .map(|s| s.message.clone())
                                             .unwrap_or_default();
+                                        let at_stats =
+                                            tab.auto_trim_state.as_ref().and_then(|s| s.stats);
+                                        let at_live_pending = tab
+                                            .auto_trim_state
+                                            .as_ref()
+                                            .map(|s| s.config_dirty_at.is_some())
+                                            .unwrap_or(false);
+                                        let mut at_cfg_changed = false;
                                         {
                                             let cfg = &mut tab.auto_trim_config;
+                                            let slider_w =
+                                                (ui.available_width() - 118.0).clamp(80.0, 170.0);
                                             egui::Grid::new(("auto_trim_config_grid", tab_idx))
                                                 .num_columns(2)
-                                                .spacing(egui::vec2(10.0, 6.0))
+                                                .spacing(egui::vec2(8.0, 5.0))
                                                 .show(ui, |ui| {
-                                                    ui.label("above noise (dB)");
-                                                    ui.add_enabled_ui(!at_running, |ui| {
-                                                        ui.add_sized(
-                                                            [66.0, 22.0],
-                                                            egui::DragValue::new(
-                                                                &mut cfg.threshold_above_noise_db,
-                                                            )
-                                                            .range(0.0..=48.0)
-                                                            .speed(0.5)
-                                                            .fixed_decimals(1),
+                                                    ui.spacing_mut().slider_width = slider_w;
+                                                    ui.label("Noise gate")
+                                                        .on_hover_text(
+                                                            "How far above the measured noise floor a block must be to count as sound",
                                                         );
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        at_cfg_changed |= ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut cfg.threshold_above_noise_db,
+                                                                    0.0..=48.0,
+                                                                )
+                                                                .suffix(" dB")
+                                                                .fixed_decimals(1),
+                                                            )
+                                                            .changed();
                                                     });
                                                     ui.end_row();
-                                                    ui.label("below peak (dB)");
-                                                    ui.add_enabled_ui(!at_running, |ui| {
-                                                        ui.add_sized(
-                                                            [66.0, 22.0],
-                                                            egui::DragValue::new(
-                                                                &mut cfg.threshold_below_peak_db,
-                                                            )
-                                                            .range(0.0..=80.0)
-                                                            .speed(0.5)
-                                                            .fixed_decimals(1),
+                                                    ui.label("Peak gate")
+                                                        .on_hover_text(
+                                                            "How far below the loudest block audio may fall before it counts as silence",
                                                         );
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        at_cfg_changed |= ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut cfg.threshold_below_peak_db,
+                                                                    0.0..=80.0,
+                                                                )
+                                                                .suffix(" dB")
+                                                                .fixed_decimals(1),
+                                                            )
+                                                            .changed();
                                                     });
                                                     ui.end_row();
-                                                    ui.label("pre-roll (s)");
-                                                    ui.add_enabled_ui(!at_running, |ui| {
-                                                        ui.add_sized(
-                                                            [66.0, 22.0],
-                                                            egui::DragValue::new(
-                                                                &mut cfg.pre_roll_secs,
-                                                            )
-                                                            .range(0.0..=2.0)
-                                                            .speed(0.01)
-                                                            .fixed_decimals(3),
+                                                    ui.label("Pre-roll")
+                                                        .on_hover_text(
+                                                            "Silence kept before each detected section",
                                                         );
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        at_cfg_changed |= ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut cfg.pre_roll_secs,
+                                                                    0.0..=2.0,
+                                                                )
+                                                                .suffix(" s")
+                                                                .fixed_decimals(3),
+                                                            )
+                                                            .changed();
                                                     });
                                                     ui.end_row();
-                                                    ui.label("post-roll (s)");
-                                                    ui.add_enabled_ui(!at_running, |ui| {
-                                                        ui.add_sized(
-                                                            [66.0, 22.0],
-                                                            egui::DragValue::new(
-                                                                &mut cfg.post_roll_secs,
-                                                            )
-                                                            .range(0.0..=2.0)
-                                                            .speed(0.01)
-                                                            .fixed_decimals(3),
+                                                    ui.label("Post-roll")
+                                                        .on_hover_text(
+                                                            "Silence kept after each detected section (release tails)",
                                                         );
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        at_cfg_changed |= ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut cfg.post_roll_secs,
+                                                                    0.0..=2.0,
+                                                                )
+                                                                .suffix(" s")
+                                                                .fixed_decimals(3),
+                                                            )
+                                                            .changed();
                                                     });
                                                     ui.end_row();
-                                                    ui.label("gap merge (s)");
-                                                    ui.add_enabled_ui(!at_running, |ui| {
-                                                        ui.add_sized(
-                                                            [66.0, 22.0],
-                                                            egui::DragValue::new(
-                                                                &mut cfg.gap_merge_secs,
-                                                            )
-                                                            .range(0.0..=2.0)
-                                                            .speed(0.01)
-                                                            .fixed_decimals(3),
+                                                    ui.label("Gap merge")
+                                                        .on_hover_text(
+                                                            "Silent gaps shorter than this stay inside one section",
                                                         );
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        at_cfg_changed |= ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut cfg.gap_merge_secs,
+                                                                    0.0..=2.0,
+                                                                )
+                                                                .suffix(" s")
+                                                                .fixed_decimals(3),
+                                                            )
+                                                            .changed();
                                                     });
                                                     ui.end_row();
-                                                    ui.label("min active (s)");
-                                                    ui.add_enabled_ui(!at_running, |ui| {
-                                                        ui.add_sized(
-                                                            [66.0, 22.0],
-                                                            egui::DragValue::new(
-                                                                &mut cfg.min_active_secs,
-                                                            )
-                                                            .range(0.0..=1.0)
-                                                            .speed(0.005)
-                                                            .fixed_decimals(3),
+                                                    ui.label("Min active")
+                                                        .on_hover_text(
+                                                            "Sections shorter than this are ignored as noise blips",
                                                         );
+                                                    ui.add_enabled_ui(!at_running, |ui| {
+                                                        at_cfg_changed |= ui
+                                                            .add(
+                                                                egui::Slider::new(
+                                                                    &mut cfg.min_active_secs,
+                                                                    0.0..=1.0,
+                                                                )
+                                                                .suffix(" s")
+                                                                .fixed_decimals(3),
+                                                            )
+                                                            .changed();
                                                     });
                                                     ui.end_row();
                                                 });
+                                        }
+                                        // Measured levels: make the thresholds concrete in dB.
+                                        if let Some(stats) = at_stats {
+                                            ui.add_sized(
+                                                [ui.available_width(), 18.0],
+                                                egui::Label::new(
+                                                    RichText::new(format!(
+                                                        "noise {:.1} dB \u{00B7} peak {:.1} dB",
+                                                        stats.noise_floor_db, stats.peak_db
+                                                    ))
+                                                    .monospace()
+                                                    .weak(),
+                                                )
+                                                .truncate()
+                                                .show_tooltip_when_elided(true),
+                                            );
+                                            let threshold_note = if stats.uniform_signal {
+                                                format!(
+                                                    "threshold {:.1} dB (uniform: peak gate only)",
+                                                    stats.threshold_db
+                                                )
+                                            } else {
+                                                format!("threshold {:.1} dB", stats.threshold_db)
+                                            };
+                                            ui.add_sized(
+                                                [ui.available_width(), 18.0],
+                                                egui::Label::new(
+                                                    RichText::new(threshold_note)
+                                                        .monospace()
+                                                        .color(Color32::from_rgb(120, 200, 255)),
+                                                )
+                                                .truncate()
+                                                .show_tooltip_when_elided(true),
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Run Auto Trim once to measure levels",
+                                                )
+                                                .weak(),
+                                            );
+                                        }
+                                        if at_cfg_changed {
+                                            if let Some(state) = tab.auto_trim_state.as_mut() {
+                                                if state.result.is_some() || state.stats.is_some() {
+                                                    state.config_dirty_at =
+                                                        Some(std::time::Instant::now());
+                                                }
+                                            }
+                                        }
+                                        if at_live_pending || at_cfg_changed {
+                                            ui.ctx().request_repaint_after(
+                                                std::time::Duration::from_millis(120),
+                                            );
                                         }
                                         let at_range_count = {
                                             let mut count = tab
@@ -5852,7 +6019,9 @@ impl crate::app::WavesPreviewer {
                                                     !at_running && !tab.ch_samples.is_empty(),
                                                     egui::Button::new("Auto Trim"),
                                                 )
-                                                .on_hover_text("Detect active sections")
+                                                .on_hover_text(
+                                                    "Detect active sections; edits above re-run automatically afterwards",
+                                                )
                                                 .clicked()
                                             {
                                                 do_auto_trim = Some(tab_idx);
@@ -5862,6 +6031,13 @@ impl crate::app::WavesPreviewer {
                                                 .clicked()
                                             {
                                                 do_cancel_auto_trim = Some(tab_idx);
+                                            }
+                                            if at_live_pending && !at_running {
+                                                ui.label(
+                                                    RichText::new("live update\u{2026}")
+                                                        .weak()
+                                                        .italics(),
+                                                );
                                             }
                                         });
                                         ui.allocate_ui_with_layout(
@@ -7249,7 +7425,7 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                         ViewMode::Tempogram => {
-                            ui.label(RichText::new("Tempogram").strong());
+                            Self::inspector_section(ui, "Tempogram");
                             ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
                             ui.horizontal_wrapped(|ui| {
                                 if ui.button("Analyze BPM").clicked() {
@@ -7258,34 +7434,59 @@ impl crate::app::WavesPreviewer {
                                 if analysis_loading && ui.button("Cancel").clicked() {
                                     cancel_feature_analysis = true;
                                 }
-                                if let Some(data) = tempogram_data.as_ref() {
-                                    if let Some(bpm) = data.estimated_bpm {
-                                        if ui.button("Apply BPM").clicked() {
-                                            apply_estimated_bpm = Some(bpm);
-                                        }
-                                    }
-                                }
                             });
                             if let Some(data) = tempogram_data.as_ref() {
-                                let bpm_text = data
-                                    .estimated_bpm
-                                    .map(|bpm| format!("{bpm:.2}"))
-                                    .unwrap_or_else(|| "-".to_string());
+                                match data.estimated_bpm {
+                                    Some(bpm) => {
+                                        ui.label(
+                                            RichText::new(format!("\u{2248} {bpm:.1} BPM"))
+                                                .monospace()
+                                                .size(18.0)
+                                                .color(Color32::from_rgb(120, 220, 160)),
+                                        );
+                                        Self::inspector_confidence_bar(ui, data.confidence);
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .button("Apply BPM")
+                                                .on_hover_text(
+                                                    "Write this BPM into the file's metadata on save",
+                                                )
+                                                .clicked()
+                                            {
+                                                apply_estimated_bpm = Some(bpm);
+                                            }
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "\u{00BD} {:.1} / \u{00D7}2 {:.1}",
+                                                    bpm * 0.5,
+                                                    bpm * 2.0
+                                                ))
+                                                .monospace()
+                                                .weak(),
+                                            )
+                                            .on_hover_text(
+                                                "Half/double tempo readings are equally valid; pick what matches the material",
+                                            );
+                                        });
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("No stable tempo found").weak());
+                                    }
+                                }
                                 ui.label(
-                                    RichText::new(format!("Estimated BPM: {bpm_text}")).monospace(),
-                                );
-                                ui.label(
-                                    RichText::new(format!("Confidence: {:.2}", data.confidence))
-                                        .monospace(),
+                                    RichText::new(
+                                        "Bright ridge = rhythmic period. Green line marks the estimate.",
+                                    )
+                                    .weak(),
                                 );
                             } else if analysis_loading {
                                 ui.label(RichText::new("Analyzing mono mixdown...").weak());
                             } else {
-                                ui.label(RichText::new("Tempogram not ready").weak());
+                                ui.label(RichText::new("Press Analyze BPM to build the tempogram").weak());
                             }
                         }
                         ViewMode::Chromagram => {
-                            ui.label(RichText::new("Chromagram").strong());
+                            Self::inspector_section(ui, "Chromagram");
                             ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
                             ui.horizontal_wrapped(|ui| {
                                 if ui.button("Analyze Key").clicked() {
@@ -7296,24 +7497,32 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                             if let Some(data) = chromagram_data.as_ref() {
-                                let key = data
-                                    .estimated_key
-                                    .clone()
-                                    .unwrap_or_else(|| "-".to_string());
-                                let mode = data
-                                    .estimated_mode
-                                    .clone()
-                                    .unwrap_or_else(|| "-".to_string());
-                                ui.label(RichText::new(format!("Key: {key}")).monospace());
-                                ui.label(RichText::new(format!("Mode: {mode}")).monospace());
+                                match (data.estimated_key.as_deref(), data.estimated_mode.as_deref())
+                                {
+                                    (Some(key), mode) => {
+                                        let mode = mode.unwrap_or("");
+                                        ui.label(
+                                            RichText::new(format!("{key} {mode}"))
+                                                .monospace()
+                                                .size(18.0)
+                                                .color(Color32::from_rgb(120, 220, 160)),
+                                        );
+                                        Self::inspector_confidence_bar(ui, data.confidence);
+                                    }
+                                    _ => {
+                                        ui.label(RichText::new("No stable key found").weak());
+                                    }
+                                }
                                 ui.label(
-                                    RichText::new(format!("Confidence: {:.2}", data.confidence))
-                                        .monospace(),
+                                    RichText::new(
+                                        "Rows are pitch classes; bright cells show which notes sound. The detected key's row label is highlighted.",
+                                    )
+                                    .weak(),
                                 );
                             } else if analysis_loading {
                                 ui.label(RichText::new("Analyzing mono mixdown...").weak());
                             } else {
-                                ui.label(RichText::new("Chromagram not ready").weak());
+                                ui.label(RichText::new("Press Analyze Key to build the chromagram").weak());
                             }
                         }
                     }

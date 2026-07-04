@@ -4,7 +4,15 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
-### FLAC Support + Format/Metadata Matrix (Latest)
+### Inspector Overhaul: Loop Edit / Auto Trim / Tempogram / Chromagram (Latest)
+- Loop Edit no longer overflows the inspector: a mis-nested layout row swallowed the Apply button and the whole Auto Detect section into one wrapping row; crossfade controls now sit on two rows, loop-range readouts truncate with tooltips, and detect candidates render as fixed-width color-coded rows.
+- Loop auto-detect scoring got stricter and more musical: anti-correlated seams no longer earn a baseline score, a long-range loudness-envelope similarity term rewards structurally matching sections, near-silent seams are penalized, and refined candidates deduplicate within ~20 ms so the list shows distinct alternatives.
+- Auto Trim is now live: thresholds are sliders with units and plain-language tooltips, the measured noise floor / peak / effective threshold are shown in dB after a run, and edits re-run detection automatically (debounced) so the selected ranges update as you drag.
+- Tempogram is readable: values are normalized globally (silence stays dark instead of amplifying noise), the BPM axis is always drawn, and a green guide line + label marks the estimated BPM with half/double-tempo hints in the panel.
+- Chromagram is readable: displayed values use per-frame raw chroma (key estimation still runs on the CENS profile), pitch-class bands are equal-height and aligned with always-visible note labels, and the detected key's row is highlighted.
+- Inspector styling pass: consistent accent-bar section headers, unified spacing, confidence meters for BPM/key estimates.
+
+### FLAC Support + Format/Metadata Matrix
 - Added FLAC decode via symphonia (`flac` feature) and FLAC encode via `flacenc` (16/24-bit; 32-bit float sources are quantized to 24-bit since FLAC has no float representation).
 - FLAC now works across list/editor load, save/overwrite, format convert ("To FLAC"), gain export, and virtual-item export; list shows a FLAC badge.
 - Loop markers for FLAC are stored as Vorbis comments (`LOOPSTART`/`LOOPEND`, same convention as MP3/M4A); BPM (`BPM`/`TEMPO` comment) and cover art (`PICTURE` block) are read.

@@ -1066,26 +1066,13 @@ impl super::WavesPreviewer {
             vertical_view_center,
             cfg,
         );
-        let mut frame_maxima = vec![0.0f32; frame_count];
-        let mut global_max = 0.0f32;
-        for (local_frame, frame_idx) in (f0..f1).enumerate() {
-            let row = &data.values[frame_idx * data.tempo_bins..(frame_idx + 1) * data.tempo_bins];
-            let row_max = row.iter().copied().fold(0.0f32, f32::max);
-            frame_maxima[local_frame] = row_max;
-            global_max = global_max.max(row_max);
-        }
-        let global_floor = (global_max * 0.25).max(1.0e-9);
+        // Values are globally normalized at compute time; painting them
+        // directly keeps silent passages dark instead of amplifying noise.
         for lane_idx in 0..lane_count.max(1) {
             let lane_y0 = lane_idx.saturating_mul(target_lane_h);
             for x in 0..target_w {
                 let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
-                let local_frame = frame_idx.saturating_sub(f0).min(frame_count - 1);
                 let base = frame_idx * data.tempo_bins;
-                let frame_den = frame_maxima
-                    .get(local_frame)
-                    .copied()
-                    .unwrap_or(global_floor)
-                    .max(global_floor);
                 for y in 0..target_lane_h {
                     let frac_local =
                         1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
@@ -1094,7 +1081,7 @@ impl super::WavesPreviewer {
                         .round() as usize;
                     let idx = base + bin.min(data.tempo_bins.saturating_sub(1));
                     let value = data.values.get(idx).copied().unwrap_or(0.0).max(0.0);
-                    let norm = (value / frame_den).clamp(0.0, 1.0).sqrt();
+                    let norm = value.clamp(0.0, 1.0).sqrt();
                     let pixel_idx =
                         (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
@@ -1147,11 +1134,13 @@ impl super::WavesPreviewer {
                     let frac_local =
                         1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
                     let frac = visible_min + frac_local * (visible_max - visible_min);
-                    let bin = (frac.clamp(0.0, 1.0) * data.bins.saturating_sub(1) as f32).round()
-                        as usize;
+                    // Each pitch class occupies an equal-height band so rows
+                    // line up with the note labels on the axis.
+                    let bin = ((frac.clamp(0.0, 1.0) * data.bins as f32).floor() as usize)
+                        .min(data.bins.saturating_sub(1));
                     let norm = data
                         .values
-                        .get(base + bin.min(data.bins.saturating_sub(1)))
+                        .get(base + bin)
                         .copied()
                         .unwrap_or(0.0)
                         .clamp(0.0, 1.0)

@@ -1,4 +1,4 @@
-use crate::app::auto_trim::{AutoTrimConfig, AutoTrimOutcome};
+use crate::app::auto_trim::{AutoTrimConfig, AutoTrimLevelStats, AutoTrimOutcome};
 use crate::app::loop_detect::{LoopDetectCandidate, LoopDetectConfig};
 use crate::app::render::waveform_pyramid::{Peak, WaveformPyramidSet};
 use crate::audio::AudioBuffer;
@@ -3064,8 +3064,21 @@ pub struct AutoTrimState {
     pub progress: f32,
     pub message: String,
     pub result: Option<AutoTrimOutcome>,
+    /// Levels (noise floor / peak / effective threshold) from the last run.
+    pub stats: Option<AutoTrimLevelStats>,
+    /// Config used for the last (or in-flight) run; used to detect edits.
+    pub last_config: Option<AutoTrimConfig>,
+    /// Set when the user edits the config after a run; a debounced re-run
+    /// fires once this is old enough, keeping the detected ranges live.
+    pub config_dirty_at: Option<std::time::Instant>,
     pub cancel: Arc<AtomicBool>,
-    pub rx: Option<Receiver<(u64, Result<AutoTrimOutcome, String>)>>,
+    pub rx: Option<Receiver<AutoTrimWorkerResult>>,
+}
+
+pub struct AutoTrimWorkerResult {
+    pub generation: u64,
+    pub outcome: Result<AutoTrimOutcome, String>,
+    pub stats: Option<AutoTrimLevelStats>,
 }
 
 impl Default for AutoTrimState {
@@ -3076,6 +3089,9 @@ impl Default for AutoTrimState {
             progress: 0.0,
             message: String::new(),
             result: None,
+            stats: None,
+            last_config: None,
+            config_dirty_at: None,
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
         }
