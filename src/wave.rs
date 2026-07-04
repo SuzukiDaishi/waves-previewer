@@ -1664,25 +1664,30 @@ fn encode_flac(
     let frames = source_frames.max(FLAC_MIN_BLOCK);
     let max_abs = ((1i64 << (bits_per_sample - 1)) - 1) as f32;
     let bytes_per_sample = bits_per_sample / 8;
-    let mut md5 = <md5::Md5 as md5::Digest>::new();
-    let mut interleaved: Vec<i32> = Vec::with_capacity(frames * channels);
-    for i in 0..frames {
-        for ch in chans {
-            let v = ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
-            let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
-            md5::Digest::update(&mut md5, &q.to_le_bytes()[0..bytes_per_sample]);
-            interleaved.push(q);
-        }
-    }
-    let md5_digest: [u8; 16] = md5::Digest::finalize(md5).into();
+    let quantize = |v: f32| -> i32 {
+        let v = v.clamp(-1.0, 1.0);
+        (v * max_abs).round().clamp(-max_abs, max_abs) as i32
+    };
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|e| anyhow::anyhow!("flac encoder config: {e:?}"))?;
-    // Encode frame-by-frame instead of via `encode_with_fixed_block_size`:
-    // that helper pads the final partial block up to a full block, which
-    // appends silence and changes the decoded length. It also feeds the
-    // padding into the MD5 digest, so the digest is computed here instead.
     let block_size = config.block_size;
+
+    // Pass 1: MD5 of the quantized little-endian samples. The digest must be
+    // set on STREAMINFO before the stream is built, and we deliberately avoid
+    // materializing the whole interleaved buffer, so the samples are quantized
+    // block-by-block here and again during encoding below. Quantization is a
+    // few cheap ops per sample — negligible next to FLAC's LPC/Rice coding —
+    // and this keeps peak RAM bounded by one block regardless of clip length.
+    let mut md5 = <md5::Md5 as md5::Digest>::new();
+    for i in 0..frames {
+        for ch in chans {
+            let q = quantize(ch.get(i).copied().unwrap_or(0.0));
+            md5::Digest::update(&mut md5, &q.to_le_bytes()[0..bytes_per_sample]);
+        }
+    }
+    let md5_digest: [u8; 16] = md5::Digest::finalize(md5).into();
+
     let mut stream_info = flacenc::component::StreamInfo::new(
         sample_rate.max(1) as usize,
         channels,
@@ -1691,17 +1696,28 @@ fn encode_flac(
     .map_err(|e| anyhow::anyhow!("flac stream init: {e:?}"))?;
     stream_info.set_md5_digest(&md5_digest);
     let mut stream = flacenc::component::Stream::with_stream_info(stream_info);
+
+    // Pass 2: encode frame-by-frame instead of via
+    // `encode_with_fixed_block_size` — that helper pads the final partial
+    // block up to a full block, appending silence and changing the decoded
+    // length. Each block is quantized into a small reused scratch buffer.
+    let mut block_scratch: Vec<i32> = Vec::with_capacity(block_size * channels);
     let mut pos = 0usize;
     let mut frame_number = 0usize;
     while pos < frames {
         let this_block = (frames - pos).min(block_size);
+        block_scratch.clear();
+        for i in pos..pos + this_block {
+            for ch in chans {
+                block_scratch.push(quantize(ch.get(i).copied().unwrap_or(0.0)));
+            }
+        }
         let mut framebuf = flacenc::source::FrameBuf::with_size(channels, this_block)
             .map_err(|e| anyhow::anyhow!("flac frame buffer: {e:?}"))?;
-        let chunk = &interleaved[pos * channels..(pos + this_block) * channels];
         {
             use flacenc::source::Fill;
             framebuf
-                .fill_interleaved(chunk)
+                .fill_interleaved(&block_scratch)
                 .map_err(|e| anyhow::anyhow!("flac frame fill: {e:?}"))?;
         }
         let frame =
@@ -1712,6 +1728,10 @@ fn encode_flac(
         pos += this_block;
         frame_number += 1;
     }
+    // flacenc 0.4 only ships an in-memory `ByteSink`, so the compressed output
+    // is buffered whole before the min_block_size patch (which seeks back to
+    // byte 8). This is bounded by the *compressed* size — smaller than the PCM
+    // input we already stream — so it is an acceptable ceiling.
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream
         .write(&mut sink)
@@ -2783,5 +2803,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 
 }

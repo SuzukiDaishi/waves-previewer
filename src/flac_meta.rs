@@ -5,6 +5,8 @@
 //! Loop markers use the same `LOOPSTART` / `LOOPEND` convention as the MP3
 //! (TXXX) and M4A (freeform) paths, stored as Vorbis comments.
 
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,68 +18,80 @@ const BLOCK_STREAMINFO: u8 = 0;
 const BLOCK_VORBIS_COMMENT: u8 = 4;
 const BLOCK_PICTURE: u8 = 6;
 
+/// A FLAC metadata block's `length` field is 24-bit, so a payload cannot
+/// exceed this many bytes.
+const MAX_BLOCK_PAYLOAD: usize = 0x00FF_FFFF;
+
 struct FlacBlock {
     block_type: u8,
     payload: Vec<u8>,
 }
 
-struct FlacFile {
+/// The parsed metadata section of a FLAC file. Audio frames are intentionally
+/// not loaded: only their starting byte offset is kept so rewrites can
+/// stream-copy them instead of buffering the whole (potentially huge) file.
+struct FlacMeta {
     blocks: Vec<FlacBlock>,
-    /// Audio frames (and anything after the last metadata block), verbatim.
-    frames: Vec<u8>,
+    /// Byte offset where the audio frames begin (end of the metadata section).
+    audio_offset: u64,
 }
 
-fn parse_flac(path: &Path) -> Result<FlacFile> {
-    let data = std::fs::read(path).with_context(|| format!("read flac: {}", path.display()))?;
-    if data.len() < 8 || &data[0..4] != b"fLaC" {
+/// Read only the metadata section, streaming block-by-block. Audio frames are
+/// left on disk (see [`FlacMeta::audio_offset`]).
+fn parse_flac(path: &Path) -> Result<FlacMeta> {
+    let file = File::open(path).with_context(|| format!("open flac: {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut magic = [0u8; 4];
+    reader
+        .read_exact(&mut magic)
+        .with_context(|| format!("read flac header: {}", path.display()))?;
+    if &magic != b"fLaC" {
         anyhow::bail!("not a FLAC file: {}", path.display());
     }
     let mut blocks = Vec::new();
-    let mut pos = 4usize;
+    let mut audio_offset = 4u64;
     loop {
-        if pos + 4 > data.len() {
-            anyhow::bail!("truncated FLAC metadata: {}", path.display());
-        }
-        let header = data[pos];
-        let is_last = header & 0x80 != 0;
-        let block_type = header & 0x7F;
-        let size =
-            u32::from_be_bytes([0, data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        let start = pos + 4;
-        let end = start.saturating_add(size);
-        if end > data.len() {
-            anyhow::bail!("truncated FLAC metadata block: {}", path.display());
-        }
+        let mut header = [0u8; 4];
+        reader
+            .read_exact(&mut header)
+            .with_context(|| format!("truncated FLAC metadata: {}", path.display()))?;
+        let is_last = header[0] & 0x80 != 0;
+        let block_type = header[0] & 0x7F;
+        let size = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        let mut payload = vec![0u8; size];
+        reader
+            .read_exact(&mut payload)
+            .with_context(|| format!("truncated FLAC metadata block: {}", path.display()))?;
+        audio_offset += 4 + size as u64;
         blocks.push(FlacBlock {
             block_type,
-            payload: data[start..end].to_vec(),
+            payload,
         });
-        pos = end;
         if is_last {
             break;
         }
     }
-    Ok(FlacFile {
+    Ok(FlacMeta {
         blocks,
-        frames: data[pos..].to_vec(),
+        audio_offset,
     })
 }
 
-fn encode_flac_file(path: &Path, file: &FlacFile) -> Result<()> {
-    let mut out = Vec::with_capacity(file.frames.len() + 1024);
-    out.extend_from_slice(b"fLaC");
-    let last_index = file.blocks.len().saturating_sub(1);
-    for (i, block) in file.blocks.iter().enumerate() {
-        let mut header = block.block_type & 0x7F;
-        if i == last_index {
-            header |= 0x80;
+/// Rewrite `path`'s metadata section with `meta.blocks`, stream-copying the
+/// original audio frames (from `meta.audio_offset` onward) so memory stays
+/// bounded regardless of file size. Oversized blocks are rejected rather than
+/// silently truncated.
+fn encode_flac_file(path: &Path, meta: &FlacMeta) -> Result<()> {
+    for block in &meta.blocks {
+        if block.payload.len() > MAX_BLOCK_PAYLOAD {
+            anyhow::bail!(
+                "FLAC metadata block (type {}) is {} bytes, exceeding the 24-bit limit of {} bytes",
+                block.block_type,
+                block.payload.len(),
+                MAX_BLOCK_PAYLOAD
+            );
         }
-        out.push(header);
-        let size = (block.payload.len() as u32).min(0x00FF_FFFF);
-        out.extend_from_slice(&size.to_be_bytes()[1..4]);
-        out.extend_from_slice(&block.payload[..size as usize]);
     }
-    out.extend_from_slice(&file.frames);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = parent.join(format!(
         ".wvp_tmp_flacmeta_{}_{}.flac",
@@ -87,7 +101,31 @@ fn encode_flac_file(path: &Path, file: &FlacFile) -> Result<()> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    std::fs::write(&tmp, out).with_context(|| format!("write flac tmp: {}", tmp.display()))?;
+    // Scope the writer/reader so their handles close before the rename.
+    {
+        let tmp_file =
+            File::create(&tmp).with_context(|| format!("create flac tmp: {}", tmp.display()))?;
+        let mut out = BufWriter::new(tmp_file);
+        out.write_all(b"fLaC")?;
+        let last_index = meta.blocks.len().saturating_sub(1);
+        for (i, block) in meta.blocks.iter().enumerate() {
+            let mut header = block.block_type & 0x7F;
+            if i == last_index {
+                header |= 0x80;
+            }
+            out.write_all(&[header])?;
+            let size = block.payload.len() as u32;
+            out.write_all(&size.to_be_bytes()[1..4])?;
+            out.write_all(&block.payload)?;
+        }
+        // Stream-copy audio frames from the original file (never buffered whole).
+        let src = File::open(path).with_context(|| format!("open flac audio: {}", path.display()))?;
+        let mut src = BufReader::new(src);
+        src.seek(SeekFrom::Start(meta.audio_offset))?;
+        std::io::copy(&mut src, &mut out)
+            .with_context(|| format!("copy flac audio frames: {}", path.display()))?;
+        out.flush()?;
+    }
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(_) => {
@@ -161,8 +199,8 @@ fn vendor_string(payload: &[u8]) -> String {
 
 /// Read all Vorbis comments (KEY=value pairs) from a FLAC file.
 pub fn read_flac_vorbis_comments(path: &Path) -> Result<Vec<(String, String)>> {
-    let file = parse_flac(path)?;
-    Ok(file
+    let meta = parse_flac(path)?;
+    Ok(meta
         .blocks
         .iter()
         .filter(|b| b.block_type == BLOCK_VORBIS_COMMENT)
