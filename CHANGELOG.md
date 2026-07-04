@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+## 0.20260704.0 - 2026-07-04
+
 ### UI Overhaul: Effect Graph, Resizable Panels, Seam Check, MiniMeter (Latest)
 - Effect Graph console now docks under the canvas only (left palette stays full height), with a drag-resizable, height-clamped panel so it can no longer swallow half the window; rows are monospace, severity-colored, truncated with tooltips, and the header shows a validation-issue count.
 - Effect Graph nodes restyled: soft drop shadow, accent-tinted header with underline, slimmer status border with a selection glow, pill-shaped elapsed-time badge, ringed port pins, and cables with a dark underlay for depth. Left/right panels gained sane min/max resize ranges.
