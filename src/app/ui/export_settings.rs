@@ -436,6 +436,7 @@ impl crate::app::WavesPreviewer {
                                             (ViewMode::Mel, "Mel"),
                                             (ViewMode::Tempogram, "Tempogram"),
                                             (ViewMode::Chromagram, "Chromagram"),
+                                            (ViewMode::World, "World (F0/Env)"),
                                         ] {
                                             if ui
                                                 .selectable_label(tab.leaf_view_mode() == vm, label)

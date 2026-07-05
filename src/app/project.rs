@@ -1007,7 +1007,7 @@ pub fn project_spec_sub_view_string(view: EditorSpecSubView) -> String {
 
 pub fn project_other_sub_view_string(view: EditorOtherSubView) -> String {
     match view {
-        EditorOtherSubView::F0 => "f0",
+        EditorOtherSubView::World => "world",
         EditorOtherSubView::Tempogram => "tempogram",
         EditorOtherSubView::Chromagram => "chromagram",
     }
@@ -1035,7 +1035,7 @@ pub fn primary_view_from_project(
     };
     let other_view = match other_sub_view.map(|v| v.trim().to_ascii_lowercase()) {
         Some(v) if v == "chromagram" => EditorOtherSubView::Chromagram,
-        Some(v) if v == "f0" => EditorOtherSubView::F0,
+        Some(v) if v == "world" || v == "f0" => EditorOtherSubView::World,
         Some(v) if v == "tempogram" => EditorOtherSubView::Tempogram,
         _ => EditorOtherSubView::from_mode(legacy_mode),
     };

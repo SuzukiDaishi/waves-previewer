@@ -313,6 +313,7 @@ pub enum ViewMode {
     Mel,
     Tempogram,
     Chromagram,
+    World,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -333,7 +334,7 @@ pub enum EditorSpecSubView {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum EditorOtherSubView {
-    F0,
+    World,
     #[default]
     Tempogram,
     Chromagram,
@@ -344,7 +345,7 @@ impl EditorPrimaryView {
         match mode {
             ViewMode::Waveform => Self::Wave,
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => Self::Spec,
-            ViewMode::Tempogram | ViewMode::Chromagram => Self::Other,
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World => Self::Other,
         }
     }
 
@@ -380,13 +381,14 @@ impl EditorOtherSubView {
         match mode {
             ViewMode::Chromagram => Self::Chromagram,
             ViewMode::Tempogram => Self::Tempogram,
+            ViewMode::World => Self::World,
             _ => Self::Tempogram,
         }
     }
 
     pub fn to_mode(self) -> ViewMode {
         match self {
-            Self::F0 => ViewMode::Tempogram,
+            Self::World => ViewMode::World,
             Self::Tempogram => ViewMode::Tempogram,
             Self::Chromagram => ViewMode::Chromagram,
         }
@@ -916,6 +918,17 @@ impl ChannelView {
     }
 }
 
+/// Transient smoothing/hold state for the editor bottom meter strip
+/// (spectrum analyzer ballistics, per-channel peak hold, correlation).
+#[derive(Clone, Debug, Default)]
+pub struct MiniMeterState {
+    pub spectrum_db: Vec<f32>,  // smoothed per-column analyzer levels (dBFS)
+    pub peak_hold_db: Vec<f32>, // per-channel peak hold (dBFS)
+    pub corr: f32,              // smoothed stereo correlation in [-1, 1]
+    pub last_time: f64,         // ui time of the previous update
+    pub active: bool,           // decay animation still in motion
+}
+
 pub struct EditorTab {
     pub path: PathBuf,
     pub display_name: String,
@@ -1014,6 +1027,7 @@ pub struct EditorTab {
     pub auto_trim_config: AutoTrimConfig,
     pub auto_trim_state: Option<AutoTrimState>,
     pub loop_detect_state: Option<LoopDetectState>,
+    pub mini_meter: MiniMeterState, // transient bottom meter strip state
 }
 
 impl EditorTab {
@@ -1155,6 +1169,7 @@ pub enum EditorAnalysisKind {
     Spectrogram,
     Tempogram,
     Chromagram,
+    World,
 }
 
 #[derive(Clone, Debug)]
@@ -1181,6 +1196,23 @@ pub struct ChromagramData {
     pub confidence: f32,
 }
 
+/// WORLD vocoder analysis results (F0 trajectory + spectral envelope)
+/// resampled onto the editor feature-view frame grid.
+#[derive(Clone, Debug)]
+pub struct WorldFeatureData {
+    pub frames: usize,
+    pub bins: usize,       // envelope bins (fft_size / 2 + 1)
+    pub frame_step: usize, // hop in samples at `sample_rate`
+    pub sample_rate: u32,
+    pub fft_size: usize,
+    pub f0_floor: f32,
+    pub f0_ceil: f32,
+    pub f0_values: Vec<f32>,  // per frame, 0.0 = unvoiced
+    pub env_db: Vec<f32>,     // frames * bins, power dB
+    pub median_f0: Option<f32>,
+    pub voiced_ratio: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EditorAnalysisKey {
     pub path: PathBuf,
@@ -1191,6 +1223,7 @@ pub struct EditorAnalysisKey {
 pub enum EditorFeatureAnalysisData {
     Tempogram(TempogramData),
     Chromagram(ChromagramData),
+    World(WorldFeatureData),
 }
 
 pub enum EditorFeatureAnalysisJobMsg {
@@ -1203,6 +1236,11 @@ pub enum EditorFeatureAnalysisJobMsg {
         path: PathBuf,
         generation: u64,
         data: ChromagramData,
+    },
+    WorldDone {
+        path: PathBuf,
+        generation: u64,
+        data: WorldFeatureData,
     },
 }
 

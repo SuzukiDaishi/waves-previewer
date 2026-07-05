@@ -720,6 +720,7 @@ fn commit_session_with_providers(
 
 fn build_execution_providers(cfg: &TranscriptAiConfig) -> Vec<ep::ExecutionProviderDispatch> {
     let mut out = Vec::new();
+    #[cfg(windows)]
     let dml = ep::DirectML::default()
         .with_device_id(cfg.dml_device_id.max(0))
         .build()

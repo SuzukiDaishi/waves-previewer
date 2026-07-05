@@ -246,7 +246,8 @@ impl super::WavesPreviewer {
                         ViewMode::Log => ViewMode::Mel,
                         ViewMode::Mel => ViewMode::Tempogram,
                         ViewMode::Tempogram => ViewMode::Chromagram,
-                        ViewMode::Chromagram => ViewMode::Waveform,
+                        ViewMode::Chromagram => ViewMode::World,
+                        ViewMode::World => ViewMode::Waveform,
                     };
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.set_leaf_view_mode(next);

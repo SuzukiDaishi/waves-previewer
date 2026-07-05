@@ -4566,6 +4566,7 @@ fn render_gui_session_screenshot(
             ViewMode::Mel => "mel",
             ViewMode::Tempogram => "tempogram",
             ViewMode::Chromagram => "chromagram",
+            ViewMode::World => "world",
         }));
     }
     if let Some(flag) = waveform_overlay {
@@ -4636,6 +4637,7 @@ fn view_mode_name(mode: crate::cli::CliViewMode) -> &'static str {
         crate::cli::CliViewMode::Mel => "mel",
         crate::cli::CliViewMode::Tempogram => "tempogram",
         crate::cli::CliViewMode::Chromagram => "chromagram",
+        crate::cli::CliViewMode::World => "world",
     }
 }
 

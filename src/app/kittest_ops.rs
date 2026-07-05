@@ -58,6 +58,33 @@ impl super::WavesPreviewer {
         self.show_export_settings
     }
 
+    /// WORLD feature analysis result for the active tab, if cached:
+    /// (frames, envelope bins, voiced ratio).
+    pub fn test_world_features_ready(&self) -> Option<(usize, usize, f32)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        let key = crate::app::types::EditorAnalysisKey {
+            path: tab.path.clone(),
+            kind: crate::app::types::EditorAnalysisKind::World,
+        };
+        match self.editor_feature_cache.get(&key)?.as_ref() {
+            crate::app::types::EditorFeatureAnalysisData::World(data) => {
+                Some((data.frames, data.bins, data.voiced_ratio))
+            }
+            _ => None,
+        }
+    }
+
+    /// Mini meter strip state for the active tab:
+    /// (spectrum columns, per-channel peak-hold count, smoothed correlation).
+    pub fn test_mini_meter_state(&self) -> Option<(usize, usize, f32)> {
+        let tab = self.tabs.get(self.active_tab?)?;
+        Some((
+            tab.mini_meter.spectrum_db.len(),
+            tab.mini_meter.peak_hold_db.len(),
+            tab.mini_meter.corr,
+        ))
+    }
+
     pub fn test_show_transcription_settings(&self) -> bool {
         self.show_transcription_settings
     }

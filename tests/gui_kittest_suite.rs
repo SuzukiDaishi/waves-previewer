@@ -2007,6 +2007,7 @@ mod kittest_suite {
             (neowaves::ViewMode::Mel, "Mel", "Mel"),
             (neowaves::ViewMode::Tempogram, "Tempogram", "Tempogram"),
             (neowaves::ViewMode::Chromagram, "Chromagram", "Chromagram"),
+            (neowaves::ViewMode::World, "World (F0/Env)", "World"),
             (neowaves::ViewMode::Waveform, "Wave", "Waveform"),
         ];
         for (mode, combo_value, debug_name) in cases {
@@ -2036,6 +2037,7 @@ mod kittest_suite {
             "Mel",
             "Tempogram",
             "Chromagram",
+            "World",
             "Waveform",
         ];
         for expected_view in expected {
@@ -2522,6 +2524,82 @@ mod kittest_suite {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn world_view_runs_analysis_and_caches_features() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::World));
+        let start = Instant::now();
+        let features = loop {
+            harness.run_steps(1);
+            if let Some(features) = harness.state().test_world_features_ready() {
+                break features;
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                panic!("WORLD analysis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let (frames, bins, voiced_ratio) = features;
+        assert!(frames > 0, "WORLD analysis should produce frames");
+        assert!(bins > 0, "WORLD analysis should produce envelope bins");
+        assert!(
+            (0.0..=1.0).contains(&voiced_ratio),
+            "voiced ratio must be a fraction, got {voiced_ratio}"
+        );
+    }
+
+    #[test]
+    fn editor_mini_meter_populates_state() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(8);
+        let (spectrum_cols, peak_channels, corr) = harness
+            .state()
+            .test_mini_meter_state()
+            .expect("mini meter state for active tab");
+        assert!(
+            spectrum_cols > 0,
+            "spectrum analyzer columns should be sized after drawing"
+        );
+        let tab_idx = harness.state().active_tab.unwrap();
+        let n_ch = harness.state().tabs[tab_idx].ch_samples.len();
+        assert_eq!(
+            peak_channels, n_ch,
+            "peak meter should track one bar per channel"
+        );
+        assert!((-1.0..=1.0).contains(&corr), "correlation must stay in [-1, 1]");
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn editor_mini_meter_frame_timing_metrics() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(4);
+        let steps = 120usize;
+        let start = Instant::now();
+        for _ in 0..steps {
+            harness.run_steps(1);
+        }
+        let elapsed = start.elapsed();
+        let per_ms = elapsed.as_secs_f64() * 1000.0 / steps as f64;
+        eprintln!(
+            "editor_mini_meter_frame_timing_metrics: steps={} total_ms={:.2} per_frame_ms={:.2}",
+            steps,
+            elapsed.as_secs_f64() * 1000.0,
+            per_ms
+        );
     }
 
     #[test]
@@ -3081,6 +3159,7 @@ mod kittest_suite {
             neowaves::ViewMode::Mel,
             neowaves::ViewMode::Tempogram,
             neowaves::ViewMode::Chromagram,
+            neowaves::ViewMode::World,
         ] {
             assert!(harness.state_mut().test_set_view_mode(mode));
             harness.run_steps(1);

@@ -4,6 +4,20 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### New WORLD Feature View (F0 / Spectral Envelope)
+- New editor view "World (F0/Env)" alongside Tempogram/Chromagram: a CheapTrick spectral-envelope heatmap on a log-frequency axis with the DIO+StoneMask F0 trajectory overlaid as a cyan polyline, a live F0 readout at the playhead, and frequency-axis ticks in the gutter.
+- The analysis is an independent pure-Rust port of the WORLD vocoder's core algorithms (mmorise/World, BSD-3-Clause) in `render/world_features.rs` — DIO band-wise zero-crossing F0 candidates, StoneMask instantaneous-frequency refinement, CheapTrick pitch-adaptive envelope — with unit tests covering sines (55/100/440 Hz), sweeps, silence/noise voicing decisions, and envelope peak placement.
+- Runs as a cached background job like the other feature views (auto-starts on view switch, cancel/progress wired, invalidated on edits); frame period scales with clip length so long files stay bounded. Inspector shows median F0, voiced ratio, hop size, and a Re-analyze button.
+- Wired through session persistence (`other_view: "world"`, legacy `"f0"` accepted), the `S` view-cycle hotkey, `--open-view-mode world`, export-settings view picker, and kittest coverage (view switching + an end-to-end analysis test).
+
+### MiniMeter Overhaul: Vectorscope, Per-Channel Peaks, Better Analyzer
+- New STEREO panel in the editor bottom strip: goniometer/vectorscope (Lissajous, auto-gain, L/R diagonal guides) plus a smoothed correlation bar (-1..+1). Mono files collapse onto the mid axis and show a MONO badge; files with 3+ channels visualize the first pair and show a CH1+2 badge.
+- PEAK panel now draws one bar per channel for any channel count (L/R labels for stereo, numbered otherwise), each with its own peak-hold and RMS tick; the readout shows the loudest channel.
+- Spectrum analyzer is dual-resolution: a long FFT (~170 ms window) feeds the low band so bass peaks are localized instead of smeared, a short FFT keeps the high band fast, with a log-domain blend across the crossover; sub-bin columns are interpolated so lows render as a smooth curve.
+- Analyzer ballistics: fast attack (~10 ms) with a prompt release (~100 ms) so bars fall cleanly back to the floor when the signal goes quiet, and the strip keeps animating until the decay settles after playback stops.
+- Meter DSP moved to `render/mini_meter.rs` with unit tests (low/mid/high peak accuracy, dBFS calibration, ballistics, correlation) and a frame-budget test; per-frame state lives on the tab (no per-frame allocations), keeping the strip comfortably inside a 30 fps budget.
+- Fixed Linux link failure of the `neowaves` binary: the DirectML execution provider was referenced unconditionally in transcription session setup (Windows-only symbol).
+
 ## 0.20260704.0 - 2026-07-04
 
 ### UI Overhaul: Effect Graph, Resizable Panels, Seam Check, MiniMeter (Latest)

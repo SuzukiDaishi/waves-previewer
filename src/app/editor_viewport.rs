@@ -14,7 +14,11 @@ use super::types::{
     EditorViewportRenderCache, EditorViewportRenderKey, EditorViewportRenderPayload,
     EditorViewportRenderQuality, EditorViewportWaveLane, EditorViewportWavePayload,
     SpectrogramConfig, SpectrogramData, SpectrogramScale, TempogramData, ViewMode,
+    WorldFeatureData,
 };
+
+/// Bottom of the log-frequency axis used by the WORLD feature view.
+pub(crate) const WORLD_VIEW_MIN_HZ: f32 = 40.0;
 
 #[derive(Clone, Debug)]
 pub(super) struct EditorViewportHint {
@@ -77,6 +81,22 @@ enum EditorViewportRequest {
         quality: EditorViewportRenderQuality,
         key: EditorViewportRenderKey,
         data: Arc<ChromagramData>,
+        wave_width_px: usize,
+        lane_height_px: usize,
+        lane_count: usize,
+        start: usize,
+        end: usize,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        cfg: SpectrogramConfig,
+        view_mode: ViewMode,
+    },
+    World {
+        tab_path: PathBuf,
+        generation: u64,
+        quality: EditorViewportRenderQuality,
+        key: EditorViewportRenderKey,
+        data: Arc<WorldFeatureData>,
         wave_width_px: usize,
         lane_height_px: usize,
         lane_count: usize,
@@ -421,6 +441,7 @@ impl super::WavesPreviewer {
         let kind = match view_mode {
             ViewMode::Tempogram => EditorAnalysisKind::Tempogram,
             ViewMode::Chromagram => EditorAnalysisKind::Chromagram,
+            ViewMode::World => EditorAnalysisKind::World,
             _ => return None,
         };
         Some(EditorAnalysisKey {
@@ -444,7 +465,7 @@ impl super::WavesPreviewer {
                     return None;
                 }
             }
-            ViewMode::Tempogram | ViewMode::Chromagram => {
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World => {
                 let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
                 if self.editor_feature_cache.contains_key(&analysis_key) {
                     EditorViewportPayloadKind::Spectral
@@ -642,6 +663,29 @@ impl super::WavesPreviewer {
                     view_mode: hint.view_mode,
                 })
             }
+            ViewMode::World => {
+                let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
+                let data = match self.editor_feature_cache.get(&analysis_key)?.as_ref() {
+                    EditorFeatureAnalysisData::World(data) => Arc::new(data.clone()),
+                    _ => return None,
+                };
+                Some(EditorViewportRequest::World {
+                    tab_path: tab.path.clone(),
+                    generation,
+                    quality,
+                    key,
+                    data,
+                    wave_width_px: hint.wave_width_px.max(1),
+                    lane_height_px: hint.lane_height_px.max(1),
+                    lane_count: hint.lane_count.max(1),
+                    start: hint.start,
+                    end: hint.end,
+                    vertical_zoom: tab.vertical_zoom,
+                    vertical_view_center: tab.vertical_view_center,
+                    cfg: self.spectro_cfg.clone(),
+                    view_mode: hint.view_mode,
+                })
+            }
         }
     }
 
@@ -763,6 +807,43 @@ impl super::WavesPreviewer {
                     view_mode,
                 } => {
                     let image = Arc::new(Self::render_chromagram_viewport_image(
+                        &data,
+                        wave_width_px,
+                        lane_height_px,
+                        lane_count,
+                        start,
+                        end,
+                        vertical_zoom,
+                        vertical_view_center,
+                        &cfg,
+                        view_mode,
+                        quality,
+                    ));
+                    let _ = tx.send(EditorViewportJobMsg::Ready {
+                        tab_path,
+                        generation,
+                        quality,
+                        key,
+                        payload: EditorViewportRenderPayload::Image(image),
+                    });
+                }
+                EditorViewportRequest::World {
+                    tab_path,
+                    generation,
+                    quality,
+                    key,
+                    data,
+                    wave_width_px,
+                    lane_height_px,
+                    lane_count,
+                    start,
+                    end,
+                    vertical_zoom,
+                    vertical_view_center,
+                    cfg,
+                    view_mode,
+                } => {
+                    let image = Arc::new(Self::render_world_viewport_image(
                         &data,
                         wave_width_px,
                         lane_height_px,
@@ -1145,6 +1226,106 @@ impl super::WavesPreviewer {
                         .unwrap_or(0.0)
                         .clamp(0.0, 1.0)
                         .sqrt();
+                    let pixel_idx =
+                        (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
+                    if let Some(pixel) = image.pixels.get_mut(pixel_idx) {
+                        *pixel = db_to_color(-80.0 + norm * 80.0);
+                    }
+                }
+            }
+        }
+        image
+    }
+
+    /// Log-frequency mapping shared by the WORLD envelope heatmap and the
+    /// F0 overlay drawn in the editor paint pass: fraction 0.0 = bottom
+    /// (WORLD_VIEW_MIN_HZ), 1.0 = top (Nyquist).
+    pub(crate) fn world_view_freq_to_frac(freq_hz: f32, sample_rate: u32) -> f32 {
+        let nyquist = (sample_rate.max(1) as f32 * 0.5).max(WORLD_VIEW_MIN_HZ * 2.0);
+        let f = freq_hz.clamp(WORLD_VIEW_MIN_HZ, nyquist);
+        (f / WORLD_VIEW_MIN_HZ).ln() / (nyquist / WORLD_VIEW_MIN_HZ).ln()
+    }
+
+    pub(crate) fn world_view_frac_to_freq(frac: f32, sample_rate: u32) -> f32 {
+        let nyquist = (sample_rate.max(1) as f32 * 0.5).max(WORLD_VIEW_MIN_HZ * 2.0);
+        WORLD_VIEW_MIN_HZ * (nyquist / WORLD_VIEW_MIN_HZ).powf(frac.clamp(0.0, 1.0))
+    }
+
+    /// Spectral-envelope heatmap for the WORLD feature view. The vertical
+    /// axis is log-frequency (WORLD_VIEW_MIN_HZ..Nyquist); levels are
+    /// normalized against the loudest visible envelope value so quiet
+    /// clips still show contrast. The F0 curve itself is overlaid as a
+    /// polyline in the editor paint pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_world_viewport_image(
+        data: &WorldFeatureData,
+        wave_width_px: usize,
+        lane_height_px: usize,
+        lane_count: usize,
+        start: usize,
+        end: usize,
+        vertical_zoom: f32,
+        vertical_view_center: f32,
+        cfg: &SpectrogramConfig,
+        view_mode: ViewMode,
+        quality: EditorViewportRenderQuality,
+    ) -> ColorImage {
+        let (target_w, target_lane_h) =
+            Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
+        let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
+        let mut image = ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
+        let Some((f0, f1)) =
+            Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
+        else {
+            return image;
+        };
+        if data.bins == 0 || data.env_db.is_empty() {
+            return image;
+        }
+        let frame_count = f1.saturating_sub(f0).max(1);
+        let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+            view_mode,
+            vertical_zoom,
+            vertical_view_center,
+            cfg,
+        );
+        // Normalize against the loudest visible envelope value.
+        let mut vmax = f32::MIN;
+        for frame in f0..f1.min(data.frames) {
+            let row = &data.env_db[frame * data.bins..(frame + 1) * data.bins];
+            for v in row {
+                if v.is_finite() {
+                    vmax = vmax.max(*v);
+                }
+            }
+        }
+        if !vmax.is_finite() {
+            return image;
+        }
+        let range_db = 90.0f32;
+        let nyquist = (data.sample_rate.max(1) as f32 * 0.5).max(WORLD_VIEW_MIN_HZ * 2.0);
+        let bin_hz = nyquist / data.bins.saturating_sub(1).max(1) as f32;
+        for lane_idx in 0..lane_count.max(1) {
+            let lane_y0 = lane_idx.saturating_mul(target_lane_h);
+            for x in 0..target_w {
+                let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+                let base = frame_idx.min(data.frames.saturating_sub(1)) * data.bins;
+                for y in 0..target_lane_h {
+                    let frac_local =
+                        1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
+                    let frac = visible_min + frac_local * (visible_max - visible_min);
+                    let freq = Self::world_view_frac_to_freq(frac, data.sample_rate);
+                    let pos = (freq / bin_hz).clamp(0.0, data.bins.saturating_sub(1) as f32);
+                    let b0 = pos.floor() as usize;
+                    let tfrac = pos - b0 as f32;
+                    let v0 = data.env_db.get(base + b0).copied().unwrap_or(vmax - range_db);
+                    let v1 = data
+                        .env_db
+                        .get(base + (b0 + 1).min(data.bins.saturating_sub(1)))
+                        .copied()
+                        .unwrap_or(v0);
+                    let db = v0 + (v1 - v0) * tfrac;
+                    let norm = ((db - (vmax - range_db)) / range_db).clamp(0.0, 1.0);
                     let pixel_idx =
                         (lane_y0 + y.min(target_lane_h.saturating_sub(1))) * target_w + x;
                     if let Some(pixel) = image.pixels.get_mut(pixel_idx) {

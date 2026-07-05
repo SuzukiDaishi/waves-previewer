@@ -101,6 +101,88 @@ impl super::WavesPreviewer {
         });
     }
 
+    fn queue_world_data(
+        &mut self,
+        path: PathBuf,
+        mono: Vec<f32>,
+        sample_rate: u32,
+        generation: u64,
+    ) {
+        self.ensure_feature_analysis_channel();
+        let Some(tx) = self.editor_feature_tx.as_ref().cloned() else {
+            return;
+        };
+        let key = EditorAnalysisKey {
+            path: path.clone(),
+            kind: EditorAnalysisKind::World,
+        };
+        let cancel = self
+            .editor_feature_cancel
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        std::thread::spawn(move || {
+            super::threading::lower_current_thread_priority();
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let data = Self::compute_world_feature_data(&mono, sample_rate);
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let _ = tx.send(EditorFeatureAnalysisJobMsg::WorldDone {
+                path,
+                generation,
+                data,
+            });
+        });
+    }
+
+    /// WORLD (DIO + StoneMask + CheapTrick) analysis of a mono buffer,
+    /// packaged for the editor feature pipeline. The frame period grows
+    /// with clip length so long files stay bounded in frames and cost.
+    pub(super) fn compute_world_feature_data(
+        mono: &[f32],
+        sample_rate: u32,
+    ) -> super::types::WorldFeatureData {
+        let sr = sample_rate.max(1);
+        let duration_ms = mono.len() as f64 * 1_000.0 / sr as f64;
+        let frame_period_ms = (duration_ms / 6_000.0).max(5.0);
+        let features =
+            crate::app::render::world_features::analyze_world(mono, sr, frame_period_ms);
+        let frame_step = ((sr as f64 * features.frame_period_ms / 1_000.0).round() as usize).max(1);
+        let mut voiced: Vec<f32> = features
+            .f0
+            .iter()
+            .copied()
+            .filter(|f0| *f0 > 0.0)
+            .collect();
+        let voiced_ratio = if features.f0.is_empty() {
+            0.0
+        } else {
+            voiced.len() as f32 / features.f0.len() as f32
+        };
+        let median_f0 = if voiced.is_empty() {
+            None
+        } else {
+            voiced.sort_by(f32::total_cmp);
+            Some(voiced[voiced.len() / 2])
+        };
+        super::types::WorldFeatureData {
+            frames: features.frames,
+            bins: features.bins,
+            frame_step,
+            sample_rate: sr,
+            fft_size: features.fft_size,
+            f0_floor: features.f0_floor as f32,
+            f0_ceil: features.f0_ceil as f32,
+            f0_values: features.f0,
+            env_db: features.envelope_db,
+            median_f0,
+            voiced_ratio,
+        }
+    }
+
     pub(super) fn queue_feature_analysis_for_tab(&mut self, tab_idx: usize) {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
@@ -108,6 +190,7 @@ impl super::WavesPreviewer {
         let kind = match tab.leaf_view_mode() {
             ViewMode::Tempogram => EditorAnalysisKind::Tempogram,
             ViewMode::Chromagram => EditorAnalysisKind::Chromagram,
+            ViewMode::World => EditorAnalysisKind::World,
             _ => return,
         };
         let key = EditorAnalysisKey {
@@ -142,6 +225,9 @@ impl super::WavesPreviewer {
             EditorAnalysisKind::Chromagram => {
                 self.queue_chromagram_data(key.path, mono, sample_rate, generation);
             }
+            EditorAnalysisKind::World => {
+                self.queue_world_data(key.path, mono, sample_rate, generation);
+            }
             EditorAnalysisKind::Spectrogram => {}
         }
     }
@@ -155,7 +241,7 @@ impl super::WavesPreviewer {
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                 self.queue_spectrogram_for_tab(tab_idx);
             }
-            ViewMode::Tempogram | ViewMode::Chromagram => {
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World => {
                 self.queue_feature_analysis_for_tab(tab_idx);
             }
         }
@@ -198,6 +284,21 @@ impl super::WavesPreviewer {
                         key,
                         generation,
                         EditorFeatureAnalysisData::Chromagram(data),
+                    );
+                }
+                EditorFeatureAnalysisJobMsg::WorldDone {
+                    path,
+                    generation,
+                    data,
+                } => {
+                    let key = EditorAnalysisKey {
+                        path,
+                        kind: EditorAnalysisKind::World,
+                    };
+                    self.finish_feature_analysis(
+                        key,
+                        generation,
+                        EditorFeatureAnalysisData::World(data),
                     );
                 }
             }
