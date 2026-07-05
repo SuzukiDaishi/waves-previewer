@@ -674,7 +674,8 @@ impl super::WavesPreviewer {
             ViewMode::World => {
                 let analysis_key = Self::editor_feature_key_for_view(&tab.path, hint.view_mode)?;
                 let data = match self.editor_feature_cache.get(&analysis_key)?.as_ref() {
-                    EditorFeatureAnalysisData::World(data) => Arc::new(data.clone()),
+                    // Cheap Arc clone; the analysis payload can be tens of MB.
+                    EditorFeatureAnalysisData::World(data) => data.clone(),
                     _ => return None,
                 };
                 Some(EditorViewportRequest::World {
@@ -1326,16 +1327,9 @@ impl super::WavesPreviewer {
             vertical_view_center,
             cfg,
         );
-        // Normalize against the loudest visible envelope value.
-        let mut vmax = f32::MIN;
-        for frame in f0..f1.min(data.frames) {
-            let row = &data.env_db[frame * data.bins..(frame + 1) * data.bins];
-            for v in row {
-                if v.is_finite() {
-                    vmax = vmax.max(*v);
-                }
-            }
-        }
+        // Normalize against the precomputed file-wide envelope maximum so
+        // the ramp is stable while panning and no per-render scan is needed.
+        let vmax = data.env_max_db;
         if !vmax.is_finite() {
             return image;
         }

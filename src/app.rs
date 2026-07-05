@@ -511,6 +511,9 @@ pub struct WavesPreviewer {
     pub editor_feature_cache: HashMap<EditorAnalysisKey, std::sync::Arc<EditorFeatureAnalysisData>>,
     pub editor_feature_inflight: HashSet<EditorAnalysisKey>,
     pub editor_feature_progress: HashMap<EditorAnalysisKey, AnalysisProgress>,
+    /// Live 0..=100 progress written by analysis worker threads (WORLD).
+    pub editor_feature_progress_shared:
+        HashMap<EditorAnalysisKey, Arc<std::sync::atomic::AtomicU32>>,
     pub editor_feature_cancel:
         HashMap<EditorAnalysisKey, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub editor_feature_generation: HashMap<EditorAnalysisKey, u64>,
@@ -2357,6 +2360,9 @@ impl WavesPreviewer {
             tab.last_amplitude_nav_click_at = 0.0;
             tab.last_amplitude_nav_click_pos = None;
             tab.dirty = state.dirty;
+            // Keep the worker-facing Arc mirror in sync with the restored
+            // buffers; stale mirrors would feed old audio to analysis jobs.
+            tab.ch_samples_arc = Arc::new(tab.ch_samples.clone());
             Self::editor_clamp_ranges(tab);
             Self::invalidate_editor_viewport_cache(tab);
             Self::update_markers_dirty(tab);
@@ -2373,10 +2379,18 @@ impl WavesPreviewer {
         };
         self.audio.stop();
         self.audio.set_samples_channels(channels);
-        self.playback_mark_buffer_source(PlaybackSourceKind::EditorTab(path), buffer_sample_rate);
+        self.playback_mark_buffer_source(
+            PlaybackSourceKind::EditorTab(path.clone()),
+            buffer_sample_rate,
+        );
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
         }
+        // The restored audio invalidates any analysis of the pre-undo
+        // buffers (spectrogram, tempogram/chromagram/WORLD); drop them so
+        // the views re-analyze what is actually audible now.
+        self.cancel_spectrogram_for_path(&path);
+        self.cancel_feature_analysis_for_path(&path);
         true
     }
 

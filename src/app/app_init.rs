@@ -137,6 +137,7 @@ impl WavesPreviewer {
             editor_feature_cache: HashMap::new(),
             editor_feature_inflight: HashSet::new(),
             editor_feature_progress: HashMap::new(),
+            editor_feature_progress_shared: HashMap::new(),
             editor_feature_cancel: HashMap::new(),
             editor_feature_generation: HashMap::new(),
             editor_feature_generation_counter: 0,

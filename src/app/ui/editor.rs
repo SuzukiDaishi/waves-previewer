@@ -2206,7 +2206,7 @@ impl crate::app::WavesPreviewer {
             _ => None,
         };
         let world_data = world_feature_cache.as_deref().and_then(|data| match data {
-            EditorFeatureAnalysisData::World(data) => Some(data),
+            EditorFeatureAnalysisData::World(data) => Some(data.as_ref()),
             _ => None,
         });
         let mut touch_spectro_cache = false;
@@ -3740,9 +3740,20 @@ impl crate::app::WavesPreviewer {
                         } else {
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let msg = if feature_loading {
-                                "Analyzing WORLD features (F0 / spectral envelope)..."
+                                let pct = feature_progress
+                                    .map(|(done, total, _)| {
+                                        if total > 0 {
+                                            (done as f32 / total as f32 * 100.0).round()
+                                        } else {
+                                            0.0
+                                        }
+                                    })
+                                    .unwrap_or(0.0);
+                                format!(
+                                    "Analyzing WORLD features (F0 / spectral envelope)... {pct:.0}%"
+                                )
                             } else {
-                                "WORLD features not ready"
+                                "WORLD features not ready".to_string()
                             };
                             painter.text(
                                 egui::pos2(wave_left + 6.0, rect.top() + 6.0),
@@ -3830,6 +3841,13 @@ impl crate::app::WavesPreviewer {
                             let last_frame = ((end / frame_step) + 2).min(data.frames);
                             // Each curve gets a dark halo pass underneath so
                             // the line stays readable on bright heatmap areas.
+                            // Decimate to at most ~2 points per pixel so
+                            // long clips stay cheap to draw; a window with any
+                            // unvoiced frame breaks the line like the raw data
+                            // would.
+                            let frame_span = last_frame.saturating_sub(first_frame).max(1);
+                            let max_points = (wave_w.max(32.0) as usize) * 2;
+                            let frame_step_draw = (frame_span / max_points.max(1)).max(1);
                             let draw_curve = |values: &[f32], color: Color32, width: f32| {
                                 let halo = Color32::from_rgba_unmultiplied(8, 10, 14, 210);
                                 for (pass_color, pass_width) in
@@ -3837,10 +3855,25 @@ impl crate::app::WavesPreviewer {
                                 {
                                     let stroke = egui::Stroke::new(pass_width, pass_color);
                                     let mut last_pt: Option<egui::Pos2> = None;
-                                    for frame in first_frame..last_frame {
-                                        let f0 = values.get(frame).copied().unwrap_or(0.0);
-                                        if f0 <= 0.0 {
+                                    let mut frame = first_frame;
+                                    while frame < last_frame {
+                                        let window_end =
+                                            (frame + frame_step_draw).min(last_frame);
+                                        let mut f0 = 0.0f32;
+                                        let mut voiced = true;
+                                        for j in frame..window_end {
+                                            let v = values.get(j).copied().unwrap_or(0.0);
+                                            if v <= 0.0 {
+                                                voiced = false;
+                                                break;
+                                            }
+                                            if j == frame {
+                                                f0 = v;
+                                            }
+                                        }
+                                        if !voiced {
                                             last_pt = None;
+                                            frame = window_end;
                                             continue;
                                         }
                                         let sample = frame * frame_step;
@@ -3862,6 +3895,7 @@ impl crate::app::WavesPreviewer {
                                             );
                                         }
                                         last_pt = Some(pt);
+                                        frame = window_end;
                                     }
                                 }
                             };

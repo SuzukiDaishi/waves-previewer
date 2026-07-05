@@ -2619,6 +2619,33 @@ mod kittest_suite {
             "resynthesis must push an undo state"
         );
         assert!(harness.state().tabs[tab_idx].dirty, "tab should be dirty");
+
+        // Ctrl+Z must restore the pre-resynthesis audio, keep the worker
+        // Arc mirror in sync, and drop the stale WORLD analysis so the
+        // view re-analyzes what is audible again.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        harness.run_steps(3);
+        let restored_fp = fingerprint(harness.state());
+        assert!(
+            (restored_fp - before_fp).abs() < before_fp * 0.001,
+            "undo should restore the original audio (before={before_fp}, restored={restored_fp})"
+        );
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            let arc_fp: f64 = tab.ch_samples_arc[0]
+                .iter()
+                .take(48_000)
+                .map(|v| (*v as f64).abs())
+                .sum();
+            assert!(
+                (arc_fp - restored_fp).abs() < restored_fp.abs() * 0.001 + 1e-9,
+                "ch_samples_arc must mirror the restored buffers"
+            );
+        }
+        assert!(
+            harness.state().test_world_features_ready().is_none(),
+            "undo must invalidate the stale WORLD analysis cache"
+        );
     }
 
     #[test]

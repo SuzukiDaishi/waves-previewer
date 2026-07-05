@@ -56,6 +56,10 @@ impl crate::app::WavesPreviewer {
         tab.samples_len_visual = tab.samples_len;
         tab.loading = false;
         tab.loading_waveform_minmax.clear();
+        // Analysis workers (spectrogram / tempogram / chromagram / WORLD)
+        // read this Arc mirror; a stale mirror would silently feed them
+        // pre-edit audio.
+        tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
         let (waveform_minmax, waveform_pyramid) =
             Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
         tab.waveform_minmax = waveform_minmax;

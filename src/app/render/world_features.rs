@@ -85,6 +85,17 @@ pub struct WorldFeatures {
 
 /// Runs DIO + StoneMask + CheapTrick on a mono signal.
 pub fn analyze_world(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> WorldFeatures {
+    analyze_world_with_progress(mono, sample_rate, frame_period_ms, None)
+}
+
+/// [`analyze_world`] with an optional progress sink (called with 0.0..=1.0
+/// from the analysis thread; keep the callback cheap).
+pub fn analyze_world_with_progress(
+    mono: &[f32],
+    sample_rate: u32,
+    frame_period_ms: f64,
+    progress: Option<&dyn Fn(f32)>,
+) -> WorldFeatures {
     let fft_size = cheaptrick_fft_size(sample_rate.max(1));
     let bins = fft_size / 2 + 1;
     if mono.is_empty() || sample_rate == 0 || !(frame_period_ms > 0.0) {
@@ -112,10 +123,45 @@ pub fn analyze_world(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Wo
         .collect();
 
     let mut planner = RealFftPlanner::<f64>::new();
-    let f0_dio = dio_f0(&x, fs, frame_period_ms, &temporal_positions, &mut planner);
-    let f0 = stonemask(&x, fs, &temporal_positions, &f0_dio, &mut planner);
-    let envelope_db = cheaptrick(&x, fs, &temporal_positions, &f0, fft_size, &mut planner);
-    let aperiodicity = d4c(&x, fs, &temporal_positions, &f0, fft_size, &mut planner);
+    let report = |v: f32| {
+        if let Some(cb) = progress {
+            cb(v.clamp(0.0, 1.0));
+        }
+    };
+    report(0.01);
+    let f0_dio = dio_f0(
+        &x,
+        fs,
+        frame_period_ms,
+        &temporal_positions,
+        &mut planner,
+        &|p| report(0.01 + p * 0.34),
+    );
+    report(0.35);
+    let f0 = stonemask(&x, fs, &temporal_positions, &f0_dio, &mut planner, &|p| {
+        report(0.35 + p * 0.20)
+    });
+    report(0.55);
+    let envelope_db = cheaptrick(
+        &x,
+        fs,
+        &temporal_positions,
+        &f0,
+        fft_size,
+        &mut planner,
+        &|p| report(0.55 + p * 0.25),
+    );
+    report(0.80);
+    let aperiodicity = d4c(
+        &x,
+        fs,
+        &temporal_positions,
+        &f0,
+        fft_size,
+        &mut planner,
+        &|p| report(0.80 + p * 0.19),
+    );
+    report(1.0);
 
     WorldFeatures {
         frame_period_ms,
@@ -299,6 +345,7 @@ fn dio_f0(
     frame_period_ms: f64,
     temporal_positions: &[f64],
     planner: &mut RealFftPlanner<f64>,
+    progress: &dyn Fn(f32),
 ) -> Vec<f64> {
     let f0_length = temporal_positions.len();
     let number_of_bands = 1 + ((F0_CEIL_HZ / F0_FLOOR_HZ).log2() * CHANNELS_IN_OCTAVE) as usize;
@@ -329,6 +376,7 @@ fn dio_f0(
     let mut candidate = vec![0.0f64; f0_length];
     let mut score = vec![0.0f64; f0_length];
     for (band, &boundary_f0) in boundary_f0_list.iter().enumerate() {
+        progress(0.1 + 0.9 * band as f32 / number_of_bands.max(1) as f32);
         get_f0_candidate_from_raw_event(
             boundary_f0,
             actual_fs,
@@ -754,11 +802,19 @@ fn stonemask(
     temporal_positions: &[f64],
     f0: &[f64],
     planner: &mut RealFftPlanner<f64>,
+    progress: &dyn Fn(f32),
 ) -> Vec<f64> {
+    let total = temporal_positions.len().max(1);
     temporal_positions
         .iter()
         .zip(f0.iter())
-        .map(|(&position, &initial_f0)| get_refined_f0(x, fs, position, initial_f0, planner))
+        .enumerate()
+        .map(|(i, (&position, &initial_f0))| {
+            if i % 256 == 0 {
+                progress(i as f32 / total as f32);
+            }
+            get_refined_f0(x, fs, position, initial_f0, planner)
+        })
         .collect()
 }
 
@@ -905,6 +961,7 @@ fn cheaptrick(
     f0: &[f64],
     fft_size: usize,
     planner: &mut RealFftPlanner<f64>,
+    progress: &dyn Fn(f32),
 ) -> Vec<f32> {
     let bins = fft_size / 2 + 1;
     // Lowest F0 the FFT size supports (cheaptrick.cpp GetF0FloorForCheapTrick).
@@ -912,7 +969,11 @@ fn cheaptrick(
     let mut rng = WorldRandn::new();
     let mut envelope_db = Vec::with_capacity(temporal_positions.len() * bins);
     let mut envelope_log = vec![0.0f64; bins];
-    for (&position, &frame_f0) in temporal_positions.iter().zip(f0.iter()) {
+    let total = temporal_positions.len().max(1);
+    for (i, (&position, &frame_f0)) in temporal_positions.iter().zip(f0.iter()).enumerate() {
+        if i % 128 == 0 {
+            progress(i as f32 / total as f32);
+        }
         let current_f0 = if frame_f0 <= f0_floor { DEFAULT_F0_HZ } else { frame_f0 };
         cheaptrick_general_body(
             x,
@@ -1153,6 +1214,7 @@ fn d4c(
     f0: &[f64],
     fft_size_for_spectrogram: usize,
     planner: &mut RealFftPlanner<f64>,
+    progress: &dyn Fn(f32),
 ) -> Vec<f32> {
     let bins = fft_size_for_spectrogram / 2 + 1;
     let mut rng = WorldRandn::new();
@@ -1185,10 +1247,15 @@ fn d4c(
 
     let mut aperiodicity = Vec::with_capacity(temporal_positions.len() * bins);
     let mut row = vec![0.0f64; bins];
-    for (&position, (&frame_f0, &love_train)) in temporal_positions
+    let total = temporal_positions.len().max(1);
+    for (i, (&position, (&frame_f0, &love_train))) in temporal_positions
         .iter()
         .zip(f0.iter().zip(aperiodicity0.iter()))
+        .enumerate()
     {
+        if i % 128 == 0 {
+            progress(i as f32 / total as f32);
+        }
         if frame_f0 == 0.0 || love_train <= D4C_THRESHOLD {
             // d4c.cpp InitializeAperiodicity: everything is aperiodic.
             aperiodicity

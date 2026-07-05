@@ -4,6 +4,13 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### WORLD Responsiveness / Undo Correctness Pass
+- Fixed Ctrl+Z after destructive edits (including WORLD resynthesis): undo/redo now refreshes the worker-facing buffer mirror and drops stale spectrogram/feature analyses, so the World view (and Spec/Tempo/Chroma) re-analyze the audio that is actually restored instead of showing the pre-undo analysis.
+- WORLD analysis now reports live progress (DIO -> StoneMask -> CheapTrick -> D4C weighted 0-100%): the inspector progress bar animates, the canvas overlay shows a percentage, and the frame loop keeps ticking during analysis so feedback never freezes.
+- Removed every UI-thread stall in the World pipeline: analysis mixdown moved onto the worker thread (applies to Tempogram/Chromagram too), viewport render requests share the cached analysis via Arc instead of deep-cloning tens of MB per pan/zoom, and the envelope maximum is precomputed at analysis time instead of rescanned on every render.
+- F0 curve drawing is decimated to ~2 points per pixel (window-aware so unvoiced gaps still break the line), keeping long clips smooth while editing.
+- Dev builds (`cargo run`) now compile at opt-level 1 with hot DSP crates at full optimization - the WORLD/FFT paths were 10-20x slower unoptimized, which made debug builds feel hung; lib test wall time dropped from ~20 s to ~2 s as a side effect.
+
 ### F0 Editing + WORLD Resynthesis
 - The World view is now an editor: enable "Edit F0 on canvas" and draw the pitch curve with the mouse (left-drag draws, right-drag erases to unvoiced; strokes interpolate in log-frequency so fast drags leave no gaps). Canvas seek/select pause while editing.
 - Curve transforms in the inspector: semitone shift (drag value + apply), 5-frame median smooth, flatten-to-median (monotone), and reset to the analyzed curve. The edited draft renders in orange over the dimmed analyzed curve.

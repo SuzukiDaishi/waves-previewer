@@ -26,7 +26,8 @@ impl super::WavesPreviewer {
     fn queue_tempogram_data(
         &mut self,
         path: PathBuf,
-        mono: Vec<f32>,
+        channels: std::sync::Arc<Vec<Vec<f32>>>,
+        samples_len: usize,
         sample_rate: u32,
         generation: u64,
     ) {
@@ -49,6 +50,7 @@ impl super::WavesPreviewer {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
+            let mono = super::WavesPreviewer::mixdown_channels(&channels, samples_len);
             let data =
                 crate::app::render::music_features::compute_tempogram(&mono, sample_rate, &cfg);
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -65,7 +67,8 @@ impl super::WavesPreviewer {
     fn queue_chromagram_data(
         &mut self,
         path: PathBuf,
-        mono: Vec<f32>,
+        channels: std::sync::Arc<Vec<Vec<f32>>>,
+        samples_len: usize,
         sample_rate: u32,
         generation: u64,
     ) {
@@ -88,6 +91,7 @@ impl super::WavesPreviewer {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
+            let mono = super::WavesPreviewer::mixdown_channels(&channels, samples_len);
             let data =
                 crate::app::render::music_features::compute_chromagram(&mono, sample_rate, &cfg);
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -104,7 +108,8 @@ impl super::WavesPreviewer {
     fn queue_world_data(
         &mut self,
         path: PathBuf,
-        mono: Vec<f32>,
+        channels: std::sync::Arc<Vec<Vec<f32>>>,
+        samples_len: usize,
         sample_rate: u32,
         generation: u64,
     ) {
@@ -121,12 +126,19 @@ impl super::WavesPreviewer {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let shared_progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        self.editor_feature_progress_shared
+            .insert(key.clone(), shared_progress.clone());
         std::thread::spawn(move || {
             super::threading::lower_current_thread_priority();
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
-            let data = Self::compute_world_feature_data(&mono, sample_rate);
+            let mono = super::WavesPreviewer::mixdown_channels(&channels, samples_len);
+            let data = Self::compute_world_feature_data(&mono, sample_rate, &|p: f32| {
+                shared_progress
+                    .store((p * 100.0) as u32, std::sync::atomic::Ordering::Relaxed);
+            });
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
@@ -144,12 +156,17 @@ impl super::WavesPreviewer {
     pub(super) fn compute_world_feature_data(
         mono: &[f32],
         sample_rate: u32,
-    ) -> super::types::WorldFeatureData {
+        progress: &dyn Fn(f32),
+    ) -> std::sync::Arc<super::types::WorldFeatureData> {
         let sr = sample_rate.max(1);
         let duration_ms = mono.len() as f64 * 1_000.0 / sr as f64;
         let frame_period_ms = (duration_ms / 6_000.0).max(5.0);
-        let features =
-            crate::app::render::world_features::analyze_world(mono, sr, frame_period_ms);
+        let features = crate::app::render::world_features::analyze_world_with_progress(
+            mono,
+            sr,
+            frame_period_ms,
+            Some(progress),
+        );
         let frame_step = ((sr as f64 * features.frame_period_ms / 1_000.0).round() as usize).max(1);
         let mut voiced: Vec<f32> = features
             .f0
@@ -168,7 +185,7 @@ impl super::WavesPreviewer {
             voiced.sort_by(f32::total_cmp);
             Some(voiced[voiced.len() / 2])
         };
-        super::types::WorldFeatureData {
+        std::sync::Arc::new(super::types::WorldFeatureData {
             frames: features.frames,
             bins: features.bins,
             frame_step,
@@ -177,11 +194,17 @@ impl super::WavesPreviewer {
             f0_floor: features.f0_floor as f32,
             f0_ceil: features.f0_ceil as f32,
             f0_values: features.f0,
+            env_max_db: features
+                .envelope_db
+                .iter()
+                .copied()
+                .filter(|v| v.is_finite())
+                .fold(f32::MIN, f32::max),
             env_db: features.envelope_db,
             aperiodicity: features.aperiodicity,
             median_f0,
             voiced_ratio,
-        }
+        })
     }
 
     pub(super) fn queue_feature_analysis_for_tab(&mut self, tab_idx: usize) {
@@ -203,13 +226,17 @@ impl super::WavesPreviewer {
         {
             return;
         }
-        let mono = super::WavesPreviewer::mixdown_channels(&tab.ch_samples, tab.samples_len);
+        // Mixdown happens on the worker; cloning the Arc is free and avoids
+        // a UI-thread stall proportional to the clip length.
+        let channels = tab.ch_samples_arc.clone();
+        let samples_len = tab.samples_len;
         let sample_rate = tab.buffer_sample_rate.max(1);
         self.editor_feature_progress.insert(
             key.clone(),
             AnalysisProgress {
                 done_units: 0,
-                total_units: 1,
+                // WORLD reports live percent; the others finish in one unit.
+                total_units: if kind == EditorAnalysisKind::World { 100 } else { 1 },
                 started_at: std::time::Instant::now(),
             },
         );
@@ -221,13 +248,19 @@ impl super::WavesPreviewer {
         self.editor_feature_inflight.insert(key.clone());
         match kind {
             EditorAnalysisKind::Tempogram => {
-                self.queue_tempogram_data(key.path, mono, sample_rate, generation);
+                self.queue_tempogram_data(key.path, channels, samples_len, sample_rate, generation);
             }
             EditorAnalysisKind::Chromagram => {
-                self.queue_chromagram_data(key.path, mono, sample_rate, generation);
+                self.queue_chromagram_data(
+                    key.path,
+                    channels,
+                    samples_len,
+                    sample_rate,
+                    generation,
+                );
             }
             EditorAnalysisKind::World => {
-                self.queue_world_data(key.path, mono, sample_rate, generation);
+                self.queue_world_data(key.path, channels, samples_len, sample_rate, generation);
             }
             EditorAnalysisKind::Spectrogram => {}
         }
@@ -249,6 +282,17 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn apply_feature_analysis_updates(&mut self, ctx: &egui::Context) {
+        // Mirror live worker progress into the UI-facing progress map and
+        // keep the frame loop ticking so the bar animates without input.
+        if !self.editor_feature_progress_shared.is_empty() {
+            for (key, shared) in &self.editor_feature_progress_shared {
+                if let Some(progress) = self.editor_feature_progress.get_mut(key) {
+                    progress.done_units =
+                        (shared.load(std::sync::atomic::Ordering::Relaxed) as usize).min(100);
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         let mut messages = Vec::new();
         if let Some(rx) = &self.editor_feature_rx {
             while let Ok(msg) = rx.try_recv() {
@@ -332,6 +376,7 @@ impl super::WavesPreviewer {
             progress.done_units = progress.total_units;
         }
         self.editor_feature_progress.remove(&key);
+        self.editor_feature_progress_shared.remove(&key);
         self.editor_feature_cancel.remove(&key);
     }
 
@@ -341,6 +386,7 @@ impl super::WavesPreviewer {
         }
         self.editor_feature_inflight.remove(key);
         self.editor_feature_progress.remove(key);
+        self.editor_feature_progress_shared.remove(key);
         self.editor_feature_generation.remove(key);
         self.editor_feature_cache.remove(key);
     }

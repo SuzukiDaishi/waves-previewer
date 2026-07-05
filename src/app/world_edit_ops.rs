@@ -153,6 +153,10 @@ impl super::WavesPreviewer {
         let Some(cache) = self.editor_feature_cache.get(&key).cloned() else {
             return;
         };
+        let EditorFeatureAnalysisData::World(job_data) = cache.as_ref() else {
+            return;
+        };
+        let job_data = job_data.clone();
         self.audio.stop();
         // The applied audio becomes the new baseline; the re-analysis that
         // follows the apply yields a fresh curve to edit.
@@ -162,9 +166,7 @@ impl super::WavesPreviewer {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             super::threading::lower_current_thread_priority();
-            let EditorFeatureAnalysisData::World(data) = cache.as_ref() else {
-                return;
-            };
+            let data = job_data;
             let mono = crate::app::render::world_features::synthesize_world(
                 &f0,
                 &data.env_db,
@@ -251,6 +253,7 @@ mod tests {
             f0_ceil: 800.0,
             f0_values: f0.clone(),
             env_db: vec![0.0; f0.len() * 4],
+            env_max_db: 0.0,
             aperiodicity: vec![1.0; f0.len() * 4],
             median_f0: None,
             voiced_ratio: 0.0,

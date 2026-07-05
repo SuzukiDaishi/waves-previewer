@@ -1235,6 +1235,7 @@ pub struct WorldFeatureData {
     pub f0_ceil: f32,
     pub f0_values: Vec<f32>,  // per frame, 0.0 = unvoiced
     pub env_db: Vec<f32>,     // frames * bins, power dB
+    pub env_max_db: f32,      // precomputed max of env_db (render normalization)
     pub aperiodicity: Vec<f32>, // frames * bins, linear 0..1 (1 = noise)
     pub median_f0: Option<f32>,
     pub voiced_ratio: f32,
@@ -1250,7 +1251,9 @@ pub struct EditorAnalysisKey {
 pub enum EditorFeatureAnalysisData {
     Tempogram(TempogramData),
     Chromagram(ChromagramData),
-    World(WorldFeatureData),
+    // Arc so render requests and jobs can share the (potentially large)
+    // analysis without deep-cloning it on the UI thread.
+    World(Arc<WorldFeatureData>),
 }
 
 pub enum EditorFeatureAnalysisJobMsg {
@@ -1267,7 +1270,7 @@ pub enum EditorFeatureAnalysisJobMsg {
     WorldDone {
         path: PathBuf,
         generation: u64,
-        data: WorldFeatureData,
+        data: Arc<WorldFeatureData>,
     },
 }
 

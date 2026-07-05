@@ -69,6 +69,26 @@ plugin_native_clap = ["clack-host", "clack-extensions"]
 # at a modest build-time cost.
 lto = "thin"
 
+[profile.dev]
+# The WORLD analysis/synthesis and FFT paths are unusably slow at opt-level
+# 0 (10-20x); light optimization keeps `cargo run` interactive while
+# preserving debug assertions and usable backtraces.
+opt-level = 1
+
+# Hot DSP dependencies get full optimization even in dev builds.
+# (fdk-aac-sys additionally fails to compile at -O1: its force-inlined
+# fixed-point FFT needs the optimizer to devirtualize indirect calls.)
+[profile.dev.package.fdk-aac-sys]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.realfft]
+opt-level = 3
+[profile.dev.package.signalsmith-stretch]
+opt-level = 3
+[profile.dev.package.rubato]
+opt-level = 3
+
 [build-dependencies]
 windows_exe_info = "0.5.2"
 
