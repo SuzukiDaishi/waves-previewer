@@ -1112,13 +1112,16 @@ impl super::WavesPreviewer {
         lane_height_px: usize,
         quality: EditorViewportRenderQuality,
     ) -> (usize, usize) {
+        // Fine renders at the native pixel size (bounded for safety) so the
+        // spectrogram/feature heatmaps stay sharp on large canvases; the
+        // coarse pass is a fast low-res preview that the fine pass replaces.
         let target_w = match quality {
-            EditorViewportRenderQuality::Coarse => (wave_width_px / 4).clamp(48, 160),
-            EditorViewportRenderQuality::Fine => (wave_width_px / 2).clamp(96, 384),
+            EditorViewportRenderQuality::Coarse => (wave_width_px / 4).clamp(64, 256),
+            EditorViewportRenderQuality::Fine => wave_width_px.clamp(96, 2_048),
         };
         let target_lane_h = match quality {
-            EditorViewportRenderQuality::Coarse => (lane_height_px / 4).clamp(32, 96),
-            EditorViewportRenderQuality::Fine => (lane_height_px / 2).clamp(64, 192),
+            EditorViewportRenderQuality::Coarse => (lane_height_px / 4).clamp(48, 192),
+            EditorViewportRenderQuality::Fine => lane_height_px.clamp(64, 1_024),
         };
         (target_w.max(1), target_lane_h.max(1))
     }

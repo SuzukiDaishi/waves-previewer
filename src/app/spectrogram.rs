@@ -165,6 +165,13 @@ impl super::WavesPreviewer {
                     self.touch_spectro_cache(&tile.path);
                     self.evict_spectro_cache_if_needed();
                 }
+                // New tile data must retire any viewport image rendered from
+                // the partially-filled spectrogram, otherwise the first
+                // render (with black unfilled regions) sticks around until
+                // the user happens to zoom or pan.
+                for tab in self.tabs.iter_mut().filter(|t| t.path == tile.path) {
+                    Self::invalidate_editor_viewport_cache(tab);
+                }
                 ctx.request_repaint();
             }
             SpectrogramJobMsg::Done { path, generation } => {
@@ -184,6 +191,9 @@ impl super::WavesPreviewer {
                 self.spectro_cancel.remove(&path);
                 self.touch_spectro_cache(&path);
                 self.evict_spectro_cache_if_needed();
+                for tab in self.tabs.iter_mut().filter(|t| t.path == path) {
+                    Self::invalidate_editor_viewport_cache(tab);
+                }
                 ctx.request_repaint();
             }
         }

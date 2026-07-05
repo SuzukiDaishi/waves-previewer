@@ -4,6 +4,10 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Spectrogram Display Fixes: Stale Partial Render + Resolution
+- Fixed the spectrogram (and Freq Log / Mel) showing a partially-filled image with a black tail when a view is opened while analysis tiles are still streaming in - the first render stuck around until a zoom/pan happened to change the render key. Tile arrival and completion now retire the cached viewport image, so the heatmap fills in progressively and always ends complete.
+- Feature-view render resolution unlocked: the fine pass now renders at native pixel size (up to 2048x1024; previously hard-capped at 384x192 and stretched), so Spec/Freq Log/Mel/Tempogram/Chromagram/World are sharp on large canvases. The coarse preview pass got a matching bump.
+
 ### WORLD Responsiveness / Undo Correctness Pass
 - Fixed Ctrl+Z after destructive edits (including WORLD resynthesis): undo/redo now refreshes the worker-facing buffer mirror and drops stale spectrogram/feature analyses, so the World view (and Spec/Tempo/Chroma) re-analyze the audio that is actually restored instead of showing the pre-undo analysis.
 - WORLD analysis now reports live progress (DIO -> StoneMask -> CheapTrick -> D4C weighted 0-100%): the inspector progress bar animates, the canvas overlay shows a percentage, and the frame loop keeps ticking during analysis so feedback never freezes.
