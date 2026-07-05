@@ -422,6 +422,10 @@ pub struct WavesPreviewer {
     pub meta_pool: Option<meta::MetaPool>,
     pub meta_inflight: HashSet<PathBuf>,
     meta_sort_pending: bool,
+    /// Cached (computed_at, count) for the pending-gain scan; the topbar and
+    /// list header read this every frame and a full O(n) item scan at 140k
+    /// files is far too hot for the frame loop.
+    pending_gain_count_cache: Option<(std::time::Instant, usize)>,
     meta_sort_last_applied: Option<std::time::Instant>,
     list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,

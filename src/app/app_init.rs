@@ -48,6 +48,7 @@ impl WavesPreviewer {
             meta_pool: None,
             meta_inflight: HashSet::new(),
             meta_sort_pending: false,
+            pending_gain_count_cache: None,
             meta_sort_last_applied: None,
             list_meta_prefetch_cursor: 0,
             transcript_inflight: HashSet::new(),

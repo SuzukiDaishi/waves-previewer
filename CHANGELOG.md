@@ -4,6 +4,13 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### List & Apply-Path Performance Pass (large libraries, long clips)
+- Removed two full item-array scans that ran every frame (pending-gain count in the topbar and the list-header dirty check): both now read a 250 ms-throttled cached count that gain edits invalidate immediately. At ~140k files these two scans strided tens of MB of item structs per frame - the main reason the list felt heavy while background jobs forced 60 fps repaints. Idle frame time on a 140k-row list drops ~4.1 ms -> ~1.9 ms avg.
+- Meta-driven re-sorts are debounced adaptively: lists over 20k items re-sort at most every 750 ms while metadata streams in (was 120 ms; each pass is an O(n log n) decorate+sort costing tens of ms at 140k). Transcript-triggered search refilters follow the same adaptive debounce.
+- List rows no longer deep-clone the whole MediaItem (strings, external map, inline FileMeta with thumbnail) for every visible row every frame; rows now borrow the item once and keep only the cheap pieces (badge, cover-art Arc, transcript Arc).
+- Pitch/stretch/loudness applies and WORLD resynthesis now build the waveform overview + pyramid and the worker-facing Arc mirror on the worker thread; adopting a finished apply no longer re-scans and re-clones the full buffers on the UI thread (~35-80 ms saved per apply on a 3-minute stereo clip).
+- Rate-mode processing results (Speed/Pitch/Stretch previews) also prebuild the editor waveform cache on the worker, and two wasteful full-buffer clones in the completion handler were removed (the engine now takes the processed buffers by move).
+
 ### Spectrogram Display Fixes: Stale Partial Render + Resolution
 - Fixed the spectrogram (and Freq Log / Mel) showing a partially-filled image with a black tail when a view is opened while analysis tiles are still streaming in - the first render stuck around until a zoom/pan happened to change the render key. Tile arrival and completion now retire the cached viewport image, so the heatmap fills in progressively and always ends complete.
 - Feature-view render resolution unlocked: the fine pass now renders at native pixel size (up to 2048x1024; previously hard-capped at 384x192 and stretched), so Spec/Freq Log/Mel/Tempogram/Chromagram/World are sharp on large canvases. The coarse preview pass got a matching bump.

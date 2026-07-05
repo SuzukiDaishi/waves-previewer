@@ -86,18 +86,24 @@ impl super::WavesPreviewer {
                 samples,
                 channels,
                 waveform: _waveform,
+                editor_waveform,
             } = res;
-            let rebuilt_cache =
-                if matches!(target, ProcessingTarget::EditorTab(_)) && !channels.is_empty() {
+            // The worker prebuilds the editor waveform cache; only rebuild
+            // here (UI thread) if a legacy result arrived without one.
+            let rebuilt_cache = if matches!(target, ProcessingTarget::EditorTab(_))
+                && !channels.is_empty()
+            {
+                editor_waveform.or_else(|| {
                     let samples_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
                     Some(Self::build_editor_waveform_cache(&channels, samples_len))
-                } else {
-                    None
-                };
+                })
+            } else {
+                None
+            };
             if matches!(target, ProcessingTarget::EditorTab(_)) {
                 if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
                     if let Some(tab) = self.tabs.get_mut(idx) {
-                        if let Some((waveform, waveform_pyramid)) = rebuilt_cache.clone() {
+                        if let Some((waveform, waveform_pyramid)) = rebuilt_cache {
                             tab.waveform_minmax = waveform;
                             tab.waveform_pyramid = waveform_pyramid;
                         } else {
@@ -111,7 +117,9 @@ impl super::WavesPreviewer {
             if channels.is_empty() {
                 self.audio.set_samples_mono(samples);
             } else {
-                self.audio.set_samples_channels(channels.clone());
+                // `channels` is not used again below; moving it avoids a
+                // full-buffer copy on the UI thread.
+                self.audio.set_samples_channels(channels);
             }
             let source = match &target {
                 ProcessingTarget::EditorTab(path) => {

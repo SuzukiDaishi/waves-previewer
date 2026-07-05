@@ -1404,6 +1404,15 @@ impl super::WavesPreviewer {
             let samples = Self::mixdown_channels_mono(&processed, len);
             let mut waveform = Vec::new();
             crate::wave::build_minmax(&mut waveform, &samples, 2048);
+            // Editor targets adopt a full waveform cache; building it here
+            // keeps the pyramid scan off the UI thread.
+            let editor_waveform = if matches!(target_for_thread, ProcessingTarget::EditorTab(_)) {
+                Some(crate::app::WavesPreviewer::build_editor_waveform_cache(
+                    &processed, len,
+                ))
+            } else {
+                None
+            };
             let _ = tx.send(ProcessingResult {
                 path: path_for_thread,
                 job_id,
@@ -1412,6 +1421,7 @@ impl super::WavesPreviewer {
                 samples,
                 waveform,
                 channels: processed,
+                editor_waveform,
             });
         });
         self.debug_log(format!(
@@ -2861,6 +2871,14 @@ impl super::WavesPreviewer {
                 let samples = Self::mixdown_channels_mono(&channels, len);
                 let mut waveform = Vec::new();
                 crate::wave::build_minmax(&mut waveform, &samples, 2048);
+                let editor_waveform =
+                    if matches!(target_for_thread, ProcessingTarget::EditorTab(_)) {
+                        Some(crate::app::WavesPreviewer::build_editor_waveform_cache(
+                            &channels, len,
+                        ))
+                    } else {
+                        None
+                    };
                 let _ = tx.send(ProcessingResult {
                     path: path_for_thread.clone(),
                     job_id,
@@ -2869,6 +2887,7 @@ impl super::WavesPreviewer {
                     samples,
                     waveform,
                     channels,
+                    editor_waveform,
                 });
             }
         });

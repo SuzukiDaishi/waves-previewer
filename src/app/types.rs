@@ -1378,6 +1378,9 @@ pub struct ProcessingResult {
     pub waveform: Vec<(f32, f32)>,
     #[allow(dead_code)]
     pub channels: Vec<Vec<f32>>,
+    /// Editor waveform overview + pyramid prebuilt on the worker for
+    /// EditorTab targets (None for list previews).
+    pub editor_waveform: Option<(Vec<(f32, f32)>, Option<Arc<WaveformPyramidSet>>)>,
 }
 
 pub struct EditorApplyState {
@@ -1392,6 +1395,12 @@ pub struct EditorApplyResult {
     pub tab_idx: usize,
     pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
+    /// Arc mirror of `channels`, cloned on the worker so the UI thread
+    /// doesn't pay a full-buffer copy on adoption.
+    pub channels_arc: Arc<Vec<Vec<f32>>>,
+    /// Waveform overview + pyramid prebuilt on the worker.
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub lufs_override: Option<f32>,
 }
 

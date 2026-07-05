@@ -178,10 +178,16 @@ impl super::WavesPreviewer {
                 out_len,
             );
             let channels = vec![mono.clone(); n_ch];
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&channels, out_len);
+            let channels_arc = std::sync::Arc::new(channels.clone());
             let _ = tx.send(EditorApplyResult {
                 tab_idx,
                 samples: mono,
                 channels,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
                 lufs_override: None,
             });
         });

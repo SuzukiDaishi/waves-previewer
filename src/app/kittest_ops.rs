@@ -698,6 +698,7 @@ impl super::WavesPreviewer {
             samples: vec![0.0; 1024],
             waveform: Vec::new(),
             channels,
+            editor_waveform: None,
         });
         self.processing = Some(ProcessingState {
             msg: "Test processing".to_string(),

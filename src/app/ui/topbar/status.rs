@@ -74,7 +74,7 @@ impl WavesPreviewer {
 
         let total_vis = self.files.len();
         let total_all = self.items.len();
-        let dirty_gains = self.pending_gain_count();
+        let dirty_gains = self.pending_gain_count_throttled();
         let has_status = total_all > 0 || dirty_gains > 0;
         if has_status {
             ui.separator();

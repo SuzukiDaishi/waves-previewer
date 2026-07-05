@@ -455,7 +455,7 @@ impl WavesPreviewer {
         self.list_has_focus = interaction.list_has_focus;
     }
 
-    fn list_header_dirty(&self) -> bool {
+    fn list_header_dirty(&mut self) -> bool {
         self.tabs
             .iter()
             .any(|t| t.dirty || t.loop_markers_dirty || t.markers_dirty)
@@ -463,10 +463,9 @@ impl WavesPreviewer {
                 .edited_cache
                 .values()
                 .any(|c| c.dirty || c.loop_markers_dirty || c.markers_dirty)
-            || self
-                .items
-                .iter()
-                .any(|item| item.pending_gain_db.abs() > 0.0001)
+            // Throttled cache: a raw scan over all items here runs every
+            // frame and dominated the frame at 100k+ files.
+            || self.pending_gain_count_throttled() > 0
             || !self.sample_rate_override.is_empty()
             || !self.bit_depth_override.is_empty()
     }

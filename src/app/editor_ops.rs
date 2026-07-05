@@ -1388,10 +1388,18 @@ impl crate::app::WavesPreviewer {
                     *v /= chn;
                 }
             }
+            // Build the waveform cache + Arc mirror here so adopting the
+            // result on the UI thread is (nearly) copy-free.
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(EditorApplyResult {
                 tab_idx,
                 samples: mono,
                 channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
                 lufs_override,
             });
         });
@@ -1417,10 +1425,10 @@ impl crate::app::WavesPreviewer {
                 apply_done = Some((res, undo));
             }
         }
-        if let Some((res, undo)) = apply_done {
+        if let Some((mut res, undo)) = apply_done {
             let mut spectro_reset_path: Option<PathBuf> = None;
             if res.tab_idx < self.tabs.len() {
-                let mut applied_channels = res.channels;
+                let mut applied_channels = std::mem::take(&mut res.channels);
                 if applied_channels.is_empty() && !res.samples.is_empty() {
                     applied_channels = vec![res.samples.clone()];
                 }
@@ -1434,13 +1442,26 @@ impl crate::app::WavesPreviewer {
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
                     tab.ch_samples = applied_channels;
-                    tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
+                    // Adopt the worker-built mirror + waveform cache instead
+                    // of re-cloning and re-scanning the buffers here.
+                    tab.ch_samples_arc = if res.channels_arc.len() == tab.ch_samples.len()
+                        && !tab.ch_samples.is_empty()
+                    {
+                        res.channels_arc.clone()
+                    } else {
+                        std::sync::Arc::new(tab.ch_samples.clone())
+                    };
                     tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                     tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
-                    let (waveform_minmax, waveform_pyramid) =
-                        Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
-                    tab.waveform_minmax = waveform_minmax;
-                    tab.waveform_pyramid = waveform_pyramid;
+                    if res.waveform_minmax.is_empty() && tab.samples_len > 0 {
+                        let (waveform_minmax, waveform_pyramid) =
+                            Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
+                        tab.waveform_minmax = waveform_minmax;
+                        tab.waveform_pyramid = waveform_pyramid;
+                    } else {
+                        tab.waveform_minmax = std::mem::take(&mut res.waveform_minmax);
+                        tab.waveform_pyramid = res.waveform_pyramid.take();
+                    }
                     Self::invalidate_editor_viewport_cache(tab);
                     let new_len = tab.samples_len.max(1);
                     if old_len > 0 && new_len > 0 {
