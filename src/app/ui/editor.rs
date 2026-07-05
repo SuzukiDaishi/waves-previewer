@@ -2201,10 +2201,14 @@ impl crate::app::WavesPreviewer {
             Some(EditorFeatureAnalysisData::Chromagram(data)) => Some(data.clone()),
             _ => None,
         };
-        let world_data = match feature_cache.as_deref() {
-            Some(EditorFeatureAnalysisData::World(data)) => Some(data.clone()),
+        let world_feature_cache = match feature_cache.as_deref() {
+            Some(EditorFeatureAnalysisData::World(_)) => feature_cache.clone(),
             _ => None,
         };
+        let world_data = world_feature_cache.as_deref().and_then(|data| match data {
+            EditorFeatureAnalysisData::World(data) => Some(data),
+            _ => None,
+        });
         let mut touch_spectro_cache = false;
         let mut pending_viewport_hint: Option<crate::app::editor_viewport::EditorViewportHint> =
             None;
@@ -2787,6 +2791,7 @@ impl crate::app::WavesPreviewer {
         let mut pending_tempogram_refresh = false;
         let mut pending_chromagram_refresh = false;
         let mut pending_world_refresh = false;
+        let mut pending_world_resynth = false;
         let mut apply_estimated_bpm: Option<f32> = None;
         let mut perf_mixdown_ms: Option<f32> = None;
         let mut perf_wave_render_ms: Option<f32> = None;
@@ -3703,9 +3708,10 @@ impl crate::app::WavesPreviewer {
                                 ),
                                 Color32::WHITE,
                             );
-                        } else if let Some(data) = world_data.as_ref() {
+                        } else if let Some(data) = world_data {
                             let fallback_image = Self::render_world_viewport_image(
                                 data,
+                                tab.world_f0_focus,
                                 wave_width_px,
                                 Self::editor_viewport_dimension_px(h, pixels_per_point),
                                 1,
@@ -3746,7 +3752,7 @@ impl crate::app::WavesPreviewer {
                                 Color32::GRAY,
                             );
                         }
-                        if let Some(data) = world_data.as_ref() {
+                        if let Some(data) = world_data {
                             let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
                                 view_mode,
                                 tab.vertical_zoom,
@@ -3754,9 +3760,10 @@ impl crate::app::WavesPreviewer {
                                 &self.spectro_cfg,
                             );
                             let span = (visible_max - visible_min).max(f32::EPSILON);
+                            let f0_focus = tab.world_f0_focus;
                             let y_for_freq = |freq: f32| {
                                 let frac =
-                                    Self::world_view_freq_to_frac(freq, data.sample_rate);
+                                    Self::world_view_freq_to_frac(freq, data.sample_rate, f0_focus);
                                 let visible_frac = ((frac - visible_min) / span).clamp(0.0, 1.0);
                                 lane_rect.bottom() - visible_frac * lane_rect.height()
                             };
@@ -3777,8 +3784,13 @@ impl crate::app::WavesPreviewer {
                                 if freq > nyquist {
                                     continue;
                                 }
+                                let (axis_lo, axis_hi) =
+                                    Self::world_view_freq_bounds(data.sample_rate, f0_focus);
+                                if freq < axis_lo * 1.01 || freq > axis_hi * 0.999 {
+                                    continue;
+                                }
                                 let frac =
-                                    Self::world_view_freq_to_frac(freq, data.sample_rate);
+                                    Self::world_view_freq_to_frac(freq, data.sample_rate, f0_focus);
                                 let visible_frac = (frac - visible_min) / span;
                                 if !(0.0..=1.0).contains(&visible_frac) {
                                     continue;
@@ -3799,41 +3811,75 @@ impl crate::app::WavesPreviewer {
                                     tick_col,
                                 );
                             }
-                            // F0 trajectory overlay (broken at unvoiced frames).
+                            // F0 trajectories: analyzed curve, plus the edit
+                            // draft on top when it exists (broken at unvoiced
+                            // frames in both cases).
                             let frame_step = data.frame_step.max(1);
                             let visible_len = end.saturating_sub(start).max(1) as f32;
-                            let f0_color = Color32::from_rgb(80, 230, 255);
-                            let f0_stroke = egui::Stroke::new(1.8, f0_color);
-                            let mut last_pt: Option<egui::Pos2> = None;
+                            let analyzed_color = Color32::from_rgb(80, 230, 255);
+                            let draft_color = Color32::from_rgb(255, 176, 64);
+                            let draft_values: Option<&[f32]> = tab
+                                .world_f0_draft
+                                .as_ref()
+                                .filter(|draft| {
+                                    draft.source_frames == data.frames
+                                        && (draft.dirty || draft.edit_enabled)
+                                })
+                                .map(|draft| draft.values.as_slice());
                             let first_frame = start / frame_step;
-                            let last_frame =
-                                ((end / frame_step) + 2).min(data.frames);
-                            for frame in first_frame..last_frame {
-                                let f0 = data
-                                    .f0_values
-                                    .get(frame)
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                if f0 <= 0.0 {
-                                    last_pt = None;
-                                    continue;
+                            let last_frame = ((end / frame_step) + 2).min(data.frames);
+                            // Each curve gets a dark halo pass underneath so
+                            // the line stays readable on bright heatmap areas.
+                            let draw_curve = |values: &[f32], color: Color32, width: f32| {
+                                let halo = Color32::from_rgba_unmultiplied(8, 10, 14, 210);
+                                for (pass_color, pass_width) in
+                                    [(halo, width + 2.6), (color, width)]
+                                {
+                                    let stroke = egui::Stroke::new(pass_width, pass_color);
+                                    let mut last_pt: Option<egui::Pos2> = None;
+                                    for frame in first_frame..last_frame {
+                                        let f0 = values.get(frame).copied().unwrap_or(0.0);
+                                        if f0 <= 0.0 {
+                                            last_pt = None;
+                                            continue;
+                                        }
+                                        let sample = frame * frame_step;
+                                        let x = wave_left
+                                            + ((sample.saturating_sub(start)) as f32
+                                                / visible_len)
+                                                * wave_w;
+                                        let pt = egui::pos2(
+                                            x.clamp(wave_left, wave_left + wave_w),
+                                            y_for_freq(f0),
+                                        );
+                                        if let Some(prev) = last_pt {
+                                            painter.line_segment([prev, pt], stroke);
+                                        } else {
+                                            painter.circle_filled(
+                                                pt,
+                                                pass_width * 0.9,
+                                                pass_color,
+                                            );
+                                        }
+                                        last_pt = Some(pt);
+                                    }
                                 }
-                                let sample = frame * frame_step;
-                                let x = wave_left
-                                    + ((sample.saturating_sub(start)) as f32 / visible_len)
-                                        * wave_w;
-                                let pt = egui::pos2(x.clamp(wave_left, wave_left + wave_w), y_for_freq(f0));
-                                if let Some(prev) = last_pt {
-                                    painter.line_segment([prev, pt], f0_stroke);
-                                } else {
-                                    painter.circle_filled(pt, 1.2, f0_color);
-                                }
-                                last_pt = Some(pt);
+                            };
+                            if let Some(draft) = draft_values {
+                                draw_curve(
+                                    &data.f0_values,
+                                    Color32::from_rgba_unmultiplied(80, 230, 255, 110),
+                                    1.4,
+                                );
+                                draw_curve(draft, draft_color, 2.4);
+                            } else {
+                                draw_curve(&data.f0_values, analyzed_color, 2.4);
                             }
-                            // Live F0 readout at the playhead.
+                            // Live F0 readout at the playhead (edited value
+                            // when a draft is active).
                             let cur_frame = playhead_display_now / frame_step;
-                            let cur_f0 = data
-                                .f0_values
+                            let cur_values = draft_values.unwrap_or(&data.f0_values);
+                            let cur_f0 = cur_values
                                 .get(cur_frame.min(data.frames.saturating_sub(1)))
                                 .copied()
                                 .unwrap_or(0.0);
@@ -3842,13 +3888,32 @@ impl crate::app::WavesPreviewer {
                             } else {
                                 "F0 --".to_string()
                             };
+                            let readout_color = if draft_values.is_some() {
+                                draft_color
+                            } else {
+                                analyzed_color
+                            };
                             painter.text(
                                 egui::pos2(lane_rect.right() - 8.0, lane_rect.top() + 6.0),
                                 egui::Align2::RIGHT_TOP,
                                 readout,
                                 fid,
-                                f0_color,
+                                readout_color,
                             );
+                            if tab
+                                .world_f0_draft
+                                .as_ref()
+                                .map(|draft| draft.edit_enabled)
+                                .unwrap_or(false)
+                            {
+                                painter.text(
+                                    egui::pos2(lane_rect.left() + 6.0, lane_rect.top() + 6.0),
+                                    egui::Align2::LEFT_TOP,
+                                    "F0 EDIT: left-drag draw / right-drag erase",
+                                    egui::FontId::monospace(10.0),
+                                    draft_color,
+                                );
+                            }
                         }
                     }
                     ViewMode::Waveform => {}
@@ -4044,6 +4109,66 @@ impl crate::app::WavesPreviewer {
             }
             // Drag markers for LoopEdit (primary button only)
             let mut suppress_seek = false;
+            // WORLD F0 pencil editing: while enabled it owns the pointer on
+            // this canvas (left-drag draws pitch, right-drag erases), so the
+            // seek / marker / range-select handlers below are bypassed.
+            let world_f0_editing = view_mode == ViewMode::World
+                && world_data.is_some()
+                && tab
+                    .world_f0_draft
+                    .as_ref()
+                    .map(|draft| draft.edit_enabled)
+                    .unwrap_or(false);
+            if world_f0_editing {
+                suppress_seek = true;
+                if let Some(data) = world_data {
+                    if resp.hovered() {
+                        hover_cursor = Some(egui::CursorIcon::Crosshair);
+                    }
+                    let draw_btn = resp.drag_started_by(egui::PointerButton::Primary)
+                        || resp.dragged_by(egui::PointerButton::Primary)
+                        || resp.clicked_by(egui::PointerButton::Primary);
+                    let erase_btn = resp.drag_started_by(egui::PointerButton::Secondary)
+                        || resp.dragged_by(egui::PointerButton::Secondary)
+                        || resp.clicked_by(egui::PointerButton::Secondary);
+                    if draw_btn || erase_btn {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let sample = geom.x_to_display_sample(
+                                pos.x.clamp(wave_left, wave_left + wave_w),
+                            );
+                            let frame = sample / data.frame_step.max(1);
+                            let (visible_min, visible_max) =
+                                Self::editor_vertical_range_for_view(
+                                    view_mode,
+                                    tab.vertical_zoom,
+                                    tab.vertical_view_center,
+                                    &self.spectro_cfg,
+                                );
+                            let frac_local =
+                                1.0 - ((pos.y - rect.top()) / h.max(1.0)).clamp(0.0, 1.0);
+                            let frac = visible_min + frac_local * (visible_max - visible_min);
+                            let freq = if erase_btn {
+                                0.0
+                            } else {
+                                Self::world_view_frac_to_freq(
+                                    frac,
+                                    data.sample_rate,
+                                    tab.world_f0_focus,
+                                )
+                            };
+                            let draft = Self::world_f0_draft_mut(tab, data);
+                            Self::world_f0_paint(draft, frame, freq);
+                        }
+                    }
+                    if resp.drag_stopped_by(egui::PointerButton::Primary)
+                        || resp.drag_stopped_by(egui::PointerButton::Secondary)
+                    {
+                        if let Some(draft) = tab.world_f0_draft.as_mut() {
+                            draft.last_drag_frame = None;
+                        }
+                    }
+                }
+            }
             let alt_now = ui.input(|i| i.modifiers.alt);
             let selection_snap_playhead_display = playhead_display_now.min(display_samples_len);
             let selection_snap_playhead_x = geom.sample_center_x(selection_snap_playhead_display);
@@ -4058,6 +4183,7 @@ impl crate::app::WavesPreviewer {
             // Right drag is dedicated to seek/playhead movement.
             // Shift+Right drag switches to range selection with button-down anchor.
             if pointer_over_waveform
+                && !world_f0_editing
                 && !alt_now
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
@@ -4117,6 +4243,7 @@ impl crate::app::WavesPreviewer {
                 }
             }
             if pointer_over_waveform
+                && !world_f0_editing
                 && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && display_samples_len > 0
             {
@@ -4185,6 +4312,7 @@ impl crate::app::WavesPreviewer {
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
             if pointer_over_waveform
+                && !world_f0_editing
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
             {
@@ -8185,7 +8313,16 @@ impl crate::app::WavesPreviewer {
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                             ui.label(RichText::new("Display").strong());
                             ui.label(
-                                RichText::new("Values: dB (log magnitude)").monospace().weak(),
+                                RichText::new(match self.spectro_cfg.db_ref {
+                                    crate::app::types::SpectrogramDbRef::Absolute => {
+                                        "Values: dB (0 dBFS ref)"
+                                    }
+                                    crate::app::types::SpectrogramDbRef::MaxNormalized => {
+                                        "Values: dB (normalized to max)"
+                                    }
+                                })
+                                .monospace()
+                                .weak(),
                             );
                             let overlay_resp =
                                 ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
@@ -8311,7 +8448,7 @@ impl crate::app::WavesPreviewer {
                                     cancel_feature_analysis = true;
                                 }
                             });
-                            if let Some(data) = world_data.as_ref() {
+                            if let Some(data) = world_data {
                                 match data.median_f0 {
                                     Some(f0) => {
                                         ui.label(
@@ -8342,6 +8479,102 @@ impl crate::app::WavesPreviewer {
                                     )
                                     .weak(),
                                 );
+                                ui.separator();
+                                Self::inspector_section(ui, "F0 Edit");
+                                let mut edit_on = tab
+                                    .world_f0_draft
+                                    .as_ref()
+                                    .map(|draft| draft.edit_enabled)
+                                    .unwrap_or(false);
+                                if ui
+                                    .checkbox(&mut edit_on, "Edit F0 on canvas")
+                                    .on_hover_text(
+                                        "Left-drag: draw pitch. Right-drag: erase (unvoiced). Seek/select on the canvas are paused while editing.",
+                                    )
+                                    .changed()
+                                {
+                                    Self::world_f0_draft_mut(tab, data).edit_enabled = edit_on;
+                                }
+                                ui.checkbox(&mut tab.world_f0_focus, "F0 zoom (50 Hz - 1.1 kHz axis)")
+                                    .on_hover_text(
+                                        "Zoom the vertical axis onto the pitch range so the F0 curve is easier to read and edit",
+                                    );
+                                let mut shift = tab
+                                    .world_f0_draft
+                                    .as_ref()
+                                    .map(|draft| draft.shift_semitones)
+                                    .unwrap_or(0.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Shift");
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut shift)
+                                                .range(-24.0..=24.0)
+                                                .speed(0.1)
+                                                .suffix(" st"),
+                                        )
+                                        .changed()
+                                    {
+                                        Self::world_f0_draft_mut(tab, data).shift_semitones =
+                                            shift;
+                                    }
+                                    if ui.button("Apply shift").clicked() && shift != 0.0 {
+                                        let draft = Self::world_f0_draft_mut(tab, data);
+                                        Self::world_f0_shift_semitones(draft, shift);
+                                        draft.shift_semitones = 0.0;
+                                    }
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui
+                                        .button("Smooth")
+                                        .on_hover_text("5-frame median filter over voiced runs")
+                                        .clicked()
+                                    {
+                                        Self::world_f0_smooth(Self::world_f0_draft_mut(tab, data));
+                                    }
+                                    if ui
+                                        .button("Flatten")
+                                        .on_hover_text(
+                                            "Set every voiced frame to the median F0 (monotone)",
+                                        )
+                                        .clicked()
+                                    {
+                                        Self::world_f0_flatten(Self::world_f0_draft_mut(
+                                            tab, data,
+                                        ));
+                                    }
+                                    if ui.button("Reset").clicked() {
+                                        let draft = Self::world_f0_draft_mut(tab, data);
+                                        Self::world_f0_reset(draft, data);
+                                    }
+                                });
+                                if tab
+                                    .world_f0_draft
+                                    .as_ref()
+                                    .map(|draft| draft.dirty)
+                                    .unwrap_or(false)
+                                {
+                                    ui.label(
+                                        RichText::new("F0 edited - orange curve on the canvas")
+                                            .color(Color32::from_rgb(255, 176, 64)),
+                                    );
+                                }
+                                let can_resynth = data.frames > 0
+                                    && data.aperiodicity.len() == data.frames * data.bins;
+                                let resynth = ui
+                                    .add_enabled(
+                                        can_resynth && !analysis_loading,
+                                        egui::Button::new("Resynthesize (replace audio)"),
+                                    )
+                                    .on_hover_text(
+                                        "WORLD synthesis with the edited F0 replaces this tab's audio on every channel (source is the mono mixdown; undo with Ctrl+Z)",
+                                    )
+                                    .on_disabled_hover_text(
+                                        "Re-analyze first so aperiodicity is available",
+                                    );
+                                if resynth.clicked() {
+                                    pending_world_resynth = true;
+                                }
                             } else if analysis_loading {
                                 ui.label(RichText::new("Analyzing mono mixdown...").weak());
                             } else {
@@ -8592,6 +8825,9 @@ impl crate::app::WavesPreviewer {
                 kind: EditorAnalysisKind::World,
             };
             self.cancel_feature_analysis_for_key(&key);
+        }
+        if pending_world_resynth {
+            self.spawn_world_resynth_for_tab(tab_idx);
         }
         if let Some(bpm) = apply_estimated_bpm {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

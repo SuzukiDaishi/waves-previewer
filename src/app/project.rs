@@ -291,6 +291,8 @@ pub struct ProjectSpectrogram {
     pub scale: String,
     pub mel_scale: String,
     pub db_floor: f32,
+    #[serde(default)]
+    pub db_ref: Option<String>,
     pub max_freq_hz: f32,
     pub show_note_labels: bool,
 }
@@ -685,6 +687,10 @@ pub fn spectro_config_from_project(p: &ProjectSpectrogram) -> SpectrogramConfig 
         scale,
         mel_scale,
         db_floor: p.db_floor,
+        db_ref: match p.db_ref.as_deref() {
+            Some("max") => super::types::SpectrogramDbRef::MaxNormalized,
+            _ => super::types::SpectrogramDbRef::Absolute,
+        },
         max_freq_hz: p.max_freq_hz,
         show_note_labels: p.show_note_labels,
     }
@@ -712,6 +718,13 @@ pub fn project_spectrogram_from_cfg(cfg: &SpectrogramConfig) -> ProjectSpectrogr
         scale: scale.to_string(),
         mel_scale: mel_scale.to_string(),
         db_floor: cfg.db_floor,
+        db_ref: Some(
+            match cfg.db_ref {
+                super::types::SpectrogramDbRef::MaxNormalized => "max",
+                super::types::SpectrogramDbRef::Absolute => "absolute",
+            }
+            .to_string(),
+        ),
         max_freq_hz: cfg.max_freq_hz,
         show_note_labels: cfg.show_note_labels,
     }
@@ -1434,6 +1447,7 @@ wave = true
             scale: "log".to_string(),
             mel_scale: "linear".to_string(),
             db_floor: -120.0,
+            db_ref: None,
             max_freq_hz: 0.0,
             show_note_labels: false,
         };
@@ -1450,6 +1464,7 @@ wave = true
             scale: "log".to_string(),
             mel_scale: "linear".to_string(),
             db_floor: -120.0,
+            db_ref: None,
             max_freq_hz: 0.0,
             show_note_labels: false,
         };

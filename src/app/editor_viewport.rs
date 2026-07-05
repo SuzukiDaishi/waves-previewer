@@ -19,6 +19,9 @@ use super::types::{
 
 /// Bottom of the log-frequency axis used by the WORLD feature view.
 pub(crate) const WORLD_VIEW_MIN_HZ: f32 = 40.0;
+/// Axis range used when the WORLD view is zoomed onto the F0 band.
+pub(crate) const WORLD_VIEW_FOCUS_MIN_HZ: f32 = 50.0;
+pub(crate) const WORLD_VIEW_FOCUS_MAX_HZ: f32 = 1_100.0;
 
 #[derive(Clone, Debug)]
 pub(super) struct EditorViewportHint {
@@ -97,6 +100,7 @@ enum EditorViewportRequest {
         quality: EditorViewportRenderQuality,
         key: EditorViewportRenderKey,
         data: Arc<WorldFeatureData>,
+        f0_focus: bool,
         wave_width_px: usize,
         lane_height_px: usize,
         lane_count: usize,
@@ -489,7 +493,11 @@ impl super::WavesPreviewer {
             samples_per_px_bits: tab.samples_per_px.to_bits(),
             vertical_zoom_bits: tab.vertical_zoom.to_bits(),
             vertical_view_center_bits: tab.vertical_view_center.to_bits(),
-            scale_bits: 0,
+            scale_bits: if hint.view_mode == ViewMode::World {
+                tab.world_f0_focus as u32
+            } else {
+                0
+            },
             spectro_cfg_digest: match kind {
                 EditorViewportPayloadKind::Spectral => {
                     Self::editor_spectro_cfg_digest(&self.spectro_cfg)
@@ -675,6 +683,7 @@ impl super::WavesPreviewer {
                     quality,
                     key,
                     data,
+                    f0_focus: tab.world_f0_focus,
                     wave_width_px: hint.wave_width_px.max(1),
                     lane_height_px: hint.lane_height_px.max(1),
                     lane_count: hint.lane_count.max(1),
@@ -833,6 +842,7 @@ impl super::WavesPreviewer {
                     quality,
                     key,
                     data,
+                    f0_focus,
                     wave_width_px,
                     lane_height_px,
                     lane_count,
@@ -845,6 +855,7 @@ impl super::WavesPreviewer {
                 } => {
                     let image = Arc::new(Self::render_world_viewport_image(
                         &data,
+                        f0_focus,
                         wave_width_px,
                         lane_height_px,
                         lane_count,
@@ -1012,6 +1023,19 @@ impl super::WavesPreviewer {
             }
             let frame_count = f1.saturating_sub(f0).max(1);
             let max_bin = spec.bins.saturating_sub(1).max(1);
+            // librosa-style `ref=max`: shift the ramp so the loudest bin of
+            // the file maps to the top color, keeping harmonic contrast on
+            // quiet material.
+            let ref_db = match cfg.db_ref {
+                super::types::SpectrogramDbRef::Absolute => 0.0,
+                super::types::SpectrogramDbRef::MaxNormalized => spec
+                    .values_db
+                    .iter()
+                    .copied()
+                    .filter(|v| v.is_finite())
+                    .fold(f32::MIN, f32::max)
+                    .max(-300.0),
+            };
             let sr = spec.sample_rate.max(1) as f32;
             let mut max_freq = sr * 0.5;
             if cfg.max_freq_hz > 0.0 {
@@ -1059,11 +1083,12 @@ impl super::WavesPreviewer {
                         _ => 0,
                     };
                     let idx = base + bin.min(max_bin);
-                    let db_raw = spec
+                    let db_raw = (spec
                         .values_db
                         .get(idx)
                         .copied()
                         .unwrap_or(-120.0)
+                        - ref_db)
                         .clamp(cfg.db_floor, 0.0);
                     let norm = if (0.0 - cfg.db_floor).abs() < f32::EPSILON {
                         0.0
@@ -1240,15 +1265,26 @@ impl super::WavesPreviewer {
     /// Log-frequency mapping shared by the WORLD envelope heatmap and the
     /// F0 overlay drawn in the editor paint pass: fraction 0.0 = bottom
     /// (WORLD_VIEW_MIN_HZ), 1.0 = top (Nyquist).
-    pub(crate) fn world_view_freq_to_frac(freq_hz: f32, sample_rate: u32) -> f32 {
-        let nyquist = (sample_rate.max(1) as f32 * 0.5).max(WORLD_VIEW_MIN_HZ * 2.0);
-        let f = freq_hz.clamp(WORLD_VIEW_MIN_HZ, nyquist);
-        (f / WORLD_VIEW_MIN_HZ).ln() / (nyquist / WORLD_VIEW_MIN_HZ).ln()
+    /// Log-frequency axis bounds for the WORLD view. `f0_focus` zooms the
+    /// axis onto the F0 band so the pitch curve fills the canvas.
+    pub(crate) fn world_view_freq_bounds(sample_rate: u32, f0_focus: bool) -> (f32, f32) {
+        if f0_focus {
+            (WORLD_VIEW_FOCUS_MIN_HZ, WORLD_VIEW_FOCUS_MAX_HZ)
+        } else {
+            let nyquist = (sample_rate.max(1) as f32 * 0.5).max(WORLD_VIEW_MIN_HZ * 2.0);
+            (WORLD_VIEW_MIN_HZ, nyquist)
+        }
     }
 
-    pub(crate) fn world_view_frac_to_freq(frac: f32, sample_rate: u32) -> f32 {
-        let nyquist = (sample_rate.max(1) as f32 * 0.5).max(WORLD_VIEW_MIN_HZ * 2.0);
-        WORLD_VIEW_MIN_HZ * (nyquist / WORLD_VIEW_MIN_HZ).powf(frac.clamp(0.0, 1.0))
+    pub(crate) fn world_view_freq_to_frac(freq_hz: f32, sample_rate: u32, f0_focus: bool) -> f32 {
+        let (lo, hi) = Self::world_view_freq_bounds(sample_rate, f0_focus);
+        let f = freq_hz.clamp(lo, hi);
+        (f / lo).ln() / (hi / lo).ln()
+    }
+
+    pub(crate) fn world_view_frac_to_freq(frac: f32, sample_rate: u32, f0_focus: bool) -> f32 {
+        let (lo, hi) = Self::world_view_freq_bounds(sample_rate, f0_focus);
+        lo * (hi / lo).powf(frac.clamp(0.0, 1.0))
     }
 
     /// Spectral-envelope heatmap for the WORLD feature view. The vertical
@@ -1259,6 +1295,7 @@ impl super::WavesPreviewer {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_world_viewport_image(
         data: &WorldFeatureData,
+        f0_focus: bool,
         wave_width_px: usize,
         lane_height_px: usize,
         lane_count: usize,
@@ -1314,7 +1351,7 @@ impl super::WavesPreviewer {
                     let frac_local =
                         1.0 - (y as f32 / target_lane_h.saturating_sub(1).max(1) as f32);
                     let frac = visible_min + frac_local * (visible_max - visible_min);
-                    let freq = Self::world_view_frac_to_freq(frac, data.sample_rate);
+                    let freq = Self::world_view_frac_to_freq(frac, data.sample_rate, f0_focus);
                     let pos = (freq / bin_hz).clamp(0.0, data.bins.saturating_sub(1) as f32);
                     let b0 = pos.floor() as usize;
                     let tfrac = pos - b0 as f32;
@@ -1343,6 +1380,10 @@ impl super::WavesPreviewer {
         cfg.hop_size.hash(&mut hasher);
         cfg.max_frames.hash(&mut hasher);
         cfg.db_floor.to_bits().hash(&mut hasher);
+        match cfg.db_ref {
+            super::types::SpectrogramDbRef::Absolute => 1u8.hash(&mut hasher),
+            super::types::SpectrogramDbRef::MaxNormalized => 2u8.hash(&mut hasher),
+        }
         cfg.max_freq_hz.to_bits().hash(&mut hasher);
         cfg.show_note_labels.hash(&mut hasher);
         match cfg.window {
@@ -1435,5 +1476,89 @@ impl super::WavesPreviewer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{
+        SpectrogramConfig, SpectrogramData, SpectrogramDbRef, ViewMode,
+    };
+    use super::super::WavesPreviewer;
+    use crate::app::types::EditorViewportRenderQuality;
+
+    fn quiet_spec() -> SpectrogramData {
+        // A uniformly quiet spectrogram (-60 dBFS everywhere).
+        SpectrogramData {
+            frames: 32,
+            bins: 64,
+            frame_step: 256,
+            sample_rate: 48_000,
+            values_db: vec![-60.0; 32 * 64],
+        }
+    }
+
+    fn mean_brightness(cfg: &SpectrogramConfig) -> f32 {
+        let image = WavesPreviewer::render_spectral_viewport_image(
+            &[quiet_spec()],
+            &[0],
+            128,
+            128,
+            1,
+            0,
+            32 * 256,
+            1.0,
+            0.0,
+            cfg,
+            ViewMode::Spectrogram,
+            EditorViewportRenderQuality::Coarse,
+        );
+        let sum: f32 = image
+            .pixels
+            .iter()
+            .map(|p| p.r() as f32 + p.g() as f32 + p.b() as f32)
+            .sum();
+        sum / image.pixels.len().max(1) as f32
+    }
+
+    #[test]
+    fn max_normalized_db_ref_brightens_quiet_material() {
+        let absolute = SpectrogramConfig {
+            db_ref: SpectrogramDbRef::Absolute,
+            ..SpectrogramConfig::default()
+        };
+        let normalized = SpectrogramConfig {
+            db_ref: SpectrogramDbRef::MaxNormalized,
+            ..SpectrogramConfig::default()
+        };
+        let dim = mean_brightness(&absolute);
+        let bright = mean_brightness(&normalized);
+        assert!(
+            bright > dim + 50.0,
+            "ref=max should brighten a -60 dBFS spectrogram (abs={dim:.1}, max={bright:.1})"
+        );
+    }
+
+    #[test]
+    fn world_view_freq_mapping_roundtrips_and_focuses() {
+        for focus in [false, true] {
+            for freq in [80.0f32, 220.0, 440.0, 900.0] {
+                let frac = WavesPreviewer::world_view_freq_to_frac(freq, 48_000, focus);
+                let back = WavesPreviewer::world_view_frac_to_freq(frac, 48_000, focus);
+                assert!(
+                    (back - freq).abs() / freq < 0.001,
+                    "roundtrip failed for {freq} Hz focus={focus}: got {back}"
+                );
+            }
+        }
+        // Focus mode should spread the F0 band across far more of the axis.
+        let spread_full = WavesPreviewer::world_view_freq_to_frac(800.0, 48_000, false)
+            - WavesPreviewer::world_view_freq_to_frac(80.0, 48_000, false);
+        let spread_focus = WavesPreviewer::world_view_freq_to_frac(800.0, 48_000, true)
+            - WavesPreviewer::world_view_freq_to_frac(80.0, 48_000, true);
+        assert!(
+            spread_focus > spread_full * 2.0,
+            "focus axis should zoom the pitch range (full={spread_full:.3}, focus={spread_focus:.3})"
+        );
     }
 }

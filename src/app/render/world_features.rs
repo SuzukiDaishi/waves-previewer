@@ -9,11 +9,15 @@
 //! * StoneMask (`stonemask.cpp`): F0 refinement using instantaneous frequency.
 //! * CheapTrick (`cheaptrick.cpp`): pitch-adaptive spectral envelope
 //!   estimation.
+//! * D4C (`d4c.cpp`): band aperiodicity estimation with the LoveTrain
+//!   voiced/unvoiced decision.
+//! * Synthesis (`synthesis.cpp`): minimum-phase excitation synthesis from
+//!   (F0, spectral envelope, aperiodicity).
 //!
 //! The port follows the reference C++ implementation closely; deviations are
 //! noted inline (the anti-aliasing decimation filter is realized in the
-//! frequency domain instead of WORLD's hard-coded IIR, and a tiny positive
-//! clamp guards the log of the smoothed power spectrum).
+//! frequency domain instead of WORLD's hard-coded IIR, and tiny positive
+//! clamps guard logarithms and divisions that the reference leaves bare).
 
 // Not wired into the renderer yet; remove once a view calls `analyze_world`.
 #![allow(dead_code)]
@@ -43,6 +47,16 @@ const CHEAPTRICK_Q1: f64 = -0.15;
 const STONEMASK_F0_FLOOR_HZ: f64 = 40.0;
 /// Magnitude of the noise added to the smoothed power spectrum (WORLD `kEps`).
 const INFINITESIMAL_NOISE: f64 = 2.220_446_049_250_313e-16;
+/// D4C voiced/unvoiced LoveTrain threshold (WORLD `D4COption::threshold`).
+const D4C_THRESHOLD: f64 = 0.85;
+/// Lowest F0 D4C's own FFT size is designed for (WORLD `kFloorF0D4C`).
+const D4C_F0_FLOOR_HZ: f64 = 47.0;
+/// Upper limit of the coarse aperiodicity bands in Hz (WORLD `kUpperLimit`).
+const D4C_UPPER_LIMIT_HZ: f64 = 15_000.0;
+/// Spacing of the coarse aperiodicity bands in Hz (WORLD `kFrequencyInterval`).
+const D4C_FREQUENCY_INTERVAL_HZ: f64 = 3_000.0;
+/// Lowest F0 assumed by the LoveTrain V/UV analysis (`lowest_f0` in d4c.cpp).
+const D4C_LOVE_TRAIN_LOWEST_F0_HZ: f64 = 40.0;
 /// Sample rate DIO decimates the input towards before band analysis.
 ///
 /// WORLD exposes this as the `speed` option (decimation ratio 1..=12); a
@@ -61,6 +75,9 @@ pub struct WorldFeatures {
     pub f0: Vec<f32>,
     /// Spectral envelope, `frames * bins` values in dB (`10*log10(power)`).
     pub envelope_db: Vec<f32>,
+    /// D4C band aperiodicity, `frames * bins` linear values in `0..1`
+    /// (`1.0` = fully aperiodic; unvoiced frames are all `~1.0`).
+    pub aperiodicity: Vec<f32>,
     pub frames: usize,
     /// `fft_size / 2 + 1`.
     pub bins: usize,
@@ -79,6 +96,7 @@ pub fn analyze_world(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Wo
             f0_ceil: F0_CEIL_HZ,
             f0: Vec::new(),
             envelope_db: Vec::new(),
+            aperiodicity: Vec::new(),
             frames: 0,
             bins,
         };
@@ -97,6 +115,7 @@ pub fn analyze_world(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Wo
     let f0_dio = dio_f0(&x, fs, frame_period_ms, &temporal_positions, &mut planner);
     let f0 = stonemask(&x, fs, &temporal_positions, &f0_dio, &mut planner);
     let envelope_db = cheaptrick(&x, fs, &temporal_positions, &f0, fft_size, &mut planner);
+    let aperiodicity = d4c(&x, fs, &temporal_positions, &f0, fft_size, &mut planner);
 
     WorldFeatures {
         frame_period_ms,
@@ -106,6 +125,7 @@ pub fn analyze_world(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> Wo
         f0_ceil: F0_CEIL_HZ,
         f0: f0.iter().map(|&v| v as f32).collect(),
         envelope_db,
+        aperiodicity,
         frames,
         bins,
     }
@@ -1109,6 +1129,868 @@ fn smoothing_with_recovery(
 }
 
 // ---------------------------------------------------------------------------
+// D4C (d4c.cpp)
+// ---------------------------------------------------------------------------
+
+/// Window shapes used by D4C's windowed-waveform extraction.
+#[derive(Clone, Copy)]
+enum D4cWindowType {
+    Hanning,
+    Blackman,
+}
+
+/// D4C's own FFT size (d4c.cpp `D4C`, sized for `kFloorF0D4C`).
+fn d4c_fft_size(fs: f64) -> usize {
+    1usize << (1 + (4.0 * fs / D4C_F0_FLOOR_HZ + 1.0).log2() as usize)
+}
+
+/// Band aperiodicity for every frame, `frames * bins` linear values in `0..1`
+/// (d4c.cpp `D4C`). `fft_size_for_spectrogram` is CheapTrick's FFT size.
+fn d4c(
+    x: &[f64],
+    fs: f64,
+    temporal_positions: &[f64],
+    f0: &[f64],
+    fft_size_for_spectrogram: usize,
+    planner: &mut RealFftPlanner<f64>,
+) -> Vec<f32> {
+    let bins = fft_size_for_spectrogram / 2 + 1;
+    let mut rng = WorldRandn::new();
+    let fft_size_d4c = d4c_fft_size(fs);
+
+    let number_of_aperiodicities = (D4C_UPPER_LIMIT_HZ
+        .min(fs / 2.0 - D4C_FREQUENCY_INTERVAL_HZ)
+        / D4C_FREQUENCY_INTERVAL_HZ) as usize;
+    // The Nuttall window is common to every frame, so it is designed once.
+    let window_length =
+        (D4C_FREQUENCY_INTERVAL_HZ * fft_size_d4c as f64 / fs) as usize * 2 + 1;
+    let mut window = vec![0.0f64; window_length];
+    nuttall_window(window_length, &mut window);
+
+    // D4C LoveTrain (the aperiodicity of totally unvoiced-looking frames is
+    // decided by a different algorithm).
+    let aperiodicity0 = d4c_love_train(x, fs, temporal_positions, f0, planner, &mut rng);
+
+    let mut coarse_aperiodicity = vec![0.0f64; number_of_aperiodicities + 2];
+    coarse_aperiodicity[0] = -60.0;
+    coarse_aperiodicity[number_of_aperiodicities + 1] = -SAFE_GUARD_MINIMUM;
+    let mut coarse_frequency_axis: Vec<f64> = (0..=number_of_aperiodicities)
+        .map(|i| i as f64 * D4C_FREQUENCY_INTERVAL_HZ)
+        .collect();
+    coarse_frequency_axis.push(fs / 2.0);
+
+    let frequency_axis: Vec<f64> = (0..bins)
+        .map(|i| i as f64 * fs / fft_size_for_spectrogram as f64)
+        .collect();
+
+    let mut aperiodicity = Vec::with_capacity(temporal_positions.len() * bins);
+    let mut row = vec![0.0f64; bins];
+    for (&position, (&frame_f0, &love_train)) in temporal_positions
+        .iter()
+        .zip(f0.iter().zip(aperiodicity0.iter()))
+    {
+        if frame_f0 == 0.0 || love_train <= D4C_THRESHOLD {
+            // d4c.cpp InitializeAperiodicity: everything is aperiodic.
+            aperiodicity
+                .extend(std::iter::repeat((1.0 - SAFE_GUARD_MINIMUM) as f32).take(bins));
+            continue;
+        }
+        d4c_general_body(
+            x,
+            fs,
+            frame_f0.max(D4C_F0_FLOOR_HZ),
+            fft_size_d4c,
+            position,
+            &window,
+            planner,
+            &mut rng,
+            &mut coarse_aperiodicity[1..=number_of_aperiodicities],
+        );
+        // Linear interpolation (in dB) of the coarse aperiodicity into its
+        // spectral representation (d4c.cpp GetAperiodicity).
+        interp1(
+            &coarse_frequency_axis,
+            &coarse_aperiodicity,
+            &frequency_axis,
+            &mut row,
+        );
+        aperiodicity.extend(row.iter().map(|&v| 10f64.powf(v / 20.0) as f32));
+    }
+    aperiodicity
+}
+
+/// Voiced/unvoiced measure per frame: ratio of the cumulative power below
+/// 4 kHz to the cumulative power below 7.9 kHz (d4c.cpp `D4CLoveTrain`).
+fn d4c_love_train(
+    x: &[f64],
+    fs: f64,
+    temporal_positions: &[f64],
+    f0: &[f64],
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+) -> Vec<f64> {
+    let fft_size =
+        1usize << (1 + (3.0 * fs / D4C_LOVE_TRAIN_LOWEST_F0_HZ + 1.0).log2() as usize);
+    // Cumulative powers at 100, 4000 and 7900 Hz are used for VUV
+    // identification (clamped to Nyquist for very low sample rates).
+    let boundary0 = ((100.0 * fft_size as f64 / fs).ceil() as usize).min(fft_size / 2);
+    let boundary1 = ((4000.0 * fft_size as f64 / fs).ceil() as usize).min(fft_size / 2);
+    let boundary2 = ((7900.0 * fft_size as f64 / fs).ceil() as usize).min(fft_size / 2);
+
+    f0.iter()
+        .zip(temporal_positions.iter())
+        .map(|(&frame_f0, &position)| {
+            if frame_f0 == 0.0 {
+                return 0.0;
+            }
+            d4c_love_train_sub(
+                x,
+                fs,
+                frame_f0.max(D4C_LOVE_TRAIN_LOWEST_F0_HZ),
+                position,
+                fft_size,
+                boundary0,
+                boundary1,
+                boundary2,
+                planner,
+                rng,
+            )
+        })
+        .collect()
+}
+
+/// d4c.cpp `D4CLoveTrainSub`.
+#[allow(clippy::too_many_arguments)]
+fn d4c_love_train_sub(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    current_position: f64,
+    fft_size: usize,
+    boundary0: usize,
+    boundary1: usize,
+    boundary2: usize,
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+) -> f64 {
+    let waveform = get_windowed_waveform_d4c(
+        x,
+        fs,
+        current_f0,
+        current_position,
+        D4cWindowType::Blackman,
+        3.0,
+        rng,
+    );
+    let spectrum = real_fft(planner, &waveform, fft_size);
+    let mut power_spectrum = vec![0.0f64; fft_size / 2 + 1];
+    for i in (boundary0 + 1)..=fft_size / 2 {
+        power_spectrum[i] = spectrum[i].norm_sqr();
+    }
+    for i in boundary0..=boundary2 {
+        power_spectrum[i] += power_spectrum[i - 1];
+    }
+    // Deviation from the reference: guard the denominator so digital silence
+    // cannot produce NaN (which would silently count as "unvoiced" anyway).
+    power_spectrum[boundary1] / power_spectrum[boundary2].max(f64::MIN_POSITIVE)
+}
+
+/// F0-adaptive Hanning/Blackman windowed waveform with DC removal
+/// (d4c.cpp `GetWindowedWaveform` + `SetParametersForGetWindowedWaveform`).
+///
+/// Unlike CheapTrick's variant this one does not RMS-normalize the window.
+fn get_windowed_waveform_d4c(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    current_position: f64,
+    window_type: D4cWindowType,
+    window_length_ratio: f64,
+    rng: &mut WorldRandn,
+) -> Vec<f64> {
+    let half_window_length =
+        matlab_round(window_length_ratio * fs / current_f0 / 2.0).max(1) as usize;
+    let length = half_window_length * 2 + 1;
+    let origin = matlab_round(current_position * fs + 0.001);
+
+    let mut window = vec![0.0f64; length];
+    for (i, w) in window.iter_mut().enumerate() {
+        let base_index = i as f64 - half_window_length as f64;
+        let position = 2.0 * base_index / window_length_ratio / fs;
+        let phase = std::f64::consts::PI * position * current_f0;
+        *w = match window_type {
+            D4cWindowType::Hanning => 0.5 * phase.cos() + 0.5,
+            D4cWindowType::Blackman => 0.42 + 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos(),
+        };
+    }
+
+    let mut waveform = vec![0.0f64; length];
+    let mut tmp_weight1 = 0.0f64;
+    let mut tmp_weight2 = 0.0f64;
+    for i in 0..length {
+        let safe_index = (origin + i as i64 - half_window_length as i64)
+            .clamp(0, x.len() as i64 - 1) as usize;
+        waveform[i] = x[safe_index] * window[i] + rng.randn() * SAFE_GUARD_MINIMUM;
+        tmp_weight1 += waveform[i];
+        tmp_weight2 += window[i];
+    }
+    let weighting_coefficient = tmp_weight1 / tmp_weight2;
+    for i in 0..length {
+        waveform[i] -= window[i] * weighting_coefficient;
+    }
+    waveform
+}
+
+/// Energy-weighted temporal centroid spectrum of one windowed segment
+/// (d4c.cpp `GetCentroid`).
+fn get_centroid(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    fft_size: usize,
+    current_position: f64,
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+) -> Vec<f64> {
+    let mut waveform = get_windowed_waveform_d4c(
+        x,
+        fs,
+        current_f0,
+        current_position,
+        D4cWindowType::Blackman,
+        4.0,
+        rng,
+    );
+    let power: f64 = waveform.iter().map(|&v| v * v).sum();
+    let norm = power.sqrt().max(f64::MIN_POSITIVE);
+    for v in waveform.iter_mut() {
+        *v /= norm;
+    }
+    let main_spectrum = real_fft(planner, &waveform, fft_size);
+    let weighted: Vec<f64> = waveform
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| v * (i as f64 + 1.0))
+        .collect();
+    let weighted_spectrum = real_fft(planner, &weighted, fft_size);
+    main_spectrum
+        .iter()
+        .zip(weighted_spectrum.iter())
+        .map(|(m, w)| m.re * w.re + m.im * w.im)
+        .collect()
+}
+
+/// Sum of two centroids a quarter period apart, DC-corrected
+/// (d4c.cpp `GetStaticCentroid`).
+fn get_static_centroid(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    fft_size: usize,
+    current_position: f64,
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+) -> Vec<f64> {
+    let centroid1 = get_centroid(
+        x,
+        fs,
+        current_f0,
+        fft_size,
+        current_position - 0.25 / current_f0,
+        planner,
+        rng,
+    );
+    let centroid2 = get_centroid(
+        x,
+        fs,
+        current_f0,
+        fft_size,
+        current_position + 0.25 / current_f0,
+        planner,
+        rng,
+    );
+    let mut static_centroid: Vec<f64> = centroid1
+        .iter()
+        .zip(centroid2.iter())
+        .map(|(a, b)| a + b)
+        .collect();
+    dc_correction(&mut static_centroid, current_f0, fs, fft_size);
+    static_centroid
+}
+
+/// Smoothed power spectrum of one Hanning-windowed segment
+/// (d4c.cpp `GetSmoothedPowerSpectrum`).
+fn get_smoothed_power_spectrum(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    fft_size: usize,
+    current_position: f64,
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+) -> Vec<f64> {
+    let waveform = get_windowed_waveform_d4c(
+        x,
+        fs,
+        current_f0,
+        current_position,
+        D4cWindowType::Hanning,
+        4.0,
+        rng,
+    );
+    let spectrum = real_fft(planner, &waveform, fft_size);
+    let mut power_spectrum: Vec<f64> =
+        spectrum[..fft_size / 2 + 1].iter().map(|c| c.norm_sqr()).collect();
+    dc_correction(&mut power_spectrum, current_f0, fs, fft_size);
+    linear_smoothing(&mut power_spectrum, current_f0, fs, fft_size);
+    power_spectrum
+}
+
+/// Static group delay = centroid / power, band-pass smoothed
+/// (d4c.cpp `GetStaticGroupDelay`).
+fn get_static_group_delay(
+    static_centroid: &[f64],
+    smoothed_power_spectrum: &[f64],
+    fs: f64,
+    f0: f64,
+    fft_size: usize,
+) -> Vec<f64> {
+    // Deviation from the reference: guard the division; the smoothed power
+    // spectrum is strictly positive for any real input but a clamp keeps the
+    // group delay finite even for pathological signals.
+    let mut static_group_delay: Vec<f64> = static_centroid
+        .iter()
+        .zip(smoothed_power_spectrum.iter())
+        .map(|(c, p)| c / p.max(f64::MIN_POSITIVE))
+        .collect();
+    linear_smoothing(&mut static_group_delay, f0 / 2.0, fs, fft_size);
+    let mut smoothed_group_delay = static_group_delay.clone();
+    linear_smoothing(&mut smoothed_group_delay, f0, fs, fft_size);
+    for (v, s) in static_group_delay
+        .iter_mut()
+        .zip(smoothed_group_delay.iter())
+    {
+        *v -= s;
+    }
+    static_group_delay
+}
+
+/// Aperiodicity in dB for each 3 kHz band from the flatness of the group
+/// delay spectrum (d4c.cpp `GetCoarseAperiodicity`).
+fn get_coarse_aperiodicity(
+    static_group_delay: &[f64],
+    fs: f64,
+    fft_size: usize,
+    window: &[f64],
+    planner: &mut RealFftPlanner<f64>,
+    coarse_aperiodicity: &mut [f64],
+) {
+    let boundary = matlab_round(fft_size as f64 * 8.0 / window.len() as f64) as usize;
+    let half_window_length = window.len() / 2;
+    let mut segment = vec![0.0f64; window.len()];
+    for (band, out) in coarse_aperiodicity.iter_mut().enumerate() {
+        let center = (D4C_FREQUENCY_INTERVAL_HZ * (band + 1) as f64 * fft_size as f64 / fs)
+            as usize;
+        for (j, seg) in segment.iter_mut().enumerate() {
+            *seg = static_group_delay[center - half_window_length + j] * window[j];
+        }
+        let spectrum = real_fft(planner, &segment, fft_size);
+        let mut power_spectrum: Vec<f64> = spectrum.iter().map(|c| c.norm_sqr()).collect();
+        power_spectrum.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for j in 1..power_spectrum.len() {
+            power_spectrum[j] += power_spectrum[j - 1];
+        }
+        *out = 10.0
+            * (power_spectrum[fft_size / 2 - boundary - 1]
+                / power_spectrum[fft_size / 2].max(f64::MIN_POSITIVE))
+            .max(f64::MIN_POSITIVE)
+            .log10();
+    }
+}
+
+/// Coarse aperiodicity of one voiced frame (d4c.cpp `D4CGeneralBody`).
+#[allow(clippy::too_many_arguments)]
+fn d4c_general_body(
+    x: &[f64],
+    fs: f64,
+    current_f0: f64,
+    fft_size: usize,
+    current_position: f64,
+    window: &[f64],
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+    coarse_aperiodicity: &mut [f64],
+) {
+    let static_centroid =
+        get_static_centroid(x, fs, current_f0, fft_size, current_position, planner, rng);
+    let smoothed_power_spectrum =
+        get_smoothed_power_spectrum(x, fs, current_f0, fft_size, current_position, planner, rng);
+    let static_group_delay = get_static_group_delay(
+        &static_centroid,
+        &smoothed_power_spectrum,
+        fs,
+        current_f0,
+        fft_size,
+    );
+    get_coarse_aperiodicity(
+        &static_group_delay,
+        fs,
+        fft_size,
+        window,
+        planner,
+        coarse_aperiodicity,
+    );
+
+    // Revision of the estimate based on the F0.
+    for v in coarse_aperiodicity.iter_mut() {
+        *v = (*v + (current_f0 - 100.0) / 50.0).min(0.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Synthesis (synthesis.cpp)
+// ---------------------------------------------------------------------------
+
+/// Pulse positions and per-sample voicing for synthesis
+/// (synthesis.cpp `GetTimeBase`).
+struct SynthesisTimeBase {
+    /// Pulse positions in seconds (quantized to the sample grid).
+    pulse_locations: Vec<f64>,
+    /// Pulse positions in samples.
+    pulse_locations_index: Vec<usize>,
+    /// Sub-sample offset of the exact pulse position, in seconds (`0..1/fs`).
+    pulse_locations_time_shift: Vec<f64>,
+    /// Per-sample voiced flag (`0.0` or `1.0`).
+    interpolated_vuv: Vec<f64>,
+}
+
+/// Interpolates the frame-rate F0 contour to sample rate and accumulates
+/// phase to place one pulse per period (synthesis.cpp `GetTimeBase`,
+/// `GetTemporalParametersForTimeBase`, `GetPulseLocationsForTimeBase`).
+fn get_time_base(
+    f0: &[f64],
+    fs: f64,
+    frame_period: f64,
+    y_length: usize,
+    lowest_f0: f64,
+) -> SynthesisTimeBase {
+    let f0_length = f0.len();
+    let time_axis: Vec<f64> = (0..y_length).map(|i| i as f64 / fs).collect();
+
+    let mut coarse_time_axis = Vec::with_capacity(f0_length + 1);
+    let mut coarse_f0 = Vec::with_capacity(f0_length + 1);
+    let mut coarse_vuv = Vec::with_capacity(f0_length + 1);
+    for (i, &v) in f0.iter().enumerate() {
+        coarse_time_axis.push(i as f64 * frame_period);
+        let clamped = if v < lowest_f0 { 0.0 } else { v };
+        coarse_f0.push(clamped);
+        coarse_vuv.push(if clamped == 0.0 { 0.0 } else { 1.0 });
+    }
+    // One extrapolated frame past the end so interpolation covers y_length.
+    coarse_time_axis.push(f0_length as f64 * frame_period);
+    if f0_length >= 2 {
+        coarse_f0.push(coarse_f0[f0_length - 1] * 2.0 - coarse_f0[f0_length - 2]);
+        coarse_vuv.push(coarse_vuv[f0_length - 1] * 2.0 - coarse_vuv[f0_length - 2]);
+    } else {
+        coarse_f0.push(coarse_f0[0]);
+        coarse_vuv.push(coarse_vuv[0]);
+    }
+
+    let mut interpolated_f0 = vec![0.0f64; y_length];
+    let mut interpolated_vuv = vec![0.0f64; y_length];
+    interp1(&coarse_time_axis, &coarse_f0, &time_axis, &mut interpolated_f0);
+    interp1(&coarse_time_axis, &coarse_vuv, &time_axis, &mut interpolated_vuv);
+    for i in 0..y_length {
+        interpolated_vuv[i] = if interpolated_vuv[i] > 0.5 { 1.0 } else { 0.0 };
+        if interpolated_vuv[i] == 0.0 {
+            // Unvoiced regions still get pulses at kDefaultF0 spacing; their
+            // excitation is pure noise.
+            interpolated_f0[i] = DEFAULT_F0_HZ;
+        }
+    }
+
+    // Pulse locations from the wrap points of the accumulated phase.
+    let mut pulse_locations = Vec::new();
+    let mut pulse_locations_index = Vec::new();
+    let mut pulse_locations_time_shift = Vec::new();
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let mut total_phase = two_pi * interpolated_f0[0] / fs;
+    let mut wrap_phase_prev = total_phase % two_pi;
+    for i in 1..y_length {
+        total_phase += two_pi * interpolated_f0[i] / fs;
+        let wrap_phase = total_phase % two_pi;
+        if (wrap_phase - wrap_phase_prev).abs() > std::f64::consts::PI {
+            pulse_locations.push(time_axis[i - 1]);
+            pulse_locations_index.push(i - 1);
+            // Sub-sample time of the exact 2*pi crossing between samples
+            // i - 1 and i, solved from the two wrapped phases.
+            let y1 = wrap_phase_prev - two_pi;
+            let y2 = wrap_phase;
+            let x_frac = -y1 / (y2 - y1);
+            pulse_locations_time_shift.push(x_frac / fs);
+        }
+        wrap_phase_prev = wrap_phase;
+    }
+
+    SynthesisTimeBase {
+        pulse_locations,
+        pulse_locations_index,
+        pulse_locations_time_shift,
+        interpolated_vuv,
+    }
+}
+
+/// Hanning-shaped kernel that redistributes a removed DC component
+/// (synthesis.cpp `GetDCRemover`).
+fn get_dc_remover(fft_size: usize) -> Vec<f64> {
+    let mut dc_remover = vec![0.0f64; fft_size];
+    let mut dc_component = 0.0f64;
+    for i in 0..fft_size / 2 {
+        let v = 0.5
+            - 0.5
+                * (2.0 * std::f64::consts::PI * (i as f64 + 1.0) / (1.0 + fft_size as f64))
+                    .cos();
+        dc_remover[i] = v;
+        dc_remover[fft_size - i - 1] = v;
+        dc_component += v * 2.0;
+    }
+    for i in 0..fft_size / 2 {
+        dc_remover[i] /= dc_component;
+        dc_remover[fft_size - i - 1] = dc_remover[i];
+    }
+    dc_remover
+}
+
+/// Swaps the two halves of `x` (WORLD `fftshift`).
+fn fftshift_vec(x: &[f64]) -> Vec<f64> {
+    let half = x.len() / 2;
+    let mut y = vec![0.0f64; x.len()];
+    y[..half].copy_from_slice(&x[half..]);
+    y[half..half * 2].copy_from_slice(&x[..half]);
+    y
+}
+
+/// Removes the DC component of the (causal, second-half) response and spreads
+/// the correction with the DC remover kernel (synthesis.cpp
+/// `RemoveDCComponent`).
+fn remove_dc_component(response: &mut [f64], dc_remover: &[f64]) {
+    let half = response.len() / 2;
+    let dc_component: f64 = response[half..].iter().sum();
+    for i in 0..half {
+        response[i] = -dc_component * dc_remover[i];
+    }
+    for i in half..response.len() {
+        response[i] -= dc_component * dc_remover[i];
+    }
+}
+
+/// Minimum-phase spectrum from half a log-magnitude spectrum via the
+/// cepstrum method (common.cpp `GetMinimumPhaseSpectrum`).
+///
+/// The reference's unnormalized FFT pair plus its final `1 / fft_size` is
+/// realized here with the normalized `real_ifft`, so no extra scaling is
+/// needed by the callers.
+fn get_minimum_phase_spectrum(
+    log_spectrum: &[f64],
+    fft_size: usize,
+    planner: &mut RealFftPlanner<f64>,
+) -> Vec<Complex<f64>> {
+    // The log spectrum is real and even, so its inverse FFT (the cepstrum)
+    // is real; realize the mirrored transform with the real FFT pair.
+    let mut spectrum: Vec<Complex<f64>> = log_spectrum
+        .iter()
+        .map(|&v| Complex::new(v, 0.0))
+        .collect();
+    let mut cepstrum = real_ifft(planner, &mut spectrum, fft_size);
+    // Fold the anticausal part onto the causal part.
+    for v in cepstrum[1..fft_size / 2].iter_mut() {
+        *v *= 2.0;
+    }
+    for v in cepstrum[fft_size / 2 + 1..].iter_mut() {
+        *v = 0.0;
+    }
+    let folded_spectrum = real_fft(planner, &cepstrum, fft_size);
+    folded_spectrum
+        .iter()
+        .map(|c| Complex::from_polar(c.re.exp(), c.im))
+        .collect()
+}
+
+/// Impulse response of the periodic (pulse-excited) part with fractional
+/// time shift and DC removal (synthesis.cpp `GetPeriodicResponse`).
+#[allow(clippy::too_many_arguments)]
+fn get_periodic_response(
+    fft_size: usize,
+    spectral_envelope: &[f64],
+    aperiodic_ratio: &[f64],
+    current_vuv: f64,
+    fractional_time_shift: f64,
+    fs: f64,
+    dc_remover: &[f64],
+    planner: &mut RealFftPlanner<f64>,
+) -> Vec<f64> {
+    if current_vuv <= 0.5 || aperiodic_ratio[0] > 0.999 {
+        return vec![0.0f64; fft_size];
+    }
+
+    let log_spectrum: Vec<f64> = spectral_envelope
+        .iter()
+        .zip(aperiodic_ratio.iter())
+        .map(|(&s, &a)| (s * (1.0 - a) + SAFE_GUARD_MINIMUM).ln() / 2.0)
+        .collect();
+    let mut spectrum = get_minimum_phase_spectrum(&log_spectrum, fft_size, planner);
+
+    // Fractional time delay as a linear phase shift (synthesis.cpp
+    // GetSpectrumWithFractionalTimeShift); the shift is < 1/fs, so the phase
+    // stays within [0, pi] and sin can be recovered from cos.
+    let coefficient =
+        2.0 * std::f64::consts::PI * fractional_time_shift * fs / fft_size as f64;
+    for (i, c) in spectrum.iter_mut().enumerate() {
+        let re2 = (coefficient * i as f64).cos();
+        let im2 = (1.0 - re2 * re2).max(0.0).sqrt();
+        *c = Complex::new(c.re * re2 + c.im * im2, c.im * re2 - c.re * im2);
+    }
+
+    let waveform = real_ifft(planner, &mut spectrum, fft_size);
+    let mut response = fftshift_vec(&waveform);
+    remove_dc_component(&mut response, dc_remover);
+    response
+}
+
+/// Impulse response of the aperiodic (noise-excited) part
+/// (synthesis.cpp `GetAperiodicResponse` + `GetNoiseSpectrum`).
+#[allow(clippy::too_many_arguments)]
+fn get_aperiodic_response(
+    noise_size: usize,
+    fft_size: usize,
+    spectral_envelope: &[f64],
+    aperiodic_ratio: &[f64],
+    current_vuv: f64,
+    planner: &mut RealFftPlanner<f64>,
+    rng: &mut WorldRandn,
+) -> Vec<f64> {
+    // Zero-mean white noise excitation covering one pulse interval.
+    let n = noise_size.min(fft_size);
+    let mut noise = vec![0.0f64; fft_size];
+    if n > 0 {
+        let mut average = 0.0f64;
+        for v in noise[..n].iter_mut() {
+            *v = rng.randn();
+            average += *v;
+        }
+        average /= n as f64;
+        for v in noise[..n].iter_mut() {
+            *v -= average;
+        }
+    }
+    let noise_spectrum = real_fft(planner, &noise, fft_size);
+
+    let log_spectrum: Vec<f64> = if current_vuv != 0.0 {
+        spectral_envelope
+            .iter()
+            .zip(aperiodic_ratio.iter())
+            .map(|(&s, &a)| (s * a).max(f64::MIN_POSITIVE).ln() / 2.0)
+            .collect()
+    } else {
+        spectral_envelope
+            .iter()
+            .map(|&s| s.max(f64::MIN_POSITIVE).ln() / 2.0)
+            .collect()
+    };
+    let minimum_phase = get_minimum_phase_spectrum(&log_spectrum, fft_size, planner);
+
+    let mut product: Vec<Complex<f64>> = minimum_phase
+        .iter()
+        .zip(noise_spectrum.iter())
+        .map(|(a, b)| a * b)
+        .collect();
+    let waveform = real_ifft(planner, &mut product, fft_size);
+    fftshift_vec(&waveform)
+}
+
+/// Spectral envelope (linear power) interpolated at `current_time`
+/// (synthesis.cpp `GetSpectralEnvelope`).
+fn get_spectral_envelope(
+    spectrogram: &[f64],
+    bins: usize,
+    f0_length: usize,
+    frame_period: f64,
+    current_time: f64,
+    out: &mut [f64],
+) {
+    let position = current_time / frame_period;
+    let frame_floor = (position.floor() as usize).min(f0_length - 1);
+    let frame_ceil = (position.ceil() as usize).min(f0_length - 1);
+    let interpolation = position - frame_floor as f64;
+    let row_floor = &spectrogram[frame_floor * bins..frame_floor * bins + bins];
+    if frame_floor == frame_ceil {
+        for (o, &v) in out.iter_mut().zip(row_floor.iter()) {
+            *o = v.abs();
+        }
+    } else {
+        let row_ceil = &spectrogram[frame_ceil * bins..frame_ceil * bins + bins];
+        for i in 0..bins {
+            out[i] =
+                (1.0 - interpolation) * row_floor[i].abs() + interpolation * row_ceil[i].abs();
+        }
+    }
+}
+
+/// synthesis.cpp `GetSafeAperiodicity`.
+fn safe_aperiodicity(x: f64) -> f64 {
+    x.clamp(0.001, 0.999_999_999_999)
+}
+
+/// Squared aperiodicity interpolated at `current_time`
+/// (synthesis.cpp `GetAperiodicRatio`).
+fn get_aperiodic_ratio(
+    aperiodicity: &[f64],
+    bins: usize,
+    f0_length: usize,
+    frame_period: f64,
+    current_time: f64,
+    out: &mut [f64],
+) {
+    let position = current_time / frame_period;
+    let frame_floor = (position.floor() as usize).min(f0_length - 1);
+    let frame_ceil = (position.ceil() as usize).min(f0_length - 1);
+    let interpolation = position - frame_floor as f64;
+    let row_floor = &aperiodicity[frame_floor * bins..frame_floor * bins + bins];
+    if frame_floor == frame_ceil {
+        for (o, &v) in out.iter_mut().zip(row_floor.iter()) {
+            *o = safe_aperiodicity(v).powi(2);
+        }
+    } else {
+        let row_ceil = &aperiodicity[frame_ceil * bins..frame_ceil * bins + bins];
+        for i in 0..bins {
+            out[i] = ((1.0 - interpolation) * safe_aperiodicity(row_floor[i])
+                + interpolation * safe_aperiodicity(row_ceil[i]))
+            .powi(2);
+        }
+    }
+}
+
+/// Synthesizes a waveform from a WORLD parameter set (synthesis.cpp
+/// `Synthesis`).
+///
+/// `f0` is the per-frame contour in Hz (`0.0` = unvoiced, may be user
+/// edited), `envelope_db` the CheapTrick envelope as produced by
+/// [`analyze_world`] (power dB), `aperiodicity` the linear D4C band
+/// aperiodicity, and `fft_size` the CheapTrick FFT size used at analysis
+/// time. The output is exactly `out_len` samples (zero-padded/truncated).
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_world(
+    f0: &[f32],
+    envelope_db: &[f32],
+    aperiodicity: &[f32],
+    bins: usize,
+    fft_size: usize,
+    sample_rate: u32,
+    frame_period_ms: f64,
+    out_len: usize,
+) -> Vec<f32> {
+    if out_len == 0 {
+        return Vec::new();
+    }
+    let f0_length = f0.len();
+    if f0_length == 0
+        || sample_rate == 0
+        || !(frame_period_ms > 0.0)
+        || bins == 0
+        || bins != fft_size / 2 + 1
+        || envelope_db.len() < f0_length * bins
+        || aperiodicity.len() < f0_length * bins
+    {
+        return vec![0.0f32; out_len];
+    }
+
+    let fs = sample_rate as f64;
+    let frame_period = frame_period_ms / 1000.0;
+    let f0_f64: Vec<f64> = f0.iter().map(|&v| v as f64).collect();
+    // Power dB back to linear power.
+    let spectrogram: Vec<f64> = envelope_db[..f0_length * bins]
+        .iter()
+        .map(|&v| 10f64.powf(v as f64 / 10.0))
+        .collect();
+    let aperiodicity_f64: Vec<f64> = aperiodicity[..f0_length * bins]
+        .iter()
+        .map(|&v| v as f64)
+        .collect();
+
+    // Lowest F0 the impulse-response length supports; WORLD computes this
+    // with integer division (`fs / fft_size + 1.0`).
+    let lowest_f0 = (sample_rate as usize / fft_size) as f64 + 1.0;
+    let time_base = get_time_base(&f0_f64, fs, frame_period, out_len, lowest_f0);
+
+    let dc_remover = get_dc_remover(fft_size);
+    // One planner for the whole call: realfft caches plans per size, so no
+    // FFT is replanned per pulse.
+    let mut planner = RealFftPlanner::<f64>::new();
+    let mut rng = WorldRandn::new();
+
+    let mut y = vec![0.0f64; out_len];
+    let mut spectral_envelope = vec![0.0f64; bins];
+    let mut aperiodic_ratio = vec![0.0f64; bins];
+    let number_of_pulses = time_base.pulse_locations.len();
+    for i in 0..number_of_pulses {
+        let noise_size = time_base.pulse_locations_index
+            [(i + 1).min(number_of_pulses - 1)]
+            - time_base.pulse_locations_index[i];
+        let current_vuv = time_base.interpolated_vuv[time_base.pulse_locations_index[i]];
+        let current_time = time_base.pulse_locations[i];
+
+        get_spectral_envelope(
+            &spectrogram,
+            bins,
+            f0_length,
+            frame_period,
+            current_time,
+            &mut spectral_envelope,
+        );
+        get_aperiodic_ratio(
+            &aperiodicity_f64,
+            bins,
+            f0_length,
+            frame_period,
+            current_time,
+            &mut aperiodic_ratio,
+        );
+
+        let periodic_response = get_periodic_response(
+            fft_size,
+            &spectral_envelope,
+            &aperiodic_ratio,
+            current_vuv,
+            time_base.pulse_locations_time_shift[i],
+            fs,
+            &dc_remover,
+            &mut planner,
+        );
+        let aperiodic_response = get_aperiodic_response(
+            noise_size,
+            fft_size,
+            &spectral_envelope,
+            &aperiodic_ratio,
+            current_vuv,
+            &mut planner,
+            &mut rng,
+        );
+
+        // real_ifft is normalized, so WORLD's final 1 / fft_size division is
+        // already folded into both responses.
+        let sqrt_noise_size = (noise_size as f64).sqrt();
+        let offset = time_base.pulse_locations_index[i] as i64 - (fft_size / 2) as i64 + 1;
+        let lower = (-offset).max(0) as usize;
+        let upper = (out_len as i64 - offset).clamp(0, fft_size as i64) as usize;
+        for j in lower..upper {
+            y[(j as i64 + offset) as usize] +=
+                periodic_response[j] * sqrt_noise_size + aperiodic_response[j];
+        }
+    }
+    y.iter().map(|&v| v as f32).collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1120,12 +2002,43 @@ mod tests {
     const FRAME_PERIOD_MS: f64 = 5.0;
 
     fn sine(freq: f64, secs: f64, fs: u32) -> Vec<f32> {
+        sine_amp(freq, 0.5, secs, fs)
+    }
+
+    fn sine_amp(freq: f64, amp: f32, secs: f64, fs: u32) -> Vec<f32> {
         let n = (secs * fs as f64) as usize;
         (0..n)
             .map(|i| {
-                (2.0 * std::f64::consts::PI * freq * i as f64 / fs as f64).sin() as f32 * 0.5
+                (2.0 * std::f64::consts::PI * freq * i as f64 / fs as f64).sin() as f32 * amp
             })
             .collect()
+    }
+
+    /// Deterministic LCG white-ish noise in `-0.5..0.5`.
+    fn lcg_noise(n: usize) -> Vec<f32> {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                ((state >> 33) as f64 / (1u64 << 31) as f64 - 1.0) as f32 * 0.5
+            })
+            .collect()
+    }
+
+    /// Convenience wrapper: synthesize from analyzed features.
+    fn synthesize(features: &WorldFeatures, f0: &[f32], out_len: usize) -> Vec<f32> {
+        synthesize_world(
+            f0,
+            &features.envelope_db,
+            &features.aperiodicity,
+            features.bins,
+            features.fft_size,
+            features.sample_rate,
+            features.frame_period_ms,
+            out_len,
+        )
     }
 
     /// Linear chirp from `f_start` to `f_end` Hz over `secs`.
@@ -1202,16 +2115,7 @@ mod tests {
 
     #[test]
     fn noise_is_mostly_unvoiced() {
-        // Deterministic LCG white-ish noise.
-        let mut state = 0x1234_5678_9abc_def0u64;
-        let signal: Vec<f32> = (0..TEST_FS as usize)
-            .map(|_| {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                ((state >> 33) as f64 / (1u64 << 31) as f64 - 1.0) as f32 * 0.5
-            })
-            .collect();
+        let signal = lcg_noise(TEST_FS as usize);
         let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
         let voiced_ratio =
             voiced_values(&features.f0).len() as f64 / features.frames as f64;
@@ -1292,6 +2196,14 @@ mod tests {
         assert_eq!(features.f0.len(), features.frames);
         assert_eq!(features.bins, features.fft_size / 2 + 1);
         assert_eq!(features.envelope_db.len(), features.frames * features.bins);
+        assert_eq!(features.aperiodicity.len(), features.frames * features.bins);
+        assert!(
+            features
+                .aperiodicity
+                .iter()
+                .all(|&v| (0.0..=1.0).contains(&v)),
+            "aperiodicity out of the 0..1 range"
+        );
     }
 
     #[test]
@@ -1300,6 +2212,150 @@ mod tests {
         assert_eq!(features.frames, 0);
         assert!(features.f0.is_empty());
         assert!(features.envelope_db.is_empty());
+        assert!(features.aperiodicity.is_empty());
+    }
+
+    #[test]
+    fn aperiodicity_low_for_sine_high_for_noise() {
+        // A pure tone is nearly periodic: the lowest band of the voiced
+        // frames must be far away from "fully aperiodic".
+        let signal = sine_amp(220.0, 0.7, 1.0, TEST_FS);
+        let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
+        let bins = features.bins;
+        let hz_per_bin = TEST_FS as f64 / features.fft_size as f64;
+        let band_hi = (3000.0 / hz_per_bin) as usize;
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+        for (frame, &f0) in features.f0.iter().enumerate() {
+            if f0 <= 0.0 {
+                continue;
+            }
+            for &v in &features.aperiodicity[frame * bins..frame * bins + band_hi + 1] {
+                sum += v as f64;
+                count += 1;
+            }
+        }
+        assert!(count > 0, "sine produced no voiced frames");
+        let mean = sum / count as f64;
+        assert!(
+            mean < 0.6,
+            "mean lowest-band aperiodicity {mean:.3} of a sine not < 0.6"
+        );
+
+        // Noise: voiced frames are rare, and where DIO hallucinates voicing
+        // the D4C LoveTrain must still report ~fully aperiodic frames.
+        let noise = lcg_noise(TEST_FS as usize);
+        let noise_features = analyze_world(&noise, TEST_FS, FRAME_PERIOD_MS);
+        let voiced_frames: Vec<usize> = noise_features
+            .f0
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v > 0.0)
+            .map(|(i, _)| i)
+            .collect();
+        let voiced_ratio = voiced_frames.len() as f64 / noise_features.frames as f64;
+        assert!(
+            voiced_ratio < 0.35,
+            "noise voiced ratio {:.1}% not rare",
+            voiced_ratio * 100.0
+        );
+        if !voiced_frames.is_empty() {
+            let mut sum = 0.0f64;
+            let mut count = 0usize;
+            for &frame in &voiced_frames {
+                for &v in &noise_features.aperiodicity[frame * bins..(frame + 1) * bins] {
+                    sum += v as f64;
+                    count += 1;
+                }
+            }
+            let mean = sum / count as f64;
+            assert!(
+                mean > 0.7,
+                "mean aperiodicity {mean:.3} of voiced noise frames not near 1"
+            );
+        }
+    }
+
+    #[test]
+    fn synthesis_roundtrip_preserves_pitch() {
+        let signal = sine_amp(220.0, 0.7, 1.0, TEST_FS);
+        let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
+        let start = std::time::Instant::now();
+        let out = synthesize(&features, &features.f0, signal.len());
+        println!(
+            "synthesize_world: 1.0 s @ 48 kHz in {:.1?}",
+            start.elapsed()
+        );
+        assert_eq!(out.len(), signal.len());
+        let reanalyzed = analyze_world(&out, TEST_FS, FRAME_PERIOD_MS);
+        let voiced = voiced_values(&reanalyzed.f0);
+        assert!(
+            voiced.len() as f64 / reanalyzed.frames as f64 > 0.5,
+            "resynthesized sine is mostly unvoiced"
+        );
+        let med = median(&voiced);
+        assert!(
+            (med - 220.0).abs() < 8.0,
+            "roundtrip median F0 {med} not within 8 Hz of 220"
+        );
+    }
+
+    #[test]
+    fn synthesis_pitch_edit_shifts_f0() {
+        let signal = sine_amp(220.0, 0.7, 1.0, TEST_FS);
+        let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
+        let edited: Vec<f32> = features.f0.iter().map(|&v| v * 1.5).collect();
+        let out = synthesize(&features, &edited, signal.len());
+        let reanalyzed = analyze_world(&out, TEST_FS, FRAME_PERIOD_MS);
+        let voiced = voiced_values(&reanalyzed.f0);
+        assert!(!voiced.is_empty(), "pitch-shifted output is unvoiced");
+        let med = median(&voiced);
+        assert!(
+            (med - 330.0).abs() < 12.0,
+            "pitch-edited median F0 {med} not within 12 Hz of 330"
+        );
+    }
+
+    #[test]
+    fn synthesis_output_hygiene() {
+        let signal = sine_amp(220.0, 0.7, 0.5, TEST_FS);
+        let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
+        for &out_len in &[signal.len(), signal.len() - 1234, signal.len() + 4321] {
+            let out = synthesize(&features, &features.f0, out_len);
+            assert_eq!(out.len(), out_len, "out_len not respected");
+            assert!(
+                out.iter().all(|v| v.is_finite()),
+                "output contains non-finite samples"
+            );
+            let max_abs = out.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+            assert!(max_abs < 4.0, "output peak {max_abs} not < 4.0");
+        }
+    }
+
+    #[test]
+    fn synthesis_of_noise_is_nonsilent() {
+        let signal = lcg_noise(TEST_FS as usize / 2);
+        let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
+        let out = synthesize(&features, &features.f0, signal.len());
+        assert_eq!(out.len(), signal.len());
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "noise resynthesis contains non-finite samples"
+        );
+        let energy: f64 = out.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        assert!(
+            energy > 1e-6,
+            "noise resynthesis is silent (energy {energy:.3e})"
+        );
+    }
+
+    #[test]
+    fn synthesis_is_deterministic() {
+        let signal = sine_amp(220.0, 0.7, 0.5, TEST_FS);
+        let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
+        let a = synthesize(&features, &features.f0, signal.len());
+        let b = synthesize(&features, &features.f0, signal.len());
+        assert_eq!(a, b, "two identical synthesize_world calls differ");
     }
 
     #[test]

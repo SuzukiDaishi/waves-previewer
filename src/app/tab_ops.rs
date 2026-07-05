@@ -130,6 +130,8 @@ impl super::WavesPreviewer {
                     auto_trim_state: None,
                     loop_detect_state: None,
                     mini_meter: crate::app::types::MiniMeterState::default(),
+                    world_f0_draft: None,
+                    world_f0_focus: false,
                 });
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
@@ -266,6 +268,8 @@ impl super::WavesPreviewer {
                 auto_trim_state: None,
                 loop_detect_state: None,
                 mini_meter: crate::app::types::MiniMeterState::default(),
+                world_f0_draft: None,
+                world_f0_focus: false,
             });
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
@@ -399,6 +403,8 @@ impl super::WavesPreviewer {
                 auto_trim_state: None,
                 loop_detect_state: None,
                 mini_meter: crate::app::types::MiniMeterState::default(),
+                world_f0_draft: None,
+                world_f0_focus: false,
             });
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
@@ -534,6 +540,8 @@ impl super::WavesPreviewer {
             auto_trim_state: None,
             loop_detect_state: None,
             mini_meter: crate::app::types::MiniMeterState::default(),
+            world_f0_draft: None,
+            world_f0_focus: false,
         });
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);

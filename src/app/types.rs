@@ -401,6 +401,16 @@ pub enum SpectrogramScale {
     Log,
 }
 
+/// Reference level for the spectrogram's dB color mapping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpectrogramDbRef {
+    /// 0 dBFS is the top of the color ramp (absolute levels).
+    Absolute,
+    /// The loudest bin of the file is the top of the ramp
+    /// (librosa-style `ref=max`; quiet material keeps full contrast).
+    MaxNormalized,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectGraphSpectrumMode {
@@ -424,7 +434,8 @@ pub struct SpectrogramConfig {
     pub max_frames: usize,
     pub scale: SpectrogramScale,
     pub mel_scale: SpectrogramScale,
-    pub db_floor: f32,    // negative dBFS
+    pub db_floor: f32,    // negative dB relative to `db_ref`
+    pub db_ref: SpectrogramDbRef,
     pub max_freq_hz: f32, // 0 = Nyquist
     pub show_note_labels: bool,
 }
@@ -440,6 +451,7 @@ impl Default for SpectrogramConfig {
             scale: SpectrogramScale::Linear,
             mel_scale: SpectrogramScale::Linear,
             db_floor: -120.0,
+            db_ref: SpectrogramDbRef::Absolute,
             max_freq_hz: 0.0,
             show_note_labels: false,
         }
@@ -929,6 +941,18 @@ pub struct MiniMeterState {
     pub active: bool,           // decay animation still in motion
 }
 
+/// Per-tab draft for editing the WORLD F0 trajectory before resynthesis.
+/// `values` mirrors `WorldFeatureData::f0_values` (0.0 = unvoiced).
+#[derive(Clone, Debug, Default)]
+pub struct WorldF0Draft {
+    pub values: Vec<f32>,
+    pub source_frames: usize, // frame count of the analysis this was built from
+    pub dirty: bool,          // differs from the analyzed curve
+    pub edit_enabled: bool,   // canvas pencil mode
+    pub shift_semitones: f32, // UI scratch for the pitch-shift control
+    pub last_drag_frame: Option<(usize, f32)>, // pencil interpolation anchor (frame, freq)
+}
+
 pub struct EditorTab {
     pub path: PathBuf,
     pub display_name: String,
@@ -1028,6 +1052,8 @@ pub struct EditorTab {
     pub auto_trim_state: Option<AutoTrimState>,
     pub loop_detect_state: Option<LoopDetectState>,
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
+    pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
+    pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
 }
 
 impl EditorTab {
@@ -1209,6 +1235,7 @@ pub struct WorldFeatureData {
     pub f0_ceil: f32,
     pub f0_values: Vec<f32>,  // per frame, 0.0 = unvoiced
     pub env_db: Vec<f32>,     // frames * bins, power dB
+    pub aperiodicity: Vec<f32>, // frames * bins, linear 0..1 (1 = noise)
     pub median_f0: Option<f32>,
     pub voiced_ratio: f32,
 }

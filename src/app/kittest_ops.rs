@@ -58,6 +58,38 @@ impl super::WavesPreviewer {
         self.show_export_settings
     }
 
+    /// Shift the active tab's WORLD F0 draft by `semitones` and kick the
+    /// resynthesis job. Returns true when the job was spawned.
+    pub fn test_world_shift_and_resynth(&mut self, semitones: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let key = crate::app::types::EditorAnalysisKey {
+            path: tab.path.clone(),
+            kind: crate::app::types::EditorAnalysisKind::World,
+        };
+        let Some(cache) = self.editor_feature_cache.get(&key).cloned() else {
+            return false;
+        };
+        let crate::app::types::EditorFeatureAnalysisData::World(data) = cache.as_ref() else {
+            return false;
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            let draft = Self::world_f0_draft_mut(tab, data);
+            Self::world_f0_shift_semitones(draft, semitones);
+        }
+        self.spawn_world_resynth_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
+    }
+
+    /// True while an editor apply job (including WORLD resynthesis) runs.
+    pub fn test_editor_apply_busy(&self) -> bool {
+        self.editor_apply_state.is_some()
+    }
+
     /// WORLD feature analysis result for the active tab, if cached:
     /// (frames, envelope bins, voiced ratio).
     pub fn test_world_features_ready(&self) -> Option<(usize, usize, f32)> {

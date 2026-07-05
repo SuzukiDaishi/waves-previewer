@@ -474,6 +474,7 @@ impl crate::app::WavesPreviewer {
                                         scale: SpectrogramScale::Log,
                                         mel_scale: SpectrogramScale::Linear,
                                         db_floor: -120.0,
+                                        db_ref: crate::app::types::SpectrogramDbRef::Absolute,
                                         max_freq_hz: 8000.0,
                                         show_note_labels: false,
                                     };
@@ -548,7 +549,33 @@ impl crate::app::WavesPreviewer {
                             });
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Spectrogram Values:");
-                                ui.label(RichText::new("dB (log magnitude)").monospace());
+                                egui::ComboBox::from_id_salt("spectro_db_ref")
+                                    .selected_text(match next_cfg.db_ref {
+                                        crate::app::types::SpectrogramDbRef::Absolute => {
+                                            "dB (0 dBFS ref)"
+                                        }
+                                        crate::app::types::SpectrogramDbRef::MaxNormalized => {
+                                            "dB (normalized to max)"
+                                        }
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut next_cfg.db_ref,
+                                            crate::app::types::SpectrogramDbRef::Absolute,
+                                            "dB (0 dBFS ref)",
+                                        );
+                                        ui.selectable_value(
+                                            &mut next_cfg.db_ref,
+                                            crate::app::types::SpectrogramDbRef::MaxNormalized,
+                                            "dB (normalized to max)",
+                                        );
+                                    });
+                                ui.label(
+                                    RichText::new(
+                                        "normalized = brightest bin tops the ramp (librosa ref=max)",
+                                    )
+                                    .weak(),
+                                );
                             });
                             ui.label(
                                 RichText::new(

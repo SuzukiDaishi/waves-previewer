@@ -4,6 +4,15 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### F0 Editing + WORLD Resynthesis
+- The World view is now an editor: enable "Edit F0 on canvas" and draw the pitch curve with the mouse (left-drag draws, right-drag erases to unvoiced; strokes interpolate in log-frequency so fast drags leave no gaps). Canvas seek/select pause while editing.
+- Curve transforms in the inspector: semitone shift (drag value + apply), 5-frame median smooth, flatten-to-median (monotone), and reset to the analyzed curve. The edited draft renders in orange over the dimmed analyzed curve.
+- "Resynthesize (replace audio)" rebuilds the tab audio with WORLD synthesis using the edited F0 - ported D4C aperiodicity analysis and the reference synthesis engine (pulse/noise excitation through minimum-phase spectra, fractional pulse alignment, deterministic noise) join the analysis port in `render/world_features.rs`. Runs as a background job through the shared editor-apply pipeline: full undo (Ctrl+Z), busy overlay with cancel, engine buffer swap, and cache invalidation; the mono result is written to every channel so the tab keeps its channel count. Roundtrip unit tests confirm pitch is preserved and that editing the contour actually shifts the resynthesized pitch (1 s of 48 kHz synthesizes in ~30 ms release).
+- F0 readability: pitch curves now draw over a dark halo so they stay visible on bright envelope areas, and a new "F0 zoom" toggle switches the vertical axis to 50 Hz-1.1 kHz so the pitch range fills the canvas (heatmap, ticks, and pencil mapping all follow).
+
+### Spectrogram dB Reference Option
+- New "Spectrogram Values" setting: `dB (0 dBFS ref)` (previous behavior) or `dB (normalized to max)` - librosa-style `ref=max` mapping where the loudest bin tops the color ramp, keeping harmonic detail visible on quiet material. Persisted in prefs and sessions; applies to Spec/Freq Log/Mel views.
+
 ### New WORLD Feature View (F0 / Spectral Envelope)
 - New editor view "World (F0/Env)" alongside Tempogram/Chromagram: a CheapTrick spectral-envelope heatmap on a log-frequency axis with the DIO+StoneMask F0 trajectory overlaid as a cyan polyline, a live F0 readout at the playhead, and frequency-axis ticks in the gutter.
 - The analysis is an independent pure-Rust port of the WORLD vocoder's core algorithms (mmorise/World, BSD-3-Clause) in `render/world_features.rs` — DIO band-wise zero-crossing F0 candidates, StoneMask instantaneous-frequency refinement, CheapTrick pitch-adaptive envelope — with unit tests covering sines (55/100/440 Hz), sweeps, silence/noise voicing decisions, and envelope peak placement.

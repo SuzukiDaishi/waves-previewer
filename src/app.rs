@@ -85,6 +85,7 @@ mod transcript_onnx;
 mod transcript_ops;
 mod types;
 mod ui;
+mod world_edit_ops;
 mod zoo_assets;
 mod zoo_ops;
 pub use self::cli_ops::run_cli;

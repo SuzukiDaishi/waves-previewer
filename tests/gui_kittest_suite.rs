@@ -2556,6 +2556,114 @@ mod kittest_suite {
     }
 
     #[test]
+    fn world_f0_edit_resynthesizes_audio_with_undo() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::World));
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_world_features_ready().is_some() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                panic!("WORLD analysis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let tab_idx = harness.state().active_tab.unwrap();
+        let fingerprint = |state: &WavesPreviewer| -> f64 {
+            state.tabs[tab_idx].ch_samples[0]
+                .iter()
+                .take(48_000)
+                .map(|v| (*v as f64).abs())
+                .sum()
+        };
+        let before_len = harness.state().tabs[tab_idx].samples_len;
+        let before_fp = fingerprint(harness.state());
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+        assert!(
+            harness.state_mut().test_world_shift_and_resynth(12.0),
+            "resynthesis job should spawn"
+        );
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_editor_apply_busy() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(120) {
+                panic!("WORLD resynthesis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        harness.run_steps(2);
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(tab.samples_len, before_len, "length must be preserved");
+        assert!(
+            tab.ch_samples.iter().all(|ch| ch.len() == before_len),
+            "every channel must carry the resynthesized audio"
+        );
+        let after_fp = fingerprint(harness.state());
+        assert!(
+            (after_fp - before_fp).abs() > before_fp * 0.01,
+            "audio should change after resynthesis (before={before_fp}, after={after_fp})"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before + 1,
+            "resynthesis must push an undo state"
+        );
+        assert!(harness.state().tabs[tab_idx].dirty, "tab should be dirty");
+    }
+
+    #[test]
+    fn world_f0_zoom_and_edit_toggles_respond() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::World));
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_world_features_ready().is_some() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                panic!("WORLD analysis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(!harness.state().tabs[tab_idx].world_f0_focus);
+        harness
+            .get_by_label("F0 zoom (50 Hz - 1.1 kHz axis)")
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().tabs[tab_idx].world_f0_focus,
+            "F0 zoom checkbox should toggle the focus flag"
+        );
+        harness.get_by_label("Edit F0 on canvas").click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().tabs[tab_idx]
+                .world_f0_draft
+                .as_ref()
+                .map(|d| d.edit_enabled)
+                .unwrap_or(false),
+            "Edit F0 checkbox should enable the draft pencil mode"
+        );
+    }
+
+    #[test]
     fn editor_mini_meter_populates_state() {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);

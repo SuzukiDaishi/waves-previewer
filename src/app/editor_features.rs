@@ -178,6 +178,7 @@ impl super::WavesPreviewer {
             f0_ceil: features.f0_ceil as f32,
             f0_values: features.f0,
             env_db: features.envelope_db,
+            aperiodicity: features.aperiodicity,
             median_f0,
             voiced_ratio,
         }
