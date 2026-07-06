@@ -4,6 +4,9 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Fix: List Randomly Turning Red (dev builds)
+- Fixed the file list sometimes getting 2px red outlines around every cell in debug builds. egui keeps separate dark/light styles and follows the OS theme by default; the startup style patch (app text sizes + disabling the `warn_if_rect_changes_id` debug heuristic that false-positives on the virtualized list) only landed in the style slot active at startup. When Windows later reported the other theme, egui swapped in the unpatched style - the app still looked dark (visuals were re-applied every frame) but the debug heuristic came back on and painted red outlines after scroll jumps. Styles are now patched via `all_styles_mut` (both slots), theme visuals likewise, and a kittest regression simulates the OS theme flip and asserts no red debug rects are painted.
+
 ### RX-Style Time-Frequency Selection: Spectral Mute + Play Selection
 - The spectral views (Spec / Freq Log / Mel) now support time-frequency rectangle selection: dragging selects both the time range and a frequency band (drawn as a band-limited highlight per channel lane), like iZotope RX / Adobe Audition's marquee. Dragging edge-to-edge across the whole frequency axis - or dragging in the Wave view - keeps the classic full-band time selection. The Y->Hz mapping follows the active view's axis exactly (linear / log / mel, including vertical zoom and the display max-frequency cap), and the band survives undo/redo.
 - New "Freq" row in the Inspector shows the selected band with editable low/high Hz fields and a "Full band" reset; it appears in the spectral views (and anywhere a band is set).
