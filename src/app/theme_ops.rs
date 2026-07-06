@@ -356,6 +356,11 @@ impl WavesPreviewer {
                     "log" => SpectrogramScale::Log,
                     _ => SpectrogramScale::Linear,
                 };
+            } else if let Some(rest) = line.strip_prefix("world_f0_method=") {
+                self.world_f0_method = match rest.trim() {
+                    "harvest" => crate::app::types::WorldF0Method::Harvest,
+                    _ => crate::app::types::WorldF0Method::Dio,
+                };
             } else if let Some(rest) = line.strip_prefix("spectro_db_ref=") {
                 self.spectro_cfg.db_ref = match rest.trim() {
                     "max" => crate::app::types::SpectrogramDbRef::MaxNormalized,
@@ -702,6 +707,7 @@ spectro_scale={}\n\
 spectro_mel_scale={}\n\
 spectro_db_floor={:.1}\n\
 spectro_db_ref={}\n\
+world_f0_method={}\n\
 spectro_max_hz={:.1}\n\
 spectro_note_labels={}\n\
 item_bg_mode={}\n\
@@ -758,6 +764,10 @@ zoo_flip_manual={}\n",
             match self.spectro_cfg.db_ref {
                 crate::app::types::SpectrogramDbRef::Absolute => "absolute",
                 crate::app::types::SpectrogramDbRef::MaxNormalized => "max",
+            },
+            match self.world_f0_method {
+                crate::app::types::WorldF0Method::Dio => "dio",
+                crate::app::types::WorldF0Method::Harvest => "harvest",
             },
             self.spectro_cfg.max_freq_hz,
             note_labels,

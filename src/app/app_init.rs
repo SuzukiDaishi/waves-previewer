@@ -55,6 +55,7 @@ impl WavesPreviewer {
             editor_wave_cache_generation_counter: 0,
             session_save_state: None,
             clipboard_prep_state: None,
+            world_f0_method: crate::app::types::WorldF0Method::Dio,
             meta_sort_last_applied: None,
             list_meta_prefetch_cursor: 0,
             transcript_inflight: HashSet::new(),

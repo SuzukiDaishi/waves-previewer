@@ -449,6 +449,8 @@ pub struct WavesPreviewer {
     editor_wave_cache_generation_counter: u64,
     pub(crate) session_save_state: Option<SessionSaveState>,
     pub(crate) clipboard_prep_state: Option<ClipboardPrepState>,
+    /// F0 estimator for WORLD analysis (DIO = fast, Harvest = accurate).
+    pub world_f0_method: WorldF0Method,
     meta_sort_last_applied: Option<std::time::Instant>,
     list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,

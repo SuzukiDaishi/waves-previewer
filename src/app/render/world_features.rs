@@ -80,6 +80,15 @@ pub struct WorldFeatures {
     pub bins: usize,
 }
 
+/// F0 estimator selection for [`analyze_world_with_options`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorldF0Estimator {
+    /// DIO + StoneMask refinement: fast, WORLD's default.
+    Dio,
+    /// Harvest: slower but more accurate, fewer voiced/unvoiced errors.
+    Harvest,
+}
+
 /// Runs DIO + StoneMask + CheapTrick on a mono signal.
 // Production callers report progress; the unit tests use this wrapper.
 #[cfg_attr(not(test), allow(dead_code))]
@@ -93,6 +102,23 @@ pub fn analyze_world_with_progress(
     mono: &[f32],
     sample_rate: u32,
     frame_period_ms: f64,
+    progress: Option<&dyn Fn(f32)>,
+) -> WorldFeatures {
+    analyze_world_with_options(
+        mono,
+        sample_rate,
+        frame_period_ms,
+        WorldF0Estimator::Dio,
+        progress,
+    )
+}
+
+/// [`analyze_world_with_progress`] with a selectable F0 estimator.
+pub fn analyze_world_with_options(
+    mono: &[f32],
+    sample_rate: u32,
+    frame_period_ms: f64,
+    estimator: WorldF0Estimator,
     progress: Option<&dyn Fn(f32)>,
 ) -> WorldFeatures {
     let fft_size = cheaptrick_fft_size(sample_rate.max(1));
@@ -128,18 +154,29 @@ pub fn analyze_world_with_progress(
         }
     };
     report(0.01);
-    let f0_dio = dio_f0(
-        &x,
-        fs,
-        frame_period_ms,
-        &temporal_positions,
-        &mut planner,
-        &|p| report(0.01 + p * 0.34),
-    );
-    report(0.35);
-    let f0 = stonemask(&x, fs, &temporal_positions, &f0_dio, &mut planner, &|p| {
-        report(0.35 + p * 0.20)
-    });
+    let f0 = match estimator {
+        WorldF0Estimator::Dio => {
+            let f0_dio = dio_f0(
+                &x,
+                fs,
+                frame_period_ms,
+                &temporal_positions,
+                &mut planner,
+                &|p| report(0.01 + p * 0.34),
+            );
+            report(0.35);
+            stonemask(&x, fs, &temporal_positions, &f0_dio, &mut planner, &|p| {
+                report(0.35 + p * 0.20)
+            })
+        }
+        // Harvest refines candidates by instantaneous frequency itself, so no
+        // StoneMask pass follows (matches the reference tool chain).
+        WorldF0Estimator::Harvest => {
+            harvest_f0(&x, fs, &temporal_positions, &mut planner, &|p| {
+                report(0.01 + p * 0.54)
+            })
+        }
+    };
     report(0.55);
     let envelope_db = cheaptrick(
         &x,
@@ -941,6 +978,977 @@ fn fix_f0(
         denominator += amplitude * harmonic as f64;
     }
     numerator / (denominator + SAFE_GUARD_MINIMUM)
+}
+
+// ---------------------------------------------------------------------------
+// Harvest (harvest.cpp)
+// ---------------------------------------------------------------------------
+
+/// Sample rate Harvest decimates the input towards (harvest.cpp `target_fs`).
+const HARVEST_TARGET_FS: f64 = 8000.0;
+/// Filter-bank density (harvest.cpp `channels_in_octave`).
+const HARVEST_CHANNELS_IN_OCTAVE: f64 = 40.0;
+/// Frames whose refined score falls below this are dropped
+/// (harvest.cpp `GetRefinedF0`).
+const HARVEST_SCORE_THRESHOLD: f64 = 2.5;
+
+/// Harvest F0 estimation (harvest.cpp `Harvest`). The contour is estimated on
+/// the reference's 1 ms basic grid and then sampled at `temporal_positions`.
+fn harvest_f0(
+    x: &[f64],
+    fs: f64,
+    temporal_positions: &[f64],
+    planner: &mut RealFftPlanner<f64>,
+    progress: &dyn Fn(f32),
+) -> Vec<f64> {
+    let basic_frames = (1000.0 * x.len() as f64 / fs) as usize + 1;
+    let basic_f0 = harvest_general_body(x, fs, basic_frames, planner, progress);
+    if basic_f0.is_empty() {
+        return vec![0.0; temporal_positions.len()];
+    }
+    temporal_positions
+        .iter()
+        .map(|&t| basic_f0[(matlab_round(t * 1000.0).max(0) as usize).min(basic_frames - 1)])
+        .collect()
+}
+
+/// F0 contour on a 1 ms grid (harvest.cpp `HarvestGeneralBody`).
+fn harvest_general_body(
+    x: &[f64],
+    fs: f64,
+    f0_length: usize,
+    planner: &mut RealFftPlanner<f64>,
+    progress: &dyn Fn(f32),
+) -> Vec<f64> {
+    if x.is_empty() || f0_length == 0 {
+        return vec![0.0; f0_length];
+    }
+    let adjusted_f0_floor = F0_FLOOR_HZ * 0.9;
+    let adjusted_f0_ceil = F0_CEIL_HZ * 1.1;
+    let number_of_channels = 1
+        + ((adjusted_f0_ceil / adjusted_f0_floor).log2() * HARVEST_CHANNELS_IN_OCTAVE) as usize;
+    let boundary_f0_list: Vec<f64> = (0..number_of_channels)
+        .map(|i| adjusted_f0_floor * 2f64.powf((i as f64 + 1.0) / HARVEST_CHANNELS_IN_OCTAVE))
+        .collect();
+
+    let decimation_ratio = matlab_round(fs / HARVEST_TARGET_FS).clamp(1, 12) as usize;
+    let y_length = (x.len() as f64 / decimation_ratio as f64).ceil() as usize;
+    let actual_fs = fs / decimation_ratio as f64;
+    let fft_size = get_suitable_fft_size(
+        y_length + 5 + 2 * (2.0 * actual_fs / boundary_f0_list[0]) as usize,
+    );
+
+    // Downsampled waveform and its spectrum (GetWaveformAndSpectrum). Unlike
+    // DIO there is no low-cut filter, only DC removal; the DC-removed signal
+    // is also what the refinement stage windows later.
+    let mut y = harvest_downsampled_waveform(x, y_length, decimation_ratio, planner);
+    let mean_y = y.iter().sum::<f64>() / y.len().max(1) as f64;
+    for v in y.iter_mut() {
+        *v -= mean_y;
+    }
+    let y_spectrum = real_fft(planner, &y, fft_size);
+
+    let temporal_positions: Vec<f64> = (0..f0_length).map(|i| i as f64 / 1000.0).collect();
+
+    let overlap_parameter = 7usize;
+    let max_candidates =
+        (matlab_round(number_of_channels as f64 / 10.0) as usize).max(1) * overlap_parameter;
+
+    // Stage 1: raw candidates per filter-bank channel (GetRawF0Candidates).
+    let mut raw_f0_candidates = vec![vec![0.0f64; f0_length]; number_of_channels];
+    for (i, (raw, &boundary_f0)) in raw_f0_candidates
+        .iter_mut()
+        .zip(boundary_f0_list.iter())
+        .enumerate()
+    {
+        if i % 8 == 0 {
+            progress(0.30 * i as f32 / number_of_channels as f32);
+        }
+        harvest_f0_candidate_from_raw_event(
+            boundary_f0,
+            actual_fs,
+            &y_spectrum,
+            y_length,
+            fft_size,
+            &temporal_positions,
+            raw,
+            planner,
+        );
+    }
+    progress(0.30);
+
+    // Stage 2: merge channels into per-frame candidate lists and spread them
+    // to neighbouring frames (DetectOfficialF0Candidates + Overlap).
+    let (mut f0_candidates, base_candidates) = harvest_detect_official_f0_candidates(
+        &raw_f0_candidates,
+        f0_length,
+        max_candidates,
+        overlap_parameter,
+    );
+    drop(raw_f0_candidates);
+    harvest_overlap_f0_candidates(&mut f0_candidates, base_candidates);
+    let number_of_candidates = base_candidates * overlap_parameter;
+
+    // Stage 3: refine every candidate by instantaneous frequency and score it
+    // (RefineF0Candidates). This dominates the runtime, so frames are split
+    // across worker threads.
+    let mut f0_scores = vec![vec![0.0f64; max_candidates]; f0_length];
+    harvest_refine_f0_candidates(
+        &y,
+        actual_fs,
+        &temporal_positions,
+        number_of_candidates,
+        &mut f0_candidates,
+        &mut f0_scores,
+        &|p| progress(0.30 + 0.60 * p),
+    );
+    harvest_remove_unreliable_candidates(number_of_candidates, &mut f0_candidates, &mut f0_scores);
+    progress(0.95);
+
+    // Stage 4: contour selection, fixing, and smoothing.
+    let best_f0_contour = harvest_fix_f0_contour(&f0_candidates, &f0_scores, number_of_candidates);
+    let smoothed = harvest_smooth_f0_contour(&best_f0_contour);
+    progress(1.0);
+    smoothed
+}
+
+/// MATLAB-compatible edge-padded decimation
+/// (harvest.cpp `GetWaveformAndSpectrumSub`).
+fn harvest_downsampled_waveform(
+    x: &[f64],
+    y_length: usize,
+    decimation_ratio: usize,
+    planner: &mut RealFftPlanner<f64>,
+) -> Vec<f64> {
+    if decimation_ratio <= 1 {
+        return x.to_vec();
+    }
+    let lag = ((140.0 / decimation_ratio as f64).ceil() as usize) * decimation_ratio;
+    let mut extended = Vec::with_capacity(x.len() + lag * 2);
+    extended.extend(std::iter::repeat(x[0]).take(lag));
+    extended.extend_from_slice(x);
+    extended.extend(std::iter::repeat(x[x.len() - 1]).take(lag));
+    let decimated = decimate(&extended, decimation_ratio, planner);
+    let offset = lag / decimation_ratio;
+    (0..y_length)
+        .map(|i| {
+            decimated
+                .get(offset + i)
+                .copied()
+                .unwrap_or_else(|| *decimated.last().unwrap_or(&0.0))
+        })
+        .collect()
+}
+
+/// One filter-bank channel: band-pass around `boundary_f0`, zero-crossing
+/// events, interpolated candidate contour
+/// (harvest.cpp `GetF0CandidateFromRawEvent`).
+#[allow(clippy::too_many_arguments)]
+fn harvest_f0_candidate_from_raw_event(
+    boundary_f0: f64,
+    fs: f64,
+    y_spectrum: &[Complex<f64>],
+    y_length: usize,
+    fft_size: usize,
+    temporal_positions: &[f64],
+    f0_candidate: &mut [f64],
+    planner: &mut RealFftPlanner<f64>,
+) {
+    let filtered = harvest_filtered_signal(boundary_f0, fft_size, fs, y_spectrum, y_length, planner);
+    let events = harvest_four_zero_crossing_intervals(filtered, fs);
+    harvest_f0_candidate_contour(&events, boundary_f0, temporal_positions, f0_candidate);
+}
+
+/// Band-pass filtering with a cosine-modulated Nuttall window
+/// (harvest.cpp `GetFilteredSignal`).
+fn harvest_filtered_signal(
+    boundary_f0: f64,
+    fft_size: usize,
+    fs: f64,
+    y_spectrum: &[Complex<f64>],
+    y_length: usize,
+    planner: &mut RealFftPlanner<f64>,
+) -> Vec<f64> {
+    let filter_length_half = matlab_round(fs / boundary_f0 * 2.0).max(1) as usize;
+    let filter_length = filter_length_half * 2 + 1;
+    let mut band_pass_filter = vec![0.0f64; filter_length];
+    nuttall_window(filter_length, &mut band_pass_filter);
+    for (i, v) in band_pass_filter.iter_mut().enumerate() {
+        let k = i as f64 - filter_length_half as f64;
+        *v *= (2.0 * std::f64::consts::PI * boundary_f0 * k / fs).cos();
+    }
+    let filter_spectrum = real_fft(planner, &band_pass_filter, fft_size);
+    let mut product: Vec<Complex<f64>> = y_spectrum
+        .iter()
+        .zip(filter_spectrum.iter())
+        .map(|(a, b)| a * b)
+        .collect();
+    let filtered = real_ifft(planner, &mut product, fft_size);
+
+    // Compensation of the filter group delay.
+    let index_bias = filter_length_half + 1;
+    (0..y_length)
+        .map(|i| filtered[(i + index_bias).min(fft_size - 1)])
+        .collect()
+}
+
+/// Negative/positive zero crossings plus peaks and dips
+/// (harvest.cpp `GetFourZeroCrossingIntervals`).
+fn harvest_four_zero_crossing_intervals(mut signal: Vec<f64>, fs: f64) -> [ZeroCrossings; 4] {
+    let y_length = signal.len();
+    let negatives = zero_crossing_engine(&signal, fs);
+    for v in signal.iter_mut() {
+        *v = -*v;
+    }
+    let positives = zero_crossing_engine(&signal, fs);
+    if y_length < 2 {
+        return [
+            negatives,
+            positives,
+            (Vec::new(), Vec::new()),
+            (Vec::new(), Vec::new()),
+        ];
+    }
+    for i in 0..y_length - 1 {
+        signal[i] -= signal[i + 1];
+    }
+    let peaks = zero_crossing_engine(&signal[..y_length - 1], fs);
+    for v in signal[..y_length - 1].iter_mut() {
+        *v = -*v;
+    }
+    let dips = zero_crossing_engine(&signal[..y_length - 1], fs);
+    [negatives, positives, peaks, dips]
+}
+
+/// Interpolates the four event trains and keeps only frames whose mean lies
+/// close to the channel's boundary F0 (harvest.cpp `GetF0CandidateContour`).
+fn harvest_f0_candidate_contour(
+    events: &[ZeroCrossings; 4],
+    boundary_f0: f64,
+    temporal_positions: &[f64],
+    f0_candidate: &mut [f64],
+) {
+    let usable = events.iter().all(|(_, intervals)| intervals.len() > 2);
+    if !usable {
+        f0_candidate.fill(0.0);
+        return;
+    }
+    let f0_length = temporal_positions.len();
+    let mut interpolated = vec![vec![0.0f64; f0_length]; 4];
+    for (dst, (locations, intervals)) in interpolated.iter_mut().zip(events.iter()) {
+        interp1(locations, intervals, temporal_positions, dst);
+    }
+    let upper = boundary_f0 * 1.1;
+    let lower = boundary_f0 * 0.9;
+    for (i, out) in f0_candidate.iter_mut().enumerate() {
+        let mean =
+            (interpolated[0][i] + interpolated[1][i] + interpolated[2][i] + interpolated[3][i])
+                / 4.0;
+        *out = if mean > upper || mean < lower || mean > F0_CEIL_HZ || mean < F0_FLOOR_HZ {
+            0.0
+        } else {
+            mean
+        };
+    }
+}
+
+/// Collapses per-channel candidates into per-frame candidate lists: runs of
+/// >= 10 adjacent voiced channels average into one candidate
+/// (harvest.cpp `DetectOfficialF0Candidates`). Returns the per-frame candidate
+/// matrix (`f0_length x max_candidates`) and the base candidate count.
+fn harvest_detect_official_f0_candidates(
+    raw_f0_candidates: &[Vec<f64>],
+    f0_length: usize,
+    max_candidates: usize,
+    overlap_parameter: usize,
+) -> (Vec<Vec<f64>>, usize) {
+    let number_of_channels = raw_f0_candidates.len();
+    let mut f0_candidates = vec![vec![0.0f64; max_candidates]; f0_length];
+    // Overlapping (x7) must fit into max_candidates columns.
+    let base_limit = (max_candidates / overlap_parameter).max(1);
+    let mut number_of_candidates = 0usize;
+    if number_of_channels < 2 {
+        return (f0_candidates, 0);
+    }
+    let mut vuv = vec![0i32; number_of_channels];
+    for (i, frame) in f0_candidates.iter_mut().enumerate() {
+        for (flag, channel) in vuv.iter_mut().zip(raw_f0_candidates.iter()) {
+            *flag = if channel[i] > 0.0 { 1 } else { 0 };
+        }
+        vuv[0] = 0;
+        vuv[number_of_channels - 1] = 0;
+        let mut count = 0usize;
+        let mut section_start = 0usize;
+        for j in 1..number_of_channels {
+            let step = vuv[j] - vuv[j - 1];
+            if step == 1 {
+                section_start = j;
+            }
+            if step == -1 && j - section_start >= 10 && count < base_limit {
+                let mean = raw_f0_candidates[section_start..j]
+                    .iter()
+                    .map(|channel| channel[i])
+                    .sum::<f64>()
+                    / (j - section_start) as f64;
+                frame[count] = mean;
+                count += 1;
+            }
+        }
+        number_of_candidates = number_of_candidates.max(count);
+    }
+    (f0_candidates, number_of_candidates)
+}
+
+/// Spreads each frame's candidates to the three frames on either side
+/// (harvest.cpp `OverlapF0Candidates`).
+fn harvest_overlap_f0_candidates(f0_candidates: &mut [Vec<f64>], number_of_candidates: usize) {
+    let n = 3usize;
+    let f0_length = f0_candidates.len();
+    if number_of_candidates == 0 {
+        return;
+    }
+    for i in 1..=n {
+        for j in 0..number_of_candidates {
+            for k in i..f0_length {
+                let v = f0_candidates[k - i][j];
+                f0_candidates[k][j + number_of_candidates * i] = v;
+            }
+            for k in 0..f0_length.saturating_sub(i) {
+                let v = f0_candidates[k + i][j];
+                f0_candidates[k][j + number_of_candidates * (i + n)] = v;
+            }
+        }
+    }
+}
+
+/// Refines every candidate by instantaneous frequency, in parallel across
+/// frames (harvest.cpp `RefineF0Candidates`).
+fn harvest_refine_f0_candidates(
+    y: &[f64],
+    fs: f64,
+    temporal_positions: &[f64],
+    number_of_candidates: usize,
+    f0_candidates: &mut [Vec<f64>],
+    f0_scores: &mut [Vec<f64>],
+    progress: &dyn Fn(f32),
+) {
+    let f0_length = f0_candidates.len();
+    if f0_length == 0 || number_of_candidates == 0 {
+        progress(1.0);
+        return;
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    let chunk_len = f0_length.div_ceil(threads);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for ((cand_chunk, score_chunk), position_chunk) in f0_candidates
+            .chunks_mut(chunk_len)
+            .zip(f0_scores.chunks_mut(chunk_len))
+            .zip(temporal_positions.chunks(chunk_len))
+        {
+            let done = &done;
+            scope.spawn(move || {
+                let mut planner = RealFftPlanner::<f64>::new();
+                for ((candidates, scores), &position) in cand_chunk
+                    .iter_mut()
+                    .zip(score_chunk.iter_mut())
+                    .zip(position_chunk.iter())
+                {
+                    for j in 0..number_of_candidates {
+                        let (refined, score) =
+                            harvest_refined_f0(y, fs, position, candidates[j], &mut planner);
+                        candidates[j] = refined;
+                        scores[j] = score;
+                    }
+                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        loop {
+            let finished = done.load(std::sync::atomic::Ordering::Relaxed);
+            progress(finished as f32 / f0_length as f32);
+            if finished >= f0_length {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+    });
+}
+
+/// Instantaneous-frequency refinement of one candidate; returns
+/// `(refined_f0, score)`, both zero when rejected
+/// (harvest.cpp `GetRefinedF0` + `GetMeanF0` + `FixF0`).
+fn harvest_refined_f0(
+    y: &[f64],
+    fs: f64,
+    current_position: f64,
+    current_f0: f64,
+    planner: &mut RealFftPlanner<f64>,
+) -> (f64, f64) {
+    if current_f0 <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let half_window_length = (1.5 * fs / current_f0 + 1.0) as usize;
+    let base_time_length = half_window_length * 2 + 1;
+    let window_length_in_time = base_time_length as f64 / fs;
+    let fft_size = 2 * get_suitable_fft_size(base_time_length);
+    let bins = fft_size / 2 + 1;
+
+    // Blackman window centred on the analysis position and its derivative.
+    let basic_index =
+        matlab_round((current_position - half_window_length as f64 / fs) * fs + 0.001);
+    let mut main_window = vec![0.0f64; base_time_length];
+    for (i, w) in main_window.iter_mut().enumerate() {
+        let t = (basic_index as f64 + i as f64 - 1.0) / fs - current_position;
+        *w = 0.42
+            + 0.5 * (2.0 * std::f64::consts::PI * t / window_length_in_time).cos()
+            + 0.08 * (4.0 * std::f64::consts::PI * t / window_length_in_time).cos();
+    }
+    let mut diff_window = vec![0.0f64; base_time_length];
+    diff_window[0] = -main_window[1] / 2.0;
+    for i in 1..base_time_length - 1 {
+        diff_window[i] = -(main_window[i + 1] - main_window[i - 1]) / 2.0;
+    }
+    diff_window[base_time_length - 1] = main_window[base_time_length - 2] / 2.0;
+
+    // Spectra of the waveform windowed by both windows (GetSpectra).
+    let mut main_waveform = vec![0.0f64; base_time_length];
+    let mut diff_waveform = vec![0.0f64; base_time_length];
+    for i in 0..base_time_length {
+        let safe_index = (basic_index + i as i64 - 1).clamp(0, y.len() as i64 - 1) as usize;
+        main_waveform[i] = y[safe_index] * main_window[i];
+        diff_waveform[i] = y[safe_index] * diff_window[i];
+    }
+    let main_spectrum = real_fft(planner, &main_waveform, fft_size);
+    let diff_spectrum = real_fft(planner, &diff_waveform, fft_size);
+
+    let number_of_harmonics = ((fs / 2.0 / current_f0) as usize).clamp(1, 6);
+    let mut numerator = 0.0f64;
+    let mut denominator = 0.0f64;
+    let mut score = 0.0f64;
+    for harmonic in 1..=number_of_harmonics {
+        let index = (matlab_round(current_f0 * fft_size as f64 / fs * harmonic as f64).max(0)
+            as usize)
+            .min(bins - 1);
+        let power = main_spectrum[index].norm_sqr();
+        let instantaneous_frequency = if power == 0.0 {
+            0.0
+        } else {
+            let numerator_i = main_spectrum[index].re * diff_spectrum[index].im
+                - main_spectrum[index].im * diff_spectrum[index].re;
+            index as f64 * fs / fft_size as f64
+                + numerator_i / power * fs / (2.0 * std::f64::consts::PI)
+        };
+        let amplitude = power.sqrt();
+        numerator += amplitude * instantaneous_frequency;
+        denominator += amplitude * harmonic as f64;
+        score += ((instantaneous_frequency / harmonic as f64 - current_f0) / current_f0).abs();
+    }
+    let refined_f0 = numerator / (denominator + SAFE_GUARD_MINIMUM);
+    let refined_score =
+        1.0 / (score / number_of_harmonics as f64 + SAFE_GUARD_MINIMUM);
+    if refined_f0 < F0_FLOOR_HZ || refined_f0 > F0_CEIL_HZ || refined_score < HARVEST_SCORE_THRESHOLD
+    {
+        (0.0, 0.0)
+    } else {
+        (refined_f0, refined_score)
+    }
+}
+
+/// Nearest candidate to `reference_f0` within `allowed_range` relative error;
+/// returns `(best_f0, best_error)` (harvest.cpp `SelectBestF0`).
+fn harvest_select_best_f0(
+    reference_f0: f64,
+    f0_candidates: &[f64],
+    allowed_range: f64,
+) -> (f64, f64) {
+    let mut best_f0 = 0.0f64;
+    let mut best_error = allowed_range;
+    for &candidate in f0_candidates {
+        let error = (reference_f0 - candidate).abs() / reference_f0;
+        if error > best_error {
+            continue;
+        }
+        best_f0 = candidate;
+        best_error = error;
+    }
+    (best_f0, best_error)
+}
+
+/// Zeros candidates with no close match in either neighbouring frame
+/// (harvest.cpp `RemoveUnreliableCandidates`).
+fn harvest_remove_unreliable_candidates(
+    number_of_candidates: usize,
+    f0_candidates: &mut [Vec<f64>],
+    f0_scores: &mut [Vec<f64>],
+) {
+    let f0_length = f0_candidates.len();
+    if f0_length < 3 || number_of_candidates == 0 {
+        return;
+    }
+    let snapshot: Vec<Vec<f64>> = f0_candidates.to_vec();
+    let threshold = 0.05f64;
+    for i in 1..f0_length - 1 {
+        for j in 0..number_of_candidates {
+            let reference_f0 = f0_candidates[i][j];
+            if reference_f0 == 0.0 {
+                continue;
+            }
+            let (_, error1) = harvest_select_best_f0(
+                reference_f0,
+                &snapshot[i + 1][..number_of_candidates],
+                1.0,
+            );
+            let (_, error2) = harvest_select_best_f0(
+                reference_f0,
+                &snapshot[i - 1][..number_of_candidates],
+                1.0,
+            );
+            if error1.min(error2) > threshold {
+                f0_candidates[i][j] = 0.0;
+                f0_scores[i][j] = 0.0;
+            }
+        }
+    }
+}
+
+/// Start/end frame pairs of voiced sections; ends are inclusive
+/// (harvest.cpp `GetBoundaryList`).
+fn harvest_boundary_list(f0: &[f64]) -> Vec<usize> {
+    let n = f0.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let mut vuv: Vec<i32> = f0.iter().map(|&v| if v > 0.0 { 1 } else { 0 }).collect();
+    vuv[0] = 0;
+    vuv[n - 1] = 0;
+    let mut list = Vec::new();
+    for i in 1..n {
+        if vuv[i] != vuv[i - 1] {
+            list.push(i - list.len() % 2);
+        }
+    }
+    list
+}
+
+/// One buffer per voiced section, zero elsewhere
+/// (harvest.cpp `GetMultiChannelF0`).
+fn harvest_multi_channel_f0(f0: &[f64], boundary_list: &[usize]) -> Vec<Vec<f64>> {
+    (0..boundary_list.len() / 2)
+        .map(|i| {
+            let mut channel = vec![0.0f64; f0.len()];
+            let (st, ed) = (boundary_list[i * 2], boundary_list[i * 2 + 1]);
+            channel[st..=ed].copy_from_slice(&f0[st..=ed]);
+            channel
+        })
+        .collect()
+}
+
+/// Contour selection and the four fixing steps
+/// (harvest.cpp `FixF0Contour`, parameters as in the reference).
+fn harvest_fix_f0_contour(
+    f0_candidates: &[Vec<f64>],
+    f0_scores: &[Vec<f64>],
+    number_of_candidates: usize,
+) -> Vec<f64> {
+    let base = harvest_search_f0_base(f0_candidates, f0_scores, number_of_candidates);
+    let step1 = harvest_fix_step_1(&base, 0.008);
+    let step2 = harvest_fix_step_2(&step1, 6);
+    let step3 = harvest_fix_step_3(&step2, f0_candidates, f0_scores, number_of_candidates, 0.18);
+    harvest_fix_step_4(&step3, 9)
+}
+
+/// Highest-scoring candidate per frame (harvest.cpp `SearchF0Base`).
+fn harvest_search_f0_base(
+    f0_candidates: &[Vec<f64>],
+    f0_scores: &[Vec<f64>],
+    number_of_candidates: usize,
+) -> Vec<f64> {
+    f0_candidates
+        .iter()
+        .zip(f0_scores.iter())
+        .map(|(candidates, scores)| {
+            let mut best_f0 = 0.0f64;
+            let mut best_score = 0.0f64;
+            for j in 0..number_of_candidates {
+                if scores[j] > best_score {
+                    best_f0 = candidates[j];
+                    best_score = scores[j];
+                }
+            }
+            best_f0
+        })
+        .collect()
+}
+
+/// Step 1: rapid F0 jumps are replaced by 0 (harvest.cpp `FixStep1`).
+fn harvest_fix_step_1(f0_base: &[f64], allowed_range: f64) -> Vec<f64> {
+    let mut out = vec![0.0f64; f0_base.len()];
+    for i in 2..f0_base.len() {
+        if f0_base[i] == 0.0 {
+            continue;
+        }
+        let reference_f0 = f0_base[i - 1] * 2.0 - f0_base[i - 2];
+        out[i] = if ((f0_base[i] - reference_f0) / reference_f0).abs() > allowed_range
+            && ((f0_base[i] - f0_base[i - 1]).abs()) / f0_base[i - 1] > allowed_range
+        {
+            0.0
+        } else {
+            f0_base[i]
+        };
+    }
+    out
+}
+
+/// Step 2: voiced sections shorter than `voice_range_minimum` frames are
+/// removed (harvest.cpp `FixStep2`).
+fn harvest_fix_step_2(f0_step1: &[f64], voice_range_minimum: usize) -> Vec<f64> {
+    let mut out = f0_step1.to_vec();
+    let boundary_list = harvest_boundary_list(f0_step1);
+    for pair in boundary_list.chunks_exact(2) {
+        if pair[1] - pair[0] >= voice_range_minimum {
+            continue;
+        }
+        for v in out[pair[0]..=pair[1]].iter_mut() {
+            *v = 0.0;
+        }
+    }
+    out
+}
+
+/// Step 3: voiced sections are extended along the candidate trellis and
+/// overlaps merged by score (harvest.cpp `FixStep3`).
+fn harvest_fix_step_3(
+    f0_step2: &[f64],
+    f0_candidates: &[Vec<f64>],
+    f0_scores: &[Vec<f64>],
+    number_of_candidates: usize,
+    allowed_range: f64,
+) -> Vec<f64> {
+    let f0_length = f0_step2.len();
+    let mut out = f0_step2.to_vec();
+    let mut boundary_list = harvest_boundary_list(f0_step2);
+    if boundary_list.len() < 2 || f0_length < 2 {
+        return out;
+    }
+    let mut multi_channel_f0 = harvest_multi_channel_f0(f0_step2, &boundary_list);
+    let number_of_channels = harvest_extend(
+        &mut multi_channel_f0,
+        &mut boundary_list,
+        f0_length,
+        f0_candidates,
+        number_of_candidates,
+        allowed_range,
+    );
+    if number_of_channels != 0 {
+        harvest_merge_f0(
+            &multi_channel_f0,
+            &mut boundary_list,
+            number_of_channels,
+            f0_candidates,
+            f0_scores,
+            number_of_candidates,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// Extends one section's contour frame by frame, following the nearest
+/// candidate; gives up after four consecutive misses
+/// (harvest.cpp `ExtendF0`). Returns the last extended frame.
+fn harvest_extend_f0(
+    extended_f0: &mut [f64],
+    origin: usize,
+    last_point: usize,
+    shift: i64,
+    f0_candidates: &[Vec<f64>],
+    number_of_candidates: usize,
+    allowed_range: f64,
+) -> usize {
+    let threshold = 4usize;
+    let mut tmp_f0 = extended_f0[origin];
+    let mut shifted_origin = origin;
+    let distance = (last_point as i64 - origin as i64).unsigned_abs() as usize;
+    let mut count = 0usize;
+    for i in 0..=distance {
+        let next = origin as i64 + shift * i as i64 + shift;
+        if next < 0 || next >= extended_f0.len() as i64 {
+            break;
+        }
+        let next = next as usize;
+        let (best, _) = harvest_select_best_f0(
+            tmp_f0,
+            &f0_candidates[next][..number_of_candidates],
+            allowed_range,
+        );
+        extended_f0[next] = best;
+        if best == 0.0 {
+            count += 1;
+        } else {
+            tmp_f0 = best;
+            count = 0;
+            shifted_origin = next;
+        }
+        if count == threshold {
+            break;
+        }
+    }
+    shifted_origin
+}
+
+/// Extends every section in both directions, then keeps only sections long
+/// enough relative to their mean F0 (harvest.cpp `Extend` + `ExtendSub`).
+/// Kept sections are swapped to the front; returns their count.
+fn harvest_extend(
+    multi_channel_f0: &mut [Vec<f64>],
+    boundary_list: &mut [usize],
+    f0_length: usize,
+    f0_candidates: &[Vec<f64>],
+    number_of_candidates: usize,
+    allowed_range: f64,
+) -> usize {
+    let threshold = 100usize;
+    let number_of_sections = multi_channel_f0.len();
+    for i in 0..number_of_sections {
+        let origin_ed = boundary_list[i * 2 + 1];
+        boundary_list[i * 2 + 1] = harvest_extend_f0(
+            &mut multi_channel_f0[i],
+            origin_ed,
+            (origin_ed + threshold).min(f0_length.saturating_sub(2)),
+            1,
+            f0_candidates,
+            number_of_candidates,
+            allowed_range,
+        );
+        let origin_st = boundary_list[i * 2];
+        boundary_list[i * 2] = harvest_extend_f0(
+            &mut multi_channel_f0[i],
+            origin_st,
+            origin_st.saturating_sub(threshold).max(1),
+            -1,
+            f0_candidates,
+            number_of_candidates,
+            allowed_range,
+        );
+    }
+
+    // ExtendSub: `mean_f0` deliberately carries its previous value across
+    // sections — a quirk of the reference implementation kept for
+    // compatibility.
+    let section_threshold = 2200.0f64;
+    let mut count = 0usize;
+    let mut mean_f0 = 0.0f64;
+    for i in 0..number_of_sections {
+        let st = boundary_list[i * 2];
+        let ed = boundary_list[i * 2 + 1];
+        for j in st..ed {
+            mean_f0 += multi_channel_f0[i][j];
+        }
+        mean_f0 /= (ed - st).max(1) as f64;
+        if section_threshold / mean_f0 < (ed - st) as f64 {
+            multi_channel_f0.swap(count, i);
+            boundary_list.swap(count * 2, i * 2);
+            boundary_list.swap(count * 2 + 1, i * 2 + 1);
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Highest score attached to `f0` among a frame's candidates
+/// (harvest.cpp `SearchScore`).
+fn harvest_search_score(
+    f0: f64,
+    f0_candidates: &[f64],
+    f0_scores: &[f64],
+    number_of_candidates: usize,
+) -> f64 {
+    let mut score = 0.0f64;
+    for i in 0..number_of_candidates {
+        if f0 == f0_candidates[i] && score < f0_scores[i] {
+            score = f0_scores[i];
+        }
+    }
+    score
+}
+
+/// Merges two overlapping sections, keeping the higher-scoring contour in the
+/// overlap (harvest.cpp `MergeF0Sub`). Returns the merged end frame.
+#[allow(clippy::too_many_arguments)]
+fn harvest_merge_f0_sub(
+    merged_f0: &mut [f64],
+    st1: usize,
+    ed1: usize,
+    f0_2: &[f64],
+    st2: usize,
+    ed2: usize,
+    f0_candidates: &[Vec<f64>],
+    f0_scores: &[Vec<f64>],
+    number_of_candidates: usize,
+) -> usize {
+    if st1 <= st2 && ed1 >= ed2 {
+        return ed1;
+    }
+    let mut score1 = 0.0f64;
+    let mut score2 = 0.0f64;
+    for i in st2..=ed1 {
+        score1 += harvest_search_score(
+            merged_f0[i],
+            &f0_candidates[i],
+            &f0_scores[i],
+            number_of_candidates,
+        );
+        score2 += harvest_search_score(
+            f0_2[i],
+            &f0_candidates[i],
+            &f0_scores[i],
+            number_of_candidates,
+        );
+    }
+    // Loops (not slices) so an empty range degenerates gracefully like the
+    // reference's `for` when the sections are sorted unexpectedly.
+    let start = if score1 > score2 { ed1 } else { st2 };
+    for i in start..=ed2 {
+        merged_f0[i] = f0_2[i];
+    }
+    ed2
+}
+
+/// Merges all extended sections in start order (harvest.cpp `MergeF0`).
+#[allow(clippy::too_many_arguments)]
+fn harvest_merge_f0(
+    multi_channel_f0: &[Vec<f64>],
+    boundary_list: &mut [usize],
+    number_of_channels: usize,
+    f0_candidates: &[Vec<f64>],
+    f0_scores: &[Vec<f64>],
+    number_of_candidates: usize,
+    merged_f0: &mut [f64],
+) {
+    // Insertion sort of section order by start frame (MakeSortedOrder).
+    let mut order: Vec<usize> = (0..number_of_channels).collect();
+    for i in 1..number_of_channels {
+        for j in (0..i).rev() {
+            if boundary_list[order[j] * 2] > boundary_list[order[i] * 2] {
+                order.swap(i, j);
+            } else {
+                break;
+            }
+        }
+    }
+
+    merged_f0.copy_from_slice(&multi_channel_f0[0]);
+    for i in 1..number_of_channels {
+        let st = boundary_list[order[i] * 2];
+        let ed = boundary_list[order[i] * 2 + 1];
+        if st as i64 - boundary_list[1] as i64 > 0 {
+            // No overlap with the merged contour so far.
+            merged_f0[st..=ed].copy_from_slice(&multi_channel_f0[order[i]][st..=ed]);
+            boundary_list[0] = st;
+            boundary_list[1] = ed;
+        } else {
+            boundary_list[1] = harvest_merge_f0_sub(
+                merged_f0,
+                boundary_list[0],
+                boundary_list[1],
+                &multi_channel_f0[order[i]],
+                st,
+                ed,
+                f0_candidates,
+                f0_scores,
+                number_of_candidates,
+            );
+        }
+    }
+}
+
+/// Step 4: short unvoiced gaps are bridged linearly (harvest.cpp `FixStep4`).
+fn harvest_fix_step_4(f0_step3: &[f64], threshold: usize) -> Vec<f64> {
+    let mut out = f0_step3.to_vec();
+    let boundary_list = harvest_boundary_list(f0_step3);
+    let sections = boundary_list.len() / 2;
+    if sections < 2 {
+        return out;
+    }
+    for i in 0..sections - 1 {
+        let gap_start = boundary_list[i * 2 + 1];
+        let gap_end = boundary_list[(i + 1) * 2];
+        let distance = gap_end - gap_start - 1;
+        if distance >= threshold {
+            continue;
+        }
+        let tmp0 = f0_step3[gap_start] + 1.0;
+        let tmp1 = f0_step3[gap_end] - 1.0;
+        let coefficient = (tmp1 - tmp0) / (distance as f64 + 1.0);
+        let mut count = 1.0f64;
+        for v in out[gap_start + 1..gap_end].iter_mut() {
+            *v = tmp0 + coefficient * count;
+            count += 1.0;
+        }
+    }
+    out
+}
+
+/// Zero-lag (forward-backward) 2nd-order Butterworth over one section
+/// (harvest.cpp `FilteringF0`). `x` is edge-extended in place.
+fn harvest_filtering_f0(x: &mut [f64], st: usize, ed: usize) -> Vec<f64> {
+    const B: [f64; 2] = [0.0078202080334971724, 0.015640416066994345];
+    const A: [f64; 2] = [1.7347257688092754, -0.76600660094326412];
+    let n = x.len();
+    let head = x[st];
+    for v in x[..st].iter_mut() {
+        *v = head;
+    }
+    let tail = x[ed];
+    for v in x[ed + 1..].iter_mut() {
+        *v = tail;
+    }
+
+    let mut w = [0.0f64; 2];
+    let mut tmp = vec![0.0f64; n];
+    for i in 0..n {
+        let wt = x[i] + A[0] * w[0] + A[1] * w[1];
+        tmp[n - i - 1] = B[0] * wt + B[1] * w[0] + B[0] * w[1];
+        w[1] = w[0];
+        w[0] = wt;
+    }
+    w = [0.0; 2];
+    let mut y = vec![0.0f64; n];
+    for i in 0..n {
+        let wt = tmp[i] + A[0] * w[0] + A[1] * w[1];
+        y[n - i - 1] = B[0] * wt + B[1] * w[0] + B[0] * w[1];
+        w[1] = w[0];
+        w[0] = wt;
+    }
+    y
+}
+
+/// Smooths each voiced section with the zero-lag Butterworth filter
+/// (harvest.cpp `SmoothF0Contour`).
+fn harvest_smooth_f0_contour(f0: &[f64]) -> Vec<f64> {
+    let lag = 300usize;
+    let new_length = f0.len() + lag * 2;
+    let mut padded = vec![0.0f64; new_length];
+    padded[lag..lag + f0.len()].copy_from_slice(f0);
+
+    let boundary_list = harvest_boundary_list(&padded);
+    let mut smoothed = vec![0.0f64; f0.len()];
+    let mut multi_channel_f0 = harvest_multi_channel_f0(&padded, &boundary_list);
+    for (i, channel) in multi_channel_f0.iter_mut().enumerate() {
+        let st = boundary_list[i * 2];
+        let ed = boundary_list[i * 2 + 1];
+        let filtered = harvest_filtering_f0(channel, st, ed);
+        for j in st..=ed {
+            if j >= lag && j - lag < smoothed.len() {
+                smoothed[j - lag] = filtered[j];
+            }
+        }
+    }
+    smoothed
 }
 
 // ---------------------------------------------------------------------------
@@ -2161,6 +3169,104 @@ mod tests {
         assert!(
             (med - 100.0).abs() < 5.0,
             "median voiced F0 {med} not within 5 Hz of 100"
+        );
+    }
+
+    fn analyze_harvest(mono: &[f32], fs: u32) -> WorldFeatures {
+        analyze_world_with_options(mono, fs, FRAME_PERIOD_MS, WorldF0Estimator::Harvest, None)
+    }
+
+    /// Band-limited sawtooth (harmonics `1/k` up to Nyquist). Harvest's
+    /// refinement scores harmonic consistency, so it needs harmonic-rich
+    /// material; the reference rejects pure sines outright.
+    fn saw(freq: f64, secs: f64, fs: u32) -> Vec<f32> {
+        let n = (secs * fs as f64) as usize;
+        let mut x = vec![0.0f32; n];
+        let mut k = 1.0f64;
+        while k * freq < fs as f64 / 2.0 {
+            for (i, v) in x.iter_mut().enumerate() {
+                *v += ((2.0 * std::f64::consts::PI * k * freq * i as f64 / fs as f64).sin() / k)
+                    as f32;
+            }
+            k += 1.0;
+        }
+        let peak = x.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-9);
+        for v in x.iter_mut() {
+            *v *= 0.5 / peak;
+        }
+        x
+    }
+
+    #[test]
+    fn harvest_saw_440_f0() {
+        let signal = saw(440.0, 1.0, TEST_FS);
+        let features = analyze_harvest(&signal, TEST_FS);
+        let voiced = voiced_values(&features.f0);
+        let voiced_ratio = voiced.len() as f64 / features.frames as f64;
+        assert!(
+            voiced_ratio > 0.8,
+            "expected >80% voiced frames, got {:.1}%",
+            voiced_ratio * 100.0
+        );
+        let med = median(&voiced);
+        assert!(
+            (med - 440.0).abs() < 5.0,
+            "harvest median voiced F0 {med} not within 5 Hz of 440"
+        );
+    }
+
+    #[test]
+    fn harvest_saw_220_at_44100() {
+        // Non-48k rate exercises the decimation-ratio rounding path.
+        let signal = saw(220.0, 1.0, 44_100);
+        let features = analyze_harvest(&signal, 44_100);
+        let voiced = voiced_values(&features.f0);
+        assert!(
+            voiced.len() as f64 / features.frames as f64 > 0.8,
+            "expected mostly voiced frames"
+        );
+        let med = median(&voiced);
+        assert!(
+            (med - 220.0).abs() < 5.0,
+            "harvest median voiced F0 {med} not within 5 Hz of 220"
+        );
+    }
+
+    #[test]
+    fn harvest_rejects_pure_sine_like_reference() {
+        // pyworld 0.3.5's Harvest returns 0 voiced frames for a bare 440 Hz
+        // sine (no harmonics to score against); the port must agree rather
+        // than "helpfully" voice it.
+        let signal = sine(440.0, 1.0, TEST_FS);
+        let features = analyze_harvest(&signal, TEST_FS);
+        let voiced_ratio = voiced_values(&features.f0).len() as f64 / features.frames as f64;
+        assert!(
+            voiced_ratio < 0.1,
+            "expected near-zero voiced frames, got {:.1}%",
+            voiced_ratio * 100.0
+        );
+    }
+
+    #[test]
+    fn harvest_silence_is_unvoiced() {
+        let signal = vec![0.0f32; TEST_FS as usize / 2];
+        let features = analyze_harvest(&signal, TEST_FS);
+        assert!(features.frames > 0);
+        assert!(
+            features.f0.iter().all(|&v| v == 0.0),
+            "silence produced voiced frames"
+        );
+    }
+
+    #[test]
+    fn harvest_noise_is_mostly_unvoiced() {
+        let signal = lcg_noise(TEST_FS as usize);
+        let features = analyze_harvest(&signal, TEST_FS);
+        let voiced_ratio = voiced_values(&features.f0).len() as f64 / features.frames as f64;
+        assert!(
+            voiced_ratio < 0.35,
+            "expected mostly unvoiced frames for noise, got {:.1}% voiced",
+            voiced_ratio * 100.0
         );
     }
 

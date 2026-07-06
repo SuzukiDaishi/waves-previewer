@@ -2792,6 +2792,7 @@ impl crate::app::WavesPreviewer {
         let mut pending_chromagram_refresh = false;
         let mut pending_world_refresh = false;
         let mut pending_world_resynth = false;
+        let mut pending_world_f0_method: Option<crate::app::types::WorldF0Method> = None;
         let mut apply_estimated_bpm: Option<f32> = None;
         let mut perf_mixdown_ms: Option<f32> = None;
         let mut perf_wave_render_ms: Option<f32> = None;
@@ -8482,6 +8483,35 @@ impl crate::app::WavesPreviewer {
                                     cancel_feature_analysis = true;
                                 }
                             });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("F0 estimator:");
+                                let mut method = self.world_f0_method;
+                                egui::ComboBox::from_id_salt("world_f0_method")
+                                    .selected_text(match method {
+                                        crate::app::types::WorldF0Method::Dio => "DIO (fast)",
+                                        crate::app::types::WorldF0Method::Harvest => {
+                                            "Harvest (accurate)"
+                                        }
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut method,
+                                            crate::app::types::WorldF0Method::Dio,
+                                            "DIO (fast)",
+                                        );
+                                        ui.selectable_value(
+                                            &mut method,
+                                            crate::app::types::WorldF0Method::Harvest,
+                                            "Harvest (accurate)",
+                                        )
+                                        .on_hover_text(
+                                            "Higher pitch accuracy, several times slower to analyze",
+                                        );
+                                    });
+                                if method != self.world_f0_method {
+                                    pending_world_f0_method = Some(method);
+                                }
+                            });
                             if let Some(data) = world_data {
                                 match data.median_f0 {
                                     Some(f0) => {
@@ -8862,6 +8892,22 @@ impl crate::app::WavesPreviewer {
         }
         if pending_world_resynth {
             self.spawn_world_resynth_for_tab(tab_idx);
+        }
+        if let Some(method) = pending_world_f0_method {
+            self.world_f0_method = method;
+            self.save_prefs();
+            // Cached WORLD analyses were produced with the previous
+            // estimator; drop them so every view re-analyzes.
+            let world_keys: Vec<EditorAnalysisKey> = self
+                .editor_feature_cache
+                .keys()
+                .chain(self.editor_feature_inflight.iter())
+                .filter(|key| key.kind == EditorAnalysisKind::World)
+                .cloned()
+                .collect();
+            for key in world_keys {
+                self.cancel_feature_analysis_for_key(&key);
+            }
         }
         if let Some(bpm) = apply_estimated_bpm {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

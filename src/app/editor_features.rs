@@ -129,13 +129,14 @@ impl super::WavesPreviewer {
         let shared_progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         self.editor_feature_progress_shared
             .insert(key.clone(), shared_progress.clone());
+        let f0_method = self.world_f0_method;
         std::thread::spawn(move || {
             super::threading::lower_current_thread_priority();
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
             let mono = super::WavesPreviewer::mixdown_channels(&channels, samples_len);
-            let data = Self::compute_world_feature_data(&mono, sample_rate, &|p: f32| {
+            let data = Self::compute_world_feature_data(&mono, sample_rate, f0_method, &|p: f32| {
                 shared_progress
                     .store((p * 100.0) as u32, std::sync::atomic::Ordering::Relaxed);
             });
@@ -150,21 +151,23 @@ impl super::WavesPreviewer {
         });
     }
 
-    /// WORLD (DIO + StoneMask + CheapTrick) analysis of a mono buffer,
+    /// WORLD (DIO/Harvest + CheapTrick + D4C) analysis of a mono buffer,
     /// packaged for the editor feature pipeline. The frame period grows
     /// with clip length so long files stay bounded in frames and cost.
     pub(super) fn compute_world_feature_data(
         mono: &[f32],
         sample_rate: u32,
+        f0_method: super::types::WorldF0Method,
         progress: &dyn Fn(f32),
     ) -> std::sync::Arc<super::types::WorldFeatureData> {
         let sr = sample_rate.max(1);
         let duration_ms = mono.len() as f64 * 1_000.0 / sr as f64;
         let frame_period_ms = (duration_ms / 6_000.0).max(5.0);
-        let features = crate::app::render::world_features::analyze_world_with_progress(
+        let features = crate::app::render::world_features::analyze_world_with_options(
             mono,
             sr,
             frame_period_ms,
+            f0_method.estimator(),
             Some(progress),
         );
         let frame_step = ((sr as f64 * features.frame_period_ms / 1_000.0).round() as usize).max(1);

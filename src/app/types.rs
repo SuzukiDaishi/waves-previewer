@@ -401,6 +401,25 @@ pub enum SpectrogramScale {
     Log,
 }
 
+/// F0 estimator used by the WORLD analysis/resynthesis pipeline.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorldF0Method {
+    /// Fast zero-crossing estimator (WORLD DIO + StoneMask).
+    Dio,
+    /// Slower, more accurate estimator (WORLD Harvest).
+    Harvest,
+}
+
+impl WorldF0Method {
+    /// The DSP-level estimator this setting selects.
+    pub fn estimator(self) -> crate::app::render::world_features::WorldF0Estimator {
+        match self {
+            Self::Dio => crate::app::render::world_features::WorldF0Estimator::Dio,
+            Self::Harvest => crate::app::render::world_features::WorldF0Estimator::Harvest,
+        }
+    }
+}
+
 /// Reference level for the spectrogram's dB color mapping.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SpectrogramDbRef {
