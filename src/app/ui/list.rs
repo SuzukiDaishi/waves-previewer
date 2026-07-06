@@ -665,22 +665,26 @@ impl crate::app::WavesPreviewer {
                                         row_idx,
                                         ctx,
                                     );
-                                    let value = self
-                                        .item_for_id(id)
-                                        .and_then(|it| it.external.get(name))
-                                        .map(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .to_string();
-                                    let value = value.as_str();
-                                    let label_resp = ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(value).size(text_height * 0.95),
-                                            )
-                                            .sense(Sense::click())
-                                            .truncate()
-                                            .show_tooltip_when_elided(false),
+                                    // Build the label inside a short borrow so
+                                    // no per-frame String is allocated here;
+                                    // egui copies the text into the widget once
+                                    // (unavoidable), and the hover tooltip
+                                    // re-reads the value only while hovered.
+                                    let label_widget = {
+                                        let value = self
+                                            .item_for_id(id)
+                                            .and_then(|it| it.external.get(name))
+                                            .map(|v| v.as_str())
+                                            .unwrap_or("");
+                                        egui::Label::new(
+                                            RichText::new(value).size(text_height * 0.95),
                                         )
+                                        .sense(Sense::click())
+                                        .truncate()
+                                        .show_tooltip_when_elided(false)
+                                    };
+                                    let label_resp = ui
+                                        .add(label_widget)
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                                     let label_resp =
                                         self.attach_row_context_menu(label_resp, row_idx, ctx);
@@ -691,8 +695,15 @@ impl crate::app::WavesPreviewer {
                                     {
                                         clicked_to_load = true;
                                     }
-                                    if label_resp.hovered() && !value.is_empty() {
-                                        label_resp.on_hover_text(value);
+                                    if label_resp.hovered() {
+                                        let hover_value = self
+                                            .item_for_id(id)
+                                            .and_then(|it| it.external.get(name))
+                                            .filter(|v| !v.is_empty())
+                                            .cloned();
+                                        if let Some(hover_value) = hover_value {
+                                            label_resp.on_hover_text(hover_value);
+                                        }
                                     }
                                 });
                             }

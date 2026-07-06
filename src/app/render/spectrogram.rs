@@ -94,6 +94,7 @@ pub fn compute_spectrogram(mono: &[f32], sample_rate: u32) -> SpectrogramData {
             frame_step: params.frame_step,
             sample_rate,
             values_db: Vec::new(),
+            values_max_db: f32::MIN,
         };
     }
     let values_db = compute_spectrogram_tile(mono, sample_rate, &params, 0, params.frames);
@@ -103,6 +104,7 @@ pub fn compute_spectrogram(mono: &[f32], sample_rate: u32) -> SpectrogramData {
         bins: params.bins,
         frame_step: params.frame_step,
         sample_rate,
+        values_max_db: crate::app::types::spectrogram_values_max_db(&values_db),
         values_db,
     }
 }

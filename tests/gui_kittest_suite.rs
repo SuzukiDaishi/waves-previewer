@@ -414,6 +414,27 @@ mod kittest_suite {
         }
     }
 
+    /// WORLD analysis (DIO/StoneMask/CheapTrick/D4C) of the small fixture
+    /// clips completes in a couple of seconds even in debug builds; keep the
+    /// budget aligned with the suite's other readiness waits.
+    const WORLD_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn wait_for_world_features(
+        harness: &mut Harness<'static, WavesPreviewer>,
+    ) -> (usize, usize, f32) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if let Some(features) = harness.state().test_world_features_ready() {
+                return features;
+            }
+            if start.elapsed() > WORLD_ANALYSIS_TIMEOUT {
+                panic!("WORLD analysis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_for_project_path(harness: &mut Harness<'static, WavesPreviewer>, path: &Path) {
         let expected = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let start = Instant::now();
@@ -2535,18 +2556,7 @@ mod kittest_suite {
         assert!(harness
             .state_mut()
             .test_set_view_mode(neowaves::ViewMode::World));
-        let start = Instant::now();
-        let features = loop {
-            harness.run_steps(1);
-            if let Some(features) = harness.state().test_world_features_ready() {
-                break features;
-            }
-            if start.elapsed() > Duration::from_secs(60) {
-                panic!("WORLD analysis timeout");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        let (frames, bins, voiced_ratio) = features;
+        let (frames, bins, voiced_ratio) = wait_for_world_features(&mut harness);
         assert!(frames > 0, "WORLD analysis should produce frames");
         assert!(bins > 0, "WORLD analysis should produce envelope bins");
         assert!(
@@ -2564,17 +2574,7 @@ mod kittest_suite {
         assert!(harness
             .state_mut()
             .test_set_view_mode(neowaves::ViewMode::World));
-        let start = Instant::now();
-        loop {
-            harness.run_steps(1);
-            if harness.state().test_world_features_ready().is_some() {
-                break;
-            }
-            if start.elapsed() > Duration::from_secs(60) {
-                panic!("WORLD analysis timeout");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_world_features(&mut harness);
         let tab_idx = harness.state().active_tab.unwrap();
         let fingerprint = |state: &WavesPreviewer| -> f64 {
             state.tabs[tab_idx].ch_samples[0]
@@ -2596,7 +2596,7 @@ mod kittest_suite {
             if !harness.state().test_editor_apply_busy() {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(120) {
+            if start.elapsed() > WORLD_ANALYSIS_TIMEOUT {
                 panic!("WORLD resynthesis timeout");
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -2657,17 +2657,7 @@ mod kittest_suite {
         assert!(harness
             .state_mut()
             .test_set_view_mode(neowaves::ViewMode::World));
-        let start = Instant::now();
-        loop {
-            harness.run_steps(1);
-            if harness.state().test_world_features_ready().is_some() {
-                break;
-            }
-            if start.elapsed() > Duration::from_secs(60) {
-                panic!("WORLD analysis timeout");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for_world_features(&mut harness);
         let tab_idx = harness.state().active_tab.unwrap();
         assert!(!harness.state().tabs[tab_idx].world_f0_focus);
         harness

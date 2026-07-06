@@ -1029,13 +1029,15 @@ impl super::WavesPreviewer {
             // quiet material.
             let ref_db = match cfg.db_ref {
                 super::types::SpectrogramDbRef::Absolute => 0.0,
-                super::types::SpectrogramDbRef::MaxNormalized => spec
-                    .values_db
-                    .iter()
-                    .copied()
-                    .filter(|v| v.is_finite())
-                    .fold(f32::MIN, f32::max)
-                    .max(-300.0),
+                super::types::SpectrogramDbRef::MaxNormalized => {
+                    // Maintained incrementally as analysis tiles land; no
+                    // per-render scan of the full matrix.
+                    if spec.values_max_db.is_finite() {
+                        spec.values_max_db.max(-300.0)
+                    } else {
+                        0.0
+                    }
+                }
             };
             let sr = spec.sample_rate.max(1) as f32;
             let mut max_freq = sr * 0.5;
@@ -1492,6 +1494,7 @@ mod tests {
             frame_step: 256,
             sample_rate: 48_000,
             values_db: vec![-60.0; 32 * 64],
+            values_max_db: -60.0,
         }
     }
 

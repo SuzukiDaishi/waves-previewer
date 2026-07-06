@@ -2187,12 +2187,14 @@ fn render_spectrum(args: RenderSpectrumArgs) -> Result<CliCommandOutput> {
         .with_context(|| format!("decode mono for spectrum: {}", input.display()))?;
     let cfg = SpectrogramConfig::default();
     let params = spectrogram::spectrogram_params(mono.len(), &cfg);
+    let values_db = spectrogram::compute_spectrogram_tile(&mono, sr, &params, 0, params.frames);
     let spec = SpectrogramData {
         frames: params.frames,
         bins: params.bins,
         frame_step: params.frame_step,
         sample_rate: sr,
-        values_db: spectrogram::compute_spectrogram_tile(&mono, sr, &params, 0, params.frames),
+        values_max_db: crate::app::types::spectrogram_values_max_db(&values_db),
+        values_db,
     };
     let view_mode: ViewMode = args.view_mode.into();
     let image = WavesPreviewer::render_spectral_viewport_image(

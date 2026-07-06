@@ -2956,6 +2956,9 @@ where
                                 bins: params.bins,
                                 frame_step: params.frame_step,
                                 sample_rate: bus.sample_rate,
+                                values_max_db: crate::app::types::spectrogram_values_max_db(
+                                    &values_db,
+                                ),
                                 values_db,
                             },
                         },

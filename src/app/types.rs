@@ -1112,6 +1112,19 @@ pub struct SpectrogramData {
     pub frame_step: usize,
     pub sample_rate: u32,
     pub values_db: Vec<f32>,
+    /// Running maximum of `values_db`, kept incrementally as tiles land so
+    /// `ref=max` display never has to rescan the whole matrix per render.
+    /// `f32::MIN` until any finite value arrives.
+    pub values_max_db: f32,
+}
+
+/// Maximum finite value of a spectrogram dB matrix (`f32::MIN` when empty).
+pub fn spectrogram_values_max_db(values: &[f32]) -> f32 {
+    values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f32::MIN, f32::max)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

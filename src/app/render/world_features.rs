@@ -19,9 +19,6 @@
 //! frequency domain instead of WORLD's hard-coded IIR, and tiny positive
 //! clamps guard logarithms and divisions that the reference leaves bare).
 
-// Not wired into the renderer yet; remove once a view calls `analyze_world`.
-#![allow(dead_code)]
-
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;
 
@@ -84,6 +81,8 @@ pub struct WorldFeatures {
 }
 
 /// Runs DIO + StoneMask + CheapTrick on a mono signal.
+// Production callers report progress; the unit tests use this wrapper.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn analyze_world(mono: &[f32], sample_rate: u32, frame_period_ms: f64) -> WorldFeatures {
     analyze_world_with_progress(mono, sample_rate, frame_period_ms, None)
 }
