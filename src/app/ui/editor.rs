@@ -383,6 +383,95 @@ impl crate::app::WavesPreviewer {
             .unwrap_or(fallback)
     }
 
+    /// Frequency-axis top value for the spectral views: Nyquist of the
+    /// analysis, optionally capped by the display config (`max_freq_hz`).
+    /// Must stay in sync with the axis ticks and the viewport renderer.
+    fn editor_spec_axis_max_freq(cfg: &SpectrogramConfig, sr: u32) -> f32 {
+        let mut max_freq = (sr.max(1) as f32) * 0.5;
+        if cfg.max_freq_hz > 0.0 {
+            max_freq = cfg.max_freq_hz.min(max_freq).max(1.0);
+        }
+        max_freq
+    }
+
+    /// Vertical axis fraction (0 = bottom, 1 = top of the full axis) → Hz
+    /// for the spectral views. Inverse of [`Self::editor_spec_freq_to_frac`].
+    fn editor_spec_frac_to_freq(
+        view_mode: ViewMode,
+        frac: f32,
+        max_freq: f32,
+        mel_scale: SpectrogramScale,
+    ) -> f32 {
+        let frac = frac.clamp(0.0, 1.0);
+        let log_min = 20.0_f32.min(max_freq).max(1.0);
+        match view_mode {
+            ViewMode::Spectrogram => frac * max_freq,
+            ViewMode::Log => {
+                if max_freq <= log_min {
+                    frac * max_freq
+                } else {
+                    log_min * (max_freq / log_min).powf(frac)
+                }
+            }
+            ViewMode::Mel => {
+                let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
+                let mel_min = 1.0_f32;
+                let mel = match mel_scale {
+                    SpectrogramScale::Linear => mel_max * frac,
+                    SpectrogramScale::Log => {
+                        if mel_max <= mel_min {
+                            mel_max * frac
+                        } else {
+                            mel_min * (mel_max / mel_min).powf(frac)
+                        }
+                    }
+                };
+                700.0 * (10.0_f32.powf(mel / 2595.0) - 1.0)
+            }
+            _ => frac * max_freq,
+        }
+    }
+
+    /// Hz → vertical axis fraction for the spectral views. Mirrors the
+    /// tick placement in the frequency gutter exactly.
+    fn editor_spec_freq_to_frac(
+        view_mode: ViewMode,
+        freq: f32,
+        max_freq: f32,
+        mel_scale: SpectrogramScale,
+    ) -> f32 {
+        let freq = freq.clamp(0.0, max_freq);
+        let log_min = 20.0_f32.min(max_freq).max(1.0);
+        match view_mode {
+            ViewMode::Spectrogram => (freq / max_freq).clamp(0.0, 1.0),
+            ViewMode::Log => {
+                if freq <= 0.0 || max_freq <= log_min {
+                    0.0
+                } else {
+                    let f = freq.clamp(log_min, max_freq);
+                    (f / log_min).ln() / (max_freq / log_min).ln()
+                }
+            }
+            ViewMode::Mel => {
+                let mel_max = 2595.0 * (1.0 + max_freq / 700.0).log10();
+                let mel_min = 1.0_f32;
+                let mel = 2595.0 * (1.0 + (freq / 700.0)).log10();
+                match mel_scale {
+                    SpectrogramScale::Linear => (mel / mel_max).clamp(0.0, 1.0),
+                    SpectrogramScale::Log => {
+                        if mel_max <= mel_min {
+                            (mel / mel_max.max(1.0)).clamp(0.0, 1.0)
+                        } else {
+                            (mel / mel_min).ln().clamp(0.0, (mel_max / mel_min).ln())
+                                / (mel_max / mel_min).ln()
+                        }
+                    }
+                }
+            }
+            _ => 0.0,
+        }
+    }
+
     fn editor_exact_view_for_anchor(
         anchor_sample: usize,
         anchor_ratio: f32,
@@ -2666,6 +2755,8 @@ impl crate::app::WavesPreviewer {
         let mut do_reverse: Option<(usize, usize)> = None;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
+        let mut do_play_selection = false;
+        let mut do_spectral_mute = false;
         let mut do_cutjoin: Option<(usize, usize)> = None;
         let mut do_delete_multi: Option<Vec<(usize, usize)>> = None;
         let mut do_auto_trim: Option<usize> = None;
@@ -4343,6 +4434,51 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
+            // Spectral views: dragging also selects a frequency band
+            // (time-frequency rectangle, RX-style). These helpers convert
+            // between screen Y within a channel lane and Hz using the same
+            // mapping as the axis ticks and the viewport renderer.
+            let spec_freq_view = matches!(
+                view_mode,
+                ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+            );
+            let spec_axis_sr = self
+                .spectro_cache
+                .get(&tab.path)
+                .and_then(|specs| specs.first())
+                .map(|spec| spec.sample_rate)
+                .unwrap_or(self.audio.shared.out_sample_rate);
+            let spec_axis_max_freq = Self::editor_spec_axis_max_freq(&self.spectro_cfg, spec_axis_sr);
+            let spec_mel_scale = self.spectro_cfg.mel_scale;
+            let (spec_vis_min, spec_vis_max) = Self::editor_vertical_range_for_view(
+                view_mode,
+                tab.vertical_zoom,
+                tab.vertical_view_center,
+                &self.spectro_cfg,
+            );
+            let spec_lane_at_y = {
+                let rect_top = rect.top();
+                let lane_h = lane_h.max(1.0);
+                move |y: f32| -> usize {
+                    (((y - rect_top) / lane_h).floor() as isize)
+                        .clamp(0, lane_count as isize - 1) as usize
+                }
+            };
+            let spec_y_to_freq = {
+                let rect_top = rect.top();
+                let lane_h = lane_h.max(1.0);
+                move |y: f32, lane: usize| -> f32 {
+                    let lane_top = rect_top + lane_h * lane as f32;
+                    let frac_local = 1.0 - ((y - lane_top) / lane_h).clamp(0.0, 1.0);
+                    let frac = spec_vis_min + frac_local * (spec_vis_max - spec_vis_min);
+                    Self::editor_spec_frac_to_freq(
+                        view_mode,
+                        frac,
+                        spec_axis_max_freq,
+                        spec_mel_scale,
+                    )
+                }
+            };
             // Drag to select a range (independent of tool), unless we are dragging markers.
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
@@ -4374,6 +4510,15 @@ impl crate::app::WavesPreviewer {
                             raw
                         };
                         tab.selection_anchor_sample = Some(samp);
+                        if spec_freq_view {
+                            let lane = spec_lane_at_y(pos.y);
+                            tab.freq_selection_drag = Some((lane, spec_y_to_freq(pos.y, lane)));
+                        } else {
+                            // Wave view drags select time only: reset any
+                            // frequency band from a previous spectral drag.
+                            tab.freq_selection = None;
+                            tab.freq_selection_drag = None;
+                        }
                     }
                 }
                 if dragging {
@@ -4398,10 +4543,41 @@ impl crate::app::WavesPreviewer {
                             raw
                         };
                         Self::editor_set_selection_from_anchor(tab, anchor, samp);
+                        if spec_freq_view {
+                            if let Some((lane, anchor_hz)) = tab.freq_selection_drag {
+                                let cur_hz = spec_y_to_freq(pos.y, lane);
+                                let (lo, hi) = if anchor_hz <= cur_hz {
+                                    (anchor_hz, cur_hz)
+                                } else {
+                                    (cur_hz, anchor_hz)
+                                };
+                                let lo_frac = Self::editor_spec_freq_to_frac(
+                                    view_mode,
+                                    lo,
+                                    spec_axis_max_freq,
+                                    spec_mel_scale,
+                                );
+                                let hi_frac = Self::editor_spec_freq_to_frac(
+                                    view_mode,
+                                    hi,
+                                    spec_axis_max_freq,
+                                    spec_mel_scale,
+                                );
+                                // Dragging edge-to-edge over the whole axis
+                                // means "all frequencies" (time-only range).
+                                tab.freq_selection = if lo_frac <= 0.002 && hi_frac >= 0.998 {
+                                    None
+                                } else {
+                                    Some((lo, hi))
+                                };
+                            }
+                        }
                         suppress_seek = true;
                     }
                 }
-                let _ = drag_released;
+                if drag_released {
+                    tab.freq_selection_drag = None;
+                }
             }
             // Selection vs Seek with primary button click
             if !suppress_seek {
@@ -4417,6 +4593,8 @@ impl crate::app::WavesPreviewer {
                             Self::editor_set_selection_from_anchor(tab, anchor, snapped_samp);
                         } else {
                             tab.selection = None;
+                            tab.freq_selection = None;
+                            tab.freq_selection_drag = None;
                             tab.extra_selections.clear();
                             tab.selection_anchor_sample = None;
                             tab.right_drag_mode = None;
@@ -5165,7 +5343,10 @@ impl crate::app::WavesPreviewer {
                         );
                     }
                 }
-                // Primary selection overlay (tool-independent)
+                // Primary selection overlay (tool-independent). In the
+                // spectral views a frequency band clamps the rectangle
+                // vertically inside each channel lane (time-frequency
+                // selection); otherwise it spans the full height.
                 if let Some((a0, b0)) = tab.selection {
                     let (a, b) = if a0 <= b0 { (a0, b0) } else { (b0, a0) };
                     if b >= tab.view_offset {
@@ -5174,19 +5355,62 @@ impl crate::app::WavesPreviewer {
                         if a <= end {
                             let ax = to_x(a);
                             let bx = to_x(b);
-                            let sel_rect = egui::Rect::from_min_max(
-                                egui::pos2(ax, rect.top()),
-                                egui::pos2(bx, rect.bottom()),
-                            );
                             let fill = Color32::from_rgba_unmultiplied(70, 140, 255, 28);
                             let stroke = Color32::from_rgba_unmultiplied(70, 140, 255, 160);
-                            painter.rect_filled(sel_rect, 0.0, fill);
-                            painter.rect_stroke(
-                                sel_rect,
-                                0.0,
-                                egui::Stroke::new(1.0, stroke),
-                                egui::StrokeKind::Inside,
-                            );
+                            let band = if spec_freq_view {
+                                tab.freq_selection
+                            } else {
+                                None
+                            };
+                            let mut sel_rects: Vec<egui::Rect> = Vec::new();
+                            match band {
+                                None => {
+                                    sel_rects.push(egui::Rect::from_min_max(
+                                        egui::pos2(ax, rect.top()),
+                                        egui::pos2(bx, rect.bottom()),
+                                    ));
+                                }
+                                Some((lo_hz, hi_hz)) => {
+                                    let denom = (spec_vis_max - spec_vis_min).max(f32::EPSILON);
+                                    let frac_lo = ((Self::editor_spec_freq_to_frac(
+                                        view_mode,
+                                        lo_hz,
+                                        spec_axis_max_freq,
+                                        spec_mel_scale,
+                                    ) - spec_vis_min)
+                                        / denom)
+                                        .clamp(0.0, 1.0);
+                                    let frac_hi = ((Self::editor_spec_freq_to_frac(
+                                        view_mode,
+                                        hi_hz,
+                                        spec_axis_max_freq,
+                                        spec_mel_scale,
+                                    ) - spec_vis_min)
+                                        / denom)
+                                        .clamp(0.0, 1.0);
+                                    for lane in 0..lane_count {
+                                        let lane_bottom =
+                                            rect.top() + lane_h * (lane as f32 + 1.0);
+                                        let y_top = lane_bottom - frac_hi * lane_h;
+                                        let y_bottom = lane_bottom - frac_lo * lane_h;
+                                        if y_bottom - y_top >= 0.5 {
+                                            sel_rects.push(egui::Rect::from_min_max(
+                                                egui::pos2(ax, y_top),
+                                                egui::pos2(bx, y_bottom),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                            for sel_rect in sel_rects {
+                                painter.rect_filled(sel_rect, 0.0, fill);
+                                painter.rect_stroke(
+                                    sel_rect,
+                                    0.0,
+                                    egui::Stroke::new(1.0, stroke),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                         }
                     }
                 }
@@ -5943,6 +6167,114 @@ impl crate::app::WavesPreviewer {
                             egui::Label::new(RichText::new("Range: -").monospace().weak())
                                 .truncate(),
                         );
+                    }
+                    // --- Selection (time + frequency) actions -------------
+                    // RX-style: the spectral views can carry a frequency
+                    // band on the primary selection; play/mute honor it.
+                    {
+                        let inspector_spec_view = matches!(
+                            tab.leaf_view_mode(),
+                            ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel
+                        );
+                        if inspector_spec_view || tab.freq_selection.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Freq").monospace().weak());
+                                match tab.freq_selection {
+                                    Some((lo0, hi0)) => {
+                                        let nyq = (sr_ctx * 0.5).max(1.0);
+                                        let mut lo = lo0;
+                                        let mut hi = hi0;
+                                        let r_lo = ui.add(
+                                            egui::DragValue::new(&mut lo)
+                                                .range(0.0..=nyq)
+                                                .speed(10.0)
+                                                .suffix(" Hz"),
+                                        );
+                                        ui.label(RichText::new("..").weak());
+                                        let r_hi = ui.add(
+                                            egui::DragValue::new(&mut hi)
+                                                .range(0.0..=nyq)
+                                                .speed(10.0)
+                                                .suffix(" Hz"),
+                                        );
+                                        if r_lo.changed() || r_hi.changed() {
+                                            let (lo, hi) =
+                                                if lo <= hi { (lo, hi) } else { (hi, lo) };
+                                            tab.freq_selection = Some((lo, hi));
+                                        }
+                                        if ui
+                                            .button("Full band")
+                                            .on_hover_text(
+                                                "Clear the frequency range (all frequencies)",
+                                            )
+                                            .clicked()
+                                        {
+                                            tab.freq_selection = None;
+                                        }
+                                    }
+                                    None => {
+                                        ui.label(
+                                            RichText::new(
+                                                "full band (drag on the spectrogram to set)",
+                                            )
+                                            .weak(),
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                        let sel_ok = tab
+                            .selection
+                            .map(|(a, b)| a.min(b) < a.max(b).min(tab.samples_len))
+                            .unwrap_or(false)
+                            && !tab.loading;
+                        ui.horizontal_wrapped(|ui| {
+                            if ui
+                                .add_enabled(
+                                    sel_ok,
+                                    egui::Button::new("\u{25B6} Play Selection"),
+                                )
+                                .on_hover_text(
+                                    "Play only the selected time range; with a frequency range set, only that band is played",
+                                )
+                                .clicked()
+                            {
+                                do_play_selection = true;
+                            }
+                            let mute_label = if tab.freq_selection.is_some() {
+                                "Mute Selection (Spectral)"
+                            } else {
+                                "Mute Selection"
+                            };
+                            if ui
+                                .add_enabled(sel_ok && !apply_busy, egui::Button::new(mute_label))
+                                .on_hover_text(
+                                    "Mute the selection with click-free edge fades; with a frequency range set, only that band is removed (RX-style)",
+                                )
+                                .clicked()
+                            {
+                                do_spectral_mute = true;
+                            }
+                        });
+                        if sel_ok {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Edge fade").weak());
+                                ui.add(
+                                    egui::DragValue::new(&mut self.spectral_edit_time_fade_ms)
+                                        .range(0.0..=200.0)
+                                        .speed(0.5)
+                                        .suffix(" ms"),
+                                )
+                                .on_hover_text("Time fade at the selection edges");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.spectral_edit_freq_fade_hz)
+                                        .range(0.0..=2000.0)
+                                        .speed(5.0)
+                                        .suffix(" Hz"),
+                                )
+                                .on_hover_text("Frequency transition width at the band edges");
+                            });
+                        }
                     }
                     ui.separator();
                     let leaf_view = tab.leaf_view_mode();
@@ -8992,6 +9324,12 @@ impl crate::app::WavesPreviewer {
             for (es, ee) in do_mute_extra {
                 self.editor_apply_mute_range(tab_idx, (es, ee));
             }
+        }
+        if do_spectral_mute {
+            self.editor_apply_spectral_mute_selection(tab_idx);
+        }
+        if do_play_selection {
+            self.editor_play_selection(tab_idx);
         }
         if let Some(((s, e), in_ms, out_ms)) = do_fade {
             self.editor_apply_fade_range(tab_idx, (s, e), in_ms, out_ms);

@@ -129,7 +129,7 @@ impl crate::app::WavesPreviewer {
         Self::editor_clear_selection_anchor(tab);
     }
 
-    fn editor_finish_destructive_apply(
+    pub(super) fn editor_finish_destructive_apply(
         &mut self,
         tab_idx: usize,
         undo_state: EditorUndoState,
@@ -290,6 +290,20 @@ impl crate::app::WavesPreviewer {
             }
         };
         clamp_range(&mut tab.selection);
+        if tab.selection.is_none() {
+            // Frequency band is meaningless without a time selection.
+            tab.freq_selection = None;
+        }
+        if let Some((lo, hi)) = tab.freq_selection {
+            let lo = lo.max(0.0);
+            let hi = hi.max(0.0);
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            tab.freq_selection = if hi - lo > f32::EPSILON {
+                Some((lo, hi))
+            } else {
+                None
+            };
+        }
         clamp_range(&mut tab.ab_loop);
         clamp_range(&mut tab.loop_region);
         clamp_range(&mut tab.trim_range);

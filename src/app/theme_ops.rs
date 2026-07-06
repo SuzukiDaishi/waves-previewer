@@ -119,7 +119,11 @@ impl WavesPreviewer {
     }
 
     pub(super) fn apply_theme_visuals(ctx: &egui::Context, theme: ThemeMode) {
-        ctx.set_visuals(Self::theme_visuals(theme));
+        // Write the visuals into BOTH of egui's per-theme styles: the app
+        // manages its own theme mode, so the two egui styles must stay
+        // identical or an OS dark/light switch would swap in stale visuals.
+        let visuals = Self::theme_visuals(theme);
+        ctx.all_styles_mut(|style| style.visuals = visuals.clone());
     }
 
     pub(super) fn set_theme(&mut self, ctx: &egui::Context, theme: ThemeMode) {
@@ -185,26 +189,32 @@ impl WavesPreviewer {
 
         ctx.set_fonts(fonts);
 
-        let mut style = (*ctx.global_style()).clone();
-        style
-            .text_styles
-            .insert(TextStyle::Body, FontId::proportional(16.0));
-        style
-            .text_styles
-            .insert(TextStyle::Monospace, FontId::monospace(14.0));
-        style.visuals = Self::theme_visuals(ThemeMode::Dark);
-        #[cfg(debug_assertions)]
-        {
-            // The virtualized file-list table reuses on-screen row rects for
-            // different rows after a `scroll_to_row` jump that lands on an
-            // exact row-height multiple (e.g. PageDown/PageUp). This debug-only
-            // heuristic then flags every visible row as a false-positive
-            // "Id changed for this rect" for one frame, flashing a red border
-            // around the whole list. `warn_on_id_clash` (real duplicate-Id
-            // detection) stays enabled.
-            style.debug.warn_if_rect_changes_id = false;
-        }
-        ctx.set_global_style(style);
+        // egui keeps separate dark/light styles and, with the default
+        // ThemePreference::System, swaps the active one when the OS reports
+        // a theme change. Patch BOTH styles so an OS dark/light switch can
+        // never swap in an unpatched style (default text sizes + debug
+        // heuristics re-enabled -> the list flashing red).
+        let visuals = Self::theme_visuals(ThemeMode::Dark);
+        ctx.all_styles_mut(|style| {
+            style
+                .text_styles
+                .insert(TextStyle::Body, FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(TextStyle::Monospace, FontId::monospace(14.0));
+            style.visuals = visuals.clone();
+            #[cfg(debug_assertions)]
+            {
+                // The virtualized file-list table reuses on-screen row rects for
+                // different rows after a `scroll_to_row` jump that lands on an
+                // exact row-height multiple (e.g. PageDown/PageUp). This debug-only
+                // heuristic then flags every visible row as a false-positive
+                // "Id changed for this rect" for one frame, flashing a red border
+                // around the whole list. `warn_on_id_clash` (real duplicate-Id
+                // detection) stays enabled.
+                style.debug.warn_if_rect_changes_id = false;
+            }
+        });
         // DPI スケーリングは native_pixels_per_point × zoom_factor で一元管理
         // 明示的に 1.0 を設定しておくことで widget 個別スケールとの混在を防ぐ
         ctx.set_zoom_factor(1.0);
