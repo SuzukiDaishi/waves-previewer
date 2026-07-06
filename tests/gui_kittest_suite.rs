@@ -3040,8 +3040,8 @@ mod kittest_suite {
             first_after,
             expected_first_sample
         );
-        assert!(tab.waveform_pyramid.is_some());
         assert!(harness.state().test_tab_dirty());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4728,15 +4728,31 @@ mod kittest_suite {
         assert_eq!(harness.state().test_audio_play_pos(), 9_000);
     }
 
+    /// In-place destructive applies rebuild the waveform pyramid on a
+    /// background worker; wait for the refreshed cache to land.
+    fn wait_for_waveform_pyramid(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_active_tab_waveform_pyramid_ready() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("waveform pyramid rebuild timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn editor_apply_gain_rebuilds_waveform_cache() {
+
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state().test_active_tab_waveform_pyramid_ready());
         assert!(harness.state_mut().test_apply_gain(0.2, 0.6, -6.0));
-        harness.run_steps(1);
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4746,8 +4762,7 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state().test_active_tab_waveform_pyramid_ready());
         assert!(harness.state_mut().test_apply_reverse(0.1, 0.4));
-        harness.run_steps(1);
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4762,7 +4777,7 @@ mod kittest_suite {
         harness.run_steps(1);
         let after_len = harness.state().tabs[tab_idx].samples_len;
         assert!(after_len > before_len, "loop unwrap should extend the clip");
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4843,8 +4858,7 @@ mod kittest_suite {
         assert!(harness.state().test_active_tab_waveform_pyramid_ready());
 
         assert!(harness.state_mut().test_apply_reverse(0.1, 0.4));
-        harness.run_steps(3);
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
 
         harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
         harness.run_steps(3);

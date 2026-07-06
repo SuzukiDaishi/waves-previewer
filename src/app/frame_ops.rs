@@ -74,6 +74,9 @@ impl WavesPreviewer {
         self.drain_recording_events();
         self.tick_audio_device_watch(frame_started);
         self.drain_editor_apply_jobs(ctx);
+        self.drain_editor_wave_cache_jobs(ctx);
+        self.drain_session_save(ctx);
+        self.drain_clipboard_prep(ctx);
         self.tick_virtual_trim_state(ctx);
         self.drain_plugin_jobs(ctx);
         self.drain_transcript_model_download_results(ctx);

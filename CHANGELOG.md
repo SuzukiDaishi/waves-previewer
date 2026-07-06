@@ -4,6 +4,12 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Background Session Save / Clipboard Copy + Cheaper Undo & Edits
+- Session save no longer freezes the UI: the document and Arc snapshots of every edited/virtual audio buffer are gathered instantly, then all sidecar WAV encodes, TOML serialization, and file writes run on a worker while the busy overlay shows progress ("Saving session... (N audio sidecars)"). Close-with-autosave, CLI, and tests keep a synchronous variant so completion stays observable where it matters.
+- Copying items to the clipboard is backgrounded the same way: decoding file-backed items and exporting edited audio to temp WAVs happen on a worker; the OS clipboard and in-app payload are set on completion. Large multi-selections no longer lock the app for seconds.
+- Undo snapshots are Arc-shared with the tab's worker mirror: capturing an undo point before an edit is now copy-free (was a full multi-MB buffer clone per edit), and undo/redo drop from three full-buffer copies to one plus the engine hand-off.
+- In-place destructive edits (trim / fade / gain / delete / reverse...) defer the waveform overview + pyramid rebuild to a background worker with generation guarding; the edit itself lands immediately and the refreshed overview swaps in when ready instead of stalling the frame for the rebuild.
+
 ### List & Apply-Path Performance Pass (large libraries, long clips)
 - Removed two full item-array scans that ran every frame (pending-gain count in the topbar and the list-header dirty check): both now read a 250 ms-throttled cached count that gain edits invalidate immediately. At ~140k files these two scans strided tens of MB of item structs per frame - the main reason the list felt heavy while background jobs forced 60 fps repaints. Idle frame time on a 140k-row list drops ~4.1 ms -> ~1.9 ms avg.
 - Meta-driven re-sorts are debounced adaptively: lists over 20k items re-sort at most every 750 ms while metadata streams in (was 120 ms; each pass is an O(n log n) decorate+sort costing tens of ms at 140k). Transcript-triggered search refilters follow the same adaptive debounce.

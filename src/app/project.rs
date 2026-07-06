@@ -1107,53 +1107,15 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
     }
 }
 
-pub fn save_sidecar_audio(
-    project_path: &Path,
-    tab_index: usize,
-    channels: &[Vec<f32>],
-    sample_rate: u32,
-) -> Result<PathBuf> {
-    let data_dir = project_data_dir(project_path);
-    std::fs::create_dir_all(&data_dir).context("create session data dir")?;
-    let filename = format!("tab_{:04}.wav", tab_index);
-    let dst = data_dir.join(filename);
-    let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-    crate::wave::export_selection_wav(channels, sample_rate, (0, len), &dst)
-        .context("export edited audio")?;
-    Ok(dst)
+/// Destination path a sidecar WAV will be written to, without writing it.
+/// Lets the session-save planner reference sidecars in the document while
+/// deferring the actual encode to a worker thread.
+pub fn sidecar_audio_dst(project_path: &Path, prefix: &str, index: usize) -> PathBuf {
+    project_data_dir(project_path).join(format!("{prefix}_{index:04}.wav"))
 }
 
-pub fn save_sidecar_preview_audio(
-    project_path: &Path,
-    tab_index: usize,
-    channels: &[Vec<f32>],
-    sample_rate: u32,
-) -> Result<PathBuf> {
-    let data_dir = project_data_dir(project_path);
-    std::fs::create_dir_all(&data_dir).context("create session data dir")?;
-    let filename = format!("preview_{:04}.wav", tab_index);
-    let dst = data_dir.join(filename);
-    let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-    crate::wave::export_selection_wav(channels, sample_rate, (0, len), &dst)
-        .context("export preview audio")?;
-    Ok(dst)
-}
 
-pub fn save_sidecar_cached_audio(
-    project_path: &Path,
-    edit_index: usize,
-    channels: &[Vec<f32>],
-    sample_rate: u32,
-) -> Result<PathBuf> {
-    let data_dir = project_data_dir(project_path);
-    std::fs::create_dir_all(&data_dir).context("create session data dir")?;
-    let filename = format!("cache_{:04}.wav", edit_index);
-    let dst = data_dir.join(filename);
-    let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-    crate::wave::export_selection_wav(channels, sample_rate, (0, len), &dst)
-        .context("export cached audio")?;
-    Ok(dst)
-}
+
 
 pub fn load_sidecar_audio(
     project_path: &Path,

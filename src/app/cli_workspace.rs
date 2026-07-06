@@ -100,7 +100,7 @@ impl CliWorkspace {
 
     pub(super) fn save(&mut self) -> Result<()> {
         self.app
-            .save_project_as(self.session_path.clone())
+            .save_project_as_blocking(self.session_path.clone())
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("save session: {}", self.session_path.display()))
     }

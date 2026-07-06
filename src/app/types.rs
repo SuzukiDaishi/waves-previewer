@@ -1383,6 +1383,35 @@ pub struct ProcessingResult {
     pub editor_waveform: Option<(Vec<(f32, f32)>, Option<Arc<WaveformPyramidSet>>)>,
 }
 
+/// Audio snapshot feeding one sidecar WAV write during a session save.
+pub enum SessionSidecarSource {
+    Channels(Arc<Vec<Vec<f32>>>),
+    Buffer(Arc<crate::audio::AudioBuffer>),
+}
+
+impl SessionSidecarSource {
+    pub fn channels(&self) -> &[Vec<f32>] {
+        match self {
+            Self::Channels(channels) => channels.as_slice(),
+            Self::Buffer(buffer) => buffer.channels.as_slice(),
+        }
+    }
+}
+
+pub struct SessionSidecarJob {
+    pub dst: PathBuf,
+    pub source: SessionSidecarSource,
+    pub sample_rate: u32,
+    pub label: &'static str,
+}
+
+/// In-flight background session save (sidecar encodes + TOML write).
+pub struct SessionSaveState {
+    pub msg: String,
+    pub rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    pub started_at: std::time::Instant,
+}
+
 pub struct EditorApplyState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<EditorApplyResult>,
@@ -1510,7 +1539,9 @@ pub struct EditorDecodeUiStatus {
 
 #[derive(Clone)]
 pub struct EditorUndoState {
-    pub ch_samples: Vec<Vec<f32>>,
+    /// Snapshot of the audio buffers. Arc-shared with the tab's worker
+    /// mirror when possible so capturing an undo point is copy-free.
+    pub ch_samples: Arc<Vec<Vec<f32>>>,
     pub samples_len: usize,
     pub samples_len_visual: usize,
     pub buffer_sample_rate: u32,
@@ -2525,6 +2556,41 @@ pub struct ClipboardItem {
 pub struct ClipboardPayload {
     pub items: Vec<ClipboardItem>,
     pub created_at: Instant,
+}
+
+/// One item's snapshot for the background clipboard-prepare job.
+pub enum ClipboardPrepAudio {
+    /// Edited/virtual audio already in memory; optionally exported to a
+    /// temp WAV so the OS clipboard can carry a file.
+    Ready {
+        audio: Arc<AudioBuffer>,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        export_tmp: bool,
+    },
+    /// File-backed item: the worker decodes it for the in-app payload.
+    DecodeFromFile {
+        sample_rate: u32,
+        bits_per_sample: u16,
+    },
+}
+
+pub struct ClipboardPrepItem {
+    pub display_name: String,
+    pub source_path: Option<PathBuf>,
+    pub audio: ClipboardPrepAudio,
+}
+
+pub struct ClipboardPrepDone {
+    pub payload: ClipboardPayload,
+    pub os_paths: Vec<PathBuf>,
+    pub temp_files: Vec<PathBuf>,
+}
+
+/// In-flight background clipboard preparation (decode + temp WAV export).
+pub struct ClipboardPrepState {
+    pub rx: std::sync::mpsc::Receiver<ClipboardPrepDone>,
+    pub started_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

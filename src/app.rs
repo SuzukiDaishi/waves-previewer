@@ -426,6 +426,29 @@ pub struct WavesPreviewer {
     /// list header read this every frame and a full O(n) item scan at 140k
     /// files is far too hot for the frame loop.
     pending_gain_count_cache: Option<(std::time::Instant, usize)>,
+    /// Off-thread waveform overview/pyramid rebuild after in-place edits.
+    #[allow(clippy::type_complexity)]
+    editor_wave_cache_tx: Option<
+        std::sync::mpsc::Sender<(
+            PathBuf,
+            u64,
+            Vec<(f32, f32)>,
+            Option<Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
+        )>,
+    >,
+    #[allow(clippy::type_complexity)]
+    editor_wave_cache_rx: Option<
+        std::sync::mpsc::Receiver<(
+            PathBuf,
+            u64,
+            Vec<(f32, f32)>,
+            Option<Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
+        )>,
+    >,
+    editor_wave_cache_generation: HashMap<PathBuf, u64>,
+    editor_wave_cache_generation_counter: u64,
+    pub(crate) session_save_state: Option<SessionSaveState>,
+    pub(crate) clipboard_prep_state: Option<ClipboardPrepState>,
     meta_sort_last_applied: Option<std::time::Instant>,
     list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,
@@ -2232,8 +2255,29 @@ impl WavesPreviewer {
 
     fn capture_undo_state(tab: &EditorTab) -> EditorUndoState {
         let approx_bytes = Self::estimate_state_bytes(tab);
+        // The worker mirror is resynced at the end of every buffer
+        // mutation, and undo points are captured before the next mutation
+        // begins, so it normally matches `ch_samples` exactly and the
+        // snapshot is a free Arc clone. Length checks (plus a deep compare
+        // in debug builds) guard the invariant; on mismatch fall back to a
+        // fresh deep copy.
+        let mirror_matches = tab.ch_samples_arc.len() == tab.ch_samples.len()
+            && tab
+                .ch_samples_arc
+                .iter()
+                .zip(tab.ch_samples.iter())
+                .all(|(a, b)| a.len() == b.len());
+        debug_assert!(
+            !mirror_matches || *tab.ch_samples_arc == tab.ch_samples,
+            "ch_samples_arc mirror out of sync with ch_samples at undo capture"
+        );
+        let ch_samples = if mirror_matches {
+            tab.ch_samples_arc.clone()
+        } else {
+            Arc::new(tab.ch_samples.clone())
+        };
         EditorUndoState {
-            ch_samples: tab.ch_samples.clone(),
+            ch_samples,
             samples_len: tab.samples_len,
             samples_len_visual: tab.samples_len_visual,
             buffer_sample_rate: tab.buffer_sample_rate.max(1),
@@ -2322,7 +2366,10 @@ impl WavesPreviewer {
             };
             tab.preview_audio_tool = None;
             tab.preview_overlay = None;
-            tab.ch_samples = state.ch_samples;
+            // Share the snapshot with the worker mirror (free), then take
+            // one owned copy for the mutable tab buffers.
+            tab.ch_samples = (*state.ch_samples).clone();
+            tab.ch_samples_arc = state.ch_samples;
             tab.samples_len = state.samples_len;
             tab.samples_len_visual = state.samples_len_visual;
             tab.loading = false;
@@ -2364,9 +2411,6 @@ impl WavesPreviewer {
             tab.last_amplitude_nav_click_at = 0.0;
             tab.last_amplitude_nav_click_pos = None;
             tab.dirty = state.dirty;
-            // Keep the worker-facing Arc mirror in sync with the restored
-            // buffers; stale mirrors would feed old audio to analysis jobs.
-            tab.ch_samples_arc = Arc::new(tab.ch_samples.clone());
             Self::editor_clamp_ranges(tab);
             Self::invalidate_editor_viewport_cache(tab);
             Self::update_markers_dirty(tab);

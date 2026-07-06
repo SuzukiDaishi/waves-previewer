@@ -170,6 +170,8 @@ impl super::WavesPreviewer {
         let block_busy = self.export_state.is_some()
             || self.editor_apply_state.is_some()
             || self.csv_export_state.is_some()
+            || self.session_save_state.is_some()
+            || self.clipboard_prep_state.is_some()
             || bulk_blocking;
         if !block_busy {
             return;
@@ -200,6 +202,10 @@ impl super::WavesPreviewer {
                             st.msg.as_str()
                         } else if let Some(st) = &self.export_state {
                             st.msg.as_str()
+                        } else if let Some(st) = &self.session_save_state {
+                            st.msg.as_str()
+                        } else if self.clipboard_prep_state.is_some() {
+                            "Preparing clipboard..."
                         } else if self.csv_export_state.is_some() {
                             "Preparing CSV..."
                         } else if self.bulk_resample_state.is_some() {

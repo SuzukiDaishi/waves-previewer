@@ -2398,7 +2398,7 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_save_session_to(&mut self, path: &Path) -> bool {
-        self.save_project_as(path.to_path_buf()).is_ok()
+        self.save_project_as_blocking(path.to_path_buf()).is_ok()
     }
 
     pub fn test_open_session_from(&mut self, path: &Path) -> bool {
