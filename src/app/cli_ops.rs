@@ -2187,12 +2187,14 @@ fn render_spectrum(args: RenderSpectrumArgs) -> Result<CliCommandOutput> {
         .with_context(|| format!("decode mono for spectrum: {}", input.display()))?;
     let cfg = SpectrogramConfig::default();
     let params = spectrogram::spectrogram_params(mono.len(), &cfg);
+    let values_db = spectrogram::compute_spectrogram_tile(&mono, sr, &params, 0, params.frames);
     let spec = SpectrogramData {
         frames: params.frames,
         bins: params.bins,
         frame_step: params.frame_step,
         sample_rate: sr,
-        values_db: spectrogram::compute_spectrogram_tile(&mono, sr, &params, 0, params.frames),
+        values_max_db: crate::app::types::spectrogram_values_max_db(&values_db),
+        values_db,
     };
     let view_mode: ViewMode = args.view_mode.into();
     let image = WavesPreviewer::render_spectral_viewport_image(
@@ -4566,6 +4568,7 @@ fn render_gui_session_screenshot(
             ViewMode::Mel => "mel",
             ViewMode::Tempogram => "tempogram",
             ViewMode::Chromagram => "chromagram",
+            ViewMode::World => "world",
         }));
     }
     if let Some(flag) = waveform_overlay {
@@ -4636,6 +4639,7 @@ fn view_mode_name(mode: crate::cli::CliViewMode) -> &'static str {
         crate::cli::CliViewMode::Mel => "mel",
         crate::cli::CliViewMode::Tempogram => "tempogram",
         crate::cli::CliViewMode::Chromagram => "chromagram",
+        crate::cli::CliViewMode::World => "world",
     }
 }
 

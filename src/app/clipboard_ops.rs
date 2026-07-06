@@ -78,15 +78,20 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn copy_selected_to_clipboard(&mut self) {
-        const CLIPBOARD_MARKER: &str = "neowaves://clipboard";
         let ids = self.selected_item_ids();
         if ids.is_empty() {
             return;
         }
+        if self.clipboard_prep_state.is_some() {
+            return;
+        }
         self.clear_clipboard_temp_files();
         let out_sr = self.audio.shared.out_sample_rate;
-        let mut payload_items: Vec<ClipboardItem> = Vec::new();
-        let mut os_paths: Vec<PathBuf> = Vec::new();
+        // Snapshot the inputs cheaply on the UI thread; the expensive parts
+        // (decoding file-backed items and exporting edited audio to temp
+        // WAVs) run on a worker so a large multi-selection cannot freeze
+        // the UI. The busy overlay blocks input until the clipboard is set.
+        let mut prep_items: Vec<crate::app::types::ClipboardPrepItem> = Vec::new();
         for id in ids {
             let Some(item) = self.item_for_id(id) else {
                 continue;
@@ -97,63 +102,144 @@ impl super::WavesPreviewer {
             } else {
                 None
             };
-            let edited_audio = self.edited_audio_for_path(&item.path);
-            let (mut audio, mut sample_rate, mut bits_per_sample) =
-                if let Some(audio) = edited_audio.clone() {
-                    (Some(audio), out_sr, 32)
-                } else {
-                    let meta = item.meta.as_ref();
-                    (
-                        None,
-                        meta.map(|m| m.sample_rate).unwrap_or(0),
-                        meta.map(|m| m.bits_per_sample).unwrap_or(0),
-                    )
-                };
-            if audio.is_none() {
-                if let Some(path) = source_path.as_ref() {
-                    if let Some((decoded, sr, bits)) = self.decode_audio_for_virtual(path) {
-                        audio = Some(decoded);
-                        sample_rate = sr;
-                        bits_per_sample = bits;
-                    } else if self.debug.cfg.enabled {
-                        self.debug_trace_input(format!(
-                            "copy_selected_to_clipboard decode failed: {}",
-                            path.display()
-                        ));
-                    }
+            let meta_sr = item.meta.as_ref().map(|m| m.sample_rate).unwrap_or(0);
+            let meta_bits = item.meta.as_ref().map(|m| m.bits_per_sample).unwrap_or(0);
+            let audio = if let Some(audio) = self.edited_audio_for_path(&item.path) {
+                crate::app::types::ClipboardPrepAudio::Ready {
+                    export_tmp: audio.len() > 0,
+                    audio,
+                    sample_rate: out_sr,
+                    bits_per_sample: 32,
                 }
-            }
-            if let Some(audio_ref) = edited_audio {
-                if audio_ref.len() > 0 {
-                    if let Some(tmp) =
-                        self.export_audio_to_temp_wav(&display_name, &audio_ref, out_sr)
-                    {
-                        os_paths.push(tmp);
-                    }
+            } else {
+                crate::app::types::ClipboardPrepAudio::DecodeFromFile {
+                    sample_rate: meta_sr,
+                    bits_per_sample: meta_bits,
                 }
-            } else if let Some(path) = &source_path {
-                if path.is_file() {
-                    os_paths.push(path.clone());
-                }
-            }
-            payload_items.push(ClipboardItem {
+            };
+            prep_items.push(crate::app::types::ClipboardPrepItem {
                 display_name,
                 source_path,
+                audio,
+            });
+        }
+        if prep_items.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
+            let done = Self::run_clipboard_prep(prep_items);
+            let _ = tx.send(done);
+        });
+        self.clipboard_prep_state = Some(crate::app::types::ClipboardPrepState {
+            rx,
+            started_at: std::time::Instant::now(),
+        });
+        if self.debug.cfg.enabled {
+            self.debug_trace_input("copy_selected_to_clipboard queued".to_string());
+        }
+    }
+
+    /// Worker half of the clipboard copy: decode file-backed items for the
+    /// in-app payload and export edited audio to temp WAVs for the OS
+    /// clipboard file list.
+    fn run_clipboard_prep(
+        prep_items: Vec<crate::app::types::ClipboardPrepItem>,
+    ) -> crate::app::types::ClipboardPrepDone {
+        use crate::app::types::{ClipboardPrepAudio, ClipboardPrepDone};
+        let mut payload_items: Vec<ClipboardItem> = Vec::new();
+        let mut os_paths: Vec<PathBuf> = Vec::new();
+        let mut temp_files: Vec<PathBuf> = Vec::new();
+        for item in prep_items {
+            let (audio, sample_rate, bits_per_sample) = match item.audio {
+                ClipboardPrepAudio::Ready {
+                    audio,
+                    sample_rate,
+                    bits_per_sample,
+                    export_tmp,
+                } => {
+                    if export_tmp {
+                        if let Some(tmp) = crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
+                            "clipboard", "wav",
+                        ) {
+                            let range = (0, audio.len());
+                            if crate::wave::export_selection_wav(
+                                &audio.channels,
+                                sample_rate,
+                                range,
+                                &tmp,
+                            )
+                            .is_ok()
+                            {
+                                os_paths.push(tmp.clone());
+                                temp_files.push(tmp);
+                            }
+                        }
+                    }
+                    (Some(audio), sample_rate, bits_per_sample)
+                }
+                ClipboardPrepAudio::DecodeFromFile {
+                    sample_rate,
+                    bits_per_sample,
+                } => {
+                    let mut sr = sample_rate;
+                    let mut bits = bits_per_sample;
+                    let mut audio = None;
+                    if let Some(path) = item.source_path.as_ref() {
+                        if let Ok((chans, in_sr)) = crate::audio_io::decode_audio_multi(path) {
+                            bits = crate::audio_io::read_audio_info(path)
+                                .map(|info| info.bits_per_sample)
+                                .unwrap_or(32);
+                            sr = in_sr.max(1);
+                            audio = Some(std::sync::Arc::new(
+                                crate::audio::AudioBuffer::from_channels(chans),
+                            ));
+                        }
+                        if path.is_file() {
+                            os_paths.push(path.clone());
+                        }
+                    }
+                    (audio, sr, bits)
+                }
+            };
+            payload_items.push(ClipboardItem {
+                display_name: item.display_name,
+                source_path: item.source_path,
                 audio,
                 sample_rate,
                 bits_per_sample,
             });
         }
-        self.clipboard_payload = Some(ClipboardPayload {
-            items: payload_items,
-            created_at: std::time::Instant::now(),
-        });
+        ClipboardPrepDone {
+            payload: ClipboardPayload {
+                items: payload_items,
+                created_at: std::time::Instant::now(),
+            },
+            os_paths,
+            temp_files,
+        }
+    }
+
+    pub(super) fn drain_clipboard_prep(&mut self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        const CLIPBOARD_MARKER: &str = "neowaves://clipboard";
+        let done = match &self.clipboard_prep_state {
+            Some(state) => match state.rx.try_recv() {
+                Ok(done) => Some(done),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        let Some(done) = done else {
+            return;
+        };
+        self.clipboard_prep_state = None;
+        self.clipboard_temp_files.extend(done.temp_files);
+        let count = done.payload.items.len();
+        let os_paths = done.os_paths;
+        self.clipboard_payload = Some(done.payload);
         if self.debug.cfg.enabled {
-            let count = self
-                .clipboard_payload
-                .as_ref()
-                .map(|p| p.items.len())
-                .unwrap_or(0);
             self.debug.last_copy_at = Some(std::time::Instant::now());
             self.debug.last_copy_count = count;
             self.debug_trace_input(format!("copy_selected_to_clipboard items={count}"));
@@ -180,6 +266,7 @@ impl super::WavesPreviewer {
                 }
             }
         }
+        ctx.request_repaint();
     }
 
     pub(super) fn paste_clipboard_to_list(&mut self) {

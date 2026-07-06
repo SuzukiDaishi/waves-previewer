@@ -344,6 +344,7 @@ impl crate::app::WavesPreviewer {
             ViewMode::Mel => "Mel",
             ViewMode::Tempogram => "Tempogram",
             ViewMode::Chromagram => "Chromagram",
+            ViewMode::World => "World (F0/Env)",
         }
     }
 
@@ -1077,35 +1078,19 @@ impl crate::app::WavesPreviewer {
         );
     }
 
-    /// Cached forward FFT for the mini meter (per-thread, one size).
-    fn mini_meter_fft(buffer: &mut [rustfft::num_complex::Complex<f32>]) {
-        use std::cell::RefCell;
-        thread_local! {
-            static FFT: RefCell<Option<(usize, std::sync::Arc<dyn rustfft::Fft<f32>>)>> =
-                const { RefCell::new(None) };
-        }
-        FFT.with(|cell| {
-            let mut slot = cell.borrow_mut();
-            let need = buffer.len();
-            if slot.as_ref().map(|(n, _)| *n != need).unwrap_or(true) {
-                let mut planner = rustfft::FftPlanner::new();
-                *slot = Some((need, planner.plan_fft_forward(need)));
-            }
-            if let Some((_, fft)) = slot.as_ref() {
-                fft.process(buffer);
-            }
-        });
-    }
-
-    /// Realtime "mini meter" strip under the editor: oscilloscope, spectrum
-    /// analyzer and peak/RMS meter of the audio around the playhead. Fills the
-    /// otherwise empty space below the overview navigator.
+    /// Realtime "mini meter" strip under the editor: oscilloscope,
+    /// dual-resolution spectrum analyzer, stereo vectorscope with
+    /// correlation, and per-channel peak/RMS meters of the audio around
+    /// the playhead. Fills the otherwise empty space below the overview
+    /// navigator. Smoothing/hold state lives on `tab.mini_meter`.
     fn draw_editor_mini_meter(
         ui: &mut egui::Ui,
-        tab: &EditorTab,
+        tab: &mut EditorTab,
         playhead_display: usize,
         playing: bool,
     ) {
+        use crate::app::render::mini_meter;
+
         let h = ui.available_height().clamp(64.0, 210.0);
         let w = ui.available_width().max(160.0);
         if tab.ch_samples.is_empty() || tab.samples_len == 0 {
@@ -1121,7 +1106,9 @@ impl crate::app::WavesPreviewer {
             egui::StrokeKind::Outside,
         );
 
-        let sr = tab.buffer_sample_rate.max(1) as f32;
+        let sr = tab.buffer_sample_rate.max(1);
+        let srf = sr as f32;
+        let n_ch = tab.ch_samples.len();
         let buf_len = tab
             .ch_samples
             .iter()
@@ -1133,127 +1120,151 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let end = playhead_display.clamp(1, buf_len);
-        let n_fft = 2048usize;
-        let scope_n = ((sr * 0.04) as usize).clamp(256, 8192);
-        let level_n = ((sr * 0.05) as usize).clamp(256, 8192);
-        let need = n_fft.max(scope_n).max(level_n).min(buf_len);
-        let start = end.saturating_sub(need);
-        let inv_ch = 1.0 / tab.ch_samples.len().max(1) as f32;
-        let mono: Vec<f32> = (start..end)
-            .map(|i| {
+        let spec_n = mini_meter::spectrum_history_len(sr).min(buf_len);
+        let scope_n = ((srf * 0.04) as usize).clamp(256, 8_192).min(buf_len);
+        let level_n = ((srf * 0.05) as usize).clamp(256, 8_192).min(buf_len);
+        let vector_n = ((srf * 0.03) as usize).clamp(256, 4_096).min(buf_len);
+        let need = spec_n.max(scope_n).max(level_n).min(end);
+        let start = end - need;
+
+        // Frame timing for meter ballistics.
+        let now = ui.input(|i| i.time);
+        let dt = ((now - tab.mini_meter.last_time).max(0.0) as f32).min(0.25);
+        tab.mini_meter.last_time = now;
+
+        // Mono mixdown + spectrum target reuse thread-local scratch to
+        // stay allocation-free at 30 fps.
+        thread_local! {
+            static METER_SCRATCH: std::cell::RefCell<(Vec<f32>, Vec<f32>)> =
+                const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+        }
+
+        let pad = 6.0;
+        let gap = 8.0;
+        let inner = rect.shrink(pad);
+        let label_font = egui::FontId::monospace(9.0);
+        let label_col = Color32::from_rgb(120, 132, 150);
+        let panel_bg = Color32::from_rgb(16, 18, 23);
+
+        // ---- Layout: [SCOPE][SPECTRUM][STEREO][LEVELS] -------------------
+        let levels_w = (30.0 + n_ch as f32 * 14.0).clamp(56.0, inner.width() * 0.28);
+        let stereo_w = inner
+            .height()
+            .clamp(56.0, 170.0)
+            .min((inner.width() * 0.24).max(56.0));
+        let show_scope = inner.width() >= 430.0;
+        let scope_w = if show_scope {
+            ((inner.width() - levels_w - stereo_w - gap * 3.0) * 0.30).max(60.0)
+        } else {
+            0.0
+        };
+        let used = levels_w + stereo_w + scope_w + gap * (if show_scope { 3.0 } else { 2.0 });
+        let spectrum_w = (inner.width() - used).max(40.0);
+        let scope_rect = egui::Rect::from_min_size(inner.min, egui::vec2(scope_w, inner.height()));
+        let spectrum_left = if show_scope {
+            scope_rect.right() + gap
+        } else {
+            inner.left()
+        };
+        let spectrum_rect = egui::Rect::from_min_size(
+            egui::pos2(spectrum_left, inner.top()),
+            egui::vec2(spectrum_w, inner.height()),
+        );
+        let stereo_rect = egui::Rect::from_min_size(
+            egui::pos2(spectrum_rect.right() + gap, inner.top()),
+            egui::vec2(stereo_w, inner.height()),
+        );
+        let levels_rect = egui::Rect::from_min_size(
+            egui::pos2(stereo_rect.right() + gap, inner.top()),
+            egui::vec2(levels_w, inner.height()),
+        );
+
+        METER_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            let (mono, spectrum_target) = &mut *scratch;
+            mono.clear();
+            mono.reserve(need);
+            let inv_ch = 1.0 / n_ch.max(1) as f32;
+            mono.extend((start..end).map(|i| {
                 tab.ch_samples
                     .iter()
                     .map(|c| c.get(i).copied().unwrap_or(0.0))
                     .sum::<f32>()
                     * inv_ch
-            })
-            .collect();
+            }));
 
-        let pad = 6.0;
-        let gap = 8.0;
-        let inner = rect.shrink(pad);
-        let level_w = 66.0f32.min(inner.width() * 0.25);
-        let scope_w = ((inner.width() - level_w - gap * 2.0) * 0.34).max(40.0);
-        let spectrum_w = (inner.width() - level_w - scope_w - gap * 2.0).max(40.0);
-        let scope_rect = egui::Rect::from_min_size(inner.min, egui::vec2(scope_w, inner.height()));
-        let spectrum_rect = egui::Rect::from_min_size(
-            egui::pos2(scope_rect.right() + gap, inner.top()),
-            egui::vec2(spectrum_w, inner.height()),
-        );
-        let level_rect = egui::Rect::from_min_size(
-            egui::pos2(spectrum_rect.right() + gap, inner.top()),
-            egui::vec2(level_w, inner.height()),
-        );
-        let label_font = egui::FontId::monospace(9.0);
-        let label_col = Color32::from_rgb(120, 132, 150);
-        let panel_bg = Color32::from_rgb(16, 18, 23);
-
-        // ---- Oscilloscope -------------------------------------------------
-        painter.rect_filled(scope_rect, 4.0, panel_bg);
-        let scope_take = scope_n.min(mono.len());
-        if scope_take >= 2 {
-            let scope = &mono[mono.len() - scope_take..];
-            let peak = scope.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-            let gain = (0.85 / peak.max(1.0e-4)).min(24.0);
-            let mid_y = scope_rect.center().y;
-            let denom = (scope_take - 1) as f32;
-            let mut last: Option<egui::Pos2> = None;
-            let step = (scope_take as f32 / scope_rect.width().max(1.0)).max(1.0);
-            let mut i = 0.0f32;
-            while (i as usize) < scope_take {
-                let idx = i as usize;
-                let v = (scope[idx] * gain).clamp(-1.0, 1.0);
-                let pt = egui::pos2(
-                    egui::lerp(scope_rect.x_range(), idx as f32 / denom),
-                    mid_y - v * scope_rect.height() * 0.48,
+            // ---- Oscilloscope ---------------------------------------------
+            if show_scope {
+                painter.rect_filled(scope_rect, 4.0, panel_bg);
+                let scope_take = scope_n.min(mono.len());
+                if scope_take >= 2 {
+                    let scope = &mono[mono.len() - scope_take..];
+                    let peak = scope.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                    let gain = (0.85 / peak.max(1.0e-4)).min(24.0);
+                    let mid_y = scope_rect.center().y;
+                    let denom = (scope_take - 1) as f32;
+                    let mut last: Option<egui::Pos2> = None;
+                    let step = (scope_take as f32 / scope_rect.width().max(1.0)).max(1.0);
+                    let mut i = 0.0f32;
+                    while (i as usize) < scope_take {
+                        let idx = i as usize;
+                        let v = (scope[idx] * gain).clamp(-1.0, 1.0);
+                        let pt = egui::pos2(
+                            egui::lerp(scope_rect.x_range(), idx as f32 / denom),
+                            mid_y - v * scope_rect.height() * 0.48,
+                        );
+                        if let Some(prev) = last {
+                            let heat = v.abs().powf(0.6);
+                            painter.line_segment(
+                                [prev, pt],
+                                Stroke::new(
+                                    1.2,
+                                    crate::app::helpers::lerp_color(
+                                        Color32::from_rgb(96, 200, 255),
+                                        Color32::from_rgb(255, 96, 128),
+                                        heat,
+                                    ),
+                                ),
+                            );
+                        }
+                        last = Some(pt);
+                        i += step;
+                    }
+                }
+                painter.text(
+                    scope_rect.left_top() + egui::vec2(4.0, 2.0),
+                    egui::Align2::LEFT_TOP,
+                    "SCOPE",
+                    label_font.clone(),
+                    label_col,
                 );
-                if let Some(prev) = last {
-                    let heat = v.abs().powf(0.6);
-                    painter.line_segment(
-                        [prev, pt],
-                        Stroke::new(
-                            1.2,
-                            crate::app::helpers::lerp_color(
-                                Color32::from_rgb(96, 200, 255),
-                                Color32::from_rgb(255, 96, 128),
-                                heat,
-                            ),
-                        ),
-                    );
-                }
-                last = Some(pt);
-                i += step;
             }
-        }
-        painter.text(
-            scope_rect.left_top() + egui::vec2(4.0, 2.0),
-            egui::Align2::LEFT_TOP,
-            "SCOPE",
-            label_font.clone(),
-            label_col,
-        );
 
-        // ---- Spectrum -----------------------------------------------------
-        painter.rect_filled(spectrum_rect, 4.0, panel_bg);
-        let fft_take = n_fft.min(mono.len());
-        if fft_take >= 128 {
-            let mut buffer: Vec<rustfft::num_complex::Complex<f32>> = (0..n_fft)
-                .map(|i| {
-                    let sample = if i < fft_take {
-                        let src = mono[mono.len() - fft_take + i];
-                        let t = i as f32 / (fft_take.saturating_sub(1)).max(1) as f32;
-                        let hann = 0.5 - 0.5 * (std::f32::consts::TAU * t).cos();
-                        src * hann
-                    } else {
-                        0.0
-                    };
-                    rustfft::num_complex::Complex { re: sample, im: 0.0 }
-                })
-                .collect();
-            Self::mini_meter_fft(&mut buffer);
-            let bins = n_fft / 2;
-            let db_floor = -84.0f32;
-            let scale = 2.0 / fft_take as f32;
-            let nyquist = sr * 0.5;
-            let f_lo = 28.0f32;
-            let f_hi = nyquist.max(f_lo * 2.0);
-            let cols = spectrum_rect.width().max(8.0) as usize;
-            for x in 0..cols {
-                let t0 = x as f32 / cols as f32;
-                let t1 = (x + 1) as f32 / cols as f32;
-                let f0 = f_lo * (f_hi / f_lo).powf(t0);
-                let f1 = f_lo * (f_hi / f_lo).powf(t1);
-                let b0 = ((f0 / nyquist) * bins as f32) as usize;
-                let b1 = (((f1 / nyquist) * bins as f32) as usize).max(b0 + 1);
-                let mut mag = 0.0f32;
-                for b in b0..b1.min(bins) {
-                    mag = mag.max(buffer[b].norm() * scale);
-                }
-                let db = 20.0 * mag.max(1.0e-9).log10();
+            // ---- Spectrum ---------------------------------------------------
+            painter.rect_filled(spectrum_rect, 4.0, panel_bg);
+            let db_floor = mini_meter::SPECTRUM_DB_FLOOR;
+            let cols = (spectrum_rect.width().max(8.0) as usize).min(1_024);
+            mini_meter::spectrum_columns(mono, sr, cols, spectrum_target);
+            mini_meter::smooth_spectrum_db(&mut tab.mini_meter.spectrum_db, spectrum_target, dt);
+            // Faint dB grid lines.
+            for db in [-24.0f32, -48.0, -72.0] {
+                let t = (db - db_floor) / -db_floor;
+                let y = spectrum_rect.bottom() - t * (spectrum_rect.height() - 12.0);
+                painter.line_segment(
+                    [
+                        egui::pos2(spectrum_rect.left() + 1.0, y),
+                        egui::pos2(spectrum_rect.right() - 1.0, y),
+                    ],
+                    Stroke::new(1.0, Color32::from_rgb(26, 29, 36)),
+                );
+            }
+            let col_w = (spectrum_rect.width() / cols.max(1) as f32).max(1.0);
+            for (x, db) in tab.mini_meter.spectrum_db.iter().enumerate() {
                 let norm = ((db - db_floor) / -db_floor).clamp(0.0, 1.0);
                 if norm <= 0.002 {
                     continue;
                 }
+                let t0 = x as f32 / cols as f32;
                 let x0 = spectrum_rect.left() + t0 * spectrum_rect.width();
                 let bar_h = norm * (spectrum_rect.height() - 12.0);
                 // Hue sweep blue -> red across the log-frequency axis.
@@ -1263,16 +1274,21 @@ impl crate::app::WavesPreviewer {
                 painter.rect_filled(
                     egui::Rect::from_min_max(
                         egui::pos2(x0, spectrum_rect.bottom() - bar_h),
-                        egui::pos2(
-                            (x0 + (spectrum_rect.width() / cols as f32).max(1.0)).min(spectrum_rect.right()),
-                            spectrum_rect.bottom(),
-                        ),
+                        egui::pos2((x0 + col_w).min(spectrum_rect.right()), spectrum_rect.bottom()),
                     ),
                     0.0,
                     color,
                 );
             }
-            for (freq, label) in [(100.0f32, "100"), (1_000.0, "1k"), (10_000.0, "10k")] {
+            let nyquist = srf * 0.5;
+            let f_lo = mini_meter::SPECTRUM_MIN_HZ.min(nyquist * 0.25);
+            let f_hi = nyquist.max(f_lo * 2.0);
+            for (freq, label) in [
+                (50.0f32, "50"),
+                (100.0, "100"),
+                (1_000.0, "1k"),
+                (10_000.0, "10k"),
+            ] {
                 if freq >= f_lo && freq <= f_hi {
                     let t = (freq / f_lo).ln() / (f_hi / f_lo).ln();
                     let x = spectrum_rect.left() + t * spectrum_rect.width();
@@ -1292,111 +1308,304 @@ impl crate::app::WavesPreviewer {
                     );
                 }
             }
-        }
-        painter.text(
-            spectrum_rect.left_top() + egui::vec2(4.0, 2.0),
-            egui::Align2::LEFT_TOP,
-            "SPECTRUM",
-            label_font.clone(),
-            label_col,
-        );
+            painter.text(
+                spectrum_rect.left_top() + egui::vec2(4.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                "SPECTRUM",
+                label_font.clone(),
+                label_col,
+            );
+        });
 
-        // ---- Peak / RMS meter ---------------------------------------------
-        painter.rect_filled(level_rect, 4.0, panel_bg);
-        let level_take = level_n.min(mono.len());
-        let (peak, rms) = if level_take > 0 {
-            let win = &mono[mono.len() - level_take..];
-            let peak = win.iter().fold(0.0f32, |a, v| a.max(v.abs()));
-            let rms =
-                (win.iter().map(|v| v * v).sum::<f32>() / level_take as f32).sqrt();
-            (peak, rms)
-        } else {
-            (0.0, 0.0)
-        };
+        // ---- Stereo vectorscope + correlation -----------------------------
+        painter.rect_filled(stereo_rect, 4.0, panel_bg);
+        {
+            let corr_h = 10.0;
+            let scope_area = egui::Rect::from_min_max(
+                stereo_rect.left_top() + egui::vec2(2.0, 11.0),
+                egui::pos2(stereo_rect.right() - 2.0, stereo_rect.bottom() - corr_h - 4.0),
+            );
+            let radius = (scope_area.width().min(scope_area.height()) * 0.5 - 2.0).max(8.0);
+            let center = scope_area.center();
+            let guide = Stroke::new(1.0, Color32::from_rgb(34, 39, 48));
+            painter.circle_stroke(center, radius, guide);
+            let diag = radius * std::f32::consts::FRAC_1_SQRT_2;
+            // L / R axes (45 degrees).
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - diag, center.y - diag),
+                    egui::pos2(center.x + diag, center.y + diag),
+                ],
+                guide,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(center.x + diag, center.y - diag),
+                    egui::pos2(center.x - diag, center.y + diag),
+                ],
+                guide,
+            );
+            painter.text(
+                egui::pos2(center.x - diag - 2.0, center.y - diag - 2.0),
+                egui::Align2::RIGHT_BOTTOM,
+                "L",
+                label_font.clone(),
+                label_col,
+            );
+            painter.text(
+                egui::pos2(center.x + diag + 2.0, center.y - diag - 2.0),
+                egui::Align2::LEFT_BOTTOM,
+                "R",
+                label_font.clone(),
+                label_col,
+            );
+
+            // Channel pairing: stereo uses L/R; mono duplicates the single
+            // channel (trace collapses onto the mid axis); multichannel
+            // uses the first pair (front L/R in standard layouts) — the
+            // remaining channels are covered by the per-channel meters.
+            let (li, ri) = if n_ch >= 2 { (0usize, 1usize) } else { (0usize, 0usize) };
+            let take = vector_n.min(end);
+            let l_win = &tab.ch_samples[li][end - take..end];
+            let r_win = &tab.ch_samples[ri][end - take..end];
+            let peak = l_win
+                .iter()
+                .chain(r_win.iter())
+                .fold(0.0f32, |a, v| a.max(v.abs()));
+            if peak > 1.0e-4 {
+                let gain = (0.9 / peak).min(16.0);
+                let step = (take / 480).max(1);
+                let trace = Color32::from_rgba_unmultiplied(96, 220, 200, 110);
+                let mut last: Option<egui::Pos2> = None;
+                let mut i = 0usize;
+                while i < take {
+                    let l = l_win[i] * gain;
+                    let r = r_win[i] * gain;
+                    let x = (l - r) * std::f32::consts::FRAC_1_SQRT_2;
+                    let y = (l + r) * std::f32::consts::FRAC_1_SQRT_2;
+                    let pt = egui::pos2(center.x + x * radius, center.y - y * radius);
+                    if let Some(prev) = last {
+                        painter.line_segment([prev, pt], Stroke::new(1.0, trace));
+                    }
+                    last = Some(pt);
+                    i += step;
+                }
+            }
+
+            // Correlation bar along the bottom (-1 .. +1).
+            let target_corr = if n_ch >= 2 {
+                let take = level_n.min(end);
+                crate::app::render::mini_meter::stereo_correlation(
+                    &tab.ch_samples[0][end - take..end],
+                    &tab.ch_samples[1][end - take..end],
+                )
+            } else {
+                1.0
+            };
+            let k = 1.0 - (-dt / 0.25f32).exp();
+            tab.mini_meter.corr += (target_corr - tab.mini_meter.corr) * k;
+            let corr = tab.mini_meter.corr.clamp(-1.0, 1.0);
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(stereo_rect.left() + 6.0, stereo_rect.bottom() - corr_h - 2.0),
+                egui::pos2(stereo_rect.right() - 6.0, stereo_rect.bottom() - 4.0),
+            );
+            painter.rect_filled(bar, 2.0, Color32::from_rgb(24, 27, 33));
+            let cx = bar.center().x;
+            let fill_col = if corr >= 0.0 {
+                crate::app::helpers::lerp_color(
+                    Color32::from_rgb(235, 200, 90),
+                    Color32::from_rgb(88, 200, 120),
+                    corr,
+                )
+            } else {
+                crate::app::helpers::lerp_color(
+                    Color32::from_rgb(235, 200, 90),
+                    Color32::from_rgb(240, 100, 100),
+                    -corr,
+                )
+            };
+            let fx = cx + corr * (bar.width() * 0.5 - 1.0);
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(fx.min(cx), bar.top() + 1.0),
+                    egui::pos2(fx.max(cx), bar.bottom() - 1.0),
+                ),
+                1.0,
+                fill_col,
+            );
+            painter.line_segment(
+                [egui::pos2(cx, bar.top()), egui::pos2(cx, bar.bottom())],
+                Stroke::new(1.0, Color32::from_rgb(70, 78, 92)),
+            );
+            painter.text(
+                egui::pos2(bar.left() - 1.0, bar.center().y),
+                egui::Align2::RIGHT_CENTER,
+                "-",
+                label_font.clone(),
+                label_col,
+            );
+            painter.text(
+                egui::pos2(bar.right() + 1.0, bar.center().y),
+                egui::Align2::LEFT_CENTER,
+                "+",
+                label_font.clone(),
+                label_col,
+            );
+
+            painter.text(
+                stereo_rect.left_top() + egui::vec2(4.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                "STEREO",
+                label_font.clone(),
+                label_col,
+            );
+            if n_ch == 1 {
+                painter.text(
+                    egui::pos2(stereo_rect.right() - 4.0, stereo_rect.top() + 2.0),
+                    egui::Align2::RIGHT_TOP,
+                    "MONO",
+                    label_font.clone(),
+                    Color32::from_rgb(150, 162, 184),
+                );
+            } else if n_ch > 2 {
+                painter.text(
+                    egui::pos2(stereo_rect.right() - 4.0, stereo_rect.top() + 2.0),
+                    egui::Align2::RIGHT_TOP,
+                    "CH1+2",
+                    label_font.clone(),
+                    Color32::from_rgb(150, 162, 184),
+                );
+            }
+        }
+
+        // ---- Per-channel peak / RMS meters ---------------------------------
+        painter.rect_filled(levels_rect, 4.0, panel_bg);
         let db_of = |v: f32| 20.0 * v.max(1.0e-6).log10();
         let meter_floor = -60.0f32;
         let norm_of = |db: f32| ((db - meter_floor) / -meter_floor).clamp(0.0, 1.0);
-        // Peak hold with slow decay, kept in egui temp memory.
-        let hold_id = egui::Id::new(("mini_meter_peak_hold", &tab.path));
-        let now = ui.input(|i| i.time);
-        let (mut hold_db, last_t): (f32, f64) = ui
-            .ctx()
-            .data_mut(|d| *d.get_temp_mut_or(hold_id, (meter_floor, now)));
-        let dt = (now - last_t).max(0.0) as f32;
-        hold_db = (hold_db - dt * 12.0).max(db_of(peak));
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(hold_id, (hold_db, now)));
-
-        let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(level_rect.left() + 8.0, level_rect.top() + 14.0),
-            egui::pos2(level_rect.left() + 24.0, level_rect.bottom() - 16.0),
-        );
-        painter.rect_filled(bar_rect, 2.0, Color32::from_rgb(24, 27, 33));
-        let zone = |lo_db: f32, hi_db: f32, color: Color32, level_db: f32| {
-            let lo = norm_of(lo_db);
-            let hi = norm_of(hi_db.min(level_db));
-            if hi > lo {
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::pos2(bar_rect.left(), bar_rect.bottom() - hi * bar_rect.height()),
-                        egui::pos2(bar_rect.right(), bar_rect.bottom() - lo * bar_rect.height()),
-                    ),
-                    1.0,
-                    color,
-                );
-            }
-        };
-        let peak_db = db_of(peak);
-        zone(meter_floor, -18.0, Color32::from_rgb(88, 200, 120), peak_db);
-        zone(-18.0, -6.0, Color32::from_rgb(235, 200, 90), peak_db);
-        zone(-6.0, 0.0, Color32::from_rgb(240, 100, 100), peak_db);
-        // RMS tick inside the bar, hold line above.
-        let rms_y = bar_rect.bottom() - norm_of(db_of(rms)) * bar_rect.height();
-        painter.line_segment(
-            [
-                egui::pos2(bar_rect.left(), rms_y),
-                egui::pos2(bar_rect.right(), rms_y),
-            ],
-            Stroke::new(1.5, Color32::WHITE),
-        );
-        let hold_y = bar_rect.bottom() - norm_of(hold_db) * bar_rect.height();
-        painter.line_segment(
-            [
-                egui::pos2(bar_rect.left(), hold_y),
-                egui::pos2(bar_rect.right() + 4.0, hold_y),
-            ],
-            Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+        if tab.mini_meter.peak_hold_db.len() != n_ch {
+            tab.mini_meter.peak_hold_db.clear();
+            tab.mini_meter.peak_hold_db.resize(n_ch, meter_floor);
+        }
+        let scale_w = 22.0;
+        let bars_rect = egui::Rect::from_min_max(
+            egui::pos2(levels_rect.left() + 6.0, levels_rect.top() + 14.0),
+            egui::pos2(
+                (levels_rect.right() - scale_w).max(levels_rect.left() + 10.0),
+                levels_rect.bottom() - 16.0,
+            ),
         );
         for db in [0.0f32, -6.0, -18.0, -36.0] {
-            let y = bar_rect.bottom() - norm_of(db) * bar_rect.height();
+            let y = bars_rect.bottom() - norm_of(db) * bars_rect.height();
             painter.text(
-                egui::pos2(bar_rect.right() + 6.0, y),
+                egui::pos2(bars_rect.right() + 4.0, y),
                 egui::Align2::LEFT_CENTER,
                 format!("{db:.0}"),
                 label_font.clone(),
                 label_col,
             );
         }
+        let slot_w = bars_rect.width() / n_ch.max(1) as f32;
+        let bar_w = (slot_w - 2.0).clamp(2.0, 18.0);
+        let show_ch_labels = slot_w >= 9.0 && n_ch > 1;
+        let mut max_peak_db = meter_floor;
+        for c in 0..n_ch {
+            let take = level_n.min(end);
+            let win = &tab.ch_samples[c][end - take..end];
+            let peak = win.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+            let rms = (win.iter().map(|v| v * v).sum::<f32>() / take.max(1) as f32).sqrt();
+            let peak_db = db_of(peak);
+            max_peak_db = max_peak_db.max(peak_db);
+            let hold = &mut tab.mini_meter.peak_hold_db[c];
+            *hold = (*hold - dt * 12.0).max(peak_db).max(meter_floor);
+            let x0 = bars_rect.left() + c as f32 * slot_w + (slot_w - bar_w) * 0.5;
+            let bar_rect = egui::Rect::from_min_max(
+                egui::pos2(x0, bars_rect.top()),
+                egui::pos2(x0 + bar_w, bars_rect.bottom()),
+            );
+            painter.rect_filled(bar_rect, 2.0, Color32::from_rgb(24, 27, 33));
+            let zone = |lo_db: f32, hi_db: f32, color: Color32| {
+                let lo = norm_of(lo_db);
+                let hi = norm_of(hi_db.min(peak_db));
+                if hi > lo {
+                    painter.rect_filled(
+                        egui::Rect::from_min_max(
+                            egui::pos2(bar_rect.left(), bar_rect.bottom() - hi * bar_rect.height()),
+                            egui::pos2(bar_rect.right(), bar_rect.bottom() - lo * bar_rect.height()),
+                        ),
+                        1.0,
+                        color,
+                    );
+                }
+            };
+            zone(meter_floor, -18.0, Color32::from_rgb(88, 200, 120));
+            zone(-18.0, -6.0, Color32::from_rgb(235, 200, 90));
+            zone(-6.0, 0.0, Color32::from_rgb(240, 100, 100));
+            let rms_y = bar_rect.bottom() - norm_of(db_of(rms)) * bar_rect.height();
+            painter.line_segment(
+                [
+                    egui::pos2(bar_rect.left(), rms_y),
+                    egui::pos2(bar_rect.right(), rms_y),
+                ],
+                Stroke::new(1.5, Color32::WHITE),
+            );
+            let hold_y = bar_rect.bottom() - norm_of(*hold) * bar_rect.height();
+            painter.line_segment(
+                [
+                    egui::pos2(bar_rect.left(), hold_y),
+                    egui::pos2(bar_rect.right(), hold_y),
+                ],
+                Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+            );
+            if show_ch_labels {
+                let label = match (n_ch, c) {
+                    (2, 0) => "L".to_string(),
+                    (2, 1) => "R".to_string(),
+                    _ => format!("{}", c + 1),
+                };
+                painter.text(
+                    egui::pos2(bar_rect.center().x, bars_rect.bottom() + 1.0),
+                    egui::Align2::CENTER_TOP,
+                    label,
+                    label_font.clone(),
+                    label_col,
+                );
+            }
+        }
         painter.text(
-            level_rect.left_top() + egui::vec2(4.0, 2.0),
+            levels_rect.left_top() + egui::vec2(4.0, 2.0),
             egui::Align2::LEFT_TOP,
             "PEAK",
             label_font.clone(),
             label_col,
         );
         painter.text(
-            egui::pos2(level_rect.center().x, level_rect.bottom() - 2.0),
+            egui::pos2(levels_rect.center().x, levels_rect.bottom() - 2.0),
             egui::Align2::CENTER_BOTTOM,
-            if peak_db <= meter_floor + 0.5 {
+            if max_peak_db <= meter_floor + 0.5 {
                 "-inf dB".to_string()
             } else {
-                format!("{peak_db:+.1} dB")
+                format!("{max_peak_db:+.1} dB")
             },
             label_font,
             Color32::from_rgb(200, 210, 224),
         );
 
-        if playing {
+        // Keep animating while playing or while decay is still visible so
+        // bars settle back to the floor after the sound stops.
+        let db_floor = crate::app::render::mini_meter::SPECTRUM_DB_FLOOR;
+        let decaying = tab
+            .mini_meter
+            .spectrum_db
+            .iter()
+            .any(|db| *db > db_floor + 0.5)
+            || tab
+                .mini_meter
+                .peak_hold_db
+                .iter()
+                .any(|db| *db > meter_floor + 0.5);
+        tab.mini_meter.active = playing || decaying;
+        if tab.mini_meter.active {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
         }
@@ -1966,6 +2175,7 @@ impl crate::app::WavesPreviewer {
         let feature_kind = match current_view {
             ViewMode::Tempogram => Some(EditorAnalysisKind::Tempogram),
             ViewMode::Chromagram => Some(EditorAnalysisKind::Chromagram),
+            ViewMode::World => Some(EditorAnalysisKind::World),
             _ => None,
         };
         let feature_key = feature_kind.map(|kind| EditorAnalysisKey {
@@ -1991,6 +2201,14 @@ impl crate::app::WavesPreviewer {
             Some(EditorFeatureAnalysisData::Chromagram(data)) => Some(data.clone()),
             _ => None,
         };
+        let world_feature_cache = match feature_cache.as_deref() {
+            Some(EditorFeatureAnalysisData::World(_)) => feature_cache.clone(),
+            _ => None,
+        };
+        let world_data = world_feature_cache.as_deref().and_then(|data| match data {
+            EditorFeatureAnalysisData::World(data) => Some(data.as_ref()),
+            _ => None,
+        });
         let mut touch_spectro_cache = false;
         let mut pending_viewport_hint: Option<crate::app::editor_viewport::EditorViewportHint> =
             None;
@@ -2043,6 +2261,7 @@ impl crate::app::WavesPreviewer {
                         ui.label(RichText::new("Other").weak());
                         ui.selectable_value(&mut selected_view, ViewMode::Tempogram, "Tempogram");
                         ui.selectable_value(&mut selected_view, ViewMode::Chromagram, "Chromagram");
+                        ui.selectable_value(&mut selected_view, ViewMode::World, "World (F0/Env)");
                     });
             });
             if selected_view != prev_view {
@@ -2548,18 +2767,19 @@ impl crate::app::WavesPreviewer {
             .map(|p| (p.done_tiles, p.total_tiles, p.started_at));
         let analysis_loading = match current_view {
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => spectro_loading,
-            ViewMode::Tempogram | ViewMode::Chromagram => feature_loading,
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World => feature_loading,
             ViewMode::Waveform => false,
         };
         let analysis_progress = match current_view {
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => spectro_progress,
-            ViewMode::Tempogram | ViewMode::Chromagram => feature_progress,
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World => feature_progress,
             ViewMode::Waveform => None,
         };
         let analysis_label = match current_view {
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => "Spectrogram",
             ViewMode::Tempogram => "Tempogram",
             ViewMode::Chromagram => "Chromagram",
+            ViewMode::World => "WORLD features",
             ViewMode::Waveform => "",
         };
         let mut cancel_apply = false;
@@ -2570,6 +2790,9 @@ impl crate::app::WavesPreviewer {
         let mut cancel_feature_analysis = false;
         let mut pending_tempogram_refresh = false;
         let mut pending_chromagram_refresh = false;
+        let mut pending_world_refresh = false;
+        let mut pending_world_resynth = false;
+        let mut pending_world_f0_method: Option<crate::app::types::WorldF0Method> = None;
         let mut apply_estimated_bpm: Option<f32> = None;
         let mut perf_mixdown_ms: Option<f32> = None;
         let mut perf_wave_render_ms: Option<f32> = None;
@@ -2703,8 +2926,10 @@ impl crate::app::WavesPreviewer {
                     });
                         let channel_count = tab.ch_samples.len().max(1);
                         let mut visible_channels = tab.channel_view.visible_indices(channel_count);
-                        let force_feature_mixdown =
-                            matches!(view_mode, ViewMode::Tempogram | ViewMode::Chromagram);
+                        let force_feature_mixdown = matches!(
+                            view_mode,
+                            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World
+                        );
                         let use_mixdown = force_feature_mixdown
                             || tab.channel_view.mode == ChannelViewMode::Mixdown
                             || visible_channels.is_empty();
@@ -2815,6 +3040,7 @@ impl crate::app::WavesPreviewer {
                     | ViewMode::Mel
                     | ViewMode::Tempogram
                     | ViewMode::Chromagram
+                    | ViewMode::World
             )
             .then_some(crate::app::editor_viewport::EditorViewportHint {
                 view_mode,
@@ -2834,6 +3060,7 @@ impl crate::app::WavesPreviewer {
                     | ViewMode::Mel
                     | ViewMode::Tempogram
                     | ViewMode::Chromagram
+                    | ViewMode::World
             ) {
                     Some(EditorViewportRenderKey {
                         kind: EditorViewportPayloadKind::Spectral,
@@ -3456,6 +3683,274 @@ impl crate::app::WavesPreviewer {
                             }
                         }
                     }
+                    ViewMode::World => {
+                        let lane_rect = egui::Rect::from_min_size(
+                            egui::pos2(wave_left, rect.top()),
+                            egui::vec2(wave_w, h),
+                        );
+                        let current_viewport_cache = current_feature_viewport_key
+                            .as_ref()
+                            .and_then(|key| Self::exact_editor_viewport_cache(tab, key));
+                        if let Some(crate::app::types::EditorViewportRenderCache {
+                            payload:
+                                crate::app::types::EditorViewportCachePayload::Image {
+                                    texture: Some(texture),
+                                    ..
+                                },
+                            ..
+                        }) = current_viewport_cache
+                        {
+                            painter.image(
+                                texture.id(),
+                                lane_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                        } else if let Some(data) = world_data {
+                            let fallback_image = Self::render_world_viewport_image(
+                                data,
+                                tab.world_f0_focus,
+                                wave_width_px,
+                                Self::editor_viewport_dimension_px(h, pixels_per_point),
+                                1,
+                                start,
+                                end,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                                view_mode,
+                                crate::app::types::EditorViewportRenderQuality::Coarse,
+                            );
+                            let fallback_texture = ui.ctx().load_texture(
+                                format!("editor_viewport_sync_fallback_{tab_idx}_{view_mode:?}"),
+                                fallback_image,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            painter.image(
+                                fallback_texture.id(),
+                                lane_rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                        } else {
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let msg = if feature_loading {
+                                let pct = feature_progress
+                                    .map(|(done, total, _)| {
+                                        if total > 0 {
+                                            (done as f32 / total as f32 * 100.0).round()
+                                        } else {
+                                            0.0
+                                        }
+                                    })
+                                    .unwrap_or(0.0);
+                                format!(
+                                    "Analyzing WORLD features (F0 / spectral envelope)... {pct:.0}%"
+                                )
+                            } else {
+                                "WORLD features not ready".to_string()
+                            };
+                            painter.text(
+                                egui::pos2(wave_left + 6.0, rect.top() + 6.0),
+                                egui::Align2::LEFT_TOP,
+                                msg,
+                                fid,
+                                Color32::GRAY,
+                            );
+                        }
+                        if let Some(data) = world_data {
+                            let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
+                                view_mode,
+                                tab.vertical_zoom,
+                                tab.vertical_view_center,
+                                &self.spectro_cfg,
+                            );
+                            let span = (visible_max - visible_min).max(f32::EPSILON);
+                            let f0_focus = tab.world_f0_focus;
+                            let y_for_freq = |freq: f32| {
+                                let frac =
+                                    Self::world_view_freq_to_frac(freq, data.sample_rate, f0_focus);
+                                let visible_frac = ((frac - visible_min) / span).clamp(0.0, 1.0);
+                                lane_rect.bottom() - visible_frac * lane_rect.height()
+                            };
+                            // Frequency axis ticks along the left gutter.
+                            let fid = TextStyle::Monospace.resolve(ui.style());
+                            let tick_col = Color32::from_rgb(140, 150, 165);
+                            let tick_stroke = egui::Stroke::new(1.0, tick_col);
+                            let nyquist = data.sample_rate.max(1) as f32 * 0.5;
+                            for (freq, label) in [
+                                (100.0f32, "100"),
+                                (200.0, "200"),
+                                (500.0, "500"),
+                                (1_000.0, "1k"),
+                                (2_000.0, "2k"),
+                                (5_000.0, "5k"),
+                                (10_000.0, "10k"),
+                            ] {
+                                if freq > nyquist {
+                                    continue;
+                                }
+                                let (axis_lo, axis_hi) =
+                                    Self::world_view_freq_bounds(data.sample_rate, f0_focus);
+                                if freq < axis_lo * 1.01 || freq > axis_hi * 0.999 {
+                                    continue;
+                                }
+                                let frac =
+                                    Self::world_view_freq_to_frac(freq, data.sample_rate, f0_focus);
+                                let visible_frac = (frac - visible_min) / span;
+                                if !(0.0..=1.0).contains(&visible_frac) {
+                                    continue;
+                                }
+                                let y = lane_rect.bottom() - visible_frac * lane_rect.height();
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(wave_left - 6.0, y),
+                                        egui::pos2(wave_left - 2.0, y),
+                                    ],
+                                    tick_stroke,
+                                );
+                                painter.text(
+                                    egui::pos2(rect.left() + 2.0, y),
+                                    egui::Align2::LEFT_CENTER,
+                                    label,
+                                    fid.clone(),
+                                    tick_col,
+                                );
+                            }
+                            // F0 trajectories: analyzed curve, plus the edit
+                            // draft on top when it exists (broken at unvoiced
+                            // frames in both cases).
+                            let frame_step = data.frame_step.max(1);
+                            let visible_len = end.saturating_sub(start).max(1) as f32;
+                            let analyzed_color = Color32::from_rgb(80, 230, 255);
+                            let draft_color = Color32::from_rgb(255, 176, 64);
+                            let draft_values: Option<&[f32]> = tab
+                                .world_f0_draft
+                                .as_ref()
+                                .filter(|draft| {
+                                    draft.source_frames == data.frames
+                                        && (draft.dirty || draft.edit_enabled)
+                                })
+                                .map(|draft| draft.values.as_slice());
+                            let first_frame = start / frame_step;
+                            let last_frame = ((end / frame_step) + 2).min(data.frames);
+                            // Each curve gets a dark halo pass underneath so
+                            // the line stays readable on bright heatmap areas.
+                            // Decimate to at most ~2 points per pixel so
+                            // long clips stay cheap to draw; a window with any
+                            // unvoiced frame breaks the line like the raw data
+                            // would.
+                            let frame_span = last_frame.saturating_sub(first_frame).max(1);
+                            let max_points = (wave_w.max(32.0) as usize) * 2;
+                            let frame_step_draw = (frame_span / max_points.max(1)).max(1);
+                            let draw_curve = |values: &[f32], color: Color32, width: f32| {
+                                let halo = Color32::from_rgba_unmultiplied(8, 10, 14, 210);
+                                for (pass_color, pass_width) in
+                                    [(halo, width + 2.6), (color, width)]
+                                {
+                                    let stroke = egui::Stroke::new(pass_width, pass_color);
+                                    let mut last_pt: Option<egui::Pos2> = None;
+                                    let mut frame = first_frame;
+                                    while frame < last_frame {
+                                        let window_end =
+                                            (frame + frame_step_draw).min(last_frame);
+                                        let mut f0 = 0.0f32;
+                                        let mut voiced = true;
+                                        for j in frame..window_end {
+                                            let v = values.get(j).copied().unwrap_or(0.0);
+                                            if v <= 0.0 {
+                                                voiced = false;
+                                                break;
+                                            }
+                                            if j == frame {
+                                                f0 = v;
+                                            }
+                                        }
+                                        if !voiced {
+                                            last_pt = None;
+                                            frame = window_end;
+                                            continue;
+                                        }
+                                        let sample = frame * frame_step;
+                                        let x = wave_left
+                                            + ((sample.saturating_sub(start)) as f32
+                                                / visible_len)
+                                                * wave_w;
+                                        let pt = egui::pos2(
+                                            x.clamp(wave_left, wave_left + wave_w),
+                                            y_for_freq(f0),
+                                        );
+                                        if let Some(prev) = last_pt {
+                                            painter.line_segment([prev, pt], stroke);
+                                        } else {
+                                            painter.circle_filled(
+                                                pt,
+                                                pass_width * 0.9,
+                                                pass_color,
+                                            );
+                                        }
+                                        last_pt = Some(pt);
+                                        frame = window_end;
+                                    }
+                                }
+                            };
+                            if let Some(draft) = draft_values {
+                                draw_curve(
+                                    &data.f0_values,
+                                    Color32::from_rgba_unmultiplied(80, 230, 255, 110),
+                                    1.4,
+                                );
+                                draw_curve(draft, draft_color, 2.4);
+                            } else {
+                                draw_curve(&data.f0_values, analyzed_color, 2.4);
+                            }
+                            // Live F0 readout at the playhead (edited value
+                            // when a draft is active).
+                            let cur_frame = playhead_display_now / frame_step;
+                            let cur_values = draft_values.unwrap_or(&data.f0_values);
+                            let cur_f0 = cur_values
+                                .get(cur_frame.min(data.frames.saturating_sub(1)))
+                                .copied()
+                                .unwrap_or(0.0);
+                            let readout = if cur_f0 > 0.0 {
+                                format!("F0 {cur_f0:.1} Hz")
+                            } else {
+                                "F0 --".to_string()
+                            };
+                            let readout_color = if draft_values.is_some() {
+                                draft_color
+                            } else {
+                                analyzed_color
+                            };
+                            painter.text(
+                                egui::pos2(lane_rect.right() - 8.0, lane_rect.top() + 6.0),
+                                egui::Align2::RIGHT_TOP,
+                                readout,
+                                fid,
+                                readout_color,
+                            );
+                            if tab
+                                .world_f0_draft
+                                .as_ref()
+                                .map(|draft| draft.edit_enabled)
+                                .unwrap_or(false)
+                            {
+                                painter.text(
+                                    egui::pos2(lane_rect.left() + 6.0, lane_rect.top() + 6.0),
+                                    egui::Align2::LEFT_TOP,
+                                    "F0 EDIT: left-drag draw / right-drag erase",
+                                    egui::FontId::monospace(10.0),
+                                    draft_color,
+                                );
+                            }
+                        }
+                    }
                     ViewMode::Waveform => {}
                 }
             }
@@ -3649,6 +4144,66 @@ impl crate::app::WavesPreviewer {
             }
             // Drag markers for LoopEdit (primary button only)
             let mut suppress_seek = false;
+            // WORLD F0 pencil editing: while enabled it owns the pointer on
+            // this canvas (left-drag draws pitch, right-drag erases), so the
+            // seek / marker / range-select handlers below are bypassed.
+            let world_f0_editing = view_mode == ViewMode::World
+                && world_data.is_some()
+                && tab
+                    .world_f0_draft
+                    .as_ref()
+                    .map(|draft| draft.edit_enabled)
+                    .unwrap_or(false);
+            if world_f0_editing {
+                suppress_seek = true;
+                if let Some(data) = world_data {
+                    if resp.hovered() {
+                        hover_cursor = Some(egui::CursorIcon::Crosshair);
+                    }
+                    let draw_btn = resp.drag_started_by(egui::PointerButton::Primary)
+                        || resp.dragged_by(egui::PointerButton::Primary)
+                        || resp.clicked_by(egui::PointerButton::Primary);
+                    let erase_btn = resp.drag_started_by(egui::PointerButton::Secondary)
+                        || resp.dragged_by(egui::PointerButton::Secondary)
+                        || resp.clicked_by(egui::PointerButton::Secondary);
+                    if draw_btn || erase_btn {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let sample = geom.x_to_display_sample(
+                                pos.x.clamp(wave_left, wave_left + wave_w),
+                            );
+                            let frame = sample / data.frame_step.max(1);
+                            let (visible_min, visible_max) =
+                                Self::editor_vertical_range_for_view(
+                                    view_mode,
+                                    tab.vertical_zoom,
+                                    tab.vertical_view_center,
+                                    &self.spectro_cfg,
+                                );
+                            let frac_local =
+                                1.0 - ((pos.y - rect.top()) / h.max(1.0)).clamp(0.0, 1.0);
+                            let frac = visible_min + frac_local * (visible_max - visible_min);
+                            let freq = if erase_btn {
+                                0.0
+                            } else {
+                                Self::world_view_frac_to_freq(
+                                    frac,
+                                    data.sample_rate,
+                                    tab.world_f0_focus,
+                                )
+                            };
+                            let draft = Self::world_f0_draft_mut(tab, data);
+                            Self::world_f0_paint(draft, frame, freq);
+                        }
+                    }
+                    if resp.drag_stopped_by(egui::PointerButton::Primary)
+                        || resp.drag_stopped_by(egui::PointerButton::Secondary)
+                    {
+                        if let Some(draft) = tab.world_f0_draft.as_mut() {
+                            draft.last_drag_frame = None;
+                        }
+                    }
+                }
+            }
             let alt_now = ui.input(|i| i.modifiers.alt);
             let selection_snap_playhead_display = playhead_display_now.min(display_samples_len);
             let selection_snap_playhead_x = geom.sample_center_x(selection_snap_playhead_display);
@@ -3663,6 +4218,7 @@ impl crate::app::WavesPreviewer {
             // Right drag is dedicated to seek/playhead movement.
             // Shift+Right drag switches to range selection with button-down anchor.
             if pointer_over_waveform
+                && !world_f0_editing
                 && !alt_now
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
@@ -3722,6 +4278,7 @@ impl crate::app::WavesPreviewer {
                 }
             }
             if pointer_over_waveform
+                && !world_f0_editing
                 && matches!(tab.active_tool, ToolKind::LoopEdit)
                 && display_samples_len > 0
             {
@@ -3790,6 +4347,7 @@ impl crate::app::WavesPreviewer {
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
             if pointer_over_waveform
+                && !world_f0_editing
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
             {
@@ -5319,7 +5877,9 @@ impl crate::app::WavesPreviewer {
                                             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                                                 cancel_spectro = true;
                                             }
-                                            ViewMode::Tempogram | ViewMode::Chromagram => {
+                                            ViewMode::Tempogram
+                                            | ViewMode::Chromagram
+                                            | ViewMode::World => {
                                                 cancel_feature_analysis = true;
                                             }
                                             ViewMode::Waveform => {}
@@ -7788,7 +8348,16 @@ impl crate::app::WavesPreviewer {
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
                             ui.label(RichText::new("Display").strong());
                             ui.label(
-                                RichText::new("Values: dB (log magnitude)").monospace().weak(),
+                                RichText::new(match self.spectro_cfg.db_ref {
+                                    crate::app::types::SpectrogramDbRef::Absolute => {
+                                        "Values: dB (0 dBFS ref)"
+                                    }
+                                    crate::app::types::SpectrogramDbRef::MaxNormalized => {
+                                        "Values: dB (normalized to max)"
+                                    }
+                                })
+                                .monospace()
+                                .weak(),
                             );
                             let overlay_resp =
                                 ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
@@ -7901,6 +8470,182 @@ impl crate::app::WavesPreviewer {
                                 ui.label(RichText::new("Analyzing mono mixdown...").weak());
                             } else {
                                 ui.label(RichText::new("Press Analyze Key to build the chromagram").weak());
+                            }
+                        }
+                        ViewMode::World => {
+                            Self::inspector_section(ui, "WORLD (F0 / Spectral Envelope)");
+                            ui.checkbox(&mut tab.show_waveform_overlay, "Waveform overlay");
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Re-analyze").clicked() {
+                                    pending_world_refresh = true;
+                                }
+                                if analysis_loading && ui.button("Cancel").clicked() {
+                                    cancel_feature_analysis = true;
+                                }
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label("F0 estimator:");
+                                let mut method = self.world_f0_method;
+                                egui::ComboBox::from_id_salt("world_f0_method")
+                                    .selected_text(match method {
+                                        crate::app::types::WorldF0Method::Dio => "DIO (fast)",
+                                        crate::app::types::WorldF0Method::Harvest => {
+                                            "Harvest (accurate)"
+                                        }
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut method,
+                                            crate::app::types::WorldF0Method::Dio,
+                                            "DIO (fast)",
+                                        );
+                                        ui.selectable_value(
+                                            &mut method,
+                                            crate::app::types::WorldF0Method::Harvest,
+                                            "Harvest (accurate)",
+                                        )
+                                        .on_hover_text(
+                                            "Higher pitch accuracy, several times slower to analyze",
+                                        );
+                                    });
+                                if method != self.world_f0_method {
+                                    pending_world_f0_method = Some(method);
+                                }
+                            });
+                            if let Some(data) = world_data {
+                                match data.median_f0 {
+                                    Some(f0) => {
+                                        ui.label(
+                                            RichText::new(format!("median F0 \u{2248} {f0:.1} Hz"))
+                                                .monospace()
+                                                .size(18.0)
+                                                .color(Color32::from_rgb(80, 230, 255)),
+                                        );
+                                    }
+                                    None => {
+                                        ui.label(RichText::new("No voiced frames found").weak());
+                                    }
+                                }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "voiced {:.0}%  \u{00B7}  {} frames  \u{00B7}  hop {:.1} ms",
+                                        data.voiced_ratio * 100.0,
+                                        data.frames,
+                                        data.frame_step as f32 * 1_000.0
+                                            / data.sample_rate.max(1) as f32,
+                                    ))
+                                    .monospace()
+                                    .weak(),
+                                );
+                                ui.label(
+                                    RichText::new(
+                                        "Heatmap = CheapTrick spectral envelope (log-frequency). Cyan line = DIO+StoneMask F0 trajectory.",
+                                    )
+                                    .weak(),
+                                );
+                                ui.separator();
+                                Self::inspector_section(ui, "F0 Edit");
+                                let mut edit_on = tab
+                                    .world_f0_draft
+                                    .as_ref()
+                                    .map(|draft| draft.edit_enabled)
+                                    .unwrap_or(false);
+                                if ui
+                                    .checkbox(&mut edit_on, "Edit F0 on canvas")
+                                    .on_hover_text(
+                                        "Left-drag: draw pitch. Right-drag: erase (unvoiced). Seek/select on the canvas are paused while editing.",
+                                    )
+                                    .changed()
+                                {
+                                    Self::world_f0_draft_mut(tab, data).edit_enabled = edit_on;
+                                }
+                                ui.checkbox(&mut tab.world_f0_focus, "F0 zoom (50 Hz - 1.1 kHz axis)")
+                                    .on_hover_text(
+                                        "Zoom the vertical axis onto the pitch range so the F0 curve is easier to read and edit",
+                                    );
+                                let mut shift = tab
+                                    .world_f0_draft
+                                    .as_ref()
+                                    .map(|draft| draft.shift_semitones)
+                                    .unwrap_or(0.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Shift");
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut shift)
+                                                .range(-24.0..=24.0)
+                                                .speed(0.1)
+                                                .suffix(" st"),
+                                        )
+                                        .changed()
+                                    {
+                                        Self::world_f0_draft_mut(tab, data).shift_semitones =
+                                            shift;
+                                    }
+                                    if ui.button("Apply shift").clicked() && shift != 0.0 {
+                                        let draft = Self::world_f0_draft_mut(tab, data);
+                                        Self::world_f0_shift_semitones(draft, shift);
+                                        draft.shift_semitones = 0.0;
+                                    }
+                                });
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui
+                                        .button("Smooth")
+                                        .on_hover_text("5-frame median filter over voiced runs")
+                                        .clicked()
+                                    {
+                                        Self::world_f0_smooth(Self::world_f0_draft_mut(tab, data));
+                                    }
+                                    if ui
+                                        .button("Flatten")
+                                        .on_hover_text(
+                                            "Set every voiced frame to the median F0 (monotone)",
+                                        )
+                                        .clicked()
+                                    {
+                                        Self::world_f0_flatten(Self::world_f0_draft_mut(
+                                            tab, data,
+                                        ));
+                                    }
+                                    if ui.button("Reset").clicked() {
+                                        let draft = Self::world_f0_draft_mut(tab, data);
+                                        Self::world_f0_reset(draft, data);
+                                    }
+                                });
+                                if tab
+                                    .world_f0_draft
+                                    .as_ref()
+                                    .map(|draft| draft.dirty)
+                                    .unwrap_or(false)
+                                {
+                                    ui.label(
+                                        RichText::new("F0 edited - orange curve on the canvas")
+                                            .color(Color32::from_rgb(255, 176, 64)),
+                                    );
+                                }
+                                let can_resynth = data.frames > 0
+                                    && data.aperiodicity.len() == data.frames * data.bins;
+                                let resynth = ui
+                                    .add_enabled(
+                                        can_resynth && !analysis_loading,
+                                        egui::Button::new("Resynthesize (replace audio)"),
+                                    )
+                                    .on_hover_text(
+                                        "WORLD synthesis with the edited F0 replaces this tab's audio on every channel (source is the mono mixdown; undo with Ctrl+Z)",
+                                    )
+                                    .on_disabled_hover_text(
+                                        "Re-analyze first so aperiodicity is available",
+                                    );
+                                if resynth.clicked() {
+                                    pending_world_resynth = true;
+                                }
+                            } else if analysis_loading {
+                                ui.label(RichText::new("Analyzing mono mixdown...").weak());
+                            } else {
+                                ui.label(
+                                    RichText::new("WORLD analysis starts automatically for this view")
+                                        .weak(),
+                                );
                             }
                         }
                     }
@@ -8137,6 +8882,32 @@ impl crate::app::WavesPreviewer {
                 kind: EditorAnalysisKind::Chromagram,
             };
             self.cancel_feature_analysis_for_key(&key);
+        }
+        if pending_world_refresh {
+            let key = EditorAnalysisKey {
+                path: tab_path.clone(),
+                kind: EditorAnalysisKind::World,
+            };
+            self.cancel_feature_analysis_for_key(&key);
+        }
+        if pending_world_resynth {
+            self.spawn_world_resynth_for_tab(tab_idx);
+        }
+        if let Some(method) = pending_world_f0_method {
+            self.world_f0_method = method;
+            self.save_prefs();
+            // Cached WORLD analyses were produced with the previous
+            // estimator; drop them so every view re-analyzes.
+            let world_keys: Vec<EditorAnalysisKey> = self
+                .editor_feature_cache
+                .keys()
+                .chain(self.editor_feature_inflight.iter())
+                .filter(|key| key.kind == EditorAnalysisKind::World)
+                .cloned()
+                .collect();
+            for key in world_keys {
+                self.cancel_feature_analysis_for_key(&key);
+            }
         }
         if let Some(bpm) = apply_estimated_bpm {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

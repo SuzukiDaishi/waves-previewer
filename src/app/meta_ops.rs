@@ -3,6 +3,17 @@ use std::path::PathBuf;
 use super::{meta, transcript};
 
 impl super::WavesPreviewer {
+    /// Debounce for re-sorting while metadata streams in. A full decorate +
+    /// sort of a 100k+ item list costs tens of ms, so large lists re-sort
+    /// less often (the final sort on completion is unaffected).
+    fn meta_sort_min_interval_ms(&self) -> u64 {
+        if self.files.len() > 20_000 {
+            750
+        } else {
+            crate::app::META_SORT_MIN_INTERVAL_MS
+        }
+    }
+
     fn needs_full_meta_for_sort(
         path: &PathBuf,
         meta: Option<&crate::app::types::FileMeta>,
@@ -298,7 +309,7 @@ impl super::WavesPreviewer {
                 .meta_sort_last_applied
                 .map(|last| {
                     now.duration_since(last)
-                        >= std::time::Duration::from_millis(crate::app::META_SORT_MIN_INTERVAL_MS)
+                        >= std::time::Duration::from_millis(self.meta_sort_min_interval_ms())
                 })
                 .unwrap_or(true);
         if due {
@@ -314,7 +325,7 @@ impl super::WavesPreviewer {
                 .map(|last| now.duration_since(last))
                 .unwrap_or_default();
             let interval =
-                std::time::Duration::from_millis(crate::app::META_SORT_MIN_INTERVAL_MS);
+                std::time::Duration::from_millis(self.meta_sort_min_interval_ms());
             ctx.request_repaint_after(interval.saturating_sub(elapsed));
         }
     }
@@ -382,8 +393,12 @@ impl super::WavesPreviewer {
             // Keep the existing deadline so a steady stream cannot starve it.
             self.search_dirty = true;
             if self.search_deadline.is_none() {
-                self.search_deadline =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
+                // Match the sort debounce: on huge lists each refilter walks
+                // every item, so let transcripts accumulate longer per pass.
+                let debounce_ms = self.meta_sort_min_interval_ms().max(300);
+                self.search_deadline = Some(
+                    std::time::Instant::now() + std::time::Duration::from_millis(debounce_ms),
+                );
             }
             ctx.request_repaint();
         } else {

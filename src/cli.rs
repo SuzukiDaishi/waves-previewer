@@ -1841,6 +1841,7 @@ pub enum CliViewMode {
     Mel,
     Tempogram,
     Chromagram,
+    World,
 }
 
 impl From<CliViewMode> for app::ViewMode {
@@ -1852,6 +1853,7 @@ impl From<CliViewMode> for app::ViewMode {
             CliViewMode::Mel => app::ViewMode::Mel,
             CliViewMode::Tempogram => app::ViewMode::Tempogram,
             CliViewMode::Chromagram => app::ViewMode::Chromagram,
+            CliViewMode::World => app::ViewMode::World,
         }
     }
 }

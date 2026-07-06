@@ -113,6 +113,7 @@ impl super::WavesPreviewer {
                                 frame_step: tile.frame_step,
                                 sample_rate: tile.sample_rate,
                                 values_db: Vec::new(),
+                                values_max_db: f32::MIN,
                             });
                         }
                         std::sync::Arc::new(specs)
@@ -128,6 +129,7 @@ impl super::WavesPreviewer {
                             frame_step: tile.frame_step,
                             sample_rate: tile.sample_rate,
                             values_db: Vec::new(),
+                            values_max_db: f32::MIN,
                         });
                     }
                 }
@@ -142,6 +144,7 @@ impl super::WavesPreviewer {
                         spec.frame_step = tile.frame_step;
                         spec.sample_rate = tile.sample_rate;
                         spec.values_db = vec![-120.0; tile.frames.saturating_mul(tile.bins)];
+                        spec.values_max_db = f32::MIN;
                         size_changed = true;
                     }
                     let base = tile.start_frame.saturating_mul(tile.bins);
@@ -151,6 +154,9 @@ impl super::WavesPreviewer {
                     let len = end.saturating_sub(base);
                     if len > 0 {
                         spec.values_db[base..base + len].copy_from_slice(&tile.values_db[..len]);
+                        spec.values_max_db = spec.values_max_db.max(
+                            crate::app::types::spectrogram_values_max_db(&tile.values_db[..len]),
+                        );
                     }
                 }
                 if let Some(progress) = self.spectro_progress.get_mut(&tile.path) {
@@ -164,6 +170,13 @@ impl super::WavesPreviewer {
                     self.update_spectro_cache_size(&tile.path, bytes);
                     self.touch_spectro_cache(&tile.path);
                     self.evict_spectro_cache_if_needed();
+                }
+                // New tile data must retire any viewport image rendered from
+                // the partially-filled spectrogram, otherwise the first
+                // render (with black unfilled regions) sticks around until
+                // the user happens to zoom or pan.
+                for tab in self.tabs.iter_mut().filter(|t| t.path == tile.path) {
+                    Self::invalidate_editor_viewport_cache(tab);
                 }
                 ctx.request_repaint();
             }
@@ -184,6 +197,9 @@ impl super::WavesPreviewer {
                 self.spectro_cancel.remove(&path);
                 self.touch_spectro_cache(&path);
                 self.evict_spectro_cache_if_needed();
+                for tab in self.tabs.iter_mut().filter(|t| t.path == path) {
+                    Self::invalidate_editor_viewport_cache(tab);
+                }
                 ctx.request_repaint();
             }
         }

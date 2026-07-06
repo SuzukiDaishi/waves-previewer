@@ -56,10 +56,68 @@ impl crate::app::WavesPreviewer {
         tab.samples_len_visual = tab.samples_len;
         tab.loading = false;
         tab.loading_waveform_minmax.clear();
-        let (waveform_minmax, waveform_pyramid) =
-            Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
-        tab.waveform_minmax = waveform_minmax;
-        tab.waveform_pyramid = waveform_pyramid;
+        // Analysis workers (spectrogram / tempogram / chromagram / WORLD)
+        // read this Arc mirror; a stale mirror would silently feed them
+        // pre-edit audio.
+        tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
+        // The overview + pyramid rebuild is O(n) and is deferred to the
+        // waveform postprocess worker (queued by the caller); the stale
+        // pyramid is dropped so zoomed-out rendering falls back to the raw
+        // samples instead of pre-edit peaks.
+        tab.waveform_pyramid = None;
+    }
+
+    /// Queue an off-thread rebuild of the waveform overview + pyramid for
+    /// `tab_idx` from its current Arc mirror. Results are adopted by
+    /// [`Self::drain_editor_wave_cache_jobs`]; a per-path generation drops
+    /// results that arrive after a newer edit.
+    pub(super) fn queue_editor_wave_cache_rebuild(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let path = tab.path.clone();
+        let channels = tab.ch_samples_arc.clone();
+        let samples_len = tab.samples_len;
+        self.editor_wave_cache_generation_counter =
+            self.editor_wave_cache_generation_counter.wrapping_add(1);
+        let generation = self.editor_wave_cache_generation_counter;
+        self.editor_wave_cache_generation
+            .insert(path.clone(), generation);
+        if self.editor_wave_cache_tx.is_none() || self.editor_wave_cache_rx.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.editor_wave_cache_tx = Some(tx);
+            self.editor_wave_cache_rx = Some(rx);
+        }
+        let Some(tx) = self.editor_wave_cache_tx.as_ref().cloned() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            super::threading::lower_current_thread_priority();
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&channels, samples_len);
+            let _ = tx.send((path, generation, waveform_minmax, waveform_pyramid));
+        });
+    }
+
+    pub(super) fn drain_editor_wave_cache_jobs(&mut self, ctx: &egui::Context) {
+        let mut results = Vec::new();
+        if let Some(rx) = &self.editor_wave_cache_rx {
+            while let Ok(msg) = rx.try_recv() {
+                results.push(msg);
+            }
+        }
+        for (path, generation, waveform_minmax, waveform_pyramid) in results {
+            if self.editor_wave_cache_generation.get(&path).copied() != Some(generation) {
+                continue;
+            }
+            self.editor_wave_cache_generation.remove(&path);
+            for tab in self.tabs.iter_mut().filter(|t| t.path == path) {
+                tab.waveform_minmax = waveform_minmax.clone();
+                tab.waveform_pyramid = waveform_pyramid.clone();
+                Self::invalidate_editor_viewport_cache(tab);
+            }
+            ctx.request_repaint();
+        }
     }
 
     fn editor_invalidate_destructive_preview_state(tab: &mut crate::app::types::EditorTab) {
@@ -92,6 +150,7 @@ impl crate::app::WavesPreviewer {
         }) else {
             return;
         };
+        self.queue_editor_wave_cache_rebuild(tab_idx);
 
         self.push_editor_undo_state(tab_idx, undo_state, true);
         self.clear_heavy_preview_state();
@@ -1384,10 +1443,18 @@ impl crate::app::WavesPreviewer {
                     *v /= chn;
                 }
             }
+            // Build the waveform cache + Arc mirror here so adopting the
+            // result on the UI thread is (nearly) copy-free.
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(EditorApplyResult {
                 tab_idx,
                 samples: mono,
                 channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
                 lufs_override,
             });
         });
@@ -1413,10 +1480,10 @@ impl crate::app::WavesPreviewer {
                 apply_done = Some((res, undo));
             }
         }
-        if let Some((res, undo)) = apply_done {
+        if let Some((mut res, undo)) = apply_done {
             let mut spectro_reset_path: Option<PathBuf> = None;
             if res.tab_idx < self.tabs.len() {
-                let mut applied_channels = res.channels;
+                let mut applied_channels = std::mem::take(&mut res.channels);
                 if applied_channels.is_empty() && !res.samples.is_empty() {
                     applied_channels = vec![res.samples.clone()];
                 }
@@ -1430,13 +1497,26 @@ impl crate::app::WavesPreviewer {
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
                     tab.ch_samples = applied_channels;
-                    tab.ch_samples_arc = std::sync::Arc::new(tab.ch_samples.clone());
+                    // Adopt the worker-built mirror + waveform cache instead
+                    // of re-cloning and re-scanning the buffers here.
+                    tab.ch_samples_arc = if res.channels_arc.len() == tab.ch_samples.len()
+                        && !tab.ch_samples.is_empty()
+                    {
+                        res.channels_arc.clone()
+                    } else {
+                        std::sync::Arc::new(tab.ch_samples.clone())
+                    };
                     tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
                     tab.samples_len = tab.ch_samples.get(0).map(|c| c.len()).unwrap_or(0);
-                    let (waveform_minmax, waveform_pyramid) =
-                        Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
-                    tab.waveform_minmax = waveform_minmax;
-                    tab.waveform_pyramid = waveform_pyramid;
+                    if res.waveform_minmax.is_empty() && tab.samples_len > 0 {
+                        let (waveform_minmax, waveform_pyramid) =
+                            Self::build_editor_waveform_cache(&tab.ch_samples, tab.samples_len);
+                        tab.waveform_minmax = waveform_minmax;
+                        tab.waveform_pyramid = waveform_pyramid;
+                    } else {
+                        tab.waveform_minmax = std::mem::take(&mut res.waveform_minmax);
+                        tab.waveform_pyramid = res.waveform_pyramid.take();
+                    }
                     Self::invalidate_editor_viewport_cache(tab);
                     let new_len = tab.samples_len.max(1);
                     if old_len > 0 && new_len > 0 {

@@ -85,6 +85,7 @@ mod transcript_onnx;
 mod transcript_ops;
 mod types;
 mod ui;
+mod world_edit_ops;
 mod zoo_assets;
 mod zoo_ops;
 pub use self::cli_ops::run_cli;
@@ -421,6 +422,35 @@ pub struct WavesPreviewer {
     pub meta_pool: Option<meta::MetaPool>,
     pub meta_inflight: HashSet<PathBuf>,
     meta_sort_pending: bool,
+    /// Cached (computed_at, count) for the pending-gain scan; the topbar and
+    /// list header read this every frame and a full O(n) item scan at 140k
+    /// files is far too hot for the frame loop.
+    pending_gain_count_cache: Option<(std::time::Instant, usize)>,
+    /// Off-thread waveform overview/pyramid rebuild after in-place edits.
+    #[allow(clippy::type_complexity)]
+    editor_wave_cache_tx: Option<
+        std::sync::mpsc::Sender<(
+            PathBuf,
+            u64,
+            Vec<(f32, f32)>,
+            Option<Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
+        )>,
+    >,
+    #[allow(clippy::type_complexity)]
+    editor_wave_cache_rx: Option<
+        std::sync::mpsc::Receiver<(
+            PathBuf,
+            u64,
+            Vec<(f32, f32)>,
+            Option<Arc<crate::app::render::waveform_pyramid::WaveformPyramidSet>>,
+        )>,
+    >,
+    editor_wave_cache_generation: HashMap<PathBuf, u64>,
+    editor_wave_cache_generation_counter: u64,
+    pub(crate) session_save_state: Option<SessionSaveState>,
+    pub(crate) clipboard_prep_state: Option<ClipboardPrepState>,
+    /// F0 estimator for WORLD analysis (DIO = fast, Harvest = accurate).
+    pub world_f0_method: WorldF0Method,
     meta_sort_last_applied: Option<std::time::Instant>,
     list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,
@@ -510,6 +540,9 @@ pub struct WavesPreviewer {
     pub editor_feature_cache: HashMap<EditorAnalysisKey, std::sync::Arc<EditorFeatureAnalysisData>>,
     pub editor_feature_inflight: HashSet<EditorAnalysisKey>,
     pub editor_feature_progress: HashMap<EditorAnalysisKey, AnalysisProgress>,
+    /// Live 0..=100 progress written by analysis worker threads (WORLD).
+    pub editor_feature_progress_shared:
+        HashMap<EditorAnalysisKey, Arc<std::sync::atomic::AtomicU32>>,
     pub editor_feature_cancel:
         HashMap<EditorAnalysisKey, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub editor_feature_generation: HashMap<EditorAnalysisKey, u64>,
@@ -2224,8 +2257,29 @@ impl WavesPreviewer {
 
     fn capture_undo_state(tab: &EditorTab) -> EditorUndoState {
         let approx_bytes = Self::estimate_state_bytes(tab);
+        // The worker mirror is resynced at the end of every buffer
+        // mutation, and undo points are captured before the next mutation
+        // begins, so it normally matches `ch_samples` exactly and the
+        // snapshot is a free Arc clone. Length checks (plus a deep compare
+        // in debug builds) guard the invariant; on mismatch fall back to a
+        // fresh deep copy.
+        let mirror_matches = tab.ch_samples_arc.len() == tab.ch_samples.len()
+            && tab
+                .ch_samples_arc
+                .iter()
+                .zip(tab.ch_samples.iter())
+                .all(|(a, b)| a.len() == b.len());
+        debug_assert!(
+            !mirror_matches || *tab.ch_samples_arc == tab.ch_samples,
+            "ch_samples_arc mirror out of sync with ch_samples at undo capture"
+        );
+        let ch_samples = if mirror_matches {
+            tab.ch_samples_arc.clone()
+        } else {
+            Arc::new(tab.ch_samples.clone())
+        };
         EditorUndoState {
-            ch_samples: tab.ch_samples.clone(),
+            ch_samples,
             samples_len: tab.samples_len,
             samples_len_visual: tab.samples_len_visual,
             buffer_sample_rate: tab.buffer_sample_rate.max(1),
@@ -2314,7 +2368,10 @@ impl WavesPreviewer {
             };
             tab.preview_audio_tool = None;
             tab.preview_overlay = None;
-            tab.ch_samples = state.ch_samples;
+            // Share the snapshot with the worker mirror (free), then take
+            // one owned copy for the mutable tab buffers.
+            tab.ch_samples = (*state.ch_samples).clone();
+            tab.ch_samples_arc = state.ch_samples;
             tab.samples_len = state.samples_len;
             tab.samples_len_visual = state.samples_len_visual;
             tab.loading = false;
@@ -2372,10 +2429,18 @@ impl WavesPreviewer {
         };
         self.audio.stop();
         self.audio.set_samples_channels(channels);
-        self.playback_mark_buffer_source(PlaybackSourceKind::EditorTab(path), buffer_sample_rate);
+        self.playback_mark_buffer_source(
+            PlaybackSourceKind::EditorTab(path.clone()),
+            buffer_sample_rate,
+        );
         if let Some(tab) = self.tabs.get(tab_idx) {
             self.apply_loop_mode_for_tab(tab);
         }
+        // The restored audio invalidates any analysis of the pre-undo
+        // buffers (spectrogram, tempogram/chromagram/WORLD); drop them so
+        // the views re-analyze what is actually audible now.
+        self.cancel_spectrogram_for_path(&path);
+        self.cancel_feature_analysis_for_path(&path);
         true
     }
 

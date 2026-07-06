@@ -11,8 +11,8 @@ use super::project::{
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
     project_music_analysis_to_draft, project_plugin_fx_draft_from_draft,
     project_plugin_fx_draft_to_draft, project_spectrogram_from_cfg, project_tab_from_tab,
-    project_tool_state_to_tool_state, rel_path, resolve_path, save_sidecar_audio,
-    save_sidecar_cached_audio, save_sidecar_preview_audio, serialize_project,
+    project_tool_state_to_tool_state, rel_path, resolve_path, serialize_project,
+    sidecar_audio_dst,
     spectro_config_from_project, tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph,
     ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy,
     ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
@@ -261,8 +261,10 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn close_project_with_autosave(&mut self) -> Result<(), String> {
-        if self.project_path.is_some() {
-            self.save_project()?;
+        if let Some(path) = self.project_path.clone() {
+            // Blocking: the session state is torn down right after, so the
+            // snapshot must be fully persisted first.
+            self.save_project_as_blocking(path)?;
         }
         self.close_project();
         Ok(())
@@ -365,7 +367,15 @@ impl super::WavesPreviewer {
         self.save_project_as(path)
     }
 
-    pub(super) fn save_project_as(&mut self, path: PathBuf) -> Result<(), String> {
+    /// Everything a session save needs, gathered without touching the disk:
+    /// the fully-built document plus Arc snapshots of every sidecar's audio.
+    /// The heavy part (WAV encodes + TOML write) runs from
+    /// [`Self::run_session_save_jobs`], on a worker for interactive saves.
+    fn build_session_save_plan(
+        &mut self,
+        path: PathBuf,
+    ) -> Result<(PathBuf, ProjectFile, Vec<crate::app::types::SessionSidecarJob>), String> {
+        use crate::app::types::{SessionSidecarJob, SessionSidecarSource};
         let path = if path
             .extension()
             .and_then(|s| s.to_str())
@@ -376,6 +386,7 @@ impl super::WavesPreviewer {
         } else {
             path
         };
+        let mut sidecar_jobs: Vec<SessionSidecarJob> = Vec::new();
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let list_files: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
         let mut list_items = Vec::new();
@@ -464,20 +475,15 @@ impl super::WavesPreviewer {
                         .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
                         .filter(|v| *v > 0)
                         .unwrap_or(self.audio.shared.out_sample_rate.max(1));
-                    match save_sidecar_cached_audio(
-                        &path,
-                        100_000 + virtual_sidecar_index,
-                        &audio.channels,
-                        sr,
-                    ) {
-                        Ok(saved_path) => {
-                            sidecar_audio = Some(rel_path(&saved_path, base_dir));
-                            virtual_sidecar_index = virtual_sidecar_index.saturating_add(1);
-                        }
-                        Err(err) => {
-                            return Err(format!("Failed to save virtual sidecar audio: {err}"));
-                        }
-                    }
+                    let dst = sidecar_audio_dst(&path, "cache", 100_000 + virtual_sidecar_index);
+                    sidecar_jobs.push(SessionSidecarJob {
+                        dst: dst.clone(),
+                        source: SessionSidecarSource::Buffer(audio.clone()),
+                        sample_rate: sr,
+                        label: "virtual sidecar audio",
+                    });
+                    sidecar_audio = Some(rel_path(&dst, base_dir));
+                    virtual_sidecar_index = virtual_sidecar_index.saturating_add(1);
                 }
             }
             let channels = item
@@ -654,31 +660,28 @@ impl super::WavesPreviewer {
             let mut preview_tool = None;
             if tab.dirty && !tab.ch_samples.is_empty() {
                 let sidecar_sr = tab.buffer_sample_rate.max(1);
-                match save_sidecar_audio(&path, idx, &tab.ch_samples, sidecar_sr) {
-                    Ok(p) => {
-                        edited_audio = Some(p);
-                    }
-                    Err(err) => {
-                        return Err(format!("Failed to save edited audio: {err}"));
-                    }
-                }
+                let dst = sidecar_audio_dst(&path, "tab", idx);
+                sidecar_jobs.push(SessionSidecarJob {
+                    dst: dst.clone(),
+                    source: SessionSidecarSource::Channels(tab.ch_samples_arc.clone()),
+                    sample_rate: sidecar_sr,
+                    label: "edited audio",
+                });
+                edited_audio = Some(dst);
             }
             if let Some(overlay) = tab.preview_overlay.as_ref() {
                 if overlay.is_full_sample() {
-                    match save_sidecar_preview_audio(
-                        &path,
-                        idx,
-                        &overlay.channels,
-                        self.audio.shared.out_sample_rate,
-                    ) {
-                        Ok(p) => {
-                            preview_audio = Some(p);
-                            preview_tool = Some(format!("{:?}", overlay.source_tool));
-                        }
-                        Err(err) => {
-                            return Err(format!("Failed to save preview audio: {err}"));
-                        }
-                    }
+                    let dst = sidecar_audio_dst(&path, "preview", idx);
+                    sidecar_jobs.push(SessionSidecarJob {
+                        dst: dst.clone(),
+                        source: SessionSidecarSource::Channels(std::sync::Arc::new(
+                            overlay.channels.clone(),
+                        )),
+                        sample_rate: self.audio.shared.out_sample_rate,
+                        label: "preview audio",
+                    });
+                    preview_audio = Some(dst);
+                    preview_tool = Some(format!("{:?}", overlay.source_tool));
                 }
             } else if let Some(tool) = tab.preview_audio_tool {
                 preview_tool = Some(format!("{:?}", tool));
@@ -694,13 +697,15 @@ impl super::WavesPreviewer {
                 continue;
             }
             let sidecar_sr = cached.buffer_sample_rate.max(1);
-            let edited_audio =
-                match save_sidecar_cached_audio(&path, idx, &cached.ch_samples, sidecar_sr) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        return Err(format!("Failed to save cached audio: {err}"));
-                    }
-                };
+            let edited_audio = sidecar_audio_dst(&path, "cache", idx);
+            sidecar_jobs.push(crate::app::types::SessionSidecarJob {
+                dst: edited_audio.clone(),
+                source: crate::app::types::SessionSidecarSource::Channels(std::sync::Arc::new(
+                    cached.ch_samples.clone(),
+                )),
+                sample_rate: sidecar_sr,
+                label: "cached audio",
+            });
             cached_edits.push(ProjectEdit {
                 path: rel_path(item_path, base_dir),
                 edited_audio: rel_path(&edited_audio, base_dir),
@@ -775,17 +780,102 @@ impl super::WavesPreviewer {
             active_tab: self.active_tab,
             cached_edits,
         };
-        let text = serialize_project(&project).map_err(|e| e.to_string())?;
+        Ok((path, project, sidecar_jobs))
+    }
+
+    /// The disk-touching half of a session save: sidecar WAV encodes, TOML
+    /// serialization, and the session file write. Runs on a worker thread
+    /// for interactive saves and inline for the blocking variant.
+    fn run_session_save_jobs(
+        path: &Path,
+        project: &ProjectFile,
+        jobs: &[crate::app::types::SessionSidecarJob],
+    ) -> Result<(), String> {
+        for job in jobs {
+            if let Some(parent) = job.dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to save {}: {e}", job.label))?;
+            }
+            let channels = job.source.channels();
+            let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
+            crate::wave::export_selection_wav(channels, job.sample_rate, (0, len), &job.dst)
+                .map_err(|e| format!("Failed to save {}: {e}", job.label))?;
+        }
+        let text = serialize_project(project).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(&path, text).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn finish_session_save(&mut self, path: PathBuf) {
         self.project_path = Some(path.clone());
         self.add_recent_session_path(&path);
-        // Recorded virtual items have just been persisted as sidecar audio above;
+        // Recorded virtual items have just been persisted as sidecar audio;
         // their backing temp WAVs in %TEMP% are no longer needed.
         self.clear_recording_temp_files();
+    }
+
+    /// Interactive save: snapshots everything cheaply, then encodes and
+    /// writes on a worker while the busy overlay keeps the UI responsive.
+    pub(super) fn save_project_as(&mut self, path: PathBuf) -> Result<(), String> {
+        if self.session_save_state.is_some() {
+            return Err("session save already in progress".to_string());
+        }
+        let (path, project, jobs) = self.build_session_save_plan(path)?;
+        let job_count = jobs.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
+            let result =
+                Self::run_session_save_jobs(&worker_path, &project, &jobs).map(|_| worker_path);
+            let _ = tx.send(result);
+        });
+        self.session_save_state = Some(crate::app::types::SessionSaveState {
+            msg: if job_count == 0 {
+                "Saving session...".to_string()
+            } else {
+                format!("Saving session... ({job_count} audio sidecars)")
+            },
+            rx,
+            started_at: Instant::now(),
+        });
         Ok(())
+    }
+
+    /// Synchronous save for flows that must observe completion (CLI, tests,
+    /// close-with-autosave).
+    pub(super) fn save_project_as_blocking(&mut self, path: PathBuf) -> Result<(), String> {
+        let (path, project, jobs) = self.build_session_save_plan(path)?;
+        Self::run_session_save_jobs(&path, &project, &jobs)?;
+        self.finish_session_save(path);
+        Ok(())
+    }
+
+    pub(super) fn drain_session_save(&mut self, ctx: &egui::Context) {
+        let result = match &self.session_save_state {
+            Some(state) => match state.rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(_) => None,
+            },
+            None => None,
+        };
+        let Some(result) = result else {
+            return;
+        };
+        self.session_save_state = None;
+        match result {
+            Ok(path) => {
+                self.debug_log(format!("session saved: {}", path.display()));
+                self.finish_session_save(path);
+            }
+            Err(err) => {
+                self.debug_log(format!("session save error: {err}"));
+            }
+        }
+        ctx.request_repaint();
     }
 
     pub(super) fn open_project_file(&mut self, path: PathBuf) -> Result<(), String> {

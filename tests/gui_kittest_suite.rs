@@ -414,6 +414,27 @@ mod kittest_suite {
         }
     }
 
+    /// WORLD analysis (DIO/StoneMask/CheapTrick/D4C) of the small fixture
+    /// clips completes in a couple of seconds even in debug builds; keep the
+    /// budget aligned with the suite's other readiness waits.
+    const WORLD_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn wait_for_world_features(
+        harness: &mut Harness<'static, WavesPreviewer>,
+    ) -> (usize, usize, f32) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if let Some(features) = harness.state().test_world_features_ready() {
+                return features;
+            }
+            if start.elapsed() > WORLD_ANALYSIS_TIMEOUT {
+                panic!("WORLD analysis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_for_project_path(harness: &mut Harness<'static, WavesPreviewer>, path: &Path) {
         let expected = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let start = Instant::now();
@@ -2007,6 +2028,7 @@ mod kittest_suite {
             (neowaves::ViewMode::Mel, "Mel", "Mel"),
             (neowaves::ViewMode::Tempogram, "Tempogram", "Tempogram"),
             (neowaves::ViewMode::Chromagram, "Chromagram", "Chromagram"),
+            (neowaves::ViewMode::World, "World (F0/Env)", "World"),
             (neowaves::ViewMode::Waveform, "Wave", "Waveform"),
         ];
         for (mode, combo_value, debug_name) in cases {
@@ -2036,6 +2058,7 @@ mod kittest_suite {
             "Mel",
             "Tempogram",
             "Chromagram",
+            "World",
             "Waveform",
         ];
         for expected_view in expected {
@@ -2525,6 +2548,186 @@ mod kittest_suite {
     }
 
     #[test]
+    fn world_view_runs_analysis_and_caches_features() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::World));
+        let (frames, bins, voiced_ratio) = wait_for_world_features(&mut harness);
+        assert!(frames > 0, "WORLD analysis should produce frames");
+        assert!(bins > 0, "WORLD analysis should produce envelope bins");
+        assert!(
+            (0.0..=1.0).contains(&voiced_ratio),
+            "voiced ratio must be a fraction, got {voiced_ratio}"
+        );
+    }
+
+    #[test]
+    fn world_f0_edit_resynthesizes_audio_with_undo() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::World));
+        wait_for_world_features(&mut harness);
+        let tab_idx = harness.state().active_tab.unwrap();
+        let fingerprint = |state: &WavesPreviewer| -> f64 {
+            state.tabs[tab_idx].ch_samples[0]
+                .iter()
+                .take(48_000)
+                .map(|v| (*v as f64).abs())
+                .sum()
+        };
+        let before_len = harness.state().tabs[tab_idx].samples_len;
+        let before_fp = fingerprint(harness.state());
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+        assert!(
+            harness.state_mut().test_world_shift_and_resynth(12.0),
+            "resynthesis job should spawn"
+        );
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_editor_apply_busy() {
+                break;
+            }
+            if start.elapsed() > WORLD_ANALYSIS_TIMEOUT {
+                panic!("WORLD resynthesis timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        harness.run_steps(2);
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(tab.samples_len, before_len, "length must be preserved");
+        assert!(
+            tab.ch_samples.iter().all(|ch| ch.len() == before_len),
+            "every channel must carry the resynthesized audio"
+        );
+        let after_fp = fingerprint(harness.state());
+        assert!(
+            (after_fp - before_fp).abs() > before_fp * 0.01,
+            "audio should change after resynthesis (before={before_fp}, after={after_fp})"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].undo_stack.len(),
+            undo_before + 1,
+            "resynthesis must push an undo state"
+        );
+        assert!(harness.state().tabs[tab_idx].dirty, "tab should be dirty");
+
+        // Ctrl+Z must restore the pre-resynthesis audio, keep the worker
+        // Arc mirror in sync, and drop the stale WORLD analysis so the
+        // view re-analyzes what is audible again.
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        harness.run_steps(3);
+        let restored_fp = fingerprint(harness.state());
+        assert!(
+            (restored_fp - before_fp).abs() < before_fp * 0.001,
+            "undo should restore the original audio (before={before_fp}, restored={restored_fp})"
+        );
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            let arc_fp: f64 = tab.ch_samples_arc[0]
+                .iter()
+                .take(48_000)
+                .map(|v| (*v as f64).abs())
+                .sum();
+            assert!(
+                (arc_fp - restored_fp).abs() < restored_fp.abs() * 0.001 + 1e-9,
+                "ch_samples_arc must mirror the restored buffers"
+            );
+        }
+        assert!(
+            harness.state().test_world_features_ready().is_none(),
+            "undo must invalidate the stale WORLD analysis cache"
+        );
+    }
+
+    #[test]
+    fn world_f0_zoom_and_edit_toggles_respond() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::World));
+        wait_for_world_features(&mut harness);
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(!harness.state().tabs[tab_idx].world_f0_focus);
+        harness
+            .get_by_label("F0 zoom (50 Hz - 1.1 kHz axis)")
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().tabs[tab_idx].world_f0_focus,
+            "F0 zoom checkbox should toggle the focus flag"
+        );
+        harness.get_by_label("Edit F0 on canvas").click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().tabs[tab_idx]
+                .world_f0_draft
+                .as_ref()
+                .map(|d| d.edit_enabled)
+                .unwrap_or(false),
+            "Edit F0 checkbox should enable the draft pencil mode"
+        );
+    }
+
+    #[test]
+    fn editor_mini_meter_populates_state() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(8);
+        let (spectrum_cols, peak_channels, corr) = harness
+            .state()
+            .test_mini_meter_state()
+            .expect("mini meter state for active tab");
+        assert!(
+            spectrum_cols > 0,
+            "spectrum analyzer columns should be sized after drawing"
+        );
+        let tab_idx = harness.state().active_tab.unwrap();
+        let n_ch = harness.state().tabs[tab_idx].ch_samples.len();
+        assert_eq!(
+            peak_channels, n_ch,
+            "peak meter should track one bar per channel"
+        );
+        assert!((-1.0..=1.0).contains(&corr), "correlation must stay in [-1, 1]");
+    }
+
+    #[test]
+    #[ignore = "manual perf measurement"]
+    fn editor_mini_meter_frame_timing_metrics() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+        open_first_tab(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(4);
+        let steps = 120usize;
+        let start = Instant::now();
+        for _ in 0..steps {
+            harness.run_steps(1);
+        }
+        let elapsed = start.elapsed();
+        let per_ms = elapsed.as_secs_f64() * 1000.0 / steps as f64;
+        eprintln!(
+            "editor_mini_meter_frame_timing_metrics: steps={} total_ms={:.2} per_frame_ms={:.2}",
+            steps,
+            elapsed.as_secs_f64() * 1000.0,
+            per_ms
+        );
+    }
+
+    #[test]
     #[ignore = "manual perf measurement"]
     fn list_navigation_timing_metrics() {
         let mut harness = harness_with_wavs(false);
@@ -2827,8 +3030,8 @@ mod kittest_suite {
             first_after,
             expected_first_sample
         );
-        assert!(tab.waveform_pyramid.is_some());
         assert!(harness.state().test_tab_dirty());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -3081,6 +3284,7 @@ mod kittest_suite {
             neowaves::ViewMode::Mel,
             neowaves::ViewMode::Tempogram,
             neowaves::ViewMode::Chromagram,
+            neowaves::ViewMode::World,
         ] {
             assert!(harness.state_mut().test_set_view_mode(mode));
             harness.run_steps(1);
@@ -4514,15 +4718,31 @@ mod kittest_suite {
         assert_eq!(harness.state().test_audio_play_pos(), 9_000);
     }
 
+    /// In-place destructive applies rebuild the waveform pyramid on a
+    /// background worker; wait for the refreshed cache to land.
+    fn wait_for_waveform_pyramid(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_active_tab_waveform_pyramid_ready() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("waveform pyramid rebuild timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn editor_apply_gain_rebuilds_waveform_cache() {
+
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
         assert!(harness.state().test_active_tab_waveform_pyramid_ready());
         assert!(harness.state_mut().test_apply_gain(0.2, 0.6, -6.0));
-        harness.run_steps(1);
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4532,8 +4752,7 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state().test_active_tab_waveform_pyramid_ready());
         assert!(harness.state_mut().test_apply_reverse(0.1, 0.4));
-        harness.run_steps(1);
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4548,7 +4767,7 @@ mod kittest_suite {
         harness.run_steps(1);
         let after_len = harness.state().tabs[tab_idx].samples_len;
         assert!(after_len > before_len, "loop unwrap should extend the clip");
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
     }
 
     #[test]
@@ -4629,8 +4848,7 @@ mod kittest_suite {
         assert!(harness.state().test_active_tab_waveform_pyramid_ready());
 
         assert!(harness.state_mut().test_apply_reverse(0.1, 0.4));
-        harness.run_steps(3);
-        assert!(harness.state().test_active_tab_waveform_pyramid_ready());
+        wait_for_waveform_pyramid(&mut harness);
 
         harness.key_press_modifiers(Modifiers::COMMAND, Key::Z);
         harness.run_steps(3);

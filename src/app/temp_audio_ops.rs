@@ -117,22 +117,6 @@ impl WavesPreviewer {
         }
     }
 
-    pub(super) fn export_audio_to_temp_wav(
-        &mut self,
-        display_name: &str,
-        audio: &crate::audio::AudioBuffer,
-        sample_rate: u32,
-    ) -> Option<PathBuf> {
-        let _ = display_name;
-        let path = allocate_neowaves_temp_cache_path("clipboard", "wav")?;
-        let range = (0, audio.len());
-        if crate::wave::export_selection_wav(&audio.channels, sample_rate, range, &path).is_err() {
-            return None;
-        }
-        self.clipboard_temp_files.push(path.clone());
-        Some(path)
-    }
-
     pub(super) fn edited_audio_for_path(
         &self,
         path: &Path,

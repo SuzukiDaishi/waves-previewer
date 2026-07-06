@@ -25,7 +25,7 @@
 - `K`: ループ開始位置を現在再生位置で設定
 - `P`: ループ終了位置を現在再生位置で設定
 - `L`: Apply 済みの loop marker があればそれを使って Marker loop を有効化。無ければ従来どおりループ切り替え
-- `S`: 表示モード切り替え（Waveform -> Spectrogram -> Mel）
+- `S`: 表示モード切り替え（Waveform -> Spectrogram -> Freq Log -> Mel -> Tempogram -> Chromagram -> World (F0/Env)）
 - `R`: Zero Cross Snap 切り替え
 - `B`: BPM 有効/無効
 - `M`: 再生位置にマーカー追加

@@ -284,25 +284,32 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                         }
-                        let Some(item) = self.item_for_id(id).cloned() else {
-                            return;
-                        };
-                        if !is_virtual {
+                        // Borrow the item once and extract only what the row
+                        // needs. Cloning the whole MediaItem (strings, external
+                        // map, inline FileMeta with a ~1 KB thumb) for every
+                        // visible row every frame was a steady allocator load.
+                        let (
+                            needs_bg_full,
+                            needs_wave_meta,
+                            needs_lufs_meta,
+                            cover_art,
+                            badge,
+                            row_transcript,
+                            row_transcript_language,
+                        ) = {
+                            let Some(item) = self.item_for_id(id) else {
+                                return;
+                            };
                             let needs_bg_full = match self.item_bg_mode {
                                 crate::app::types::ItemBgMode::Standard => false,
-                                crate::app::types::ItemBgMode::Dbfs => item
-                                    .meta
-                                    .as_ref()
-                                    .and_then(|m| m.peak_db)
-                                    .is_none(),
+                                crate::app::types::ItemBgMode::Dbfs => {
+                                    item.meta.as_ref().and_then(|m| m.peak_db).is_none()
+                                }
                                 crate::app::types::ItemBgMode::Lufs => {
                                     if self.lufs_override.contains_key(&path_owned) {
                                         false
                                     } else {
-                                        item.meta
-                                            .as_ref()
-                                            .and_then(|m| m.lufs_i)
-                                            .is_none()
+                                        item.meta.as_ref().and_then(|m| m.lufs_i).is_none()
                                     }
                                 }
                             };
@@ -314,14 +321,19 @@ impl crate::app::WavesPreviewer {
                                     .unwrap_or(true);
                             let needs_lufs_meta = cols.lufs
                                 && !self.lufs_override.contains_key(&path_owned)
-                                && item
-                                    .meta
-                                    .as_ref()
-                                    .and_then(|m| m.lufs_i)
-                                    .is_none();
-                            if needs_bg_full || needs_wave_meta || needs_lufs_meta {
-                                self.queue_full_meta_for_path(&path_owned, near_selected);
-                            }
+                                && item.meta.as_ref().and_then(|m| m.lufs_i).is_none();
+                            (
+                                needs_bg_full,
+                                needs_wave_meta,
+                                needs_lufs_meta,
+                                item.meta.as_ref().and_then(|m| m.cover_art.clone()),
+                                Self::list_type_badge_for_item(item),
+                                item.transcript.clone(),
+                                item.transcript_language.clone(),
+                            )
+                        };
+                        if !is_virtual && (needs_bg_full || needs_wave_meta || needs_lufs_meta) {
+                            self.queue_full_meta_for_path(&path_owned, near_selected);
                         }
                         let is_selected = self.selected_multi.contains(&row_idx);
                         row.set_selected(is_selected);
@@ -386,8 +398,8 @@ impl crate::app::WavesPreviewer {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
                                 ui.visuals_mut().override_text_color = row_fg;
-                                let art = item.meta.as_ref().and_then(|meta| meta.cover_art.clone());
-                                let (label, tooltip, fill, stroke) = Self::list_type_badge_for_item(&item);
+                                let art = cover_art.clone();
+                                let (label, tooltip, fill, stroke) = badge.clone();
                                 let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::click(),
@@ -438,18 +450,12 @@ impl crate::app::WavesPreviewer {
                                 let resp2 = self
                                     .attach_row_context_menu(resp2, row_idx, ctx)
                                     .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .on_hover_text(if item.meta.as_ref().and_then(|m| m.cover_art.as_ref()).is_some() {
+                                    .on_hover_text(if cover_art.is_some() {
                                         "Embedded artwork".to_string()
                                     } else {
                                         tooltip
                                     });
-                                if resp2.double_clicked()
-                                    && item
-                                        .meta
-                                        .as_ref()
-                                        .and_then(|m| m.cover_art.as_ref())
-                                        .is_some()
-                                {
+                                if resp2.double_clicked() && cover_art.is_some() {
                                     self.open_list_art_window(ctx, &path_owned);
                                 } else if resp2.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
@@ -576,8 +582,7 @@ impl crate::app::WavesPreviewer {
                                     row_idx,
                                     ctx,
                                 );
-                                let transcript_text = item
-                                    .transcript
+                                let transcript_text = row_transcript
                                     .as_ref()
                                     .map(|t| t.full_text.as_str())
                                     .unwrap_or("");
@@ -633,10 +638,9 @@ impl crate::app::WavesPreviewer {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
                                 ui.visuals_mut().override_text_color = row_fg;
-                                let lang = item
-                                    .transcript_language
+                                let lang = row_transcript_language
                                     .as_deref()
-                                    .filter(|v| !v.is_empty())
+                                    .filter(|v: &&str| !v.is_empty())
                                     .unwrap_or("-");
                                 ui.label(
                                     RichText::new(lang)
@@ -661,20 +665,26 @@ impl crate::app::WavesPreviewer {
                                         row_idx,
                                         ctx,
                                     );
-                                    let value = item
-                                        .external
-                                        .get(name)
-                                        .map(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let label_resp = ui
-                                        .add(
-                                            egui::Label::new(
-                                                RichText::new(value).size(text_height * 0.95),
-                                            )
-                                            .sense(Sense::click())
-                                            .truncate()
-                                            .show_tooltip_when_elided(false),
+                                    // Build the label inside a short borrow so
+                                    // no per-frame String is allocated here;
+                                    // egui copies the text into the widget once
+                                    // (unavoidable), and the hover tooltip
+                                    // re-reads the value only while hovered.
+                                    let label_widget = {
+                                        let value = self
+                                            .item_for_id(id)
+                                            .and_then(|it| it.external.get(name))
+                                            .map(|v| v.as_str())
+                                            .unwrap_or("");
+                                        egui::Label::new(
+                                            RichText::new(value).size(text_height * 0.95),
                                         )
+                                        .sense(Sense::click())
+                                        .truncate()
+                                        .show_tooltip_when_elided(false)
+                                    };
+                                    let label_resp = ui
+                                        .add(label_widget)
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                                     let label_resp =
                                         self.attach_row_context_menu(label_resp, row_idx, ctx);
@@ -685,8 +695,15 @@ impl crate::app::WavesPreviewer {
                                     {
                                         clicked_to_load = true;
                                     }
-                                    if label_resp.hovered() && !value.is_empty() {
-                                        label_resp.on_hover_text(value);
+                                    if label_resp.hovered() {
+                                        let hover_value = self
+                                            .item_for_id(id)
+                                            .and_then(|it| it.external.get(name))
+                                            .filter(|v| !v.is_empty())
+                                            .cloned();
+                                        if let Some(hover_value) = hover_value {
+                                            label_resp.on_hover_text(hover_value);
+                                        }
                                     }
                                 });
                             }
@@ -697,8 +714,7 @@ impl crate::app::WavesPreviewer {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
                                 ui.visuals_mut().override_text_color = row_fg;
-                                let (label, tooltip, fill, stroke) =
-                                    Self::list_type_badge_for_item(&item);
+                                let (label, tooltip, fill, stroke) = badge.clone();
                                 let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::click(),

@@ -291,6 +291,8 @@ pub struct ProjectSpectrogram {
     pub scale: String,
     pub mel_scale: String,
     pub db_floor: f32,
+    #[serde(default)]
+    pub db_ref: Option<String>,
     pub max_freq_hz: f32,
     pub show_note_labels: bool,
 }
@@ -685,6 +687,10 @@ pub fn spectro_config_from_project(p: &ProjectSpectrogram) -> SpectrogramConfig 
         scale,
         mel_scale,
         db_floor: p.db_floor,
+        db_ref: match p.db_ref.as_deref() {
+            Some("max") => super::types::SpectrogramDbRef::MaxNormalized,
+            _ => super::types::SpectrogramDbRef::Absolute,
+        },
         max_freq_hz: p.max_freq_hz,
         show_note_labels: p.show_note_labels,
     }
@@ -712,6 +718,13 @@ pub fn project_spectrogram_from_cfg(cfg: &SpectrogramConfig) -> ProjectSpectrogr
         scale: scale.to_string(),
         mel_scale: mel_scale.to_string(),
         db_floor: cfg.db_floor,
+        db_ref: Some(
+            match cfg.db_ref {
+                super::types::SpectrogramDbRef::MaxNormalized => "max",
+                super::types::SpectrogramDbRef::Absolute => "absolute",
+            }
+            .to_string(),
+        ),
         max_freq_hz: cfg.max_freq_hz,
         show_note_labels: cfg.show_note_labels,
     }
@@ -1007,7 +1020,7 @@ pub fn project_spec_sub_view_string(view: EditorSpecSubView) -> String {
 
 pub fn project_other_sub_view_string(view: EditorOtherSubView) -> String {
     match view {
-        EditorOtherSubView::F0 => "f0",
+        EditorOtherSubView::World => "world",
         EditorOtherSubView::Tempogram => "tempogram",
         EditorOtherSubView::Chromagram => "chromagram",
     }
@@ -1035,7 +1048,7 @@ pub fn primary_view_from_project(
     };
     let other_view = match other_sub_view.map(|v| v.trim().to_ascii_lowercase()) {
         Some(v) if v == "chromagram" => EditorOtherSubView::Chromagram,
-        Some(v) if v == "f0" => EditorOtherSubView::F0,
+        Some(v) if v == "world" || v == "f0" => EditorOtherSubView::World,
         Some(v) if v == "tempogram" => EditorOtherSubView::Tempogram,
         _ => EditorOtherSubView::from_mode(legacy_mode),
     };
@@ -1094,53 +1107,15 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
     }
 }
 
-pub fn save_sidecar_audio(
-    project_path: &Path,
-    tab_index: usize,
-    channels: &[Vec<f32>],
-    sample_rate: u32,
-) -> Result<PathBuf> {
-    let data_dir = project_data_dir(project_path);
-    std::fs::create_dir_all(&data_dir).context("create session data dir")?;
-    let filename = format!("tab_{:04}.wav", tab_index);
-    let dst = data_dir.join(filename);
-    let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-    crate::wave::export_selection_wav(channels, sample_rate, (0, len), &dst)
-        .context("export edited audio")?;
-    Ok(dst)
+/// Destination path a sidecar WAV will be written to, without writing it.
+/// Lets the session-save planner reference sidecars in the document while
+/// deferring the actual encode to a worker thread.
+pub fn sidecar_audio_dst(project_path: &Path, prefix: &str, index: usize) -> PathBuf {
+    project_data_dir(project_path).join(format!("{prefix}_{index:04}.wav"))
 }
 
-pub fn save_sidecar_preview_audio(
-    project_path: &Path,
-    tab_index: usize,
-    channels: &[Vec<f32>],
-    sample_rate: u32,
-) -> Result<PathBuf> {
-    let data_dir = project_data_dir(project_path);
-    std::fs::create_dir_all(&data_dir).context("create session data dir")?;
-    let filename = format!("preview_{:04}.wav", tab_index);
-    let dst = data_dir.join(filename);
-    let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-    crate::wave::export_selection_wav(channels, sample_rate, (0, len), &dst)
-        .context("export preview audio")?;
-    Ok(dst)
-}
 
-pub fn save_sidecar_cached_audio(
-    project_path: &Path,
-    edit_index: usize,
-    channels: &[Vec<f32>],
-    sample_rate: u32,
-) -> Result<PathBuf> {
-    let data_dir = project_data_dir(project_path);
-    std::fs::create_dir_all(&data_dir).context("create session data dir")?;
-    let filename = format!("cache_{:04}.wav", edit_index);
-    let dst = data_dir.join(filename);
-    let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-    crate::wave::export_selection_wav(channels, sample_rate, (0, len), &dst)
-        .context("export cached audio")?;
-    Ok(dst)
-}
+
 
 pub fn load_sidecar_audio(
     project_path: &Path,
@@ -1434,6 +1409,7 @@ wave = true
             scale: "log".to_string(),
             mel_scale: "linear".to_string(),
             db_floor: -120.0,
+            db_ref: None,
             max_freq_hz: 0.0,
             show_note_labels: false,
         };
@@ -1450,6 +1426,7 @@ wave = true
             scale: "log".to_string(),
             mel_scale: "linear".to_string(),
             db_floor: -120.0,
+            db_ref: None,
             max_freq_hz: 0.0,
             show_note_labels: false,
         };

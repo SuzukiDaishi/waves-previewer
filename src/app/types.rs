@@ -313,6 +313,7 @@ pub enum ViewMode {
     Mel,
     Tempogram,
     Chromagram,
+    World,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -333,7 +334,7 @@ pub enum EditorSpecSubView {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum EditorOtherSubView {
-    F0,
+    World,
     #[default]
     Tempogram,
     Chromagram,
@@ -344,7 +345,7 @@ impl EditorPrimaryView {
         match mode {
             ViewMode::Waveform => Self::Wave,
             ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => Self::Spec,
-            ViewMode::Tempogram | ViewMode::Chromagram => Self::Other,
+            ViewMode::Tempogram | ViewMode::Chromagram | ViewMode::World => Self::Other,
         }
     }
 
@@ -380,13 +381,14 @@ impl EditorOtherSubView {
         match mode {
             ViewMode::Chromagram => Self::Chromagram,
             ViewMode::Tempogram => Self::Tempogram,
+            ViewMode::World => Self::World,
             _ => Self::Tempogram,
         }
     }
 
     pub fn to_mode(self) -> ViewMode {
         match self {
-            Self::F0 => ViewMode::Tempogram,
+            Self::World => ViewMode::World,
             Self::Tempogram => ViewMode::Tempogram,
             Self::Chromagram => ViewMode::Chromagram,
         }
@@ -397,6 +399,35 @@ impl EditorOtherSubView {
 pub enum SpectrogramScale {
     Linear,
     Log,
+}
+
+/// F0 estimator used by the WORLD analysis/resynthesis pipeline.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorldF0Method {
+    /// Fast zero-crossing estimator (WORLD DIO + StoneMask).
+    Dio,
+    /// Slower, more accurate estimator (WORLD Harvest).
+    Harvest,
+}
+
+impl WorldF0Method {
+    /// The DSP-level estimator this setting selects.
+    pub fn estimator(self) -> crate::app::render::world_features::WorldF0Estimator {
+        match self {
+            Self::Dio => crate::app::render::world_features::WorldF0Estimator::Dio,
+            Self::Harvest => crate::app::render::world_features::WorldF0Estimator::Harvest,
+        }
+    }
+}
+
+/// Reference level for the spectrogram's dB color mapping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpectrogramDbRef {
+    /// 0 dBFS is the top of the color ramp (absolute levels).
+    Absolute,
+    /// The loudest bin of the file is the top of the ramp
+    /// (librosa-style `ref=max`; quiet material keeps full contrast).
+    MaxNormalized,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -422,7 +453,8 @@ pub struct SpectrogramConfig {
     pub max_frames: usize,
     pub scale: SpectrogramScale,
     pub mel_scale: SpectrogramScale,
-    pub db_floor: f32,    // negative dBFS
+    pub db_floor: f32,    // negative dB relative to `db_ref`
+    pub db_ref: SpectrogramDbRef,
     pub max_freq_hz: f32, // 0 = Nyquist
     pub show_note_labels: bool,
 }
@@ -438,6 +470,7 @@ impl Default for SpectrogramConfig {
             scale: SpectrogramScale::Linear,
             mel_scale: SpectrogramScale::Linear,
             db_floor: -120.0,
+            db_ref: SpectrogramDbRef::Absolute,
             max_freq_hz: 0.0,
             show_note_labels: false,
         }
@@ -916,6 +949,29 @@ impl ChannelView {
     }
 }
 
+/// Transient smoothing/hold state for the editor bottom meter strip
+/// (spectrum analyzer ballistics, per-channel peak hold, correlation).
+#[derive(Clone, Debug, Default)]
+pub struct MiniMeterState {
+    pub spectrum_db: Vec<f32>,  // smoothed per-column analyzer levels (dBFS)
+    pub peak_hold_db: Vec<f32>, // per-channel peak hold (dBFS)
+    pub corr: f32,              // smoothed stereo correlation in [-1, 1]
+    pub last_time: f64,         // ui time of the previous update
+    pub active: bool,           // decay animation still in motion
+}
+
+/// Per-tab draft for editing the WORLD F0 trajectory before resynthesis.
+/// `values` mirrors `WorldFeatureData::f0_values` (0.0 = unvoiced).
+#[derive(Clone, Debug, Default)]
+pub struct WorldF0Draft {
+    pub values: Vec<f32>,
+    pub source_frames: usize, // frame count of the analysis this was built from
+    pub dirty: bool,          // differs from the analyzed curve
+    pub edit_enabled: bool,   // canvas pencil mode
+    pub shift_semitones: f32, // UI scratch for the pitch-shift control
+    pub last_drag_frame: Option<(usize, f32)>, // pencil interpolation anchor (frame, freq)
+}
+
 pub struct EditorTab {
     pub path: PathBuf,
     pub display_name: String,
@@ -1014,6 +1070,9 @@ pub struct EditorTab {
     pub auto_trim_config: AutoTrimConfig,
     pub auto_trim_state: Option<AutoTrimState>,
     pub loop_detect_state: Option<LoopDetectState>,
+    pub mini_meter: MiniMeterState, // transient bottom meter strip state
+    pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
+    pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
 }
 
 impl EditorTab {
@@ -1072,6 +1131,19 @@ pub struct SpectrogramData {
     pub frame_step: usize,
     pub sample_rate: u32,
     pub values_db: Vec<f32>,
+    /// Running maximum of `values_db`, kept incrementally as tiles land so
+    /// `ref=max` display never has to rescan the whole matrix per render.
+    /// `f32::MIN` until any finite value arrives.
+    pub values_max_db: f32,
+}
+
+/// Maximum finite value of a spectrogram dB matrix (`f32::MIN` when empty).
+pub fn spectrogram_values_max_db(values: &[f32]) -> f32 {
+    values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold(f32::MIN, f32::max)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1155,6 +1227,7 @@ pub enum EditorAnalysisKind {
     Spectrogram,
     Tempogram,
     Chromagram,
+    World,
 }
 
 #[derive(Clone, Debug)]
@@ -1181,6 +1254,25 @@ pub struct ChromagramData {
     pub confidence: f32,
 }
 
+/// WORLD vocoder analysis results (F0 trajectory + spectral envelope)
+/// resampled onto the editor feature-view frame grid.
+#[derive(Clone, Debug)]
+pub struct WorldFeatureData {
+    pub frames: usize,
+    pub bins: usize,       // envelope bins (fft_size / 2 + 1)
+    pub frame_step: usize, // hop in samples at `sample_rate`
+    pub sample_rate: u32,
+    pub fft_size: usize,
+    pub f0_floor: f32,
+    pub f0_ceil: f32,
+    pub f0_values: Vec<f32>,  // per frame, 0.0 = unvoiced
+    pub env_db: Vec<f32>,     // frames * bins, power dB
+    pub env_max_db: f32,      // precomputed max of env_db (render normalization)
+    pub aperiodicity: Vec<f32>, // frames * bins, linear 0..1 (1 = noise)
+    pub median_f0: Option<f32>,
+    pub voiced_ratio: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EditorAnalysisKey {
     pub path: PathBuf,
@@ -1191,6 +1283,9 @@ pub struct EditorAnalysisKey {
 pub enum EditorFeatureAnalysisData {
     Tempogram(TempogramData),
     Chromagram(ChromagramData),
+    // Arc so render requests and jobs can share the (potentially large)
+    // analysis without deep-cloning it on the UI thread.
+    World(Arc<WorldFeatureData>),
 }
 
 pub enum EditorFeatureAnalysisJobMsg {
@@ -1203,6 +1298,11 @@ pub enum EditorFeatureAnalysisJobMsg {
         path: PathBuf,
         generation: u64,
         data: ChromagramData,
+    },
+    WorldDone {
+        path: PathBuf,
+        generation: u64,
+        data: Arc<WorldFeatureData>,
     },
 }
 
@@ -1310,6 +1410,38 @@ pub struct ProcessingResult {
     pub waveform: Vec<(f32, f32)>,
     #[allow(dead_code)]
     pub channels: Vec<Vec<f32>>,
+    /// Editor waveform overview + pyramid prebuilt on the worker for
+    /// EditorTab targets (None for list previews).
+    pub editor_waveform: Option<(Vec<(f32, f32)>, Option<Arc<WaveformPyramidSet>>)>,
+}
+
+/// Audio snapshot feeding one sidecar WAV write during a session save.
+pub enum SessionSidecarSource {
+    Channels(Arc<Vec<Vec<f32>>>),
+    Buffer(Arc<crate::audio::AudioBuffer>),
+}
+
+impl SessionSidecarSource {
+    pub fn channels(&self) -> &[Vec<f32>] {
+        match self {
+            Self::Channels(channels) => channels.as_slice(),
+            Self::Buffer(buffer) => buffer.channels.as_slice(),
+        }
+    }
+}
+
+pub struct SessionSidecarJob {
+    pub dst: PathBuf,
+    pub source: SessionSidecarSource,
+    pub sample_rate: u32,
+    pub label: &'static str,
+}
+
+/// In-flight background session save (sidecar encodes + TOML write).
+pub struct SessionSaveState {
+    pub msg: String,
+    pub rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    pub started_at: std::time::Instant,
 }
 
 pub struct EditorApplyState {
@@ -1324,6 +1456,12 @@ pub struct EditorApplyResult {
     pub tab_idx: usize,
     pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
+    /// Arc mirror of `channels`, cloned on the worker so the UI thread
+    /// doesn't pay a full-buffer copy on adoption.
+    pub channels_arc: Arc<Vec<Vec<f32>>>,
+    /// Waveform overview + pyramid prebuilt on the worker.
+    pub waveform_minmax: Vec<(f32, f32)>,
+    pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub lufs_override: Option<f32>,
 }
 
@@ -1433,7 +1571,9 @@ pub struct EditorDecodeUiStatus {
 
 #[derive(Clone)]
 pub struct EditorUndoState {
-    pub ch_samples: Vec<Vec<f32>>,
+    /// Snapshot of the audio buffers. Arc-shared with the tab's worker
+    /// mirror when possible so capturing an undo point is copy-free.
+    pub ch_samples: Arc<Vec<Vec<f32>>>,
     pub samples_len: usize,
     pub samples_len_visual: usize,
     pub buffer_sample_rate: u32,
@@ -2448,6 +2588,41 @@ pub struct ClipboardItem {
 pub struct ClipboardPayload {
     pub items: Vec<ClipboardItem>,
     pub created_at: Instant,
+}
+
+/// One item's snapshot for the background clipboard-prepare job.
+pub enum ClipboardPrepAudio {
+    /// Edited/virtual audio already in memory; optionally exported to a
+    /// temp WAV so the OS clipboard can carry a file.
+    Ready {
+        audio: Arc<AudioBuffer>,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        export_tmp: bool,
+    },
+    /// File-backed item: the worker decodes it for the in-app payload.
+    DecodeFromFile {
+        sample_rate: u32,
+        bits_per_sample: u16,
+    },
+}
+
+pub struct ClipboardPrepItem {
+    pub display_name: String,
+    pub source_path: Option<PathBuf>,
+    pub audio: ClipboardPrepAudio,
+}
+
+pub struct ClipboardPrepDone {
+    pub payload: ClipboardPayload,
+    pub os_paths: Vec<PathBuf>,
+    pub temp_files: Vec<PathBuf>,
+}
+
+/// In-flight background clipboard preparation (decode + temp WAV export).
+pub struct ClipboardPrepState {
+    pub rx: std::sync::mpsc::Receiver<ClipboardPrepDone>,
+    pub started_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

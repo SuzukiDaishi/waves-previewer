@@ -142,6 +142,7 @@ impl super::WavesPreviewer {
                     frame_step: params.frame_step,
                     sample_rate: sr,
                     values_db: Vec::new(),
+                    values_max_db: f32::MIN,
                 });
             }
             self.spectro_cache

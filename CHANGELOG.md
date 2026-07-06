@@ -4,6 +4,57 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Harvest F0 Estimator (switchable) + Resynthesis Quality Audit
+- New "F0 estimator" setting in the World inspector: `DIO (fast)` (default, unchanged) or `Harvest (accurate)` - a full pure-Rust port of WORLD's Harvest (filter-bank candidate detection on a 1 ms grid, instantaneous-frequency refinement, unreliable-candidate removal, contour fixing, zero-lag Butterworth smoothing). Harvest replaces DIO+StoneMask before CheapTrick/D4C and also drives resynthesis re-analysis. Cross-validated against pyworld 0.3.5: 100% voiced/unvoiced agreement and 0.06-cent median F0 difference on a vibrato test tone. The refinement stage (the heavy part) fans out across worker threads, and progress reporting stays live. Persisted in prefs; switching estimators drops cached World analyses so views re-analyze.
+- Audited F0-edit -> resynthesize quality against the reference implementation: no beyond-spec defects found. Sample rate is guarded end-to-end (spawn-time mismatch check; pitch roundtrips exactly at 44.1 kHz and 48 kHz), and long-clip smearing was already fixed by the 5 ms fine re-analysis. The one surprise - pure sine tones come back ~+4 dB hot - reproduces bit-for-bit in the reference vocoder (pyworld measures the same +3.98 dB; harmonic-rich material roundtrips at ~+0.2 dB), so it is inherent CheapTrick envelope behavior, not a port bug. New regression tests pin all three facts (harmonic roundtrip within 1.5 dB, sine matches the reference gain, flat-envelope synthesis calibration).
+
+### Background Session Save / Clipboard Copy + Cheaper Undo & Edits
+- Session save no longer freezes the UI: the document and Arc snapshots of every edited/virtual audio buffer are gathered instantly, then all sidecar WAV encodes, TOML serialization, and file writes run on a worker while the busy overlay shows progress ("Saving session... (N audio sidecars)"). Close-with-autosave, CLI, and tests keep a synchronous variant so completion stays observable where it matters.
+- Copying items to the clipboard is backgrounded the same way: decoding file-backed items and exporting edited audio to temp WAVs happen on a worker; the OS clipboard and in-app payload are set on completion. Large multi-selections no longer lock the app for seconds.
+- Undo snapshots are Arc-shared with the tab's worker mirror: capturing an undo point before an edit is now copy-free (was a full multi-MB buffer clone per edit), and undo/redo drop from three full-buffer copies to one plus the engine hand-off.
+- In-place destructive edits (trim / fade / gain / delete / reverse...) defer the waveform overview + pyramid rebuild to a background worker with generation guarding; the edit itself lands immediately and the refreshed overview swaps in when ready instead of stalling the frame for the rebuild.
+
+### List & Apply-Path Performance Pass (large libraries, long clips)
+- Removed two full item-array scans that ran every frame (pending-gain count in the topbar and the list-header dirty check): both now read a 250 ms-throttled cached count that gain edits invalidate immediately. At ~140k files these two scans strided tens of MB of item structs per frame - the main reason the list felt heavy while background jobs forced 60 fps repaints. Idle frame time on a 140k-row list drops ~4.1 ms -> ~1.9 ms avg.
+- Meta-driven re-sorts are debounced adaptively: lists over 20k items re-sort at most every 750 ms while metadata streams in (was 120 ms; each pass is an O(n log n) decorate+sort costing tens of ms at 140k). Transcript-triggered search refilters follow the same adaptive debounce.
+- List rows no longer deep-clone the whole MediaItem (strings, external map, inline FileMeta with thumbnail) for every visible row every frame; rows now borrow the item once and keep only the cheap pieces (badge, cover-art Arc, transcript Arc).
+- Pitch/stretch/loudness applies and WORLD resynthesis now build the waveform overview + pyramid and the worker-facing Arc mirror on the worker thread; adopting a finished apply no longer re-scans and re-clones the full buffers on the UI thread (~35-80 ms saved per apply on a 3-minute stereo clip).
+- Rate-mode processing results (Speed/Pitch/Stretch previews) also prebuild the editor waveform cache on the worker, and two wasteful full-buffer clones in the completion handler were removed (the engine now takes the processed buffers by move).
+
+### Spectrogram Display Fixes: Stale Partial Render + Resolution
+- Fixed the spectrogram (and Freq Log / Mel) showing a partially-filled image with a black tail when a view is opened while analysis tiles are still streaming in - the first render stuck around until a zoom/pan happened to change the render key. Tile arrival and completion now retire the cached viewport image, so the heatmap fills in progressively and always ends complete.
+- Feature-view render resolution unlocked: the fine pass now renders at native pixel size (up to 2048x1024; previously hard-capped at 384x192 and stretched), so Spec/Freq Log/Mel/Tempogram/Chromagram/World are sharp on large canvases. The coarse preview pass got a matching bump.
+
+### WORLD Responsiveness / Undo Correctness Pass
+- Fixed Ctrl+Z after destructive edits (including WORLD resynthesis): undo/redo now refreshes the worker-facing buffer mirror and drops stale spectrogram/feature analyses, so the World view (and Spec/Tempo/Chroma) re-analyze the audio that is actually restored instead of showing the pre-undo analysis.
+- WORLD analysis now reports live progress (DIO -> StoneMask -> CheapTrick -> D4C weighted 0-100%): the inspector progress bar animates, the canvas overlay shows a percentage, and the frame loop keeps ticking during analysis so feedback never freezes.
+- Removed every UI-thread stall in the World pipeline: analysis mixdown moved onto the worker thread (applies to Tempogram/Chromagram too), viewport render requests share the cached analysis via Arc instead of deep-cloning tens of MB per pan/zoom, and the envelope maximum is precomputed at analysis time instead of rescanned on every render.
+- F0 curve drawing is decimated to ~2 points per pixel (window-aware so unvoiced gaps still break the line), keeping long clips smooth while editing.
+- Dev builds (`cargo run`) now compile at opt-level 1 with hot DSP crates at full optimization - the WORLD/FFT paths were 10-20x slower unoptimized, which made debug builds feel hung; lib test wall time dropped from ~20 s to ~2 s as a side effect.
+
+### F0 Editing + WORLD Resynthesis
+- The World view is now an editor: enable "Edit F0 on canvas" and draw the pitch curve with the mouse (left-drag draws, right-drag erases to unvoiced; strokes interpolate in log-frequency so fast drags leave no gaps). Canvas seek/select pause while editing.
+- Curve transforms in the inspector: semitone shift (drag value + apply), 5-frame median smooth, flatten-to-median (monotone), and reset to the analyzed curve. The edited draft renders in orange over the dimmed analyzed curve.
+- "Resynthesize (replace audio)" rebuilds the tab audio with WORLD synthesis using the edited F0 - ported D4C aperiodicity analysis and the reference synthesis engine (pulse/noise excitation through minimum-phase spectra, fractional pulse alignment, deterministic noise) join the analysis port in `render/world_features.rs`. Runs as a background job through the shared editor-apply pipeline: full undo (Ctrl+Z), busy overlay with cancel, engine buffer swap, and cache invalidation; the mono result is written to every channel so the tab keeps its channel count. Roundtrip unit tests confirm pitch is preserved and that editing the contour actually shifts the resynthesized pitch (1 s of 48 kHz synthesizes in ~30 ms release).
+- F0 readability: pitch curves now draw over a dark halo so they stay visible on bright envelope areas, and a new "F0 zoom" toggle switches the vertical axis to 50 Hz-1.1 kHz so the pitch range fills the canvas (heatmap, ticks, and pencil mapping all follow).
+
+### Spectrogram dB Reference Option
+- New "Spectrogram Values" setting: `dB (0 dBFS ref)` (previous behavior) or `dB (normalized to max)` - librosa-style `ref=max` mapping where the loudest bin tops the color ramp, keeping harmonic detail visible on quiet material. Persisted in prefs and sessions; applies to Spec/Freq Log/Mel views.
+
+### New WORLD Feature View (F0 / Spectral Envelope)
+- New editor view "World (F0/Env)" alongside Tempogram/Chromagram: a CheapTrick spectral-envelope heatmap on a log-frequency axis with the DIO+StoneMask F0 trajectory overlaid as a cyan polyline, a live F0 readout at the playhead, and frequency-axis ticks in the gutter.
+- The analysis is an independent pure-Rust port of the WORLD vocoder's core algorithms (mmorise/World, BSD-3-Clause) in `render/world_features.rs` — DIO band-wise zero-crossing F0 candidates, StoneMask instantaneous-frequency refinement, CheapTrick pitch-adaptive envelope — with unit tests covering sines (55/100/440 Hz), sweeps, silence/noise voicing decisions, and envelope peak placement.
+- Runs as a cached background job like the other feature views (auto-starts on view switch, cancel/progress wired, invalidated on edits); frame period scales with clip length so long files stay bounded. Inspector shows median F0, voiced ratio, hop size, and a Re-analyze button.
+- Wired through session persistence (`other_view: "world"`, legacy `"f0"` accepted), the `S` view-cycle hotkey, `--open-view-mode world`, export-settings view picker, and kittest coverage (view switching + an end-to-end analysis test).
+
+### MiniMeter Overhaul: Vectorscope, Per-Channel Peaks, Better Analyzer
+- New STEREO panel in the editor bottom strip: goniometer/vectorscope (Lissajous, auto-gain, L/R diagonal guides) plus a smoothed correlation bar (-1..+1). Mono files collapse onto the mid axis and show a MONO badge; files with 3+ channels visualize the first pair and show a CH1+2 badge.
+- PEAK panel now draws one bar per channel for any channel count (L/R labels for stereo, numbered otherwise), each with its own peak-hold and RMS tick; the readout shows the loudest channel.
+- Spectrum analyzer is dual-resolution: a long FFT (~170 ms window) feeds the low band so bass peaks are localized instead of smeared, a short FFT keeps the high band fast, with a log-domain blend across the crossover; sub-bin columns are interpolated so lows render as a smooth curve.
+- Analyzer ballistics: fast attack (~10 ms) with a prompt release (~100 ms) so bars fall cleanly back to the floor when the signal goes quiet, and the strip keeps animating until the decay settles after playback stops.
+- Meter DSP moved to `render/mini_meter.rs` with unit tests (low/mid/high peak accuracy, dBFS calibration, ballistics, correlation) and a frame-budget test; per-frame state lives on the tab (no per-frame allocations), keeping the strip comfortably inside a 30 fps budget.
+- Fixed Linux link failure of the `neowaves` binary: the DirectML execution provider was referenced unconditionally in transcription session setup (Windows-only symbol).
+
 ## 0.20260704.0 - 2026-07-04
 
 ### UI Overhaul: Effect Graph, Resizable Panels, Seam Check, MiniMeter (Latest)
