@@ -1502,6 +1502,8 @@ impl super::WavesPreviewer {
         tab.dirty = false;
         tab.ops.clear();
         tab.selection = None;
+        tab.freq_selection = None;
+        tab.freq_selection_drag = None;
         tab.markers.clear();
         tab.markers_committed.clear();
         tab.markers_saved.clear();

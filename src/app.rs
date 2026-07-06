@@ -70,6 +70,7 @@ mod resample_ops;
 mod scan_ops;
 mod search_ops;
 mod session_ops;
+mod spectral_ops;
 mod spectrogram;
 mod spectrogram_jobs;
 mod startup;
@@ -618,6 +619,11 @@ pub struct WavesPreviewer {
     // list filtering
     skip_dotfiles: bool,
     zero_cross_epsilon: f32,
+    // Spectral selection edit (RX-style): edge fade lengths for mute/play.
+    spectral_edit_time_fade_ms: f32,
+    spectral_edit_freq_fade_hz: f32,
+    // Active "play selection" one-shot: (tab_idx, selection end in display samples)
+    editor_play_selection_state: Option<(usize, usize)>,
     invert_wave_zoom_wheel: bool,
     invert_shift_wheel_pan: bool,
     horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode,
@@ -2290,6 +2296,7 @@ impl WavesPreviewer {
             vertical_view_center: tab.vertical_view_center,
             samples_per_px: tab.samples_per_px,
             selection: tab.selection,
+            freq_selection: tab.freq_selection,
             ab_loop: tab.ab_loop,
             loop_region: tab.loop_region,
             trim_range: tab.trim_range,
@@ -2385,6 +2392,8 @@ impl WavesPreviewer {
             tab.vertical_view_center = state.vertical_view_center;
             tab.samples_per_px = state.samples_per_px;
             tab.selection = state.selection;
+            tab.freq_selection = state.freq_selection;
+            tab.freq_selection_drag = None;
             tab.ab_loop = state.ab_loop;
             tab.loop_region = state.loop_region;
             tab.trim_range = state.trim_range;

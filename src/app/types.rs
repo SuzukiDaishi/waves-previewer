@@ -1011,6 +1011,11 @@ pub struct EditorTab {
     // --- Editing state (MVP) ---
     pub selection: Option<(usize, usize)>, // [start,end) in samples (primary)
     pub extra_selections: Vec<(usize, usize)>, // additional ranges from Ctrl+drag
+    // Frequency band of the primary selection in Hz (low, high). Set by
+    // dragging in the spectral views; None = full band (time-only selection).
+    pub freq_selection: Option<(f32, f32)>,
+    // Transient drag state for spectral selection: (lane index, anchor Hz)
+    pub freq_selection_drag: Option<(usize, f32)>,
     pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
     pub markers_saved: Vec<MarkerEntry>,   // last saved markers
     pub markers_committed: Vec<MarkerEntry>, // New field
@@ -1584,6 +1589,7 @@ pub struct EditorUndoState {
     pub vertical_view_center: f32,
     pub samples_per_px: f32,
     pub selection: Option<(usize, usize)>,
+    pub freq_selection: Option<(f32, f32)>,
     pub ab_loop: Option<(usize, usize)>,
     pub loop_region: Option<(usize, usize)>,
     pub loop_region_committed: Option<(usize, usize)>,
