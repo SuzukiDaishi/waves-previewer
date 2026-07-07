@@ -371,4 +371,43 @@ mod workflow_bulk_operations {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn csv_export_completes_via_streamed_meta_queue() {
+        // The CSV export needs peak/LUFS metadata for every row; jobs are
+        // streamed to the meta pool frame by frame (the pool caps its
+        // backlog on large lists), so the export must still finish once all
+        // rows resolve.
+        let dir = make_temp_dir("csv_export");
+        let sr = 44_100u32;
+        for i in 0..3 {
+            let chans = synth_stereo(sr, 0.3, 220.0 + 110.0 * i as f32, 330.0);
+            let path = dir.join(format!("clip_{i}.wav"));
+            neowaves::wave::export_channels_audio(&chans, sr, &path).expect("export wav");
+        }
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        let csv_path = dir.join("list.csv");
+        harness
+            .state_mut()
+            .test_begin_export_list_csv(csv_path.clone());
+
+        let start = Instant::now();
+        while harness.state().test_csv_export_active() {
+            harness.run_steps(1);
+            if start.elapsed() > Duration::from_secs(30) {
+                panic!("csv export did not complete");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let body = std::fs::read_to_string(&csv_path).expect("csv written");
+        let rows = body.lines().count();
+        assert!(
+            rows >= 4,
+            "expected header + 3 rows in csv, got {rows}: {body}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

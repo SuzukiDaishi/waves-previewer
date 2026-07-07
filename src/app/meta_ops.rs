@@ -4,74 +4,51 @@ use super::{meta, transcript};
 
 impl super::WavesPreviewer {
     /// Debounce for re-sorting while metadata streams in. A full decorate +
-    /// sort of a 100k+ item list costs tens of ms, so large lists re-sort
-    /// less often (the final sort on completion is unaffected).
+    /// sort of a 100k+ item list costs tens of ms (hundreds at 500k), so
+    /// large lists re-sort less often, and the interval additionally scales
+    /// with the measured cost of the previous sort so the UI thread never
+    /// spends the majority of its time re-sorting.
     fn meta_sort_min_interval_ms(&self) -> u64 {
-        if self.files.len() > 20_000 {
+        let base = if self.files.len() > 20_000 {
             750
         } else {
             crate::app::META_SORT_MIN_INTERVAL_MS
-        }
+        };
+        let adaptive = (self.sort_loading_last_ms as u64).saturating_mul(8);
+        base.max(adaptive.min(8_000))
     }
 
-    fn needs_full_meta_for_sort(
-        path: &PathBuf,
-        meta: Option<&crate::app::types::FileMeta>,
-    ) -> bool {
-        let Some(m) = meta else {
-            return true;
-        };
-        if m.decode_error.is_some() {
-            return false;
-        }
-        let has_full = m.rms_db.is_some() || m.lufs_i.is_some() || !m.thumb.is_empty();
-        if has_full {
-            return false;
-        }
-        // Header-only rows still need one decode pass for stable numeric sort keys.
-        !path.as_path().as_os_str().is_empty()
+    /// Whether the current sort key can only be resolved by decoding the
+    /// whole file. Header metadata (duration, channels, SR, bits, bitrate,
+    /// BPM tag, file times) covers every other key.
+    fn sort_key_needs_full_decode(&self) -> bool {
+        matches!(
+            self.sort_key,
+            crate::app::types::SortKey::Level
+                | crate::app::types::SortKey::Lufs
+                | crate::app::types::SortKey::TruePeak
+                | crate::app::types::SortKey::LufsShort
+                | crate::app::types::SortKey::LufsMomentary
+        )
     }
 
     pub(super) fn prime_sort_metadata_prefetch(&mut self) {
-        let sort_meta = self.sort_key_uses_meta();
-        let sort_transcript = self.sort_key_uses_transcript();
-        if (!sort_meta && !sort_transcript) || self.files.is_empty() {
-            return;
-        }
-        let ids: Vec<_> = self.files.clone();
-        for id in ids {
-            let Some(item) = self.item_for_id(id) else {
-                continue;
-            };
-            let path = item.path.clone();
-            if self.is_virtual_path(&path) {
-                continue;
-            }
-            if sort_meta {
-                let meta = self.meta_for_path(&path);
-                if Self::needs_full_meta_for_sort(&path, meta) {
-                    if meta.is_none() {
-                        self.queue_meta_for_path(&path, false);
-                    } else {
-                        self.queue_full_meta_for_path(&path, false);
-                    }
-                }
-            }
-            if sort_transcript
-                && self.transcript_for_path(&path).is_none()
-                && !self.transcript_inflight.contains(&path)
-            {
-                self.queue_transcript_for_path(&path, false);
-            }
-        }
+        // Do NOT mass-enqueue metadata jobs here: on very large lists (100k+)
+        // queueing one decode task per row stalls the app for the lifetime of
+        // the backlog (a single header click used to queue 500k full decodes).
+        // Reset the prefetch cursor instead and let `pump_list_meta_prefetch`
+        // stream tasks each frame under its queue budget and inflight cap.
         self.list_meta_prefetch_cursor = 0;
     }
 
     pub(super) fn reset_meta_pool(&mut self) {
+        // Reserve one core for the UI/audio threads; the workers also run at
+        // lowered OS priority (see spawn_meta_pool).
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
-            .min(6);
+            .saturating_sub(1)
+            .clamp(1, 6);
         let (pool, rx) = crate::app::meta::spawn_meta_pool(workers);
         self.meta_pool = Some(pool);
         self.meta_rx = Some(rx);
@@ -89,19 +66,41 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Cancel any queued or running metadata job for a path (e.g. when the
+    /// file is removed from the list) and clear the inflight marker so the
+    /// row can be re-requested later if it comes back.
+    pub(super) fn cancel_meta_for_path(&mut self, path: &std::path::Path) {
+        if let Some(pool) = &self.meta_pool {
+            // Queued tasks are dropped silently (no update will arrive);
+            // running tasks send MetaUpdate::Cancelled, which is a harmless
+            // second remove after the one below.
+            let _ = pool.cancel_path(path);
+        }
+        self.meta_inflight.remove(path);
+    }
+
+    /// Backlog guard for large lists: a row that is (or was) visible enqueues
+    /// a decode task every frame it stays unresolved, and fast scrolling used
+    /// to accumulate an unbounded queue of full decodes. Visible rows keep
+    /// re-requesting while on screen, so rejecting new tasks at the cap is
+    /// self-healing once the backlog drains.
+    fn meta_backlog_full(&self, priority: bool) -> bool {
+        if self.files.len() < crate::app::LIST_BG_META_LARGE_THRESHOLD {
+            return false;
+        }
+        let cap = if priority {
+            crate::app::LIST_BG_META_INFLIGHT_LIMIT.saturating_mul(4)
+        } else {
+            crate::app::LIST_BG_META_INFLIGHT_LIMIT.saturating_mul(2)
+        };
+        self.meta_inflight.len() >= cap
+    }
+
     pub(super) fn queue_meta_for_path(&mut self, path: &PathBuf, priority: bool) {
         if self.is_virtual_path(path) {
             return;
         }
         if self.meta_for_path(path).is_some() {
-            return;
-        }
-        if !priority
-            && self.item_bg_mode != crate::app::types::ItemBgMode::Standard
-            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
-            && self.meta_inflight.len() >= crate::app::LIST_BG_META_INFLIGHT_LIMIT
-        {
-            // Keep large-list background coloring from building an unbounded decode backlog.
             return;
         }
         self.ensure_meta_pool();
@@ -110,6 +109,9 @@ impl super::WavesPreviewer {
                 if priority {
                     pool.promote_path(path);
                 }
+                return;
+            }
+            if self.meta_backlog_full(priority) {
                 return;
             }
             self.meta_inflight.insert(path.clone());
@@ -128,19 +130,15 @@ impl super::WavesPreviewer {
         if self.meta_for_path(path).is_some() {
             return;
         }
-        if !priority
-            && self.item_bg_mode != crate::app::types::ItemBgMode::Standard
-            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
-            && self.meta_inflight.len() >= crate::app::LIST_BG_META_INFLIGHT_LIMIT
-        {
-            return;
-        }
         self.ensure_meta_pool();
         if let Some(pool) = &self.meta_pool {
             if self.meta_inflight.contains(path) {
                 if priority {
                     pool.promote_path(path);
                 }
+                return;
+            }
+            if self.meta_backlog_full(priority) {
                 return;
             }
             self.meta_inflight.insert(path.clone());
@@ -157,19 +155,15 @@ impl super::WavesPreviewer {
         if self.is_virtual_path(path) {
             return;
         }
-        if !priority
-            && self.item_bg_mode != crate::app::types::ItemBgMode::Standard
-            && self.files.len() >= crate::app::LIST_BG_META_LARGE_THRESHOLD
-            && self.meta_inflight.len() >= crate::app::LIST_BG_META_INFLIGHT_LIMIT
-        {
-            return;
-        }
         self.ensure_meta_pool();
         if let Some(pool) = &self.meta_pool {
             if self.meta_inflight.contains(path) {
                 if priority {
                     pool.promote_path(path);
                 }
+                return;
+            }
+            if self.meta_backlog_full(priority) {
                 return;
             }
             self.meta_inflight.insert(path.clone());
@@ -247,9 +241,14 @@ impl super::WavesPreviewer {
         } else {
             crate::app::LIST_BG_META_INFLIGHT_LIMIT
         };
+        // Bound the per-frame walk as well: once most rows are resolved this
+        // loop is a pure scan, and walking all 500k rows every frame costs
+        // tens of ms. The cursor keeps advancing, so coverage is unchanged.
+        let scan_budget = total.min(crate::app::LIST_META_PREFETCH_SCAN_BUDGET);
+        let sort_needs_decode = self.sort_key_needs_full_decode();
         let mut scanned = 0usize;
         let mut queued = 0usize;
-        while scanned < total && queued < queue_budget {
+        while scanned < scan_budget && queued < queue_budget {
             if self.meta_inflight.len() >= inflight_cap {
                 break;
             }
@@ -261,25 +260,43 @@ impl super::WavesPreviewer {
             if self.is_virtual_path(&path) {
                 continue;
             }
-            if sort_meta_prefetch {
-                let full_meta_attempted = self
-                    .meta_for_path(&path)
-                    .map(|m| {
-                        m.rms_db.is_some()
-                            || m.lufs_i.is_some()
-                            || m.decode_error.is_some()
-                            || !m.thumb.is_empty()
-                    })
-                    .unwrap_or(false);
-                if !self.meta_inflight.contains(&path) {
-                    if self.meta_for_path(&path).is_none() {
+            if sort_meta_prefetch && !self.meta_inflight.contains(&path) {
+                let meta = self.meta_for_path(&path);
+                if sort_needs_decode {
+                    let full_meta_attempted = meta
+                        .map(|m| {
+                            m.rms_db.is_some()
+                                || m.lufs_i.is_some()
+                                || m.decode_error.is_some()
+                                || !m.thumb.is_empty()
+                        })
+                        .unwrap_or(false);
+                    if meta.is_none() {
                         self.queue_meta_for_path(&path, false);
                         queued += 1;
                     } else if !full_meta_attempted {
-                        // Sort mode: force one full decode pass so unknown values are resolved.
+                        // Level/LUFS sort: force one full decode pass so
+                        // unknown values are resolved.
                         self.queue_full_meta_for_path(&path, false);
                         queued += 1;
                     }
+                } else if meta.is_none() {
+                    // Every other sort key is available from the header;
+                    // don't spend a full decode per row on it.
+                    self.queue_header_meta_for_path(&path, false);
+                    queued += 1;
+                } else if matches!(self.sort_key, crate::app::types::SortKey::Length)
+                    && meta.is_some_and(|m| {
+                        m.duration_secs.is_none()
+                            && m.decode_error.is_none()
+                            && m.rms_db.is_none()
+                            && m.thumb.is_empty()
+                    })
+                {
+                    // Rare formats whose header cannot resolve a duration:
+                    // fall back to one decode pass for a stable Length key.
+                    self.queue_full_meta_for_path(&path, false);
+                    queued += 1;
                 }
             }
             if sort_transcript_prefetch && !self.transcript_inflight.contains(&path) {
@@ -313,7 +330,13 @@ impl super::WavesPreviewer {
                 })
                 .unwrap_or(true);
         if due {
-            self.apply_sort();
+            if self.sort_job_active() {
+                // An async sort is already running; let it finish and pick up
+                // the accumulated changes on the next interval.
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            self.request_sort();
             self.meta_sort_pending = false;
             self.meta_sort_last_applied = Some(now);
             ctx.request_repaint();
@@ -336,6 +359,9 @@ impl super::WavesPreviewer {
         };
         let mut updates: Vec<meta::MetaUpdate> = Vec::new();
         let mut drained = 0usize;
+        // Cap by count AND wall time: applying an update allocates (meta box,
+        // art eviction), and a deep backlog must not own the frame.
+        let drain_started = std::time::Instant::now();
         while drained < crate::app::META_UPDATE_FRAME_BUDGET {
             match rx.try_recv() {
                 Ok(update) => {
@@ -344,6 +370,9 @@ impl super::WavesPreviewer {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+            if drained % 32 == 0 && drain_started.elapsed().as_micros() > 1_000 {
+                break;
             }
         }
         if updates.is_empty() {
@@ -385,6 +414,9 @@ impl super::WavesPreviewer {
                         }
                     }
                 }
+                meta::MetaUpdate::Cancelled(p) => {
+                    self.meta_inflight.remove(&p);
+                }
             }
         }
         if refilter {
@@ -409,7 +441,9 @@ impl super::WavesPreviewer {
                 self.meta_sort_pending = true;
             }
             self.flush_pending_meta_sort(ctx, false);
-            ctx.request_repaint();
+            // Metadata streaming does not need 60fps repaints; 15fps keeps the
+            // list visibly filling in while leaving CPU to the workers.
+            ctx.request_repaint_after(std::time::Duration::from_millis(66));
         }
         if drained >= crate::app::META_UPDATE_FRAME_BUDGET {
             // Avoid a stall by continuing to consume backlog in future frames.

@@ -2306,28 +2306,160 @@ fn block_means_power(power: &[f32], win: usize, hop: usize) -> Vec<f64> {
     out
 }
 
-pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f32> {
+/// BS.1770-4 channel power weights. Channel identities are not available
+/// from the decoder here, so common film-order layouts are assumed:
+/// 5.1 = L R C LFE Ls Rs and 7.1 = L R C LFE Ls Rs Lrs Rrs (LFE excluded,
+/// surrounds x1.41). Every other channel count uses weight 1.0.
+fn bs1770_channel_weights(channels: usize) -> Vec<f32> {
+    match channels {
+        6 => vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41],
+        8 => vec![1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 1.41, 1.41],
+        n => vec![1.0; n],
+    }
+}
+
+fn power_to_lufs(z: f64) -> f32 {
+    K_CONST + 10.0 * (z.max(1e-24)).log10() as f32
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LoudnessMetrics {
+    /// Integrated loudness (gated per BS.1770-4).
+    pub lufs_i: f32,
+    /// Maximum momentary loudness (400 ms window, ungated; EBU Tech 3341).
+    pub lufs_m_max: Option<f32>,
+    /// Maximum short-term loudness (3 s window, ungated; EBU Tech 3341).
+    pub lufs_s_max: Option<f32>,
+    /// True peak per BS.1770-4 Annex 2 (oversampled inter-sample peak).
+    pub true_peak_db: Option<f32>,
+}
+
+/// Inter-sample true peak via polyphase windowed-sinc interpolation
+/// (BS.1770-4 Annex 2). 4x below 96 kHz, 2x below 192 kHz, sample peak above.
+pub fn true_peak_db_from_multi(chans: &[Vec<f32>], in_sr: u32) -> Option<f32> {
+    let mut peak_abs = 0.0f32;
+    for ch in chans {
+        for &v in ch {
+            let a = v.abs();
+            if a > peak_abs {
+                peak_abs = a;
+            }
+        }
+    }
+    let factor: usize = if in_sr < 96_000 {
+        4
+    } else if in_sr < 192_000 {
+        2
+    } else {
+        1
+    };
+    if factor > 1 {
+        // Polyphase FIR: windowed sinc, 12 taps per phase, each phase
+        // normalized to unit DC gain so a full-scale DC input stays 1.0.
+        const TAPS_PER_PHASE: usize = 12;
+        let total = TAPS_PER_PHASE * factor;
+        let center = (total - 1) as f64 / 2.0;
+        let mut phases: Vec<Vec<f32>> = vec![Vec::with_capacity(TAPS_PER_PHASE); factor];
+        for k in 0..total {
+            let x = (k as f64 - center) / factor as f64;
+            let sinc = if x.abs() < 1e-12 {
+                1.0
+            } else {
+                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+            };
+            let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * k as f64 / (total - 1) as f64).cos());
+            phases[k % factor].push((sinc * w) as f32);
+        }
+        for phase in phases.iter_mut() {
+            let sum: f32 = phase.iter().sum();
+            if sum.abs() > 1e-9 {
+                for c in phase.iter_mut() {
+                    *c /= sum;
+                }
+            }
+        }
+        for ch in chans {
+            if ch.len() < TAPS_PER_PHASE {
+                continue;
+            }
+            for n in 0..ch.len() {
+                for phase in &phases {
+                    let mut acc = 0.0f32;
+                    for (m, &c) in phase.iter().enumerate() {
+                        // Convolution index n - m, clamped at the edges.
+                        let idx = n.saturating_sub(m);
+                        acc += ch[idx] * c;
+                    }
+                    let a = acc.abs();
+                    if a > peak_abs {
+                        peak_abs = a;
+                    }
+                }
+            }
+        }
+    }
+    if peak_abs > 0.0 {
+        Some(20.0 * peak_abs.log10())
+    } else {
+        Some(f32::NEG_INFINITY)
+    }
+}
+
+/// All loudness metrics in one pass: resample-to-48k + K-weighting + the
+/// per-sample power sum are shared between I / M / S; true peak runs on the
+/// original (non-weighted, original-rate) channels.
+///
+/// Known deviation: the 48 kHz conversion uses linear interpolation, which
+/// is within ~0.1 LU of a sinc resampler for typical program material but is
+/// not bit-exact against a reference meter at non-48k rates.
+pub fn loudness_metrics_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<LoudnessMetrics> {
+    loudness_metrics_impl(chans_in, in_sr, true)
+}
+
+fn loudness_metrics_impl(
+    chans_in: &[Vec<f32>],
+    in_sr: u32,
+    with_true_peak: bool,
+) -> Result<LoudnessMetrics> {
     if chans_in.is_empty() {
         anyhow::bail!("empty channels");
     }
+    // The oversampled true-peak scan costs ~48 MACs per sample; callers that
+    // only need integrated loudness (gain-change recalc) skip it.
+    let true_peak_db = if with_true_peak {
+        true_peak_db_from_multi(chans_in, in_sr)
+    } else {
+        None
+    };
     // Resample to 48k and copy
     let (mut chans, sr) = ensure_sr_48k(chans_in, in_sr);
     let _ = sr; // sr is 48k now
                 // K-weighting
     k_weighting_apply_48k(&mut chans);
-    // Sum weighted power across channels (weights=1.0, LFE not identified here)
+    // Weighted power sum across channels (BS.1770 G weights, LFE excluded
+    // for assumed 5.1/7.1 layouts).
+    let weights = bs1770_channel_weights(chans.len());
     let n = chans[0].len();
     let mut p_sum = vec![0.0f32; n];
-    for ch in &chans {
+    for (ch, &w) in chans.iter().zip(weights.iter()) {
+        if w == 0.0 {
+            continue;
+        }
         for i in 0..n {
             let v = ch[i];
-            p_sum[i] += v * v;
+            p_sum[i] += w * v * v;
         }
     }
-    // 400ms window with 100ms hop
-    let win = (0.400 * 48_000.0) as usize;
+    // Momentary: 400ms window with 100ms hop
+    let win_m = (0.400 * 48_000.0) as usize;
     let hop = (0.100 * 48_000.0) as usize;
-    let means = block_means_power(&p_sum, win, hop);
+    let means = block_means_power(&p_sum, win_m, hop);
+    // Short-term: 3s window with 100ms hop (ungated max per EBU Tech 3341)
+    let win_s = (3.0 * 48_000.0) as usize;
+    let lufs_s_max = block_means_power(&p_sum, win_s, hop)
+        .into_iter()
+        .fold(None::<f64>, |acc, m| Some(acc.map_or(m, |a| a.max(m))))
+        .map(power_to_lufs);
     if means.is_empty() {
         // Fallback for very short audio (< window): use whole-signal mean power.
         // This avoids returning +/-inf for short clips where BS.1770 windowing can't be applied.
@@ -2336,54 +2468,69 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
             acc += v as f64;
         }
         let n = p_sum.len().max(1) as f64;
-        let z = (acc / n).max(1e-24);
-        let l = K_CONST + 10.0 * (z.log10() as f32);
-        return Ok(l);
+        let l = power_to_lufs(acc / n);
+        return Ok(LoudnessMetrics {
+            lufs_i: l,
+            lufs_m_max: None,
+            lufs_s_max,
+            true_peak_db,
+        });
     }
-    let blocks_lufs: Vec<f32> = means
+    let blocks_lufs: Vec<f32> = means.iter().map(|&m| power_to_lufs(m)).collect();
+    let lufs_m_max = blocks_lufs
         .iter()
-        .map(|&m| K_CONST + 10.0 * (m.max(1e-24)).log10() as f32)
-        .collect();
-    // Absolute gate -70 LUFS
-    let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > -70.0).collect();
-    if !sel.iter().any(|&b| b) {
-        return Ok(f32::NEG_INFINITY);
-    }
-    // Average of means after absolute gate
-    let mut num = 0usize;
-    let mut acc = 0.0f64;
-    for (i, &ok) in sel.iter().enumerate() {
-        if ok {
-            acc += means[i];
-            num += 1;
+        .copied()
+        .fold(None::<f32>, |acc, l| Some(acc.map_or(l, |a| a.max(l))));
+    let lufs_i = {
+        // Absolute gate -70 LUFS
+        let mut sel: Vec<bool> = blocks_lufs.iter().map(|&l| l > -70.0).collect();
+        if !sel.iter().any(|&b| b) {
+            f32::NEG_INFINITY
+        } else {
+            // Average of means after absolute gate
+            let mut num = 0usize;
+            let mut acc = 0.0f64;
+            for (i, &ok) in sel.iter().enumerate() {
+                if ok {
+                    acc += means[i];
+                    num += 1;
+                }
+            }
+            let z_abs = if num > 0 { acc / num as f64 } else { 0.0 };
+            if z_abs <= 0.0 {
+                f32::NEG_INFINITY
+            } else {
+                // Relative gate: -10 LU below the absolute-gated average.
+                let thr = power_to_lufs(z_abs) - 10.0;
+                for (i, l) in blocks_lufs.iter().enumerate() {
+                    sel[i] = sel[i] && (*l > thr);
+                }
+                let mut acc2 = 0.0f64;
+                let mut n2 = 0usize;
+                for (i, &ok) in sel.iter().enumerate() {
+                    if ok {
+                        acc2 += means[i];
+                        n2 += 1;
+                    }
+                }
+                if n2 == 0 {
+                    f32::NEG_INFINITY
+                } else {
+                    power_to_lufs(acc2 / n2 as f64)
+                }
+            }
         }
-    }
-    let z_abs = if num > 0 { acc / num as f64 } else { 0.0 };
-    if z_abs <= 0.0 {
-        return Ok(f32::NEG_INFINITY);
-    }
-    let l_abs = K_CONST + 10.0 * (z_abs.max(1e-24)).log10() as f32;
-    let thr = l_abs - 10.0;
-    for (i, l) in blocks_lufs.iter().enumerate() {
-        sel[i] = sel[i] && (*l > thr);
-    }
-    if !sel.iter().any(|&b| b) {
-        return Ok(f32::NEG_INFINITY);
-    }
-    let mut acc2 = 0.0f64;
-    let mut n2 = 0usize;
-    for (i, &ok) in sel.iter().enumerate() {
-        if ok {
-            acc2 += means[i];
-            n2 += 1;
-        }
-    }
-    if n2 == 0 {
-        return Ok(f32::NEG_INFINITY);
-    }
-    let z_final = acc2 / n2 as f64;
-    let l = K_CONST + 10.0 * (z_final.max(1e-24)).log10() as f32;
-    Ok(l)
+    };
+    Ok(LoudnessMetrics {
+        lufs_i,
+        lufs_m_max,
+        lufs_s_max,
+        true_peak_db,
+    })
+}
+
+pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f32> {
+    Ok(loudness_metrics_impl(chans_in, in_sr, false)?.lufs_i)
 }
 
 #[cfg(test)]
@@ -2805,4 +2952,158 @@ mod tests {
     }
 
 
+
+    // ---- Loudness (BS.1770-4 / EBU Tech 3341) ----
+
+    fn stereo_sine(freq: f32, amp_dbfs: f32, sr: u32, secs: f32) -> Vec<Vec<f32>> {
+        let amp = 10.0f32.powf(amp_dbfs / 20.0);
+        let frames = (sr as f32 * secs) as usize;
+        let ch: Vec<f32> = (0..frames)
+            .map(|i| (i as f32 / sr as f32 * freq * std::f32::consts::TAU).sin() * amp)
+            .collect();
+        vec![ch.clone(), ch]
+    }
+
+    // EBU Tech 3341 case 1: 997 Hz stereo sine at -23 dBFS -> -23.0 LUFS.
+    // (The K-weighting is unity at 997 Hz by construction, and identical
+    // signals in L+R sum to +3dB power against the -3.01dB sine RMS.)
+    #[test]
+    fn lufs_integrated_matches_tech3341_reference_tones() {
+        let sr = 48_000;
+        for target in [-23.0f32, -33.0f32] {
+            let chans = stereo_sine(997.0, target, sr, 20.0);
+            let m = super::loudness_metrics_from_multi(&chans, sr).expect("metrics");
+            assert!(
+                (m.lufs_i - target).abs() <= 0.1,
+                "LUFS-I for {target} dBFS 997Hz stereo sine: got {}",
+                m.lufs_i
+            );
+            // Steady tone: momentary and short-term maxima match integrated.
+            let mm = m.lufs_m_max.expect("momentary");
+            let sm = m.lufs_s_max.expect("short-term");
+            assert!((mm - target).abs() <= 0.1, "LUFS-M {mm} vs {target}");
+            assert!((sm - target).abs() <= 0.1, "LUFS-S {sm} vs {target}");
+        }
+    }
+
+    // 44.1 kHz input goes through the internal resampler; keep a wider
+    // tolerance for the linear interpolation deviation.
+    #[test]
+    fn lufs_integrated_reasonable_at_44100() {
+        let chans = stereo_sine(997.0, -23.0, 44_100, 20.0);
+        let m = super::loudness_metrics_from_multi(&chans, 44_100).expect("metrics");
+        assert!(
+            (m.lufs_i + 23.0).abs() <= 0.3,
+            "LUFS-I at 44.1k: got {}",
+            m.lufs_i
+        );
+    }
+
+    // Gating: 10s of tone at -23 plus 10s of near-silence must stay close to
+    // the tone level (the relative gate drops the quiet half), clearly above
+    // the ungated mean.
+    #[test]
+    fn lufs_gating_ignores_long_silence() {
+        let sr = 48_000;
+        let mut chans = stereo_sine(997.0, -23.0, sr, 10.0);
+        for ch in chans.iter_mut() {
+            ch.extend(std::iter::repeat(0.0f32).take((sr * 10) as usize));
+        }
+        let m = super::loudness_metrics_from_multi(&chans, sr).expect("metrics");
+        assert!(
+            (m.lufs_i + 23.0).abs() <= 0.5,
+            "gated LUFS-I should stay near -23, got {}",
+            m.lufs_i
+        );
+    }
+
+    // Momentary vs short-term: a 0.5s burst inside 10s of silence fills a
+    // 400ms window completely but only a fraction of a 3s window.
+    #[test]
+    fn lufs_momentary_exceeds_short_term_for_bursts() {
+        let sr = 48_000;
+        let burst = stereo_sine(997.0, -20.0, sr, 0.5);
+        let mut chans = vec![Vec::new(), Vec::new()];
+        for (i, ch) in chans.iter_mut().enumerate() {
+            ch.extend(std::iter::repeat(0.0f32).take((sr * 5) as usize));
+            ch.extend(burst[i].iter().copied());
+            ch.extend(std::iter::repeat(0.0f32).take((sr * 5) as usize));
+        }
+        let m = super::loudness_metrics_from_multi(&chans, sr).expect("metrics");
+        let mm = m.lufs_m_max.expect("momentary");
+        let sm = m.lufs_s_max.expect("short-term");
+        assert!(
+            mm > sm + 3.0,
+            "burst: momentary ({mm}) should clearly exceed short-term ({sm})"
+        );
+        assert!((mm + 20.0).abs() <= 0.5, "momentary max should be ~-20, got {mm}");
+    }
+
+    // True peak: an fs/4 sine sampled at 45 degree phase offset has all its
+    // samples at -3.01 dBFS while the continuous waveform peaks at 0 dBTP.
+    #[test]
+    fn true_peak_recovers_intersample_peak()  {
+        let sr = 48_000u32;
+        let frames = sr as usize;
+        let ch: Vec<f32> = (0..frames)
+            .map(|i| {
+                (std::f32::consts::TAU * (i as f32) / 4.0 + std::f32::consts::FRAC_PI_4).sin()
+            })
+            .collect();
+        let mut sample_peak = 0.0f32;
+        for &v in &ch {
+            sample_peak = sample_peak.max(v.abs());
+        }
+        let sample_peak_db = 20.0 * sample_peak.log10();
+        assert!((sample_peak_db + 3.01).abs() < 0.1, "sample peak {sample_peak_db}");
+        let tp = super::true_peak_db_from_multi(&[ch], sr).expect("tp");
+        assert!(
+            (tp - 0.0).abs() <= 0.35,
+            "true peak should recover ~0 dBTP, got {tp} (sample peak {sample_peak_db})"
+        );
+        assert!(tp > sample_peak_db + 2.0, "tp {tp} must exceed sample peak");
+    }
+
+    // 5.1 channel weighting: surround channels carry a 1.41 power weight, so
+    // a tone only in Ls/Rs must read ~+1.5 dB above the same tone in L/R.
+    #[test]
+    fn lufs_surround_weighting_applies_to_5_1() {
+        let sr = 48_000;
+        let tone = stereo_sine(997.0, -23.0, sr, 10.0);
+        let silence = vec![0.0f32; tone[0].len()];
+        // L R C LFE Ls Rs
+        let front: Vec<Vec<f32>> = vec![
+            tone[0].clone(),
+            tone[1].clone(),
+            silence.clone(),
+            silence.clone(),
+            silence.clone(),
+            silence.clone(),
+        ];
+        let surround: Vec<Vec<f32>> = vec![
+            silence.clone(),
+            silence.clone(),
+            silence.clone(),
+            silence.clone(),
+            tone[0].clone(),
+            tone[1].clone(),
+        ];
+        let lf = super::loudness_metrics_from_multi(&front, sr).unwrap().lufs_i;
+        let ls = super::loudness_metrics_from_multi(&surround, sr).unwrap().lufs_i;
+        // G=1.41 is a POWER weight in BS.1770-4 (L = -0.691 + 10log10(sum G_i z_i)),
+        // so the level delta is 10*log10(1.41) ~ +1.49 dB.
+        let expected = 10.0 * 1.41f32.log10();
+        assert!(
+            ((ls - lf) - expected).abs() <= 0.1,
+            "surround weighting: front {lf}, surround {ls}, expected delta {expected}"
+        );
+        // LFE must be excluded entirely.
+        let mut lfe_only: Vec<Vec<f32>> = vec![silence.clone(); 6];
+        lfe_only[3] = tone[0].clone();
+        let l_lfe = super::loudness_metrics_from_multi(&lfe_only, sr).unwrap().lufs_i;
+        assert!(
+            l_lfe == f32::NEG_INFINITY || l_lfe < -60.0,
+            "LFE-only signal should gate out, got {l_lfe}"
+        );
+    }
 }

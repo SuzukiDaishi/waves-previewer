@@ -584,6 +584,9 @@ impl super::WavesPreviewer {
                 super::types::SortKey::BitRate => "BitRate",
                 super::types::SortKey::Level => "Level",
                 super::types::SortKey::Lufs => "Lufs",
+                super::types::SortKey::TruePeak => "TruePeak",
+                super::types::SortKey::LufsShort => "LufsShort",
+                super::types::SortKey::LufsMomentary => "LufsMomentary",
                 super::types::SortKey::Bpm => "Bpm",
                 super::types::SortKey::CreatedAt => "CreatedAt",
                 super::types::SortKey::ModifiedAt => "ModifiedAt",
@@ -618,6 +621,9 @@ impl super::WavesPreviewer {
                 bit_rate: self.list_columns.bit_rate,
                 peak: self.list_columns.peak,
                 lufs: self.list_columns.lufs,
+                dbtp: self.list_columns.dbtp,
+                lufs_s: self.list_columns.lufs_s,
+                lufs_m: self.list_columns.lufs_m,
                 bpm: self.list_columns.bpm,
                 created_at: self.list_columns.created_at,
                 modified_at: self.list_columns.modified_at,
@@ -949,6 +955,9 @@ impl super::WavesPreviewer {
             bit_rate: project.app.list_columns.bit_rate,
             peak: project.app.list_columns.peak,
             lufs: project.app.list_columns.lufs,
+            dbtp: project.app.list_columns.dbtp,
+            lufs_s: project.app.list_columns.lufs_s,
+            lufs_m: project.app.list_columns.lufs_m,
             bpm: project.app.list_columns.bpm,
             created_at: project.app.list_columns.created_at,
             modified_at: project.app.list_columns.modified_at,
@@ -966,6 +975,9 @@ impl super::WavesPreviewer {
             "BitRate" => super::types::SortKey::BitRate,
             "Level" => super::types::SortKey::Level,
             "Lufs" => super::types::SortKey::Lufs,
+            "TruePeak" => super::types::SortKey::TruePeak,
+            "LufsShort" => super::types::SortKey::LufsShort,
+            "LufsMomentary" => super::types::SortKey::LufsMomentary,
             "Bpm" => super::types::SortKey::Bpm,
             "CreatedAt" => super::types::SortKey::CreatedAt,
             "ModifiedAt" => super::types::SortKey::ModifiedAt,
@@ -1132,15 +1144,14 @@ impl super::WavesPreviewer {
                     } else {
                         entry.display_name.clone()
                     };
-                    item.display_folder = "(virtual)".to_string();
+                    item.display_folder = std::sync::Arc::from("(virtual)");
                     item.source = MediaSource::Virtual;
                     item.status = super::types::MediaStatus::Ok;
-                    item.meta = Some(super::WavesPreviewer::build_meta_from_audio(
+                    item.meta = Some(Box::new(super::WavesPreviewer::build_meta_from_audio(
                         &channels,
                         sample_rate,
                         bits_per_sample,
-                    ));
-                    item.rebuild_search_cache();
+                    )));
                     item.virtual_audio = Some(audio);
                     item.virtual_state = Some(VirtualState {
                         source: source.clone(),
@@ -1195,8 +1206,7 @@ impl super::WavesPreviewer {
                         item.status = super::types::MediaStatus::DecodeFailed(
                             "Virtual restore failed".to_string(),
                         );
-                        item.meta = Some(missing_file_meta(&path));
-                        item.rebuild_search_cache();
+                        item.meta = Some(Box::new(missing_file_meta(&path)));
                         item.virtual_state = Some(VirtualState {
                             source: virtual_source_from_project(&entry.source, &base_dir),
                             op_chain: virtual_ops_from_project(&entry.op_chain),
@@ -1215,8 +1225,7 @@ impl super::WavesPreviewer {
                 self.debug_log(missing_errors.join("\n"));
             }
             self.rebuild_item_indexes();
-            self.apply_filter_from_search();
-            self.apply_sort();
+            self.refresh_filter_then_sort();
         }
 
         for item in project.list.items.iter() {
@@ -1458,8 +1467,7 @@ impl super::WavesPreviewer {
                     item.source = MediaSource::Virtual;
                     item.status =
                         super::types::MediaStatus::DecodeFailed(describe_missing(&tab_path));
-                    item.meta = Some(missing_file_meta(&tab_path));
-                    item.rebuild_search_cache();
+                    item.meta = Some(Box::new(missing_file_meta(&tab_path)));
                     if item.virtual_state.is_none() {
                         item.virtual_state = Some(VirtualState {
                             source: VirtualSourceRef::FilePath(tab_path.clone()),

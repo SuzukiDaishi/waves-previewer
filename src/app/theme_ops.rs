@@ -68,7 +68,7 @@ impl WavesPreviewer {
         self.reset_zoo_settings_to_default();
         self.reset_plugin_search_paths_to_default();
         self.ensure_sort_key_visible();
-        self.apply_sort();
+        self.request_sort();
 
         if self.theme_mode != ThemeMode::Dark {
             self.theme_mode = ThemeMode::Dark;
@@ -87,8 +87,7 @@ impl WavesPreviewer {
                         && (!skip_dotfiles || !Self::is_dotfile_path(&item.path))
                 });
                 self.rebuild_item_indexes();
-                self.apply_filter_from_search();
-                self.apply_sort();
+                self.refresh_filter_then_sort();
             }
         }
         self.save_prefs();

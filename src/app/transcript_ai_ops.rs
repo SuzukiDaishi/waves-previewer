@@ -832,7 +832,7 @@ impl super::WavesPreviewer {
             processing_targets.push(path);
         }
         if had_preloaded_success && self.sort_key_uses_transcript() {
-            self.apply_sort();
+            self.request_sort();
         }
         if processing_targets.is_empty() {
             self.transcript_ai_last_error = None;
@@ -1199,7 +1199,7 @@ impl super::WavesPreviewer {
             self.transcript_ai_inflight.clear();
             self.transcript_ai_state = None;
             if had_success && self.sort_key_uses_transcript() {
-                self.apply_sort();
+                self.request_sort();
             }
             ctx.request_repaint();
             return;

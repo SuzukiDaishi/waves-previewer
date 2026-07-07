@@ -1814,17 +1814,35 @@ mod kittest_suite {
             0,
             "initial editor shell should allow an unknown visual length placeholder"
         );
+        assert!(
+            harness.state().test_active_tab_loading_waveform_ready(),
+            "the loading placeholder overview should be present while decoding"
+        );
 
+        // Wait for the decode to surface a visual length. The final decode
+        // result clears the loading overview in the same frame it applies, so
+        // "visual > 0 while the overview is still up" is a race the test must
+        // not depend on; instead assert the invariant "loading implies the
+        // overview is visible" on every observed frame.
         let start = Instant::now();
         loop {
             harness.run_steps(1);
-            if harness.state().test_active_tab_samples_len_visual() > 0
-                && harness.state().test_active_tab_loading_waveform_ready()
-            {
+            let loading = harness.state().test_tab_loading();
+            if loading {
+                assert!(
+                    harness.state().test_active_tab_loading_waveform_ready(),
+                    "loading overview must stay visible while the decode streams"
+                );
+            }
+            if harness.state().test_active_tab_samples_len_visual() > 0 && !loading {
                 break;
             }
             if start.elapsed() > Duration::from_secs(10) {
-                panic!("placeholder visual length never updated after decode started");
+                panic!(
+                    "visual length never updated after decode started: visual={} tab_loading={}",
+                    harness.state().test_active_tab_samples_len_visual(),
+                    harness.state().test_tab_loading(),
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }

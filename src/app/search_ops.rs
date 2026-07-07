@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
 
-use super::types::SortDir;
 use super::WavesPreviewer;
 
 impl WavesPreviewer {
@@ -40,10 +39,7 @@ impl WavesPreviewer {
             return;
         }
         if Instant::now() >= deadline {
-            self.apply_filter_from_search();
-            if self.sort_dir != SortDir::None {
-                self.apply_sort();
-            }
+            self.refresh_filter_then_sort();
             self.search_dirty = false;
             self.search_deadline = None;
         }

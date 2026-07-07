@@ -271,6 +271,12 @@ pub struct ProjectListColumns {
     pub peak: bool,
     pub lufs: bool,
     #[serde(default)]
+    pub dbtp: bool,
+    #[serde(default)]
+    pub lufs_s: bool,
+    #[serde(default)]
+    pub lufs_m: bool,
+    #[serde(default)]
     pub bpm: bool,
     #[serde(default)]
     pub created_at: bool,
@@ -1096,6 +1102,9 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         peak_db: None,
         peak_db_estimate: false,
         lufs_i: None,
+        lufs_m_max: None,
+        lufs_s_max: None,
+        true_peak_db: None,
         bpm: None,
         created_at: None,
         modified_at: None,
@@ -1160,6 +1169,7 @@ impl super::WavesPreviewer {
 
     pub(super) fn reset_list_from_project(&mut self, raw_paths: &[String], base_dir: &Path) {
         self.root = None;
+        self.note_files_membership_changed();
         self.files.clear();
         self.items.clear();
         self.item_index.clear();
@@ -1185,8 +1195,7 @@ impl super::WavesPreviewer {
             let mut item = self.make_media_item(p.clone());
             if !p.is_file() {
                 item.status = super::types::MediaStatus::DecodeFailed(describe_missing(&p));
-                item.meta = Some(missing_file_meta(&p));
-                item.rebuild_search_cache();
+                item.meta = Some(Box::new(missing_file_meta(&p)));
             }
             let id = item.id;
             self.path_index.insert(p, id);

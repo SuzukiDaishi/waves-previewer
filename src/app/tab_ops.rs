@@ -571,6 +571,15 @@ impl super::WavesPreviewer {
 
     pub(super) fn open_paths_in_tabs(&mut self, paths: &[PathBuf]) {
         for path in paths {
+            // Select-all + Enter on a huge list: once the tab limit is
+            // reached, skip paths without an existing tab up front instead of
+            // funneling every remaining path through open_or_activate_tab
+            // (which logs a skip line per path).
+            if self.tabs.len() >= crate::app::MAX_EDITOR_TABS
+                && !self.tabs.iter().any(|t| t.path.as_path() == path.as_path())
+            {
+                continue;
+            }
             if let Some(item) = self.item_for_path(path) {
                 if item.source == crate::app::types::MediaSource::External {
                     continue;

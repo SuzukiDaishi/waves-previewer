@@ -14,6 +14,136 @@ use std::time::{Instant, SystemTime};
 
 pub type MediaId = u64;
 
+/// Path -> MediaId index for very large lists.
+///
+/// Keys the table by a precomputed 64-bit Fx hash of the path and keeps the
+/// path only inside the slot for equality checks. A plain
+/// `HashMap<PathBuf, _>` re-hashes every key on growth; at 1M paths that
+/// rehash was a ~270ms UI stall mid-load. Hashing a `u64` is one multiply,
+/// so growth here only moves slots (~20ms at 1M). Hash collisions (~1e-8 at
+/// 1M entries) degrade a slot to a small vector, never to a wrong answer.
+#[derive(Default)]
+pub struct PathIndex {
+    map: rustc_hash::FxHashMap<u64, PathSlot>,
+    len: usize,
+}
+
+enum PathSlot {
+    One(PathBuf, MediaId),
+    Many(Vec<(PathBuf, MediaId)>),
+}
+
+impl PathIndex {
+    fn hash_path(path: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        path.hash(&mut h);
+        h.finish()
+    }
+
+    pub fn get(&self, path: &Path) -> Option<MediaId> {
+        match self.map.get(&Self::hash_path(path))? {
+            PathSlot::One(p, id) => (p.as_path() == path).then_some(*id),
+            PathSlot::Many(v) => v
+                .iter()
+                .find(|(p, _)| p.as_path() == path)
+                .map(|(_, id)| *id),
+        }
+    }
+
+    pub fn contains_key(&self, path: &Path) -> bool {
+        self.get(path).is_some()
+    }
+
+    pub fn insert(&mut self, path: PathBuf, id: MediaId) -> Option<MediaId> {
+        let h = Self::hash_path(&path);
+        match self.map.entry(h) {
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(PathSlot::One(path, id));
+                self.len += 1;
+                None
+            }
+            std::collections::hash_map::Entry::Occupied(mut e) => match e.get_mut() {
+                PathSlot::One(p, existing) => {
+                    if p.as_path() == path.as_path() {
+                        Some(std::mem::replace(existing, id))
+                    } else {
+                        // Genuine 64-bit hash collision: widen the slot.
+                        let prev = std::mem::replace(
+                            e.get_mut(),
+                            PathSlot::Many(Vec::with_capacity(2)),
+                        );
+                        if let (PathSlot::Many(v), PathSlot::One(p0, id0)) = (e.get_mut(), prev) {
+                            v.push((p0, id0));
+                            v.push((path, id));
+                        }
+                        self.len += 1;
+                        None
+                    }
+                }
+                PathSlot::Many(v) => {
+                    if let Some((_, existing)) =
+                        v.iter_mut().find(|(p, _)| p.as_path() == path.as_path())
+                    {
+                        Some(std::mem::replace(existing, id))
+                    } else {
+                        v.push((path, id));
+                        self.len += 1;
+                        None
+                    }
+                }
+            },
+        }
+    }
+
+    pub fn remove(&mut self, path: &Path) -> Option<MediaId> {
+        let h = Self::hash_path(path);
+        let slot = self.map.get_mut(&h)?;
+        let removed = match slot {
+            PathSlot::One(p, id) => {
+                if p.as_path() == path {
+                    let id = *id;
+                    self.map.remove(&h);
+                    Some(id)
+                } else {
+                    None
+                }
+            }
+            PathSlot::Many(v) => {
+                let pos = v.iter().position(|(p, _)| p.as_path() == path)?;
+                let (_, id) = v.swap_remove(pos);
+                if v.len() == 1 {
+                    let (p, last_id) = v.pop().expect("len checked");
+                    *slot = PathSlot::One(p, last_id);
+                }
+                Some(id)
+            }
+        };
+        if removed.is_some() {
+            self.len -= 1;
+        }
+        removed
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.map.capacity()
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.map.reserve(additional);
+    }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.len = 0;
+    }
+}
+
+
 #[derive(Clone, Debug)]
 pub enum MediaStatus {
     Ok,
@@ -60,49 +190,44 @@ pub struct MediaItem {
     pub id: MediaId,
     pub path: PathBuf,
     pub display_name: String,
-    pub display_folder: String,
+    /// Interned per parent directory: at 1M files the folder string is
+    /// repeated thousands of times, so rows share one allocation.
+    pub display_folder: std::sync::Arc<str>,
     pub source: MediaSource,
-    pub meta: Option<FileMeta>,
+    /// Boxed: `FileMeta` is ~200 bytes and most rows of a freshly loaded
+    /// 1M-file list have no metadata yet; inline storage wasted ~200MB.
+    pub meta: Option<Box<FileMeta>>,
     pub pending_gain_db: f32,
     pub status: MediaStatus,
     /// Arc so cloning a `MediaItem` (the list view clones one per visible row)
     /// does not deep-copy the full transcript text and segments.
     pub transcript: Option<Arc<Transcript>>,
     pub transcript_language: Option<String>,
-    pub external: HashMap<String, String>,
+    /// External CSV/Excel row values. Boxed option: most rows have none and
+    /// an inline empty HashMap cost 48 bytes per item at 1M files.
+    pub external: Option<Box<HashMap<String, String>>>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
     pub virtual_state: Option<VirtualState>,
-    /// Pre-lowercased display_name for search. Rebuilt by rebuild_search_cache().
-    pub search_name: String,
-    /// Pre-lowercased display_folder for search. Rebuilt by rebuild_search_cache().
-    pub search_folder: String,
-    /// Pre-built meta summary string ("sr:48000 bits:24 ...") for search. Rebuilt by rebuild_search_cache().
-    pub search_meta_summary: String,
 }
 
 impl MediaItem {
-    pub fn rebuild_search_cache(&mut self) {
-        self.search_name = self.display_name.to_lowercase();
-        self.search_folder = self.display_folder.to_lowercase();
-        self.search_meta_summary = self
-            .meta
-            .as_ref()
-            .map(|m| {
-                format!(
-                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
-                    m.sample_rate,
-                    m.bits_per_sample,
-                    m.bit_rate_bps.unwrap_or(0),
-                    m.channels,
-                    m.duration_secs.unwrap_or(0.0),
-                    m.peak_db.unwrap_or(0.0),
-                    m.lufs_i.unwrap_or(0.0),
-                    m.bpm.unwrap_or(0.0)
-                )
-            })
-            .unwrap_or_default();
+    pub fn external_value(&self, key: &str) -> Option<&String> {
+        self.external.as_ref().and_then(|m| m.get(key))
+    }
+
+    pub fn set_external(&mut self, map: HashMap<String, String>) {
+        self.external = if map.is_empty() {
+            None
+        } else {
+            Some(Box::new(map))
+        };
+    }
+
+    pub fn clear_external(&mut self) {
+        self.external = None;
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct ExternalSource {
@@ -142,6 +267,9 @@ pub enum SortKey {
     BitRate,
     Level,
     Lufs,
+    TruePeak,
+    LufsShort,
+    LufsMomentary,
     Bpm,
     CreatedAt,
     ModifiedAt,
@@ -220,6 +348,9 @@ pub struct ListColumnConfig {
     pub bit_rate: bool,
     pub peak: bool,
     pub lufs: bool,
+    pub dbtp: bool,
+    pub lufs_s: bool,
+    pub lufs_m: bool,
     pub bpm: bool,
     pub created_at: bool,
     pub modified_at: bool,
@@ -245,6 +376,9 @@ impl Default for ListColumnConfig {
             bit_rate: false,
             peak: true,
             lufs: true,
+            dbtp: false,
+            lufs_s: false,
+            lufs_m: false,
             bpm: false,
             created_at: false,
             modified_at: false,
@@ -1119,6 +1253,12 @@ pub struct FileMeta {
     /// than the whole file (header-only metadata pass).
     pub peak_db_estimate: bool,
     pub lufs_i: Option<f32>,
+    /// Maximum momentary loudness (400 ms, ungated), full decode only.
+    pub lufs_m_max: Option<f32>,
+    /// Maximum short-term loudness (3 s, ungated), full decode only.
+    pub lufs_s_max: Option<f32>,
+    /// True peak (BS.1770-4 Annex 2, oversampled), full decode only.
+    pub true_peak_db: Option<f32>,
     pub bpm: Option<f32>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
@@ -1446,6 +1586,7 @@ pub struct SessionSidecarJob {
 pub struct SessionSaveState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    #[allow(dead_code)]
     pub started_at: std::time::Instant,
 }
 
@@ -2628,6 +2769,7 @@ pub struct ClipboardPrepDone {
 /// In-flight background clipboard preparation (decode + temp WAV export).
 pub struct ClipboardPrepState {
     pub rx: std::sync::mpsc::Receiver<ClipboardPrepDone>,
+    #[allow(dead_code)]
     pub started_at: Instant,
 }
 
@@ -2703,6 +2845,11 @@ pub struct CsvExportState {
     pub total: usize,
     pub done: usize,
     pub pending: HashSet<PathBuf>,
+    /// Pending rows not yet handed to the meta pool. Metadata jobs are
+    /// topped up from here each frame because the pool rejects new tasks
+    /// past its backlog cap on large lists; a one-shot mass enqueue would
+    /// silently drop most of a 500k-row export.
+    pub queue: Vec<PathBuf>,
     pub needs_peak: bool,
     pub needs_lufs: bool,
     pub started_at: Instant,

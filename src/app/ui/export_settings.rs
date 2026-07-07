@@ -254,8 +254,7 @@ impl crate::app::WavesPreviewer {
                                                 || !Self::is_dotfile_path(&item.path))
                                     });
                                     self.rebuild_item_indexes();
-                                    self.apply_filter_from_search();
-                                    self.apply_sort();
+                                    self.refresh_filter_then_sort();
                                 }
                             }
                             ui.horizontal_wrapped(|ui| {
@@ -318,6 +317,9 @@ impl crate::app::WavesPreviewer {
                                 ui.checkbox(&mut next_cols.bit_rate, "Bitrate");
                                 ui.checkbox(&mut next_cols.peak, "Peak");
                                 ui.checkbox(&mut next_cols.lufs, "LUFS");
+                                ui.checkbox(&mut next_cols.dbtp, "dBTP");
+                                ui.checkbox(&mut next_cols.lufs_s, "LUFS-S");
+                                ui.checkbox(&mut next_cols.lufs_m, "LUFS-M");
                                 ui.checkbox(&mut next_cols.bpm, "BPM");
                                 ui.checkbox(&mut next_cols.created_at, "Created");
                                 ui.checkbox(&mut next_cols.modified_at, "Modified");
@@ -340,6 +342,9 @@ impl crate::app::WavesPreviewer {
                                 || next_cols.bit_rate
                                 || next_cols.peak
                                 || next_cols.lufs
+                                || next_cols.dbtp
+                                || next_cols.lufs_s
+                                || next_cols.lufs_m
                                 || next_cols.bpm
                                 || next_cols.created_at
                                 || next_cols.modified_at
@@ -351,7 +356,7 @@ impl crate::app::WavesPreviewer {
                             if next_cols != self.list_columns {
                                 self.list_columns = next_cols;
                                 self.ensure_sort_key_visible();
-                                self.apply_sort();
+                                self.request_sort();
                             }
                             ui.separator();
                             ui.label("Editor:");

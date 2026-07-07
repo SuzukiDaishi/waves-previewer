@@ -38,6 +38,7 @@ impl super::WavesPreviewer {
         let (tx, rx) = std::sync::mpsc::channel::<LoopDetectWorkerEvent>();
 
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             let progress_tx = tx.clone();
             let mut last_progress = 0.0f32;
             let mut last_emit = Instant::now() - Duration::from_millis(250);

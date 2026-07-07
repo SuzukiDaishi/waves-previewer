@@ -45,6 +45,8 @@ fn check_canceled(cancel_requested: &Arc<AtomicBool>) -> Result<(), String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InferenceExecMode {
+    /// Only constructed on Windows (DirectML).
+    #[cfg_attr(not(windows), allow(dead_code))]
     DmlPreferred,
     CpuOnly,
 }

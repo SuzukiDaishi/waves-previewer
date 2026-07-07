@@ -17,7 +17,14 @@ impl WavesPreviewer {
 
     pub(super) fn run_frame_ui(&mut self, ui: &mut egui::Ui, frame_started: Instant) {
         let ctx = ui.ctx().clone();
+        let t_ws = Instant::now();
         let activate_path = self.run_frame_workspace(ui);
+        if std::env::var_os("NEOWAVES_BENCH_TRACE").is_some() {
+            let ms = t_ws.elapsed().as_secs_f64() * 1000.0;
+            if ms > 50.0 {
+                eprintln!("[trace] stage run_frame_workspace took {ms:.1}ms");
+            }
+        }
         let activated_tab_idx = self.run_frame_activation(&ctx, activate_path);
         if let Some(tab_idx) = activated_tab_idx {
             self.refresh_tool_preview_for_tab(tab_idx);
@@ -34,6 +41,22 @@ impl WavesPreviewer {
         frame_started: Instant,
         had_ui_input: bool,
     ) {
+        // Coarse per-stage tracing for benchmark hunts (NEOWAVES_BENCH_TRACE=1).
+        macro_rules! trace_stage {
+            ($name:expr, $body:expr) => {{
+                if std::env::var_os("NEOWAVES_BENCH_TRACE").is_some() {
+                    let t = Instant::now();
+                    let out = $body;
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    if ms > 50.0 {
+                        eprintln!("[trace] stage {} took {ms:.1}ms", $name);
+                    }
+                    out
+                } else {
+                    $body
+                }
+            }};
+        }
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
@@ -49,13 +72,18 @@ impl WavesPreviewer {
         self.playback_sync_state_snapshot();
         self.meter_db = self.current_output_meter_db();
         self.apply_effective_volume();
-        self.process_scan_messages();
-        self.pump_list_meta_prefetch();
+        trace_stage!("process_scan_messages", self.process_scan_messages());
+        trace_stage!("pump_list_jobs", {
+            if self.pump_list_jobs() {
+                ctx.request_repaint();
+            }
+        });
+        trace_stage!("pump_list_meta_prefetch", self.pump_list_meta_prefetch());
         self.process_ipc_requests();
         self.apply_pending_transcript_seek();
         self.process_tool_results();
         self.process_tool_queue();
-        self.apply_search_if_due();
+        trace_stage!("apply_search_if_due", self.apply_search_if_due());
         self.handle_screenshot_events(ctx);
         if ctx.input(|i| i.key_pressed(Key::F9)) {
             let path = self.default_screenshot_path();
@@ -64,8 +92,8 @@ impl WavesPreviewer {
         self.run_startup_actions(ctx);
         self.debug_tick(ctx);
         self.drain_heavy_preview_results();
-        self.drain_list_preview_results();
-        self.drain_list_preview_prefetch_results();
+        trace_stage!("drain_list_preview_results", self.drain_list_preview_results());
+        trace_stage!("drain_list_preview_prefetch_results", self.drain_list_preview_prefetch_results());
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
         self.drain_auto_trim_results();
@@ -86,7 +114,7 @@ impl WavesPreviewer {
         self.drain_music_ai_results(ctx);
         self.drain_music_preview_results(ctx);
         self.enforce_music_stem_cache_policy();
-        self.drain_meta_updates(ctx);
+        trace_stage!("drain_meta_updates", self.drain_meta_updates(ctx));
         self.drain_external_load_results(ctx);
         self.check_csv_export_completion();
         self.tick_bulk_resample();
@@ -767,8 +795,10 @@ impl WavesPreviewer {
             .shared
             .playing
             .load(std::sync::atomic::Ordering::Relaxed);
+        // Latency-sensitive states keep the 16ms cadence; background progress
+        // (scans, exports, metadata streams, analysis) repaints at 50ms so the
+        // UI thread does not spin at 60fps competing with saturated workers.
         let fast_repaint = playing
-            || self.scan_in_progress
             || self.processing.is_some()
             || self.playback_fx_state.is_some()
             || self.list_preview_rx.is_some()
@@ -776,16 +806,21 @@ impl WavesPreviewer {
             || self.editor_decode_state.is_some()
             || self.heavy_preview_rx.is_some()
             || self.heavy_overlay_rx.is_some()
-            || self.music_ai_state.is_some()
             || self.music_preview_state.is_some()
             || self.editor_apply_state.is_some()
-            || self.plugin_process_state.is_some()
+            || self.plugin_process_state.is_some();
+        let progress_repaint = self.scan_in_progress
+            || self.music_ai_state.is_some()
             || self.export_state.is_some()
             || self.csv_export_state.is_some()
             || self.bulk_resample_state.is_some()
+            || self.sort_job_active()
+            || self.filter_job_active()
             || !self.editor_feature_inflight.is_empty();
         let repaint_ms = if fast_repaint {
             16
+        } else if progress_repaint {
+            50
         } else if self.zoo_enabled && self.is_list_workspace_active() {
             50
         } else if self.zoo_enabled {

@@ -65,12 +65,12 @@ impl WavesPreviewer {
     }
 
     pub(super) fn item_for_path(&self, path: &Path) -> Option<&MediaItem> {
-        let id = *self.path_index.get(path)?;
+        let id = self.path_index.get(path)?;
         self.item_for_id(id)
     }
 
     pub(super) fn item_for_path_mut(&mut self, path: &Path) -> Option<&mut MediaItem> {
-        let id = *self.path_index.get(path)?;
+        let id = self.path_index.get(path)?;
         self.item_for_id_mut(id)
     }
 
@@ -90,7 +90,7 @@ impl WavesPreviewer {
         self.edited_cache
             .get(path)
             .and_then(|cached| cached.display_meta.as_ref())
-            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_ref()))
+            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_deref()))
     }
 
     pub(super) fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
@@ -181,8 +181,7 @@ impl WavesPreviewer {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
         let updated = if let Some(item) = self.item_for_path_mut(path) {
-            item.meta = Some(meta);
-            item.rebuild_search_cache();
+            item.meta = Some(Box::new(meta));
             if let Some(sr) = sr_hint {
                 self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
             }
@@ -298,7 +297,7 @@ impl WavesPreviewer {
     }
 
     pub(super) fn row_for_path(&self, path: &Path) -> Option<usize> {
-        let id = *self.path_index.get(path)?;
+        let id = self.path_index.get(path)?;
         self.files.iter().position(|&i| i == id)
     }
 
@@ -345,7 +344,7 @@ impl WavesPreviewer {
             } else if let Some(idx) = self.active_tab {
                 if let Some(tab) = self.tabs.get(idx) {
                     if let Some(id) = self.path_index.get(&tab.path) {
-                        return vec![*id];
+                        return vec![id];
                     }
                 }
             }
@@ -371,6 +370,9 @@ impl WavesPreviewer {
             SortKey::BitRate => cols.bit_rate,
             SortKey::Level => cols.peak,
             SortKey::Lufs => cols.lufs,
+            SortKey::TruePeak => cols.dbtp,
+            SortKey::LufsShort => cols.lufs_s,
+            SortKey::LufsMomentary => cols.lufs_m,
             SortKey::Bpm => cols.bpm,
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
@@ -403,6 +405,12 @@ impl WavesPreviewer {
             SortKey::Level
         } else if cols.lufs {
             SortKey::Lufs
+        } else if cols.dbtp {
+            SortKey::TruePeak
+        } else if cols.lufs_s {
+            SortKey::LufsShort
+        } else if cols.lufs_m {
+            SortKey::LufsMomentary
         } else if cols.bpm {
             SortKey::Bpm
         } else if cols.created_at {

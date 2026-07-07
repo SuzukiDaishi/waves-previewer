@@ -32,7 +32,7 @@ impl WavesPreviewer {
     pub(super) fn replace_path_in_state(&mut self, from: &Path, to: &Path) {
         self.invalidate_fs_exists_cache_for_path(from);
         self.invalidate_fs_exists_cache_for_path(to);
-        let Some(id) = self.path_index.get(from).copied() else {
+        let Some(id) = self.path_index.get(from) else {
             return;
         };
         let new_path = to.to_path_buf();
@@ -40,11 +40,11 @@ impl WavesPreviewer {
         if let Some(item) = self.item_for_id_mut(id) {
             item.path = new_path.clone();
             item.display_name = Self::display_name_for_path(&new_path);
-            item.display_folder = Self::display_folder_for_path(&new_path);
+            item.display_folder = std::sync::Arc::from(Self::display_folder_for_path(&new_path));
             item.source = MediaSource::File;
             item.virtual_audio = None;
             item.transcript = None;
-            item.external = external.unwrap_or_default();
+            item.set_external(external.unwrap_or_default());
         }
         self.path_index.remove(from);
         self.path_index.insert(new_path.clone(), id);
@@ -64,7 +64,7 @@ impl WavesPreviewer {
         if let Some(v) = self.edited_cache.remove(from) {
             self.edited_cache.insert(new_path.clone(), v);
         }
-        self.meta_inflight.remove(from);
+        self.cancel_meta_for_path(from);
         self.transcript_inflight.remove(from);
         self.transcript_ai_inflight.remove(from);
         self.spectro_inflight.remove(from);
@@ -170,8 +170,7 @@ impl WavesPreviewer {
                     tab.display_name = final_name.clone();
                 }
             }
-            self.apply_filter_from_search();
-            self.apply_sort();
+            self.refresh_filter_then_sort();
             return Ok(from.clone());
         }
 
@@ -187,8 +186,7 @@ impl WavesPreviewer {
         }
         std::fs::rename(from, &to).map_err(|e| format!("Rename failed: {e}"))?;
         self.replace_path_in_state(from, &to);
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         Ok(to)
     }
 
@@ -280,8 +278,7 @@ impl WavesPreviewer {
                 self.replace_path_in_state(src, dst);
             }
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         self.selected_multi.clear();
         for (_, dst) in mappings {
             if let Some(row) = self.row_for_path(&dst) {

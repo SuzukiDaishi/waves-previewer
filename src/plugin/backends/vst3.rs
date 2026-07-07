@@ -27,8 +27,11 @@ mod native {
         ProcessSetup, TChar,
     };
     use vst3::Steinberg::{IBStream, IBStreamTrait};
+    use vst3::Steinberg::IPlugView;
+    #[cfg(windows)]
+    use vst3::Steinberg::IPlugViewTrait;
+    #[cfg(windows)]
     use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
-    use vst3::Steinberg::{IPlugView, IPlugViewTrait};
     use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
     use vst3::{Class, ComPtr, ComWrapper, Interface, Steinberg};
     use base64::Engine;

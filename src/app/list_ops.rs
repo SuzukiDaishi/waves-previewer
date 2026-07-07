@@ -161,19 +161,15 @@ impl super::WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         self.ensure_meta_pool();
     }
 
     // Replace current list with explicit files (supported audio only). Root is cleared.
     pub(super) fn replace_with_files(&mut self, paths: &[PathBuf]) {
         self.root = None;
-        self.files.clear();
-        self.items.clear();
-        self.item_index.clear();
-        self.path_index.clear();
-        self.original_files.clear();
+        self.note_files_membership_changed();
+        self.drop_list_contents_in_background();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();

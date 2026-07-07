@@ -120,6 +120,7 @@ impl super::WavesPreviewer {
         }
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             let mut ok = 0usize;
             let mut failed = 0usize;
             let mut success_paths = Vec::new();
@@ -558,6 +559,7 @@ impl super::WavesPreviewer {
             .collect();
         let (tx, rx) = mpsc::channel::<ExportResult>();
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             let write_transcript_sidecar = |src: &Path,
                                             dst: &Path,
                                             cache: &HashMap<

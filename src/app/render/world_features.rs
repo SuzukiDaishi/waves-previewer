@@ -63,6 +63,7 @@ const DIO_TARGET_FS: f64 = 4000.0;
 /// F0 contour and CheapTrick spectral envelope for a mono clip.
 pub struct WorldFeatures {
     pub frame_period_ms: f64,
+    #[allow(dead_code)]
     pub sample_rate: u32,
     /// CheapTrick FFT size.
     pub fft_size: usize,

@@ -56,6 +56,7 @@ mod loop_detect_ops;
 mod loudnorm_ops;
 mod meta;
 mod meta_ops;
+mod sort_filter_jobs;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
@@ -116,6 +117,10 @@ const BULK_RESAMPLE_FRAME_BUDGET_MS: u64 = 3;
 const META_UPDATE_FRAME_BUDGET: usize = 256;
 const META_SORT_MIN_INTERVAL_MS: u64 = 120;
 const LIST_META_PREFETCH_BUDGET: usize = 64;
+// Max rows walked per frame by pump_list_meta_prefetch; keeps the idle scan
+// O(1) per frame on very large lists while the wrapping cursor preserves
+// full coverage over successive frames.
+const LIST_META_PREFETCH_SCAN_BUDGET: usize = 8_192;
 const LIST_PREVIEW_CACHE_MAX: usize = 48;
 const LIST_PREVIEW_PREFETCH_INFLIGHT_MAX: usize = 2;
 const LIST_BG_META_LARGE_THRESHOLD: usize = 8_000;
@@ -386,8 +391,12 @@ pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
     pub items: Vec<MediaItem>,
-    pub item_index: HashMap<MediaId, usize>,
-    pub path_index: HashMap<PathBuf, MediaId>,
+    pub item_index: rustc_hash::FxHashMap<MediaId, usize>,
+    // See types::PathIndex: growth must not re-hash a million PathBufs.
+    pub path_index: types::PathIndex,
+    /// Shared folder-name strings, keyed by parent directory (see
+    /// MediaItem::display_folder).
+    folder_intern: rustc_hash::FxHashMap<PathBuf, std::sync::Arc<str>>,
     pub files: Vec<MediaId>,
     pub next_media_id: MediaId,
     pub selected: Option<usize>,
@@ -421,7 +430,7 @@ pub struct WavesPreviewer {
     effect_graph: EffectGraphState,
     pub meta_rx: Option<std::sync::mpsc::Receiver<meta::MetaUpdate>>,
     pub meta_pool: Option<meta::MetaPool>,
-    pub meta_inflight: HashSet<PathBuf>,
+    pub meta_inflight: rustc_hash::FxHashSet<PathBuf>,
     meta_sort_pending: bool,
     /// Cached (computed_at, count) for the pending-gain scan; the topbar and
     /// list header read this every frame and a full O(n) item scan at 140k
@@ -556,6 +565,10 @@ pub struct WavesPreviewer {
     pub scan_worker_done: bool,
     pub scan_started_at: Option<std::time::Instant>,
     pub scan_found_count: usize,
+    /// Written directly by the scan worker (not via the message channel):
+    /// discovery runs far ahead of the budgeted appends, and the capacity
+    /// pre-reserve needs the live count to get ahead of hash-map growth.
+    scan_found_live: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     pub scan_visited_count: usize,
     pub scan_load_kind: Option<ListLoadKind>,
     scan_pending_target: Option<PendingListLoadTarget>,
@@ -566,7 +579,7 @@ pub struct WavesPreviewer {
     /// TTL cache for `Path::is_file()` checks in the list view. Probing the
     /// filesystem for every visible row on every frame stalls the UI thread,
     /// especially on network shares.
-    fs_exists_cache: HashMap<PathBuf, (bool, std::time::Instant)>,
+    fs_exists_cache: rustc_hash::FxHashMap<PathBuf, (bool, std::time::Instant)>,
     /// Compiled highlight regex for the current `(search_query, search_use_regex)`.
     /// `None` inner value means the query does not compile / is empty.
     search_highlight_cache: Option<(String, bool, Option<regex::Regex>)>,
@@ -602,7 +615,24 @@ pub struct WavesPreviewer {
     sort_loading_started_at: Option<std::time::Instant>,
     sort_loading_hold_until: Option<std::time::Instant>,
     sort_loading_last_ms: f32,
+    // Async sort/filter jobs (large lists): decorate is sliced across frames
+    // on the UI thread, the O(n log n) sort runs on a worker thread.
+    sort_job: Option<sort_filter_jobs::SortBuildJob>,
+    sort_rx: Option<std::sync::mpsc::Receiver<sort_filter_jobs::SortResult>>,
+    sort_request_seq: u64,
+    filter_job: Option<sort_filter_jobs::FilterJob>,
+    /// Retired sort snapshots, freed a slice per frame (see SortResult).
+    deferred_list_drop: Vec<(sort_filter_jobs::OwnedKey, String, types::MediaId)>,
+    // Bumped whenever list membership changes (append/remove/filter swap);
+    // stale async sort/filter results are discarded against this.
+    files_membership_revision: u64,
     // scroll behavior
+    /// First visible list row. The list renders only the visible window and
+    /// scrolls by row index (usize), so a 1M-row list never touches egui's
+    /// f32 scroll offsets (which quantize above ~16.7M px of content).
+    list_scroll_row: usize,
+    /// Sub-row wheel accumulation in rows.
+    list_scroll_residual: f32,
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,
@@ -733,7 +763,7 @@ pub struct WavesPreviewer {
     lufs_worker_busy: bool,
     // Sample rate conversion (non-destructive)
     sample_rate_override: HashMap<PathBuf, u32>,
-    sample_rate_probe_cache: HashMap<PathBuf, u32>,
+    sample_rate_probe_cache: rustc_hash::FxHashMap<PathBuf, u32>,
     bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
     format_override: HashMap<PathBuf, String>,
     src_quality: SrcQuality,
@@ -1470,11 +1500,22 @@ impl WavesPreviewer {
         self.record_list_update_from_paths(&paths, before_items, before);
     }
 
+    fn interned_display_folder(&mut self, path: &Path) -> std::sync::Arc<str> {
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        if let Some(existing) = self.folder_intern.get(parent) {
+            return existing.clone();
+        }
+        let folder: std::sync::Arc<str> =
+            std::sync::Arc::from(Self::display_folder_for_path(path));
+        self.folder_intern.insert(parent.to_path_buf(), folder.clone());
+        folder
+    }
+
     fn make_media_item(&mut self, path: PathBuf) -> MediaItem {
         let id = self.next_media_id;
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let display_name = Self::display_name_for_path(&path);
-        let display_folder = Self::display_folder_for_path(&path);
+        let display_folder = self.interned_display_folder(&path);
         let mut item = MediaItem {
             id,
             path,
@@ -1486,14 +1527,10 @@ impl WavesPreviewer {
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
-            external: HashMap::new(),
+            external: None,
             virtual_audio: None,
             virtual_state: None,
-            search_name: String::new(),
-            search_folder: String::new(),
-            search_meta_summary: String::new(),
         };
-        item.rebuild_search_cache();
         self.fill_external_for_item(&mut item);
         item
     }
@@ -1546,7 +1583,8 @@ impl WavesPreviewer {
         };
         let mut thumb = Vec::new();
         build_minmax(&mut thumb, &mono, 128);
-        let lufs_i = crate::wave::lufs_integrated_from_multi(channels, sample_rate).ok();
+        let loudness = crate::wave::loudness_metrics_from_multi(channels, sample_rate).ok();
+        let lufs_i = loudness.map(|l| l.lufs_i);
         let bpm = None;
         let duration_secs = if sample_rate > 0 {
             Some(frames as f32 / sample_rate as f32)
@@ -1569,6 +1607,9 @@ impl WavesPreviewer {
             peak_db: Some(peak_db),
             peak_db_estimate: false,
             lufs_i,
+            lufs_m_max: loudness.and_then(|l| l.lufs_m_max),
+            lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
+            true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
             created_at: None,
             modified_at: None,
@@ -1607,25 +1648,21 @@ impl WavesPreviewer {
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let safe = crate::app::helpers::sanitize_filename_component(&display_name);
         let path = PathBuf::from("__virtual__").join(format!("{id}_{safe}"));
-        let mut item = MediaItem {
+        let item = MediaItem {
             id,
             path,
             display_name,
-            display_folder: "(virtual)".to_string(),
+            display_folder: std::sync::Arc::from("(virtual)"),
             source: MediaSource::Virtual,
-            meta,
+            meta: meta.map(Box::new),
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
-            external: HashMap::new(),
+            external: None,
             virtual_audio: Some(audio),
             virtual_state,
-            search_name: String::new(),
-            search_folder: String::new(),
-            search_meta_summary: String::new(),
         };
-        item.rebuild_search_cache();
         item
     }
 
@@ -1838,6 +1875,15 @@ impl WavesPreviewer {
         if cols.lufs {
             header.push("LUFS (I)".to_string());
         }
+        if cols.dbtp {
+            header.push("dBTP".to_string());
+        }
+        if cols.lufs_s {
+            header.push("LUFS-S".to_string());
+        }
+        if cols.lufs_m {
+            header.push("LUFS-M".to_string());
+        }
         if cols.bpm {
             header.push("BPM".to_string());
         }
@@ -1874,7 +1920,7 @@ impl WavesPreviewer {
                 row.push(item.display_name.clone());
             }
             if cols.folder {
-                row.push(item.display_folder.clone());
+                row.push(item.display_folder.to_string());
             }
             if cols.transcript {
                 row.push(
@@ -1886,7 +1932,7 @@ impl WavesPreviewer {
             }
             if cols.external {
                 for name in external_cols.iter() {
-                    row.push(item.external.get(name).cloned().unwrap_or_default());
+                    row.push(item.external_value(name).cloned().unwrap_or_default());
                 }
             }
             if cols.length {
@@ -1940,6 +1986,24 @@ impl WavesPreviewer {
                     .copied()
                     .or_else(|| base.map(|v| v + gain_db));
                 row.push(eff.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.dbtp {
+                let adj = meta
+                    .and_then(|m| m.true_peak_db)
+                    .map(|db| db + item.pending_gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.lufs_s {
+                let adj = meta
+                    .and_then(|m| m.lufs_s_max)
+                    .map(|db| db + item.pending_gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.lufs_m {
+                let adj = meta
+                    .and_then(|m| m.lufs_m_max)
+                    .map(|db| db + item.pending_gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
             }
             if cols.bpm {
                 let bpm = meta
@@ -2006,8 +2070,7 @@ impl WavesPreviewer {
             Vec::new()
         };
         let needs_peak = cols.peak;
-        let needs_lufs = cols.lufs;
-        let needs_full_decode = needs_peak || needs_lufs;
+        let needs_lufs = cols.lufs || cols.dbtp || cols.lufs_s || cols.lufs_m;
         let needs_meta = cols.length
             || cols.channels
             || cols.sample_rate
@@ -2049,13 +2112,11 @@ impl WavesPreviewer {
             return;
         }
 
-        for p in pending.iter() {
-            if needs_full_decode {
-                self.queue_full_meta_for_path(p, false);
-            } else {
-                self.queue_meta_for_path(p, false);
-            }
-        }
+        // Metadata jobs are streamed from `queue` by
+        // check_csv_export_completion each frame; enqueueing everything here
+        // would hit the meta pool's large-list backlog cap and silently drop
+        // most rows (the export would then never complete).
+        let queue: Vec<PathBuf> = pending.iter().cloned().collect();
         self.csv_export_state = Some(CsvExportState {
             path,
             ids,
@@ -2064,6 +2125,7 @@ impl WavesPreviewer {
             total,
             done,
             pending,
+            queue,
             needs_peak,
             needs_lufs,
             started_at: std::time::Instant::now(),
@@ -2089,10 +2151,18 @@ impl WavesPreviewer {
                     state.done = state.done.saturating_add(1);
                 }
             }
+        } else if !self.meta_inflight.contains(path) {
+            // A finished job (e.g. a header-only pass queued by a visible
+            // row) did not produce what the export needs; put the row back
+            // so the streaming top-up retries it with a full task.
+            if let Some(state) = &mut self.csv_export_state {
+                state.queue.push(path.to_path_buf());
+            }
         }
     }
 
     fn check_csv_export_completion(&mut self) {
+        self.pump_csv_export_meta_queue();
         let ready = self
             .csv_export_state
             .as_ref()
@@ -2108,6 +2178,34 @@ impl WavesPreviewer {
             self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols)
         {
             self.debug_log(format!("csv export error: {err}"));
+        }
+    }
+
+    /// Hand a bounded batch of pending CSV-export rows to the meta pool each
+    /// frame. Rows whose task is already inflight are skipped here; if that
+    /// task finishes without satisfying the export, the progress handler
+    /// pushes them back onto the queue.
+    fn pump_csv_export_meta_queue(&mut self) {
+        const CSV_META_QUEUE_BUDGET: usize = 64;
+        let mut to_queue: Vec<(PathBuf, bool)> = Vec::new();
+        if let Some(state) = &mut self.csv_export_state {
+            let needs_full_decode = state.needs_peak || state.needs_lufs;
+            while to_queue.len() < CSV_META_QUEUE_BUDGET {
+                let Some(p) = state.queue.pop() else {
+                    break;
+                };
+                if !state.pending.contains(&p) || self.meta_inflight.contains(&p) {
+                    continue;
+                }
+                to_queue.push((p, needs_full_decode));
+            }
+        }
+        for (p, needs_full_decode) in to_queue {
+            if needs_full_decode {
+                self.queue_full_meta_for_path(&p, false);
+            } else {
+                self.queue_meta_for_path(&p, false);
+            }
         }
     }
 
