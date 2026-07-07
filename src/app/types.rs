@@ -60,49 +60,44 @@ pub struct MediaItem {
     pub id: MediaId,
     pub path: PathBuf,
     pub display_name: String,
-    pub display_folder: String,
+    /// Interned per parent directory: at 1M files the folder string is
+    /// repeated thousands of times, so rows share one allocation.
+    pub display_folder: std::sync::Arc<str>,
     pub source: MediaSource,
-    pub meta: Option<FileMeta>,
+    /// Boxed: `FileMeta` is ~200 bytes and most rows of a freshly loaded
+    /// 1M-file list have no metadata yet; inline storage wasted ~200MB.
+    pub meta: Option<Box<FileMeta>>,
     pub pending_gain_db: f32,
     pub status: MediaStatus,
     /// Arc so cloning a `MediaItem` (the list view clones one per visible row)
     /// does not deep-copy the full transcript text and segments.
     pub transcript: Option<Arc<Transcript>>,
     pub transcript_language: Option<String>,
-    pub external: HashMap<String, String>,
+    /// External CSV/Excel row values. Boxed option: most rows have none and
+    /// an inline empty HashMap cost 48 bytes per item at 1M files.
+    pub external: Option<Box<HashMap<String, String>>>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
     pub virtual_state: Option<VirtualState>,
-    /// Pre-lowercased display_name for search. Rebuilt by rebuild_search_cache().
-    pub search_name: String,
-    /// Pre-lowercased display_folder for search. Rebuilt by rebuild_search_cache().
-    pub search_folder: String,
-    /// Pre-built meta summary string ("sr:48000 bits:24 ...") for search. Rebuilt by rebuild_search_cache().
-    pub search_meta_summary: String,
 }
 
 impl MediaItem {
-    pub fn rebuild_search_cache(&mut self) {
-        self.search_name = self.display_name.to_lowercase();
-        self.search_folder = self.display_folder.to_lowercase();
-        self.search_meta_summary = self
-            .meta
-            .as_ref()
-            .map(|m| {
-                format!(
-                    "sr:{} bits:{} br:{} ch:{} len:{:.2} peak:{:.1} lufs:{:.1} bpm:{:.1}",
-                    m.sample_rate,
-                    m.bits_per_sample,
-                    m.bit_rate_bps.unwrap_or(0),
-                    m.channels,
-                    m.duration_secs.unwrap_or(0.0),
-                    m.peak_db.unwrap_or(0.0),
-                    m.lufs_i.unwrap_or(0.0),
-                    m.bpm.unwrap_or(0.0)
-                )
-            })
-            .unwrap_or_default();
+    pub fn external_value(&self, key: &str) -> Option<&String> {
+        self.external.as_ref().and_then(|m| m.get(key))
+    }
+
+    pub fn set_external(&mut self, map: HashMap<String, String>) {
+        self.external = if map.is_empty() {
+            None
+        } else {
+            Some(Box::new(map))
+        };
+    }
+
+    pub fn clear_external(&mut self) {
+        self.external = None;
     }
 }
+
 
 #[derive(Clone, Debug)]
 pub struct ExternalSource {

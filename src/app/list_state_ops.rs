@@ -90,7 +90,7 @@ impl WavesPreviewer {
         self.edited_cache
             .get(path)
             .and_then(|cached| cached.display_meta.as_ref())
-            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_ref()))
+            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_deref()))
     }
 
     pub(super) fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
@@ -181,8 +181,7 @@ impl WavesPreviewer {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
         let updated = if let Some(item) = self.item_for_path_mut(path) {
-            item.meta = Some(meta);
-            item.rebuild_search_cache();
+            item.meta = Some(Box::new(meta));
             if let Some(sr) = sr_hint {
                 self.sample_rate_probe_cache.insert(path.to_path_buf(), sr);
             }

@@ -1903,7 +1903,7 @@ impl super::WavesPreviewer {
         let Some(item) = self.item_for_path(path) else {
             return false;
         };
-        let mut meta = item.meta.clone().unwrap_or(FileMeta {
+        let mut meta = item.meta.as_deref().cloned().unwrap_or(FileMeta {
             channels: 1,
             sample_rate: 44_100,
             bits_per_sample: 16,

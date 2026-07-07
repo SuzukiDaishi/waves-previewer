@@ -14,6 +14,7 @@ impl WavesPreviewer {
             items: Vec::new(),
             item_index: HashMap::new(),
             path_index: HashMap::new(),
+            folder_intern: HashMap::new(),
             files: Vec::new(),
             next_media_id: 1,
             selected: None,

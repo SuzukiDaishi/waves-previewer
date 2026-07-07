@@ -27,6 +27,7 @@ impl WavesPreviewer {
         self.path_index.clear();
         self.files.clear();
         self.original_files.clear();
+        self.folder_intern.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();

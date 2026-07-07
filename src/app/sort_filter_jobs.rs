@@ -134,7 +134,7 @@ impl WavesPreviewer {
                     .map(|d| d.as_secs_f64()),
             ),
             SortKey::External(idx) => match self.external_visible_columns.get(idx) {
-                Some(col) => OwnedKey::Str(item.external.get(col).cloned().unwrap_or_default()),
+                Some(col) => OwnedKey::Str(item.external_value(col).cloned().unwrap_or_default()),
                 None => OwnedKey::Missing,
             },
         }
@@ -319,12 +319,10 @@ impl WavesPreviewer {
                 return true;
             }
         }
-        if item
-            .external
-            .values()
-            .any(|v| v.to_lowercase().contains(query_lower))
-        {
-            return true;
+        if let Some(ext) = item.external.as_ref() {
+            if ext.values().any(|v| v.to_lowercase().contains(query_lower)) {
+                return true;
+            }
         }
         false
     }
@@ -343,8 +341,10 @@ impl WavesPreviewer {
                 return true;
             }
         }
-        if item.external.values().any(|v| re.is_match(v)) {
-            return true;
+        if let Some(ext) = item.external.as_ref() {
+            if ext.values().any(|v| re.is_match(v)) {
+                return true;
+            }
         }
         false
     }

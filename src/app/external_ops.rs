@@ -61,27 +61,25 @@ impl WavesPreviewer {
                 id: self.next_media_id,
                 path: self.external_unmatched_path_for_row(row_idx),
                 display_name: key.clone(),
-                display_folder: "(external)".to_string(),
+                display_folder: std::sync::Arc::from("(external)"),
                 source: MediaSource::External,
                 meta: None,
                 pending_gain_db: 0.0,
                 status: crate::app::types::MediaStatus::Ok,
                 transcript: None,
                 transcript_language: None,
-                external: HashMap::new(),
+                external: None,
                 virtual_audio: None,
                 virtual_state: None,
-                search_name: String::new(),
-                search_folder: String::new(),
-                search_meta_summary: String::new(),
             };
-            item.rebuild_search_cache();
             self.next_media_id = self.next_media_id.wrapping_add(1);
             for (idx, header) in self.external_headers.iter().enumerate() {
                 if let Some(val) = row.get(idx) {
                     let trimmed = val.trim();
                     if !trimmed.is_empty() {
-                        item.external.insert(header.clone(), trimmed.to_string());
+                        item.external
+                            .get_or_insert_with(Default::default)
+                            .insert(header.clone(), trimmed.to_string());
                     }
                 }
             }
@@ -96,9 +94,9 @@ impl WavesPreviewer {
 
     pub(super) fn fill_external_for_item(&self, item: &mut MediaItem) {
         if item.source == MediaSource::File {
-            item.external = self.external_row_for_path(&item.path).unwrap_or_default();
+            item.set_external(self.external_row_for_path(&item.path).unwrap_or_default());
         } else {
-            item.external.clear();
+            item.clear_external();
         }
     }
 
@@ -228,13 +226,13 @@ impl WavesPreviewer {
         self.external_unmatched_rows.clear();
         if self.external_sources.is_empty() {
             for item in &mut self.items {
-                item.external.clear();
+                item.clear_external();
             }
             return;
         }
         if self.external_lookup.is_empty() {
             for item in &mut self.items {
-                item.external.clear();
+                item.clear_external();
             }
             self.external_unmatched_count = self.items.len();
             return;
@@ -264,7 +262,7 @@ impl WavesPreviewer {
             if let Some(scope) = &scope_re {
                 let path_str = item.path.to_string_lossy().to_string();
                 if !scope.is_match(&path_str) {
-                    item.external.clear();
+                    item.clear_external();
                     unmatched += 1;
                     continue;
                 }
@@ -285,10 +283,10 @@ impl WavesPreviewer {
                 }
             }
             if let Some(found) = row {
-                item.external = found;
+                item.set_external(found);
                 hit = true;
             } else {
-                item.external.clear();
+                item.clear_external();
             }
             if hit {
                 matched += 1;
@@ -392,7 +390,7 @@ impl WavesPreviewer {
         self.pending_external_restore = None;
         self.clear_external_unmatched_items();
         for item in &mut self.items {
-            item.external.clear();
+            item.clear_external();
         }
         self.refresh_filter_then_sort();
     }

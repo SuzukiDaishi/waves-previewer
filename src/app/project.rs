@@ -1186,8 +1186,7 @@ impl super::WavesPreviewer {
             let mut item = self.make_media_item(p.clone());
             if !p.is_file() {
                 item.status = super::types::MediaStatus::DecodeFailed(describe_missing(&p));
-                item.meta = Some(missing_file_meta(&p));
-                item.rebuild_search_cache();
+                item.meta = Some(Box::new(missing_file_meta(&p)));
             }
             let id = item.id;
             self.path_index.insert(p, id);

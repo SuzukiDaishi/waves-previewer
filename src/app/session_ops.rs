@@ -1132,15 +1132,14 @@ impl super::WavesPreviewer {
                     } else {
                         entry.display_name.clone()
                     };
-                    item.display_folder = "(virtual)".to_string();
+                    item.display_folder = std::sync::Arc::from("(virtual)");
                     item.source = MediaSource::Virtual;
                     item.status = super::types::MediaStatus::Ok;
-                    item.meta = Some(super::WavesPreviewer::build_meta_from_audio(
+                    item.meta = Some(Box::new(super::WavesPreviewer::build_meta_from_audio(
                         &channels,
                         sample_rate,
                         bits_per_sample,
-                    ));
-                    item.rebuild_search_cache();
+                    )));
                     item.virtual_audio = Some(audio);
                     item.virtual_state = Some(VirtualState {
                         source: source.clone(),
@@ -1195,8 +1194,7 @@ impl super::WavesPreviewer {
                         item.status = super::types::MediaStatus::DecodeFailed(
                             "Virtual restore failed".to_string(),
                         );
-                        item.meta = Some(missing_file_meta(&path));
-                        item.rebuild_search_cache();
+                        item.meta = Some(Box::new(missing_file_meta(&path)));
                         item.virtual_state = Some(VirtualState {
                             source: virtual_source_from_project(&entry.source, &base_dir),
                             op_chain: virtual_ops_from_project(&entry.op_chain),
@@ -1457,8 +1455,7 @@ impl super::WavesPreviewer {
                     item.source = MediaSource::Virtual;
                     item.status =
                         super::types::MediaStatus::DecodeFailed(describe_missing(&tab_path));
-                    item.meta = Some(missing_file_meta(&tab_path));
-                    item.rebuild_search_cache();
+                    item.meta = Some(Box::new(missing_file_meta(&tab_path)));
                     if item.virtual_state.is_none() {
                         item.virtual_state = Some(VirtualState {
                             source: VirtualSourceRef::FilePath(tab_path.clone()),

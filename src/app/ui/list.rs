@@ -534,7 +534,7 @@ impl crate::app::WavesPreviewer {
                                         let label_resp = ui
                                             .add(
                                                 egui::Label::new(
-                                                    RichText::new(parent.as_str())
+                                                    RichText::new(parent.as_ref())
                                                         .monospace()
                                                         .size(text_height * 1.0),
                                                 )
@@ -561,7 +561,7 @@ impl crate::app::WavesPreviewer {
                                             }
                                         }
                                         if label_resp.hovered() {
-                                            label_resp.on_hover_text(&parent);
+                                            label_resp.on_hover_text(parent.as_ref());
                                         }
                                     },
                                 );
@@ -673,7 +673,7 @@ impl crate::app::WavesPreviewer {
                                     let label_widget = {
                                         let value = self
                                             .item_for_id(id)
-                                            .and_then(|it| it.external.get(name))
+                                            .and_then(|it| it.external_value(name))
                                             .map(|v| v.as_str())
                                             .unwrap_or("");
                                         egui::Label::new(
@@ -698,7 +698,7 @@ impl crate::app::WavesPreviewer {
                                     if label_resp.hovered() {
                                         let hover_value = self
                                             .item_for_id(id)
-                                            .and_then(|it| it.external.get(name))
+                                            .and_then(|it| it.external_value(name))
                                             .filter(|v| !v.is_empty())
                                             .cloned();
                                         if let Some(hover_value) = hover_value {

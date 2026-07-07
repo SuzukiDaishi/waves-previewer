@@ -377,10 +377,11 @@ mod tests {
             .and_then(|s| s.to_str())
             .unwrap_or("item.wav")
             .to_string();
-        let display_folder = path
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let display_folder: std::sync::Arc<str> = std::sync::Arc::from(
+            path.parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        );
         let item = MediaItem {
             id,
             path: path.clone(),
@@ -395,9 +396,6 @@ mod tests {
             external: Default::default(),
             virtual_audio: None,
             virtual_state: None,
-            search_name: String::new(),
-            search_folder: String::new(),
-            search_meta_summary: String::new(),
         };
         app.items.push(item);
         app.files.push(id);

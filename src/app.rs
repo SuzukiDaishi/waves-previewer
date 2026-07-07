@@ -393,6 +393,9 @@ pub struct WavesPreviewer {
     pub items: Vec<MediaItem>,
     pub item_index: HashMap<MediaId, usize>,
     pub path_index: HashMap<PathBuf, MediaId>,
+    /// Shared folder-name strings, keyed by parent directory (see
+    /// MediaItem::display_folder).
+    folder_intern: HashMap<PathBuf, std::sync::Arc<str>>,
     pub files: Vec<MediaId>,
     pub next_media_id: MediaId,
     pub selected: Option<usize>,
@@ -1484,11 +1487,22 @@ impl WavesPreviewer {
         self.record_list_update_from_paths(&paths, before_items, before);
     }
 
+    fn interned_display_folder(&mut self, path: &Path) -> std::sync::Arc<str> {
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        if let Some(existing) = self.folder_intern.get(parent) {
+            return existing.clone();
+        }
+        let folder: std::sync::Arc<str> =
+            std::sync::Arc::from(Self::display_folder_for_path(path));
+        self.folder_intern.insert(parent.to_path_buf(), folder.clone());
+        folder
+    }
+
     fn make_media_item(&mut self, path: PathBuf) -> MediaItem {
         let id = self.next_media_id;
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let display_name = Self::display_name_for_path(&path);
-        let display_folder = Self::display_folder_for_path(&path);
+        let display_folder = self.interned_display_folder(&path);
         let mut item = MediaItem {
             id,
             path,
@@ -1500,14 +1514,10 @@ impl WavesPreviewer {
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
-            external: HashMap::new(),
+            external: None,
             virtual_audio: None,
             virtual_state: None,
-            search_name: String::new(),
-            search_folder: String::new(),
-            search_meta_summary: String::new(),
         };
-        item.rebuild_search_cache();
         self.fill_external_for_item(&mut item);
         item
     }
@@ -1621,25 +1631,21 @@ impl WavesPreviewer {
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let safe = crate::app::helpers::sanitize_filename_component(&display_name);
         let path = PathBuf::from("__virtual__").join(format!("{id}_{safe}"));
-        let mut item = MediaItem {
+        let item = MediaItem {
             id,
             path,
             display_name,
-            display_folder: "(virtual)".to_string(),
+            display_folder: std::sync::Arc::from("(virtual)"),
             source: MediaSource::Virtual,
-            meta,
+            meta: meta.map(Box::new),
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
-            external: HashMap::new(),
+            external: None,
             virtual_audio: Some(audio),
             virtual_state,
-            search_name: String::new(),
-            search_folder: String::new(),
-            search_meta_summary: String::new(),
         };
-        item.rebuild_search_cache();
         item
     }
 
@@ -1888,7 +1894,7 @@ impl WavesPreviewer {
                 row.push(item.display_name.clone());
             }
             if cols.folder {
-                row.push(item.display_folder.clone());
+                row.push(item.display_folder.to_string());
             }
             if cols.transcript {
                 row.push(
@@ -1900,7 +1906,7 @@ impl WavesPreviewer {
             }
             if cols.external {
                 for name in external_cols.iter() {
-                    row.push(item.external.get(name).cloned().unwrap_or_default());
+                    row.push(item.external_value(name).cloned().unwrap_or_default());
                 }
             }
             if cols.length {

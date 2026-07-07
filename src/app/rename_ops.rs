@@ -40,11 +40,11 @@ impl WavesPreviewer {
         if let Some(item) = self.item_for_id_mut(id) {
             item.path = new_path.clone();
             item.display_name = Self::display_name_for_path(&new_path);
-            item.display_folder = Self::display_folder_for_path(&new_path);
+            item.display_folder = std::sync::Arc::from(Self::display_folder_for_path(&new_path));
             item.source = MediaSource::File;
             item.virtual_audio = None;
             item.transcript = None;
-            item.external = external.unwrap_or_default();
+            item.set_external(external.unwrap_or_default());
         }
         self.path_index.remove(from);
         self.path_index.insert(new_path.clone(), id);
