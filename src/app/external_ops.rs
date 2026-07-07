@@ -90,8 +90,7 @@ impl WavesPreviewer {
         }
         if added_any {
             self.rebuild_item_indexes();
-            self.apply_filter_from_search();
-            self.apply_sort();
+            self.refresh_filter_then_sort();
         }
     }
 
@@ -367,8 +366,7 @@ impl WavesPreviewer {
         self.rebuild_external_merged();
         self.external_settings_dirty = false;
         self.apply_external_mapping();
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         Ok(())
     }
 
@@ -396,8 +394,7 @@ impl WavesPreviewer {
         for item in &mut self.items {
             item.external.clear();
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
     }
 
     pub(super) fn sync_active_external_source(&mut self) {

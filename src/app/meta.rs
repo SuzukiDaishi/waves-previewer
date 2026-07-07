@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -112,6 +112,9 @@ pub enum MetaUpdate {
     },
     Full(PathBuf, FileMeta),
     Transcript(PathBuf, Option<Transcript>),
+    /// A queued-or-running task was cancelled; the UI must drop the path from
+    /// its inflight set so the row can be re-requested later.
+    Cancelled(PathBuf),
 }
 
 fn task_path(task: &MetaTask) -> &PathBuf {
@@ -124,8 +127,26 @@ fn task_path(task: &MetaTask) -> &PathBuf {
     }
 }
 
+/// Pending work as a per-path task map plus two FIFO lanes of paths.
+/// Every operation (enqueue, promote, cancel, pop) is O(1); stale lane
+/// entries (path no longer in `tasks`) are skipped at pop time. The old
+/// single-VecDeque design made `promote_path` a linear scan under the lock,
+/// which the UI thread paid for every visible row every frame.
+struct QueueInner {
+    tasks: HashMap<PathBuf, MetaTask>,
+    /// High-priority lane: visible rows, near-selected rows, active tab.
+    hi: VecDeque<PathBuf>,
+    /// Background lane: prefetch pumps, CSV export top-ups.
+    lo: VecDeque<PathBuf>,
+    /// Paths currently sitting in `hi` (avoids duplicate pushes when a row
+    /// promotes itself every frame while visible).
+    promoted: HashSet<PathBuf>,
+    /// Cancel flags for tasks a worker has already started.
+    running: HashMap<PathBuf, Arc<AtomicBool>>,
+}
+
 struct MetaQueue {
-    queue: Mutex<VecDeque<MetaTask>>,
+    inner: Mutex<QueueInner>,
     cv: Condvar,
     stop: AtomicBool,
 }
@@ -136,24 +157,45 @@ pub struct MetaPool {
 
 impl MetaPool {
     pub fn enqueue(&self, task: MetaTask) {
-        let mut q = self.shared.queue.lock().unwrap();
-        q.push_back(task);
+        let path = task_path(&task).clone();
+        let mut inner = self.shared.inner.lock().unwrap();
+        if inner.tasks.insert(path.clone(), task).is_none() {
+            inner.lo.push_back(path);
+        }
         self.shared.cv.notify_one();
     }
 
     pub fn enqueue_front(&self, task: MetaTask) {
-        let mut q = self.shared.queue.lock().unwrap();
-        q.push_front(task);
+        let path = task_path(&task).clone();
+        let mut inner = self.shared.inner.lock().unwrap();
+        inner.tasks.insert(path.clone(), task);
+        if inner.promoted.insert(path.clone()) {
+            inner.hi.push_front(path);
+        }
         self.shared.cv.notify_one();
     }
 
     pub fn promote_path(&self, path: &PathBuf) {
-        let mut q = self.shared.queue.lock().unwrap();
-        if let Some(pos) = q.iter().position(|task| task_path(task) == path) {
-            let task = q.remove(pos).unwrap_or(MetaTask::Header(path.clone()));
-            q.push_front(task);
+        let mut inner = self.shared.inner.lock().unwrap();
+        if inner.tasks.contains_key(path) && inner.promoted.insert(path.clone()) {
+            inner.hi.push_front(path.clone());
             self.shared.cv.notify_one();
         }
+    }
+
+    /// Cancel work for a path. Queued tasks are dropped before they start;
+    /// a task already running has its cancel flag raised and stops at the
+    /// next stage boundary. Returns true if a queued (not yet started) task
+    /// was removed — in that case no `MetaUpdate` will arrive and the caller
+    /// must clear its own inflight bookkeeping.
+    pub fn cancel_path(&self, path: &Path) -> bool {
+        let mut inner = self.shared.inner.lock().unwrap();
+        inner.promoted.remove(path);
+        let removed = inner.tasks.remove(path).is_some();
+        if let Some(flag) = inner.running.get(path) {
+            flag.store(true, Ordering::Relaxed);
+        }
+        removed
     }
 }
 
@@ -416,7 +458,13 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
     let shared = Arc::new(MetaQueue {
-        queue: Mutex::new(VecDeque::new()),
+        inner: Mutex::new(QueueInner {
+            tasks: HashMap::new(),
+            hi: VecDeque::new(),
+            lo: VecDeque::new(),
+            promoted: HashSet::new(),
+            running: HashMap::new(),
+        }),
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
     });
@@ -425,12 +473,35 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
         let shared = Arc::clone(&shared);
         let tx = tx.clone();
         std::thread::spawn(move || {
+            // Decode workers must never compete with the UI thread for CPU;
+            // on a saturated machine this is the difference between a
+            // responsive list and frozen buttons.
+            crate::app::threading::lower_current_thread_priority();
             loop {
-                let task_opt = {
-                    let mut guard = shared.queue.lock().unwrap();
+                let popped = {
+                    let mut guard = shared.inner.lock().unwrap();
                     loop {
-                        if let Some(p) = guard.pop_front() {
-                            break Some(p);
+                        let next_path = loop {
+                            if let Some(p) = guard.hi.pop_front() {
+                                guard.promoted.remove(&p);
+                                if guard.tasks.contains_key(&p) {
+                                    break Some(p);
+                                }
+                                continue; // stale lane entry
+                            }
+                            if let Some(p) = guard.lo.pop_front() {
+                                if guard.tasks.contains_key(&p) {
+                                    break Some(p);
+                                }
+                                continue;
+                            }
+                            break None;
+                        };
+                        if let Some(p) = next_path {
+                            let task = guard.tasks.remove(&p).expect("task checked above");
+                            let cancel = Arc::new(AtomicBool::new(false));
+                            guard.running.insert(p, Arc::clone(&cancel));
+                            break Some((task, cancel));
                         }
                         if shared.stop.load(Ordering::Relaxed) {
                             break None;
@@ -438,64 +509,85 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                         guard = shared.cv.wait(guard).unwrap();
                     }
                 };
-                let Some(task) = task_opt else {
+                let Some((task, cancel)) = popped else {
                     break;
                 };
-
-                let (p, do_header, do_decode) = match task {
-                    MetaTask::Header(path) => (path, true, true),
-                    MetaTask::HeaderOnly(path) => (path, true, false),
-                    MetaTask::Decode(path) => (path, false, true),
-                    MetaTask::Transcript(path) => {
-                        let transcript_data = transcript::srt_path_for_audio(&path)
-                            .and_then(|p| transcript::load_srt(&p));
-                        let _ = tx.send(MetaUpdate::Transcript(path, transcript_data));
-                        continue;
-                    }
-                    MetaTask::External(_) => {
-                        continue;
-                    }
-                };
-
-                // Stage 1: quick header-only metadata
-                let mut header_meta_opt: Option<FileMeta> = None;
-                if do_header {
-                    match header_meta(&p) {
-                        Ok(meta) => {
-                            let _ = tx.send(MetaUpdate::Header {
-                                path: p.clone(),
-                                meta: meta.clone(),
-                                finalized: !do_decode,
-                            });
-                            header_meta_opt = Some(meta);
-                        }
-                        Err(err_meta) => {
-                            let _ = tx.send(MetaUpdate::Full(p.clone(), err_meta));
-                            continue;
-                        }
-                    }
-                }
-
-                if do_decode {
-                    // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
-                    if let Some(full) = decode_full_meta(&p) {
-                        let _ = tx.send(MetaUpdate::Full(p.clone(), full));
-                    } else if let Some(mut header_meta) = header_meta_opt {
-                        header_meta.decode_error = Some("Decode failed".to_string());
-                        header_meta.rms_db = None;
-                        header_meta.peak_db = None;
-                        header_meta.lufs_i = None;
-                        header_meta.thumb.clear();
-                        let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
-                    }
-                } else if let Some(header_meta) = header_meta_opt {
-                    // Header-only tasks are finalized here intentionally.
-                    let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
-                }
+                let task_path_owned = task_path(&task).clone();
+                run_meta_task(task, &cancel, &tx);
+                let mut guard = shared.inner.lock().unwrap();
+                guard.running.remove(&task_path_owned);
             }
         });
     }
     (MetaPool { shared }, rx)
+}
+
+fn run_meta_task(
+    task: MetaTask,
+    cancel: &AtomicBool,
+    tx: &std::sync::mpsc::Sender<MetaUpdate>,
+) {
+    let (p, do_header, do_decode) = match task {
+        MetaTask::Header(path) => (path, true, true),
+        MetaTask::HeaderOnly(path) => (path, true, false),
+        MetaTask::Decode(path) => (path, false, true),
+        MetaTask::Transcript(path) => {
+            let transcript_data =
+                transcript::srt_path_for_audio(&path).and_then(|p| transcript::load_srt(&p));
+            let _ = tx.send(MetaUpdate::Transcript(path, transcript_data));
+            return;
+        }
+        MetaTask::External(_) => {
+            return;
+        }
+    };
+
+    if cancel.load(Ordering::Relaxed) {
+        let _ = tx.send(MetaUpdate::Cancelled(p));
+        return;
+    }
+
+    // Stage 1: quick header-only metadata
+    let mut header_meta_opt: Option<FileMeta> = None;
+    if do_header {
+        match header_meta(&p) {
+            Ok(meta) => {
+                let _ = tx.send(MetaUpdate::Header {
+                    path: p.clone(),
+                    meta: meta.clone(),
+                    finalized: !do_decode,
+                });
+                header_meta_opt = Some(meta);
+            }
+            Err(err_meta) => {
+                let _ = tx.send(MetaUpdate::Full(p.clone(), err_meta));
+                return;
+            }
+        }
+    }
+
+    if do_decode {
+        // Stage boundary: skip the expensive full decode when the task was
+        // cancelled while the header stage ran.
+        if cancel.load(Ordering::Relaxed) {
+            let _ = tx.send(MetaUpdate::Cancelled(p));
+            return;
+        }
+        // Stage 2: decode and compute RMS/thumbnail/LUFS(I)
+        if let Some(full) = decode_full_meta(&p) {
+            let _ = tx.send(MetaUpdate::Full(p.clone(), full));
+        } else if let Some(mut header_meta) = header_meta_opt {
+            header_meta.decode_error = Some("Decode failed".to_string());
+            header_meta.rms_db = None;
+            header_meta.peak_db = None;
+            header_meta.lufs_i = None;
+            header_meta.thumb.clear();
+            let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
+        }
+    } else if let Some(header_meta) = header_meta_opt {
+        // Header-only tasks are finalized here intentionally.
+        let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
+    }
 }
 
 #[cfg(test)]

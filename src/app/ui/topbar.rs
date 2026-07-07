@@ -30,10 +30,7 @@ impl crate::app::WavesPreviewer {
     }
 
     fn ui_topbar_apply_search_now(&mut self) {
-        self.apply_filter_from_search();
-        if self.sort_dir != crate::app::types::SortDir::None {
-            self.apply_sort();
-        }
+        self.refresh_filter_then_sort();
         self.search_dirty = false;
         self.search_deadline = None;
     }

@@ -50,6 +50,9 @@ impl WavesPreviewer {
         self.meter_db = self.current_output_meter_db();
         self.apply_effective_volume();
         self.process_scan_messages();
+        if self.pump_list_jobs() {
+            ctx.request_repaint();
+        }
         self.pump_list_meta_prefetch();
         self.process_ipc_requests();
         self.apply_pending_transcript_seek();
@@ -767,8 +770,10 @@ impl WavesPreviewer {
             .shared
             .playing
             .load(std::sync::atomic::Ordering::Relaxed);
+        // Latency-sensitive states keep the 16ms cadence; background progress
+        // (scans, exports, metadata streams, analysis) repaints at 50ms so the
+        // UI thread does not spin at 60fps competing with saturated workers.
         let fast_repaint = playing
-            || self.scan_in_progress
             || self.processing.is_some()
             || self.playback_fx_state.is_some()
             || self.list_preview_rx.is_some()
@@ -776,16 +781,21 @@ impl WavesPreviewer {
             || self.editor_decode_state.is_some()
             || self.heavy_preview_rx.is_some()
             || self.heavy_overlay_rx.is_some()
-            || self.music_ai_state.is_some()
             || self.music_preview_state.is_some()
             || self.editor_apply_state.is_some()
-            || self.plugin_process_state.is_some()
+            || self.plugin_process_state.is_some();
+        let progress_repaint = self.scan_in_progress
+            || self.music_ai_state.is_some()
             || self.export_state.is_some()
             || self.csv_export_state.is_some()
             || self.bulk_resample_state.is_some()
+            || self.sort_job_active()
+            || self.filter_job_active()
             || !self.editor_feature_inflight.is_empty();
         let repaint_ms = if fast_repaint {
             16
+        } else if progress_repaint {
+            50
         } else if self.zoo_enabled && self.is_list_workspace_active() {
             50
         } else if self.zoo_enabled {

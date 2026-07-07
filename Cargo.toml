@@ -92,6 +92,9 @@ opt-level = 3
 [build-dependencies]
 windows_exe_info = "0.5.2"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4.1"
 drag = "2.1.1"

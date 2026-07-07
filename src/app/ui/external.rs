@@ -95,8 +95,7 @@ impl crate::app::WavesPreviewer {
                                 self.sync_active_external_source();
                                 self.rebuild_external_merged();
                                 self.apply_external_mapping();
-                                self.apply_filter_from_search();
-                                self.apply_sort();
+                                self.refresh_filter_then_sort();
                             }
                         }
                     }
@@ -252,8 +251,7 @@ impl crate::app::WavesPreviewer {
                     self.external_key_index = Some(key_idx);
                     self.rebuild_external_merged();
                     self.apply_external_mapping();
-                    self.apply_filter_from_search();
-                    self.apply_sort();
+                    self.refresh_filter_then_sort();
                     let key_name = self.external_headers[key_idx].clone();
                     self.external_visible_columns.retain(|c| c != &key_name);
                     if self.external_visible_columns.is_empty() {
@@ -289,8 +287,7 @@ impl crate::app::WavesPreviewer {
                 if rule != self.external_key_rule {
                     self.external_key_rule = rule;
                     self.apply_external_mapping();
-                    self.apply_filter_from_search();
-                    self.apply_sort();
+                    self.refresh_filter_then_sort();
                 }
                 if self.external_key_rule == crate::app::types::ExternalKeyRule::Regex {
                     ui.separator();
@@ -351,8 +348,7 @@ impl crate::app::WavesPreviewer {
                     });
                     if regex_changed {
                         self.apply_external_mapping();
-                        self.apply_filter_from_search();
-                        self.apply_sort();
+                        self.refresh_filter_then_sort();
                     }
                 }
                 ui.separator();
@@ -369,8 +365,7 @@ impl crate::app::WavesPreviewer {
                 });
                 if scope_changed {
                     self.apply_external_mapping();
-                    self.apply_filter_from_search();
-                    self.apply_sort();
+                    self.refresh_filter_then_sort();
                 }
                 ui.separator();
                 ui.label(RichText::new("Visible Columns").strong());
@@ -394,7 +389,7 @@ impl crate::app::WavesPreviewer {
                             self.sort_dir = crate::app::types::SortDir::None;
                         }
                     }
-                    self.apply_sort();
+                    self.request_sort();
                 }
                 ui.separator();
                 let mut show_unmatched = self.external_show_unmatched;

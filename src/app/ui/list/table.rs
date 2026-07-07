@@ -447,7 +447,7 @@ impl WavesPreviewer {
         if render.sort_changed {
             self.list_meta_prefetch_cursor = 0;
             self.prime_sort_metadata_prefetch();
-            self.apply_sort();
+            self.request_sort();
         }
         if let Some(path) = render.to_open.as_ref() {
             self.open_or_activate_tab(path);

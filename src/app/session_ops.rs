@@ -1215,8 +1215,7 @@ impl super::WavesPreviewer {
                 self.debug_log(missing_errors.join("\n"));
             }
             self.rebuild_item_indexes();
-            self.apply_filter_from_search();
-            self.apply_sort();
+            self.refresh_filter_then_sort();
         }
 
         for item in project.list.items.iter() {

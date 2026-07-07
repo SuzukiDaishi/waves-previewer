@@ -38,7 +38,7 @@ impl super::WavesPreviewer {
         (waveform_minmax, Some(waveform_pyramid))
     }
 
-    fn option_num_order_f64(a: Option<f64>, b: Option<f64>, dir: SortDir) -> std::cmp::Ordering {
+    pub(super) fn option_num_order_f64(a: Option<f64>, b: Option<f64>, dir: SortDir) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (a, b) {
             (Some(va), Some(vb)) => {
@@ -56,7 +56,7 @@ impl super::WavesPreviewer {
         }
     }
 
-    fn string_order(a: &str, b: &str, dir: SortDir) -> std::cmp::Ordering {
+    pub(super) fn string_order(a: &str, b: &str, dir: SortDir) -> std::cmp::Ordering {
         let ord = a.cmp(b);
         match dir {
             SortDir::Asc => ord,
@@ -1914,7 +1914,7 @@ impl super::WavesPreviewer {
             return;
         }
         let is_virtual = item_snapshot.source == crate::app::types::MediaSource::Virtual;
-        if !is_virtual && !p_owned.is_file() {
+        if !is_virtual && !self.path_is_file_cached(&p_owned) {
             self.remove_missing_path(&p_owned);
             return;
         }
@@ -2250,8 +2250,9 @@ impl super::WavesPreviewer {
         self.path_index.remove(&path_buf);
         self.files.retain(|&fid| fid != id);
         self.original_files.retain(|&fid| fid != id);
+        self.note_files_membership_changed();
 
-        self.meta_inflight.remove(&path_buf);
+        self.cancel_meta_for_path(&path_buf);
         self.transcript_inflight.remove(&path_buf);
         self.transcript_ai_inflight.remove(&path_buf);
         self.purge_spectro_cache_entry(&path_buf);
@@ -2273,8 +2274,7 @@ impl super::WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         self.selected = selected_path.and_then(|p| self.row_for_path(&p));
         self.selected_multi.clear();
         for p in selected_paths {
@@ -2346,9 +2346,10 @@ impl super::WavesPreviewer {
         self.rebuild_item_indexes();
         self.files.retain(|id| !removed_ids.contains(id));
         self.original_files.retain(|id| !removed_ids.contains(id));
+        self.note_files_membership_changed();
 
         for path in unique.iter() {
-            self.meta_inflight.remove(path);
+            self.cancel_meta_for_path(path);
             self.transcript_inflight.remove(path);
             self.transcript_ai_inflight.remove(path);
             self.purge_spectro_cache_entry(path);
@@ -2371,8 +2372,7 @@ impl super::WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         self.selected = selected_path.and_then(|p| self.row_for_path(&p));
         self.selected_multi.clear();
         for p in selected_paths {
@@ -2403,6 +2403,7 @@ impl super::WavesPreviewer {
         }
     }
     pub fn rescan(&mut self) {
+        self.note_files_membership_changed();
         self.files.clear();
         self.items.clear();
         self.item_index.clear();
@@ -2427,8 +2428,7 @@ impl super::WavesPreviewer {
         if let Some(root) = &self.root {
             self.start_scan_folder(root.clone());
         } else {
-            self.apply_filter_from_search();
-            self.apply_sort();
+            self.refresh_filter_then_sort();
         }
     }
 
@@ -2439,77 +2439,23 @@ impl super::WavesPreviewer {
         // Search spans display name, folder, transcript, meta summary, and external fields.
         if query.is_empty() {
             self.files = self.items.iter().map(|item| item.id).collect();
-        } else if self.search_use_regex {
-            let re = RegexBuilder::new(&query).case_insensitive(true).build();
-            if let Ok(re) = re {
-                self.files = self
-                    .items
-                    .iter()
-                    .filter(|item| {
-                        let transcript = item
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.full_text.as_str())
-                            .unwrap_or("");
-                        let external_hit = item.external.values().any(|v| re.is_match(v));
-                        re.is_match(&item.search_name)
-                            || re.is_match(&item.search_folder)
-                            || re.is_match(transcript)
-                            || re.is_match(&item.search_meta_summary)
-                            || external_hit
-                    })
-                    .map(|item| item.id)
-                    .collect();
-            } else {
-                // Regex parse failed; fall back to case-insensitive substring matching.
-                let q = query.to_lowercase();
-                self.files = self
-                    .items
-                    .iter()
-                    .filter(|item| {
-                        let transcript = item
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.full_text.to_lowercase())
-                            .unwrap_or_default();
-                        let external_hit = item
-                            .external
-                            .values()
-                            .any(|v| v.to_lowercase().contains(&q));
-                        item.search_name.contains(&q)
-                            || item.search_folder.contains(&q)
-                            || transcript.contains(&q)
-                            || item.search_meta_summary.contains(&q)
-                            || external_hit
-                    })
-                    .map(|item| item.id)
-                    .collect();
-            }
         } else {
+            // Invalid regexes fall back to case-insensitive substring matching.
+            let regex = if self.search_use_regex {
+                RegexBuilder::new(&query).case_insensitive(true).build().ok()
+            } else {
+                None
+            };
             let q = query.to_lowercase();
             self.files = self
                 .items
                 .iter()
-                .filter(|item| {
-                    let transcript = item
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.full_text.to_lowercase())
-                        .unwrap_or_default();
-                    let external_hit = item
-                        .external
-                        .values()
-                        .any(|v| v.to_lowercase().contains(&q));
-                    item.search_name.contains(&q)
-                        || item.search_folder.contains(&q)
-                        || transcript.contains(&q)
-                        || item.search_meta_summary.contains(&q)
-                        || external_hit
-                })
+                .filter(|item| Self::item_matches_filter(item, &q, regex.as_ref()))
                 .map(|item| item.id)
                 .collect();
         }
         self.original_files = self.files.clone();
+        self.note_files_membership_changed();
         // restore selected index
         self.selected = selected_idx.and_then(|idx| self.files.iter().position(|&x| x == idx));
         self.search_dirty = false;
@@ -2529,140 +2475,22 @@ impl super::WavesPreviewer {
         if dir == SortDir::None {
             self.files = self.original_files.clone();
         } else {
-            use std::borrow::Cow;
-            use std::cmp::Ordering;
-            use std::time::UNIX_EPOCH;
-
-            // Decorate-sort-undecorate: compute one sort key per row up front
-            // (O(n) hash lookups) so the O(n log n) comparisons stay cheap.
-            enum RowKey<'a> {
-                Str(Cow<'a, str>),
-                Num(Option<f64>),
-                Missing,
-            }
-
-            let items = &self.items;
-            let item_index = &self.item_index;
-            let lufs_override = &self.lufs_override;
-            let external_cols = &self.external_visible_columns;
-            let sample_rate_override = &self.sample_rate_override;
-            let bit_depth_override = &self.bit_depth_override;
-
-            let mut decorated: Vec<(RowKey<'_>, &str, MediaId)> = self
+            use super::sort_filter_jobs::OwnedKey;
+            // Decorate-sort-undecorate with owned keys, shared with the async
+            // sort job. The owned clones only cost on this small-list path;
+            // large lists go through request_sort() and sort off-thread.
+            let mut decorated: Vec<(OwnedKey, String, MediaId)> = self
                 .files
                 .iter()
-                .map(|&id| {
-                    let item = item_index.get(&id).and_then(|&idx| items.get(idx));
-                    let Some(item) = item else {
-                        return (RowKey::Missing, "", id);
-                    };
-                    let m = item.meta.as_ref();
-                    let row_key = match key {
-                        SortKey::File => RowKey::Str(Cow::Borrowed(item.display_name.as_str())),
-                        SortKey::Folder => {
-                            RowKey::Str(Cow::Borrowed(item.display_folder.as_str()))
-                        }
-                        SortKey::Transcript => RowKey::Str(Cow::Borrowed(
-                            item.transcript
-                                .as_ref()
-                                .map(|t| t.full_text.as_str())
-                                .unwrap_or(""),
-                        )),
-                        SortKey::Type => RowKey::Str(Self::list_type_sort_key(item)),
-                        SortKey::Length => RowKey::Num(
-                            m.and_then(|m| m.duration_secs)
-                                .filter(|v| v.is_finite())
-                                .map(|v| v as f64),
-                        ),
-                        SortKey::Channels => RowKey::Num(
-                            m.map(|m| m.channels as f64).filter(|v| *v > 0.0),
-                        ),
-                        SortKey::SampleRate => RowKey::Num(
-                            sample_rate_override
-                                .get(&item.path)
-                                .copied()
-                                .or_else(|| m.map(|m| m.sample_rate))
-                                .filter(|v| *v > 0)
-                                .map(|v| v as f64),
-                        ),
-                        SortKey::Bits => RowKey::Num(
-                            bit_depth_override
-                                .get(&item.path)
-                                .copied()
-                                .map(|v| v.bits_per_sample())
-                                .or_else(|| m.map(|m| m.bits_per_sample))
-                                .filter(|v| *v > 0)
-                                .map(|v| v as f64),
-                        ),
-                        SortKey::BitRate => RowKey::Num(
-                            m.and_then(|m| m.bit_rate_bps)
-                                .map(|v| v as f64)
-                                .filter(|v| *v > 0.0),
-                        ),
-                        SortKey::Level => RowKey::Num(
-                            m.and_then(|m| m.peak_db)
-                                .filter(|v| v.is_finite())
-                                .map(|v| v as f64),
-                        ),
-                        // LUFS sorting uses effective value: override if present, else base + gain.
-                        SortKey::Lufs => {
-                            let v = if let Some(v) = lufs_override.get(&item.path).copied() {
-                                v
-                            } else {
-                                m.and_then(|m| m.lufs_i.map(|x| x + item.pending_gain_db))
-                                    .unwrap_or(f32::NAN)
-                            };
-                            RowKey::Num(v.is_finite().then_some(v as f64))
-                        }
-                        SortKey::Bpm => RowKey::Num(
-                            m.and_then(|m| m.bpm)
-                                .filter(|v| v.is_finite() && *v > 0.0)
-                                .map(|v| v as f64),
-                        ),
-                        SortKey::CreatedAt => RowKey::Num(
-                            m.and_then(|m| m.created_at)
-                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs_f64()),
-                        ),
-                        SortKey::ModifiedAt => RowKey::Num(
-                            m.and_then(|m| m.modified_at)
-                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs_f64()),
-                        ),
-                        SortKey::External(idx) => match external_cols.get(idx) {
-                            Some(col) => RowKey::Str(Cow::Borrowed(
-                                item.external.get(col).map(|v| v.as_str()).unwrap_or(""),
-                            )),
-                            None => RowKey::Missing,
-                        },
-                    };
-                    (row_key, item.display_name.as_str(), id)
+                .map(|&id| match self.item_for_id(id) {
+                    Some(item) => {
+                        (self.owned_sort_key(item, key), item.display_name.clone(), id)
+                    }
+                    None => (OwnedKey::Missing, String::new(), id),
                 })
                 .collect();
-
-            // Unstable sort: no O(n) merge buffer, and measurably faster on
-            // 100k+ rows. Determinism comes from the full tie-break below.
-            // Equal keys tie-break by display name, then by MediaId (scan
-            // order). Numeric keys such as sample rate tie constantly on big
-            // lists, so the tie-break dominates the whole sort; the previous
-            // component-wise Path::cmp fallback made a 500k-row sort take
-            // multiple seconds on its own.
-            decorated.sort_unstable_by(|a, b| {
-                let ord = match (&a.0, &b.0) {
-                    (RowKey::Missing, _) | (_, RowKey::Missing) => return Ordering::Equal,
-                    (RowKey::Str(x), RowKey::Str(y)) => Self::string_order(x, y, dir),
-                    (RowKey::Num(x), RowKey::Num(y)) => Self::option_num_order_f64(*x, *y, dir),
-                    _ => Ordering::Equal,
-                };
-                if ord == Ordering::Equal {
-                    a.1.cmp(b.1).then_with(|| a.2.cmp(&b.2))
-                } else {
-                    ord
-                }
-            });
-
-            let sorted: Vec<MediaId> = decorated.into_iter().map(|entry| entry.2).collect();
-            self.files = sorted;
+            decorated.sort_unstable_by(|a, b| Self::compare_decorated_rows(a, b, dir));
+            self.files = decorated.into_iter().map(|e| e.2).collect();
         }
 
         // restore selection to the same path if possible
@@ -2935,6 +2763,7 @@ impl super::WavesPreviewer {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             let mut batch: Vec<PathBuf> = Vec::with_capacity(128);
             let mut seen = HashSet::new();
             let mut visited = 0usize;

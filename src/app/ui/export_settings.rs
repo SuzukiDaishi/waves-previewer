@@ -254,8 +254,7 @@ impl crate::app::WavesPreviewer {
                                                 || !Self::is_dotfile_path(&item.path))
                                     });
                                     self.rebuild_item_indexes();
-                                    self.apply_filter_from_search();
-                                    self.apply_sort();
+                                    self.refresh_filter_then_sort();
                                 }
                             }
                             ui.horizontal_wrapped(|ui| {
@@ -351,7 +350,7 @@ impl crate::app::WavesPreviewer {
                             if next_cols != self.list_columns {
                                 self.list_columns = next_cols;
                                 self.ensure_sort_key_visible();
-                                self.apply_sort();
+                                self.request_sort();
                             }
                             ui.separator();
                             ui.label("Editor:");

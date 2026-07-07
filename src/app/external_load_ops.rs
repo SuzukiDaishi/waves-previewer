@@ -56,8 +56,7 @@ impl super::WavesPreviewer {
         self.external_show_unmatched = restore.show_unmatched;
         self.sync_active_external_source();
         self.apply_external_mapping();
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
     }
 
     pub(super) fn drain_external_load_results(&mut self, ctx: &egui::Context) {

@@ -1160,6 +1160,7 @@ impl super::WavesPreviewer {
 
     pub(super) fn reset_list_from_project(&mut self, raw_paths: &[String], base_dir: &Path) {
         self.root = None;
+        self.note_files_membership_changed();
         self.files.clear();
         self.items.clear();
         self.item_index.clear();

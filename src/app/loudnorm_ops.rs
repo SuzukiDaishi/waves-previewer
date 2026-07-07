@@ -58,6 +58,7 @@ impl super::WavesPreviewer {
         self.lufs_rx2 = Some(rx);
         self.lufs_worker_busy = true;
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             let started = std::time::Instant::now();
             let res = (|| -> anyhow::Result<f32> {
                 let (mut chans, sr) = crate::wave::decode_wav_multi(&path)?;

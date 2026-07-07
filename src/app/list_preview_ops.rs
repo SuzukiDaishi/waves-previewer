@@ -260,6 +260,7 @@ impl super::WavesPreviewer {
         let settings = self.preview_settings_for_path(&path);
         self.list_preview_prefetch_inflight.insert(path.clone());
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             let _ = max_secs;
             let entry = match crate::wave::decode_wav_multi(&path) {
                 Ok((channels, in_sr)) => {

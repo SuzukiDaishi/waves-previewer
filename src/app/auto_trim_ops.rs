@@ -44,6 +44,7 @@ impl super::WavesPreviewer {
         let (tx, rx) = std::sync::mpsc::channel::<AutoTrimWorkerResult>();
 
         std::thread::spawn(move || {
+            crate::app::threading::lower_current_thread_priority();
             // Whole-buffer level stats so the UI can show noise floor / peak /
             // effective threshold in dB regardless of which ranges were scanned.
             let stats = auto_trim::analyze_levels(&ch_samples, &config);

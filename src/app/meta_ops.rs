@@ -38,10 +38,13 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn reset_meta_pool(&mut self) {
+        // Reserve one core for the UI/audio threads; the workers also run at
+        // lowered OS priority (see spawn_meta_pool).
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4)
-            .min(6);
+            .saturating_sub(1)
+            .clamp(1, 6);
         let (pool, rx) = crate::app::meta::spawn_meta_pool(workers);
         self.meta_pool = Some(pool);
         self.meta_rx = Some(rx);
@@ -57,6 +60,19 @@ impl super::WavesPreviewer {
         if self.meta_pool.is_none() {
             self.reset_meta_pool();
         }
+    }
+
+    /// Cancel any queued or running metadata job for a path (e.g. when the
+    /// file is removed from the list) and clear the inflight marker so the
+    /// row can be re-requested later if it comes back.
+    pub(super) fn cancel_meta_for_path(&mut self, path: &std::path::Path) {
+        if let Some(pool) = &self.meta_pool {
+            // Queued tasks are dropped silently (no update will arrive);
+            // running tasks send MetaUpdate::Cancelled, which is a harmless
+            // second remove after the one below.
+            let _ = pool.cancel_path(path);
+        }
+        self.meta_inflight.remove(path);
     }
 
     /// Backlog guard for large lists: a row that is (or was) visible enqueues
@@ -310,7 +326,13 @@ impl super::WavesPreviewer {
                 })
                 .unwrap_or(true);
         if due {
-            self.apply_sort();
+            if self.sort_job_active() {
+                // An async sort is already running; let it finish and pick up
+                // the accumulated changes on the next interval.
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            self.request_sort();
             self.meta_sort_pending = false;
             self.meta_sort_last_applied = Some(now);
             ctx.request_repaint();
@@ -333,6 +355,9 @@ impl super::WavesPreviewer {
         };
         let mut updates: Vec<meta::MetaUpdate> = Vec::new();
         let mut drained = 0usize;
+        // Cap by count AND wall time: applying an update allocates (meta box,
+        // art eviction), and a deep backlog must not own the frame.
+        let drain_started = std::time::Instant::now();
         while drained < crate::app::META_UPDATE_FRAME_BUDGET {
             match rx.try_recv() {
                 Ok(update) => {
@@ -341,6 +366,9 @@ impl super::WavesPreviewer {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+            if drained % 32 == 0 && drain_started.elapsed().as_micros() > 1_000 {
+                break;
             }
         }
         if updates.is_empty() {
@@ -382,6 +410,9 @@ impl super::WavesPreviewer {
                         }
                     }
                 }
+                meta::MetaUpdate::Cancelled(p) => {
+                    self.meta_inflight.remove(&p);
+                }
             }
         }
         if refilter {
@@ -406,7 +437,9 @@ impl super::WavesPreviewer {
                 self.meta_sort_pending = true;
             }
             self.flush_pending_meta_sort(ctx, false);
-            ctx.request_repaint();
+            // Metadata streaming does not need 60fps repaints; 15fps keeps the
+            // list visibly filling in while leaving CPU to the workers.
+            ctx.request_repaint_after(std::time::Duration::from_millis(66));
         }
         if drained >= crate::app::META_UPDATE_FRAME_BUDGET {
             // Avoid a stall by continuing to consume backlog in future frames.

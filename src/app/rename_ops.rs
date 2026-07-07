@@ -64,7 +64,7 @@ impl WavesPreviewer {
         if let Some(v) = self.edited_cache.remove(from) {
             self.edited_cache.insert(new_path.clone(), v);
         }
-        self.meta_inflight.remove(from);
+        self.cancel_meta_for_path(from);
         self.transcript_inflight.remove(from);
         self.transcript_ai_inflight.remove(from);
         self.spectro_inflight.remove(from);
@@ -170,8 +170,7 @@ impl WavesPreviewer {
                     tab.display_name = final_name.clone();
                 }
             }
-            self.apply_filter_from_search();
-            self.apply_sort();
+            self.refresh_filter_then_sort();
             return Ok(from.clone());
         }
 
@@ -187,8 +186,7 @@ impl WavesPreviewer {
         }
         std::fs::rename(from, &to).map_err(|e| format!("Rename failed: {e}"))?;
         self.replace_path_in_state(from, &to);
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         Ok(to)
     }
 
@@ -280,8 +278,7 @@ impl WavesPreviewer {
                 self.replace_path_in_state(src, dst);
             }
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
         self.selected_multi.clear();
         for (_, dst) in mappings {
             if let Some(row) = self.row_for_path(&dst) {

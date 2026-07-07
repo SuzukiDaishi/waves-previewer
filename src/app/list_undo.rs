@@ -154,8 +154,7 @@ impl crate::app::WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
     }
 
     fn apply_list_remove_items(&mut self, items: &[ListUndoItem]) {
@@ -228,8 +227,7 @@ impl crate::app::WavesPreviewer {
                 }
             }
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
     }
 
     fn push_list_undo_action(&mut self, action: ListUndoAction) {

@@ -21,6 +21,7 @@ impl WavesPreviewer {
 
     fn reset_list_contents_for_folder_load(&mut self) {
         self.clear_list_load_runtime();
+        self.note_files_membership_changed();
         self.items.clear();
         self.item_index.clear();
         self.path_index.clear();
@@ -55,6 +56,7 @@ impl WavesPreviewer {
     }
 
     fn reset_list_contents_for_explicit_replace(&mut self) {
+        self.note_files_membership_changed();
         self.root = None;
         self.clear_list_load_runtime();
         self.files.clear();
@@ -164,14 +166,14 @@ impl WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        self.apply_filter_from_search();
-        self.apply_sort();
+        self.refresh_filter_then_sort();
     }
 
     pub(super) fn append_scanned_paths(&mut self, batch: Vec<PathBuf>) {
         if batch.is_empty() {
             return;
         }
+        self.note_files_membership_changed();
         let has_search = !self.search_query.trim().is_empty();
         let query = self.search_query.to_lowercase();
         self.items.reserve(batch.len());

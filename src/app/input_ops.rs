@@ -169,7 +169,7 @@ impl super::WavesPreviewer {
             }
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
                 self.search_use_regex = !self.search_use_regex;
-                self.apply_filter_from_search();
+                self.refresh_filter_then_sort();
             }
         }
 

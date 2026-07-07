@@ -56,6 +56,7 @@ mod loop_detect_ops;
 mod loudnorm_ops;
 mod meta;
 mod meta_ops;
+mod sort_filter_jobs;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
@@ -606,6 +607,15 @@ pub struct WavesPreviewer {
     sort_loading_started_at: Option<std::time::Instant>,
     sort_loading_hold_until: Option<std::time::Instant>,
     sort_loading_last_ms: f32,
+    // Async sort/filter jobs (large lists): decorate is sliced across frames
+    // on the UI thread, the O(n log n) sort runs on a worker thread.
+    sort_job: Option<sort_filter_jobs::SortBuildJob>,
+    sort_rx: Option<std::sync::mpsc::Receiver<sort_filter_jobs::SortResult>>,
+    sort_request_seq: u64,
+    filter_job: Option<sort_filter_jobs::FilterJob>,
+    // Bumped whenever list membership changes (append/remove/filter swap);
+    // stale async sort/filter results are discarded against this.
+    files_membership_revision: u64,
     // scroll behavior
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
