@@ -785,6 +785,7 @@ mod native {
         instance: PluginInstance<ClapHostHandlers>,
         gui_ext: PluginGui,
         gui_open: bool,
+        #[allow(dead_code)]
         gui_is_floating: bool,
         params_ext: Option<PluginParams>,
         state_ext: Option<PluginState>,

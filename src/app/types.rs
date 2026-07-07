@@ -1456,6 +1456,7 @@ pub struct SessionSidecarJob {
 pub struct SessionSaveState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<Result<PathBuf, String>>,
+    #[allow(dead_code)]
     pub started_at: std::time::Instant,
 }
 
@@ -2638,6 +2639,7 @@ pub struct ClipboardPrepDone {
 /// In-flight background clipboard preparation (decode + temp WAV export).
 pub struct ClipboardPrepState {
     pub rx: std::sync::mpsc::Receiver<ClipboardPrepDone>,
+    #[allow(dead_code)]
     pub started_at: Instant,
 }
 

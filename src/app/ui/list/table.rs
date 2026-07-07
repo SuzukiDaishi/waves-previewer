@@ -18,7 +18,9 @@ impl WavesPreviewer {
         let avail_h = ui.available_height();
         let visible_rows = ((avail_h - header_h) / row_h).floor().max(1.0) as usize;
         ui.set_min_width(ui.available_width());
-        let row_count = self.files.len().max(12);
+        // Rows actually rendered: the visible window plus one partial row,
+        // with a floor so tiny viewports still show a usable list.
+        let row_count = (visible_rows + 1).max(12);
         let external_cols = if cols.external {
             self.external_visible_columns.clone()
         } else {
@@ -61,11 +63,107 @@ impl WavesPreviewer {
                     .is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(300)))
     }
 
+    /// Update the row-window scroll state from wheel input, selection
+    /// auto-scroll, and list length. Runs before the table is built so this
+    /// frame renders the final window (no one-frame lag on jumps).
+    pub(super) fn update_list_scroll_state(
+        &mut self,
+        ctx: &egui::Context,
+        metrics: &ListViewMetrics,
+        allow_auto_scroll: bool,
+    ) {
+        let total = self.files.len();
+        let visible = metrics.visible_rows.max(1);
+        let max_start = total.saturating_sub(visible);
+        // Wheel scrolling accumulates fractional rows; the window itself
+        // always starts on a whole row (index-based, precise at any size).
+        if metrics.pointer_over_list {
+            let dy = ctx.input(|i| i.smooth_scroll_delta.y);
+            if dy != 0.0 && total > visible {
+                self.list_scroll_residual -= dy / metrics.row_h.max(1.0);
+                let whole = self.list_scroll_residual.trunc();
+                if whole != 0.0 {
+                    self.list_scroll_residual -= whole;
+                    let delta = whole as i64;
+                    let cur = self.list_scroll_row as i64;
+                    self.list_scroll_row =
+                        (cur + delta).clamp(0, max_start as i64) as usize;
+                }
+            }
+        }
+        if allow_auto_scroll {
+            if let Some(sel) = self.selected.filter(|&s| s < total) {
+                // Keep the selected row centered, matching the old
+                // scroll_to_row(sel, Align::Center) behavior.
+                self.list_scroll_row = sel.saturating_sub(visible / 2).min(max_start);
+                self.scroll_to_selected = false;
+            }
+        }
+        self.list_scroll_row = self.list_scroll_row.min(max_start);
+    }
+
+    /// Custom index-based scrollbar for the list. The thumb maps directly to
+    /// `list_scroll_row` in f64, so it stays pixel-accurate at 1M rows where
+    /// egui's own f32 scroll offsets quantize.
+    pub(super) fn ui_list_scrollbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        metrics: &ListViewMetrics,
+    ) {
+        let total = self.files.len();
+        let visible = metrics.visible_rows.max(1);
+        if total <= visible {
+            return;
+        }
+        const BAR_W: f32 = 12.0;
+        let list_rect = metrics.list_rect;
+        let bar_rect = egui::Rect::from_min_max(
+            egui::pos2(list_rect.right() - BAR_W, list_rect.top() + metrics.header_h),
+            list_rect.right_bottom(),
+        );
+        let id = ui.id().with("list_vscroll_custom");
+        let resp = ui.interact(bar_rect, id, egui::Sense::click_and_drag());
+        let track_h = bar_rect.height().max(1.0);
+        let thumb_h = ((visible as f64 / total as f64) * track_h as f64)
+            .max(24.0_f64.min(track_h as f64 * 0.5)) as f32;
+        let denom = (total - visible) as f64;
+        if (resp.dragged() || resp.clicked()) && denom > 0.0 {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let frac = ((pos.y - bar_rect.top() - thumb_h * 0.5)
+                    / (track_h - thumb_h).max(1.0)) as f64;
+                let row = (frac.clamp(0.0, 1.0) * denom).round() as usize;
+                self.list_scroll_row = row.min(total - visible);
+                self.last_list_scroll_at = Some(std::time::Instant::now());
+            }
+        }
+        let frac = if denom > 0.0 {
+            (self.list_scroll_row as f64 / denom).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let thumb_top = bar_rect.top() + frac as f32 * (track_h - thumb_h).max(0.0);
+        let visuals = ui.style().visuals.clone();
+        ui.painter().rect_filled(
+            bar_rect,
+            0.0,
+            visuals.extreme_bg_color.gamma_multiply(0.5),
+        );
+        let thumb_rect = egui::Rect::from_min_max(
+            egui::pos2(bar_rect.left() + 2.0, thumb_top),
+            egui::pos2(bar_rect.right() - 2.0, thumb_top + thumb_h),
+        );
+        let thumb_color = if resp.hovered() || resp.dragged() {
+            visuals.widgets.hovered.bg_fill
+        } else {
+            visuals.widgets.inactive.bg_fill
+        };
+        ui.painter().rect_filled(thumb_rect, 4.0, thumb_color);
+    }
+
     pub(super) fn build_list_table<'a>(
         &mut self,
         ui: &'a mut egui::Ui,
         metrics: &ListViewMetrics,
-        allow_auto_scroll: bool,
     ) -> (TableBuilder<'a>, usize, bool) {
         let cols = self.list_columns;
         let header_dirty = self.list_header_dirty();
@@ -75,6 +173,10 @@ impl WavesPreviewer {
             .striped(true)
             .resizable(true)
             .auto_shrink([false, true])
+            // Vertical scrolling is handled by the app: only the visible row
+            // window is ever handed to the table, so egui never sees a huge
+            // content height (f32 offsets quantize past ~16.7M px).
+            .vscroll(false)
             .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
         if cols.edited {
@@ -175,14 +277,6 @@ impl WavesPreviewer {
             .column(egui_extras::Column::remainder())
             .min_scrolled_height((metrics.avail_h - metrics.header_h).max(0.0));
         filler_cols += 1;
-        if allow_auto_scroll {
-            if let Some(sel) = self.selected {
-                if sel < metrics.row_count {
-                    table = table.scroll_to_row(sel, Some(Align::Center));
-                    self.scroll_to_selected = false;
-                }
-            }
-        }
         (table, filler_cols, header_dirty)
     }
 

@@ -620,6 +620,12 @@ pub struct WavesPreviewer {
     // stale async sort/filter results are discarded against this.
     files_membership_revision: u64,
     // scroll behavior
+    /// First visible list row. The list renders only the visible window and
+    /// scrolls by row index (usize), so a 1M-row list never touches egui's
+    /// f32 scroll offsets (which quantize above ~16.7M px of content).
+    list_scroll_row: usize,
+    /// Sub-row wheel accumulation in rows.
+    list_scroll_residual: f32,
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,

@@ -237,8 +237,8 @@ impl crate::app::WavesPreviewer {
         let mut visible_first_row: Option<usize> = None;
         let mut visible_last_row: Option<usize> = None;
         let allow_auto_scroll = self.list_allow_auto_scroll(ctx, &metrics, key_moved);
-        let (table, filler_cols, header_dirty) =
-            self.build_list_table(ui, &metrics, allow_auto_scroll);
+        self.update_list_scroll_state(ctx, &metrics, allow_auto_scroll);
+        let (table, filler_cols, header_dirty) = self.build_list_table(ui, &metrics);
 
         table
             .header(metrics.header_h, |mut header| {
@@ -246,7 +246,9 @@ impl crate::app::WavesPreviewer {
             })
             .body(|body| {
                 body.rows(row_h, row_count, |mut row| {
-                    let row_idx = row.index();
+                    // The table only ever renders the visible window; map the
+                    // window-local index back to the absolute row.
+                    let row_idx = self.list_scroll_row + row.index();
                     if row_idx < self.files.len() {
                         visible_first_row = Some(visible_first_row.map_or(row_idx, |v| v.min(row_idx)));
                         visible_last_row = Some(visible_last_row.map_or(row_idx, |v| v.max(row_idx)));
@@ -1330,6 +1332,8 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+
+        self.ui_list_scrollbar(ui, &metrics);
 
         interaction.list_has_focus = list_has_focus;
         self.finish_list_view(

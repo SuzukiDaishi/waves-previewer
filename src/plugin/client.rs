@@ -8,8 +8,11 @@ use std::time::{Duration, Instant};
 use crate::plugin::protocol::{WorkerRequest, WorkerResponse};
 
 static WORKER_TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
+// Disambiguates per-spawn temp copies of the worker exe (Windows-only path).
+#[cfg(windows)]
 static WORKER_SPAWN_SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn apply_no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {

@@ -14,6 +14,8 @@ pub(super) struct PreparedExternalDrag {
     pub(super) temp_paths: Vec<PathBuf>,
 }
 
+// Constructed only by the Windows drag backend; other platforms just match.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum NativeDragOutcome {
     Dropped,
