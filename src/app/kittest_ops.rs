@@ -247,6 +247,30 @@ impl super::WavesPreviewer {
         self.files.len()
     }
 
+    pub fn test_list_scroll_row(&self) -> usize {
+        self.list_scroll_row
+    }
+
+    pub fn test_sort_job_active(&self) -> bool {
+        self.sort_job_active() || self.filter_job_active()
+    }
+
+    /// Async sort entry (same path as a header click). `test_set_sort` and
+    /// friends stay synchronous for small-list test semantics.
+    pub fn test_request_sort(&mut self, key: SortKey, dir: SortDir) {
+        self.sort_key = key;
+        self.sort_dir = dir;
+        self.request_sort();
+    }
+
+    pub fn test_request_sort_file_asc(&mut self) {
+        self.test_request_sort(SortKey::File, SortDir::Asc);
+    }
+
+    pub fn test_request_sort_sample_rate_asc(&mut self) {
+        self.test_request_sort(SortKey::SampleRate, SortDir::Asc);
+    }
+
     pub fn test_begin_export_list_csv(&mut self, path: std::path::PathBuf) {
         self.begin_export_list_csv(path);
     }
@@ -313,6 +337,16 @@ impl super::WavesPreviewer {
             return false;
         }
         self.select_and_load(row, false);
+        true
+    }
+
+    /// Like test_select_and_load_row but with auto-scroll (keyboard-nav
+    /// semantics): the windowed list recenters on the selection.
+    pub fn test_select_row_with_autoscroll(&mut self, row: usize) -> bool {
+        if row >= self.files.len() {
+            return false;
+        }
+        self.select_and_load(row, true);
         true
     }
 

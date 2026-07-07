@@ -116,43 +116,77 @@ fn bench_load_large_folder() {
         rss_mb()
     );
 
-    // Phase 3: sort by File (string sort over full list).
+    // Phase 3: async sort by File — the click itself must be ~free; the
+    // decorate slices + worker sort run over the following frames.
     let t0 = Instant::now();
-    harness.state_mut().test_cycle_sort_file();
-    let sort_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let t1 = Instant::now();
-    harness.step();
+    harness.state_mut().test_request_sort_file_asc();
+    let click_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let mut worst = 0.0f64;
+    let mut frames = 0u64;
+    while harness.state().test_sort_job_active() {
+        let t = Instant::now();
+        harness.step();
+        worst = worst.max(t.elapsed().as_secs_f64() * 1000.0);
+        frames += 1;
+        assert!(frames < 100_000, "sort never settled");
+    }
     eprintln!(
-        "[bench] sort-by-file: sort={:.1}ms step={:.1}ms",
-        sort_ms,
-        t1.elapsed().as_secs_f64() * 1000.0
+        "[bench] async sort-by-file: click={:.2}ms settle={:.1}ms frames={} worst_frame={:.1}ms",
+        click_ms,
+        t0.elapsed().as_secs_f64() * 1000.0,
+        frames,
+        worst
     );
 
-    // Phase 4: sort by a metadata key (SampleRate) — exercises meta prefetch path.
+    // Phase 4: metadata-sort storm — SampleRate sort streams header metadata
+    // for the whole list; the UI must stay responsive while workers churn.
     let t0 = Instant::now();
-    harness.state_mut().test_sort_sample_rate_asc();
-    let sort_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let t1 = Instant::now();
-    harness.step();
-    eprintln!(
-        "[bench] sort-by-samplerate: sort={:.1}ms step={:.1}ms rss={:.0}MB",
-        sort_ms,
-        t1.elapsed().as_secs_f64() * 1000.0,
-        rss_mb()
-    );
+    harness.state_mut().test_request_sort_sample_rate_asc();
+    let click_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    while harness.state().test_sort_job_active() {
+        harness.step();
+    }
     let mut total = 0.0f64;
     let mut worst = 0.0f64;
-    for _ in 0..N {
-        let t0 = Instant::now();
+    const STORM_FRAMES: usize = 240;
+    for i in 0..STORM_FRAMES {
+        if i % 10 == 0 {
+            // Simulated user interaction during the storm.
+            let target = (i * 997) % harness.state().test_files_len();
+            harness.state_mut().test_select_and_load_row(target);
+        }
+        let t = Instant::now();
         harness.step();
-        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
         total += ms;
         worst = worst.max(ms);
     }
     eprintln!(
-        "[bench] post-meta-sort steady: avg={:.2}ms worst={:.2}ms rss={:.0}MB",
-        total / N as f64,
+        "[bench] meta-storm steady (SR sort active, selections every 10f): click={:.2}ms avg={:.2}ms worst={:.2}ms rss={:.0}MB",
+        click_ms,
+        total / STORM_FRAMES as f64,
         worst,
         rss_mb()
     );
+
+    // Phase 5: scroll precision at the far end of the list.
+    let last = harness.state().test_files_len() - 1;
+    assert!(harness.state_mut().test_select_row_with_autoscroll(last));
+    harness.step();
+    harness.step();
+    let scroll = harness.state().test_list_scroll_row();
+    eprintln!("[bench] scroll to last row: selected={last} scroll_row={scroll}");
+    assert!(
+        scroll <= last && last < scroll + 200,
+        "selected row must be inside the visible window: scroll={scroll} last={last}"
+    );
+    assert!(harness.state_mut().test_select_row_with_autoscroll(0));
+    harness.step();
+    harness.step();
+    assert!(
+        harness.state().test_list_scroll_row() < 100,
+        "scroll back to top failed: {}",
+        harness.state().test_list_scroll_row()
+    );
+    eprintln!("[bench] final rss={:.0}MB", rss_mb());
 }
