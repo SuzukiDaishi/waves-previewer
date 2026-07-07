@@ -4,6 +4,18 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### 500k-File List Scalability Pass
+- Fixed the app effectively locking up after loading very large libraries (reported with 500k FLAC files) once a sort column was involved:
+  - Clicking a metadata sort header (Length / SR / Bits / LUFS...) used to enqueue one decode job per row up front - at 500k rows that meant half a million full-file decodes queued in one frame, days of background CPU, and a UI-thread promote scan over the giant queue every frame. Sort prefetch now streams through the existing per-frame pump under its queue budget and inflight cap.
+  - Sort keys that are fully answerable from the file header (duration, channels, sample rate, bits, bitrate, BPM tag, created/modified) no longer trigger full-file decodes at all during sort prefetch; only dBFS (Peak) and LUFS sorts still decode, since they need sample data. Files whose header cannot resolve a duration still fall back to one decode pass under a Length sort.
+  - The one-shot list sort is ~3x faster at 500k rows (unstable sort with no merge buffer; the equal-key tie-break is now display name then MediaId instead of display name then component-wise `Path::cmp` - numeric sorts like SR tie constantly, so the tie-break dominated the whole sort). A 500k-row File-header click drops ~1.7 s -> ~0.55 s in release. Rows with identical primary key and name now order by scan order rather than full path; the order stays deterministic.
+  - Fixed a hidden double sort: the first metadata batch arriving right after a header click passed the "never sorted yet" debounce check and re-sorted the entire list again in the same frame (another ~1.3 s at 500k). Any explicit sort now stamps the debounce clock. Re-sorts while metadata streams in also scale their debounce with the measured cost of the previous sort (8x, capped at 8 s), so the UI thread can never spend the majority of its time re-sorting.
+- Bounded the visible-row metadata decode backlog on large lists (>= 8k files): fast scrolling used to enqueue an unbounded pile of full decodes (one per row that ever became visible). New tasks are rejected past a cap and visible rows self-heal by re-requesting, so the queue - and the per-frame promote scan over it - stays small.
+- The idle sort-prefetch walk is capped per frame (8192 rows, wrapping cursor) so a fully-resolved 500k list no longer pays an O(n) scan every frame while a metadata sort is active.
+- Select-all + Enter on a huge list no longer funnels every selected path through the tab-open path (and its per-path skip log) once the editor tab limit is reached.
+- CSV export now streams its metadata jobs to the worker pool frame by frame instead of mass-enqueueing every row up front (new regression test). This keeps huge exports compatible with the backlog cap - and fixes a pre-existing stall where a large-list export with a dBFS/LUFS background mode active could drop most of its decode jobs at the old cap and never finish.
+- Added an opt-in headless benchmark (`tests/large_list_bench.rs`) that loads a 500k-file fixture and reports scan/append frame times, steady-state frame cost, sort latency, and RSS.
+
 ## 0.20260706.0 - 2026-07-06
 
 ### Fix: List Randomly Turning Red (dev builds)

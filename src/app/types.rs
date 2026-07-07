@@ -2703,6 +2703,11 @@ pub struct CsvExportState {
     pub total: usize,
     pub done: usize,
     pub pending: HashSet<PathBuf>,
+    /// Pending rows not yet handed to the meta pool. Metadata jobs are
+    /// topped up from here each frame because the pool rejects new tasks
+    /// past its backlog cap on large lists; a one-shot mass enqueue would
+    /// silently drop most of a 500k-row export.
+    pub queue: Vec<PathBuf>,
     pub needs_peak: bool,
     pub needs_lufs: bool,
     pub started_at: Instant,

@@ -2548,13 +2548,13 @@ impl super::WavesPreviewer {
             let sample_rate_override = &self.sample_rate_override;
             let bit_depth_override = &self.bit_depth_override;
 
-            let mut decorated: Vec<(RowKey<'_>, &str, &Path, MediaId)> = self
+            let mut decorated: Vec<(RowKey<'_>, &str, MediaId)> = self
                 .files
                 .iter()
                 .map(|&id| {
                     let item = item_index.get(&id).and_then(|&idx| items.get(idx));
                     let Some(item) = item else {
-                        return (RowKey::Missing, "", Path::new(""), id);
+                        return (RowKey::Missing, "", id);
                     };
                     let m = item.meta.as_ref();
                     let row_key = match key {
@@ -2636,11 +2636,18 @@ impl super::WavesPreviewer {
                             None => RowKey::Missing,
                         },
                     };
-                    (row_key, item.display_name.as_str(), item.path.as_path(), id)
+                    (row_key, item.display_name.as_str(), id)
                 })
                 .collect();
 
-            decorated.sort_by(|a, b| {
+            // Unstable sort: no O(n) merge buffer, and measurably faster on
+            // 100k+ rows. Determinism comes from the full tie-break below.
+            // Equal keys tie-break by display name, then by MediaId (scan
+            // order). Numeric keys such as sample rate tie constantly on big
+            // lists, so the tie-break dominates the whole sort; the previous
+            // component-wise Path::cmp fallback made a 500k-row sort take
+            // multiple seconds on its own.
+            decorated.sort_unstable_by(|a, b| {
                 let ord = match (&a.0, &b.0) {
                     (RowKey::Missing, _) | (_, RowKey::Missing) => return Ordering::Equal,
                     (RowKey::Str(x), RowKey::Str(y)) => Self::string_order(x, y, dir),
@@ -2648,13 +2655,13 @@ impl super::WavesPreviewer {
                     _ => Ordering::Equal,
                 };
                 if ord == Ordering::Equal {
-                    a.1.cmp(b.1).then(a.2.cmp(b.2))
+                    a.1.cmp(b.1).then_with(|| a.2.cmp(&b.2))
                 } else {
                     ord
                 }
             });
 
-            let sorted: Vec<MediaId> = decorated.into_iter().map(|entry| entry.3).collect();
+            let sorted: Vec<MediaId> = decorated.into_iter().map(|entry| entry.2).collect();
             self.files = sorted;
         }
 
@@ -2662,6 +2669,10 @@ impl super::WavesPreviewer {
         self.selected = selected_idx.and_then(|idx| self.files.iter().position(|&x| x == idx));
         let elapsed = sort_started.elapsed();
         self.sort_loading_last_ms = elapsed.as_secs_f32() * 1000.0;
+        // Any sort counts as "just sorted" for the streaming-metadata resort
+        // debounce; without this the first metadata batch after a header
+        // click re-sorted the whole list a second time in the same frame.
+        self.meta_sort_last_applied = Some(std::time::Instant::now());
         let hold_ms = if elapsed >= std::time::Duration::from_millis(120) {
             900
         } else {

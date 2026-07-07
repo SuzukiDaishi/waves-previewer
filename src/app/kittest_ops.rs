@@ -247,6 +247,14 @@ impl super::WavesPreviewer {
         self.files.len()
     }
 
+    pub fn test_begin_export_list_csv(&mut self, path: std::path::PathBuf) {
+        self.begin_export_list_csv(path);
+    }
+
+    pub fn test_csv_export_active(&self) -> bool {
+        self.csv_export_state.is_some()
+    }
+
     pub fn test_auto_play_list_nav(&self) -> bool {
         self.auto_play_list_nav
     }

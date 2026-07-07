@@ -116,6 +116,10 @@ const BULK_RESAMPLE_FRAME_BUDGET_MS: u64 = 3;
 const META_UPDATE_FRAME_BUDGET: usize = 256;
 const META_SORT_MIN_INTERVAL_MS: u64 = 120;
 const LIST_META_PREFETCH_BUDGET: usize = 64;
+// Max rows walked per frame by pump_list_meta_prefetch; keeps the idle scan
+// O(1) per frame on very large lists while the wrapping cursor preserves
+// full coverage over successive frames.
+const LIST_META_PREFETCH_SCAN_BUDGET: usize = 8_192;
 const LIST_PREVIEW_CACHE_MAX: usize = 48;
 const LIST_PREVIEW_PREFETCH_INFLIGHT_MAX: usize = 2;
 const LIST_BG_META_LARGE_THRESHOLD: usize = 8_000;
@@ -2007,7 +2011,6 @@ impl WavesPreviewer {
         };
         let needs_peak = cols.peak;
         let needs_lufs = cols.lufs;
-        let needs_full_decode = needs_peak || needs_lufs;
         let needs_meta = cols.length
             || cols.channels
             || cols.sample_rate
@@ -2049,13 +2052,11 @@ impl WavesPreviewer {
             return;
         }
 
-        for p in pending.iter() {
-            if needs_full_decode {
-                self.queue_full_meta_for_path(p, false);
-            } else {
-                self.queue_meta_for_path(p, false);
-            }
-        }
+        // Metadata jobs are streamed from `queue` by
+        // check_csv_export_completion each frame; enqueueing everything here
+        // would hit the meta pool's large-list backlog cap and silently drop
+        // most rows (the export would then never complete).
+        let queue: Vec<PathBuf> = pending.iter().cloned().collect();
         self.csv_export_state = Some(CsvExportState {
             path,
             ids,
@@ -2064,6 +2065,7 @@ impl WavesPreviewer {
             total,
             done,
             pending,
+            queue,
             needs_peak,
             needs_lufs,
             started_at: std::time::Instant::now(),
@@ -2089,10 +2091,18 @@ impl WavesPreviewer {
                     state.done = state.done.saturating_add(1);
                 }
             }
+        } else if !self.meta_inflight.contains(path) {
+            // A finished job (e.g. a header-only pass queued by a visible
+            // row) did not produce what the export needs; put the row back
+            // so the streaming top-up retries it with a full task.
+            if let Some(state) = &mut self.csv_export_state {
+                state.queue.push(path.to_path_buf());
+            }
         }
     }
 
     fn check_csv_export_completion(&mut self) {
+        self.pump_csv_export_meta_queue();
         let ready = self
             .csv_export_state
             .as_ref()
@@ -2108,6 +2118,34 @@ impl WavesPreviewer {
             self.export_list_csv(&state.path, &state.ids, state.cols, &state.external_cols)
         {
             self.debug_log(format!("csv export error: {err}"));
+        }
+    }
+
+    /// Hand a bounded batch of pending CSV-export rows to the meta pool each
+    /// frame. Rows whose task is already inflight are skipped here; if that
+    /// task finishes without satisfying the export, the progress handler
+    /// pushes them back onto the queue.
+    fn pump_csv_export_meta_queue(&mut self) {
+        const CSV_META_QUEUE_BUDGET: usize = 64;
+        let mut to_queue: Vec<(PathBuf, bool)> = Vec::new();
+        if let Some(state) = &mut self.csv_export_state {
+            let needs_full_decode = state.needs_peak || state.needs_lufs;
+            while to_queue.len() < CSV_META_QUEUE_BUDGET {
+                let Some(p) = state.queue.pop() else {
+                    break;
+                };
+                if !state.pending.contains(&p) || self.meta_inflight.contains(&p) {
+                    continue;
+                }
+                to_queue.push((p, needs_full_decode));
+            }
+        }
+        for (p, needs_full_decode) in to_queue {
+            if needs_full_decode {
+                self.queue_full_meta_for_path(&p, false);
+            } else {
+                self.queue_meta_for_path(&p, false);
+            }
         }
     }
 
