@@ -24,7 +24,11 @@ impl super::WavesPreviewer {
     fn sort_key_needs_full_decode(&self) -> bool {
         matches!(
             self.sort_key,
-            crate::app::types::SortKey::Level | crate::app::types::SortKey::Lufs
+            crate::app::types::SortKey::Level
+                | crate::app::types::SortKey::Lufs
+                | crate::app::types::SortKey::TruePeak
+                | crate::app::types::SortKey::LufsShort
+                | crate::app::types::SortKey::LufsMomentary
         )
     }
 

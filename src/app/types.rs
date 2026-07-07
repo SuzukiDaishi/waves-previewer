@@ -137,6 +137,9 @@ pub enum SortKey {
     BitRate,
     Level,
     Lufs,
+    TruePeak,
+    LufsShort,
+    LufsMomentary,
     Bpm,
     CreatedAt,
     ModifiedAt,
@@ -215,6 +218,9 @@ pub struct ListColumnConfig {
     pub bit_rate: bool,
     pub peak: bool,
     pub lufs: bool,
+    pub dbtp: bool,
+    pub lufs_s: bool,
+    pub lufs_m: bool,
     pub bpm: bool,
     pub created_at: bool,
     pub modified_at: bool,
@@ -240,6 +246,9 @@ impl Default for ListColumnConfig {
             bit_rate: false,
             peak: true,
             lufs: true,
+            dbtp: false,
+            lufs_s: false,
+            lufs_m: false,
             bpm: false,
             created_at: false,
             modified_at: false,
@@ -1114,6 +1123,12 @@ pub struct FileMeta {
     /// than the whole file (header-only metadata pass).
     pub peak_db_estimate: bool,
     pub lufs_i: Option<f32>,
+    /// Maximum momentary loudness (400 ms, ungated), full decode only.
+    pub lufs_m_max: Option<f32>,
+    /// Maximum short-term loudness (3 s, ungated), full decode only.
+    pub lufs_s_max: Option<f32>,
+    /// True peak (BS.1770-4 Annex 2, oversampled), full decode only.
+    pub true_peak_db: Option<f32>,
     pub bpm: Option<f32>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,

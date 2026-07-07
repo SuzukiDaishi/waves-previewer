@@ -1570,7 +1570,8 @@ impl WavesPreviewer {
         };
         let mut thumb = Vec::new();
         build_minmax(&mut thumb, &mono, 128);
-        let lufs_i = crate::wave::lufs_integrated_from_multi(channels, sample_rate).ok();
+        let loudness = crate::wave::loudness_metrics_from_multi(channels, sample_rate).ok();
+        let lufs_i = loudness.map(|l| l.lufs_i);
         let bpm = None;
         let duration_secs = if sample_rate > 0 {
             Some(frames as f32 / sample_rate as f32)
@@ -1593,6 +1594,9 @@ impl WavesPreviewer {
             peak_db: Some(peak_db),
             peak_db_estimate: false,
             lufs_i,
+            lufs_m_max: loudness.and_then(|l| l.lufs_m_max),
+            lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
+            true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
             created_at: None,
             modified_at: None,
@@ -1858,6 +1862,15 @@ impl WavesPreviewer {
         if cols.lufs {
             header.push("LUFS (I)".to_string());
         }
+        if cols.dbtp {
+            header.push("dBTP".to_string());
+        }
+        if cols.lufs_s {
+            header.push("LUFS-S".to_string());
+        }
+        if cols.lufs_m {
+            header.push("LUFS-M".to_string());
+        }
         if cols.bpm {
             header.push("BPM".to_string());
         }
@@ -1961,6 +1974,24 @@ impl WavesPreviewer {
                     .or_else(|| base.map(|v| v + gain_db));
                 row.push(eff.map(|db| format!("{:.1}", db)).unwrap_or_default());
             }
+            if cols.dbtp {
+                let adj = meta
+                    .and_then(|m| m.true_peak_db)
+                    .map(|db| db + item.pending_gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.lufs_s {
+                let adj = meta
+                    .and_then(|m| m.lufs_s_max)
+                    .map(|db| db + item.pending_gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
+            if cols.lufs_m {
+                let adj = meta
+                    .and_then(|m| m.lufs_m_max)
+                    .map(|db| db + item.pending_gain_db);
+                row.push(adj.map(|db| format!("{:.1}", db)).unwrap_or_default());
+            }
             if cols.bpm {
                 let bpm = meta
                     .and_then(|m| m.bpm)
@@ -2026,7 +2057,7 @@ impl WavesPreviewer {
             Vec::new()
         };
         let needs_peak = cols.peak;
-        let needs_lufs = cols.lufs;
+        let needs_lufs = cols.lufs || cols.dbtp || cols.lufs_s || cols.lufs_m;
         let needs_meta = cols.length
             || cols.channels
             || cols.sample_rate

@@ -322,10 +322,26 @@ impl crate::app::WavesPreviewer {
                             let needs_lufs_meta = cols.lufs
                                 && !self.lufs_override.contains_key(&path_owned)
                                 && item.meta.as_ref().and_then(|m| m.lufs_i).is_none();
+                            let decode_ok = item
+                                .meta
+                                .as_ref()
+                                .map(|m| m.decode_error.is_none())
+                                .unwrap_or(true);
+                            let needs_loudness_extra = decode_ok
+                                && ((cols.dbtp
+                                && item.meta.as_ref().and_then(|m| m.true_peak_db).is_none())
+                                || (cols.lufs_s
+                                    && item.meta.as_ref().and_then(|m| m.lufs_s_max).is_none())
+                                || (cols.lufs_m
+                                    && item
+                                        .meta
+                                        .as_ref()
+                                        .and_then(|m| m.lufs_m_max)
+                                        .is_none()));
                             (
                                 needs_bg_full,
                                 needs_wave_meta,
-                                needs_lufs_meta,
+                                needs_lufs_meta || needs_loudness_extra,
                                 item.meta.as_ref().and_then(|m| m.cover_art.clone()),
                                 Self::list_type_badge_for_item(item),
                                 item.transcript.clone(),
@@ -933,6 +949,111 @@ impl crate::app::WavesPreviewer {
                                 } else {
                                     base.map(|v| v + gain_db)
                                 };
+                                let (rect2, resp2) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), row_h * 0.9),
+                                    Sense::click(),
+                                );
+                                if let Some(db) = eff {
+                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                }
+                                let text = eff
+                                    .map(|v| format!("{:.1}", v))
+                                    .unwrap_or_else(|| "...".into());
+                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                ui.painter().text(
+                                    rect2.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    text,
+                                    fid,
+                                    egui::Color32::WHITE,
+                                );
+                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                                                if cols.dbtp {
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                let eff = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.true_peak_db)
+                                    .map(|v| v + gain_db);
+                                let (rect2, resp2) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), row_h * 0.9),
+                                    Sense::click(),
+                                );
+                                if let Some(db) = eff {
+                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                }
+                                let text = eff
+                                    .map(|v| format!("{:.1}", v))
+                                    .unwrap_or_else(|| "...".into());
+                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                ui.painter().text(
+                                    rect2.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    text,
+                                    fid,
+                                    egui::Color32::WHITE,
+                                );
+                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.lufs_s {
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                let eff = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.lufs_s_max)
+                                    .map(|v| v + gain_db);
+                                let (rect2, resp2) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), row_h * 0.9),
+                                    Sense::click(),
+                                );
+                                if let Some(db) = eff {
+                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                }
+                                let text = eff
+                                    .map(|v| format!("{:.1}", v))
+                                    .unwrap_or_else(|| "...".into());
+                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                ui.painter().text(
+                                    rect2.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    text,
+                                    fid,
+                                    egui::Color32::WHITE,
+                                );
+                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        if cols.lufs_m {
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                let eff = self
+                                    .meta_for_path(&path_owned)
+                                    .and_then(|m| m.lufs_m_max)
+                                    .map(|v| v + gain_db);
                                 let (rect2, resp2) = ui.allocate_exact_size(
                                     egui::vec2(ui.available_width(), row_h * 0.9),
                                     Sense::click(),

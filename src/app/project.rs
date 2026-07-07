@@ -271,6 +271,12 @@ pub struct ProjectListColumns {
     pub peak: bool,
     pub lufs: bool,
     #[serde(default)]
+    pub dbtp: bool,
+    #[serde(default)]
+    pub lufs_s: bool,
+    #[serde(default)]
+    pub lufs_m: bool,
+    #[serde(default)]
     pub bpm: bool,
     #[serde(default)]
     pub created_at: bool,
@@ -1096,6 +1102,9 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         peak_db: None,
         peak_db_estimate: false,
         lufs_i: None,
+        lufs_m_max: None,
+        lufs_s_max: None,
+        true_peak_db: None,
         bpm: None,
         created_at: None,
         modified_at: None,

@@ -139,6 +139,18 @@ impl WavesPreviewer {
             table = table.column(egui_extras::Column::initial(90.0).resizable(true));
             filler_cols += 1;
         }
+        if cols.dbtp {
+            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.lufs_s {
+            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
+            filler_cols += 1;
+        }
+        if cols.lufs_m {
+            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
+            filler_cols += 1;
+        }
         if cols.bpm {
             table = table.column(egui_extras::Column::initial(70.0).resizable(true));
             filler_cols += 1;
@@ -345,6 +357,42 @@ impl WavesPreviewer {
                     &mut self.sort_key,
                     &mut self.sort_dir,
                     SortKey::Lufs,
+                    false,
+                );
+            });
+        }
+        if cols.dbtp {
+            header.col(|ui| {
+                *sort_changed |= sortable_header(
+                    ui,
+                    "dBTP",
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    SortKey::TruePeak,
+                    false,
+                );
+            });
+        }
+        if cols.lufs_s {
+            header.col(|ui| {
+                *sort_changed |= sortable_header(
+                    ui,
+                    "LUFS-S",
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    SortKey::LufsShort,
+                    false,
+                );
+            });
+        }
+        if cols.lufs_m {
+            header.col(|ui| {
+                *sort_changed |= sortable_header(
+                    ui,
+                    "LUFS-M",
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    SortKey::LufsMomentary,
                     false,
                 );
             });

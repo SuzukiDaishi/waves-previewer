@@ -118,6 +118,21 @@ impl WavesPreviewer {
                 };
                 OwnedKey::Num(v.is_finite().then_some(v as f64))
             }
+            SortKey::TruePeak => OwnedKey::Num(
+                m.and_then(|m| m.true_peak_db.map(|v| v + item.pending_gain_db))
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as f64),
+            ),
+            SortKey::LufsShort => OwnedKey::Num(
+                m.and_then(|m| m.lufs_s_max.map(|v| v + item.pending_gain_db))
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as f64),
+            ),
+            SortKey::LufsMomentary => OwnedKey::Num(
+                m.and_then(|m| m.lufs_m_max.map(|v| v + item.pending_gain_db))
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as f64),
+            ),
             SortKey::Bpm => OwnedKey::Num(
                 m.and_then(|m| m.bpm)
                     .filter(|v| v.is_finite() && *v > 0.0)

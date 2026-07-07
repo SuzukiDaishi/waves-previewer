@@ -1477,6 +1477,9 @@ impl super::WavesPreviewer {
                     | SortKey::BitRate
                     | SortKey::Level
                     | SortKey::Lufs
+                    | SortKey::TruePeak
+                    | SortKey::LufsShort
+                    | SortKey::LufsMomentary
                     | SortKey::Bpm
                     | SortKey::CreatedAt
                     | SortKey::ModifiedAt

@@ -317,6 +317,9 @@ impl crate::app::WavesPreviewer {
                                 ui.checkbox(&mut next_cols.bit_rate, "Bitrate");
                                 ui.checkbox(&mut next_cols.peak, "Peak");
                                 ui.checkbox(&mut next_cols.lufs, "LUFS");
+                                ui.checkbox(&mut next_cols.dbtp, "dBTP");
+                                ui.checkbox(&mut next_cols.lufs_s, "LUFS-S");
+                                ui.checkbox(&mut next_cols.lufs_m, "LUFS-M");
                                 ui.checkbox(&mut next_cols.bpm, "BPM");
                                 ui.checkbox(&mut next_cols.created_at, "Created");
                                 ui.checkbox(&mut next_cols.modified_at, "Modified");
@@ -339,6 +342,9 @@ impl crate::app::WavesPreviewer {
                                 || next_cols.bit_rate
                                 || next_cols.peak
                                 || next_cols.lufs
+                                || next_cols.dbtp
+                                || next_cols.lufs_s
+                                || next_cols.lufs_m
                                 || next_cols.bpm
                                 || next_cols.created_at
                                 || next_cols.modified_at

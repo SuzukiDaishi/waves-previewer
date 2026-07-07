@@ -370,6 +370,9 @@ impl WavesPreviewer {
             SortKey::BitRate => cols.bit_rate,
             SortKey::Level => cols.peak,
             SortKey::Lufs => cols.lufs,
+            SortKey::TruePeak => cols.dbtp,
+            SortKey::LufsShort => cols.lufs_s,
+            SortKey::LufsMomentary => cols.lufs_m,
             SortKey::Bpm => cols.bpm,
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
@@ -402,6 +405,12 @@ impl WavesPreviewer {
             SortKey::Level
         } else if cols.lufs {
             SortKey::Lufs
+        } else if cols.dbtp {
+            SortKey::TruePeak
+        } else if cols.lufs_s {
+            SortKey::LufsShort
+        } else if cols.lufs_m {
+            SortKey::LufsMomentary
         } else if cols.bpm {
             SortKey::Bpm
         } else if cols.created_at {

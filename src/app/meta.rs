@@ -245,6 +245,9 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 peak_db: quick_peak_db(path),
                 peak_db_estimate: true,
                 lufs_i: None,
+                lufs_m_max: None,
+                lufs_s_max: None,
+                true_peak_db: None,
                 bpm: audio_io::read_audio_bpm(path),
                 created_at: info.created_at,
                 modified_at: info.modified_at,
@@ -267,6 +270,9 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             peak_db: None,
             peak_db_estimate: false,
             lufs_i: None,
+            lufs_m_max: None,
+            lufs_s_max: None,
+            true_peak_db: None,
             bpm: None,
             created_at: None,
             modified_at: None,
@@ -335,7 +341,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         };
         let mut thumb = Vec::new();
         crate::wave::build_minmax(&mut thumb, &mono, 128);
-        let lufs_i = crate::wave::lufs_integrated_from_multi(&chans, sr).ok();
+        let loudness = crate::wave::loudness_metrics_from_multi(&chans, sr).ok();
+        let lufs_i = loudness.map(|l| l.lufs_i);
         let bpm = audio_io::read_audio_bpm(path);
         let (ch, bits) = info
             .as_ref()
@@ -369,6 +376,9 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             peak_db: Some(peak_db),
             peak_db_estimate: false,
             lufs_i,
+            lufs_m_max: loudness.and_then(|l| l.lufs_m_max),
+            lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
+            true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
@@ -437,6 +447,9 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             peak_db: Some(peak_db),
             peak_db_estimate: true,
             lufs_i: None,
+            lufs_m_max: None,
+            lufs_s_max: None,
+            true_peak_db: None,
             bpm,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
@@ -581,6 +594,9 @@ fn run_meta_task(
             header_meta.rms_db = None;
             header_meta.peak_db = None;
             header_meta.lufs_i = None;
+            header_meta.lufs_m_max = None;
+            header_meta.lufs_s_max = None;
+            header_meta.true_peak_db = None;
             header_meta.thumb.clear();
             let _ = tx.send(MetaUpdate::Full(p.clone(), header_meta));
         }
