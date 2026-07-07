@@ -58,7 +58,7 @@ impl crate::app::WavesPreviewer {
             if !unique.insert(path.clone()) {
                 continue;
             }
-            let Some(id) = self.path_index.get(path).copied() else {
+            let Some(id) = self.path_index.get(path) else {
                 continue;
             };
             let Some(item_idx) = self.item_index.get(&id).copied() else {
@@ -90,7 +90,7 @@ impl crate::app::WavesPreviewer {
     pub(super) fn capture_list_undo_items_by_paths(&self, paths: &[PathBuf]) -> Vec<ListUndoItem> {
         let mut out = Vec::new();
         for path in paths {
-            let Some(id) = self.path_index.get(path).copied() else {
+            let Some(id) = self.path_index.get(path) else {
                 continue;
             };
             let Some(item_idx) = self.item_index.get(&id).copied() else {
@@ -173,7 +173,6 @@ impl crate::app::WavesPreviewer {
             let idx = self
                 .path_index
                 .get(&entry.item.path)
-                .copied()
                 .and_then(|id| self.item_index.get(&id).copied());
             if let Some(item_idx) = idx {
                 if let Some(slot) = self.items.get_mut(item_idx) {

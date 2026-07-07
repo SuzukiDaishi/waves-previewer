@@ -4,6 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Hitch-Free Loading (no stalls during or right after big loads)
+- Loading a 1M-file folder no longer produces multi-hundred-ms frame stalls mid-scan. The path->id index is now keyed by a precomputed 64-bit hash (`types::PathIndex`): growing a plain `HashMap<PathBuf, _>` re-hashes every key, which cost ~270ms in one frame at 640k entries; growing the u64-keyed table only moves slots (the worst load-time frame at 1M drops from ~650ms to ~64ms). Hash collisions degrade a slot to a tiny vector, never to a wrong answer. The remaining per-item maps (id index, folder intern, inflight set, stat cache, SR probe cache) switch to FxHash.
+- The list containers pre-reserve toward the scanner's live discovery count (shared via an atomic, not the message channel, so it runs ahead of the budgeted appends).
+- Loading a new folder over an existing large list no longer freezes while ~1GB of old items drop: the old containers are handed to a low-priority thread.
+- Finishing a scan with no active search no longer re-collects the whole id list (files/original_files are already maintained incrementally during the scan).
+- The async sort's snapshot (1M keys + names) is now returned to the UI thread and freed a slice per frame; freeing it wholesale on the sort worker contended with the UI thread inside the allocator and showed up as a ~200-260ms frame right when a background sort finished (now worst ~15ms).
+- `NEOWAVES_BENCH_TRACE=1` enables coarse per-stage frame tracing (scan ingest, list jobs, reserve, workspace pass) used to find these; it is compiled in but env-gated.
+
 ### 1M-File Responsiveness Pass (priority scheduling, async sort/filter, windowed list)
 - Background workers no longer compete with the UI thread for CPU. `lower_current_thread_priority` now works on Linux (per-thread nice) and macOS (utility QoS) in addition to Windows, and is applied to the workers that previously ran at normal priority: the metadata decode pool (also capped at cores-1), list-preview prefetch, LUFS recalc, exports, auto-trim, loop detect, and the folder scan walker. This was the root cause of "buttons stop responding while background work runs".
 - Sorting and search filtering never block the UI thread on large lists anymore: the sort snapshot is built in 2 ms slices per frame and the O(n log n) sort runs on a worker thread (results are dropped if the list changed meanwhile); the search filter runs as a sliced per-frame job. Lists <= 50k rows keep the synchronous path.

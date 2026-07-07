@@ -65,12 +65,12 @@ impl WavesPreviewer {
     }
 
     pub(super) fn item_for_path(&self, path: &Path) -> Option<&MediaItem> {
-        let id = *self.path_index.get(path)?;
+        let id = self.path_index.get(path)?;
         self.item_for_id(id)
     }
 
     pub(super) fn item_for_path_mut(&mut self, path: &Path) -> Option<&mut MediaItem> {
-        let id = *self.path_index.get(path)?;
+        let id = self.path_index.get(path)?;
         self.item_for_id_mut(id)
     }
 
@@ -297,7 +297,7 @@ impl WavesPreviewer {
     }
 
     pub(super) fn row_for_path(&self, path: &Path) -> Option<usize> {
-        let id = *self.path_index.get(path)?;
+        let id = self.path_index.get(path)?;
         self.files.iter().position(|&i| i == id)
     }
 
@@ -344,7 +344,7 @@ impl WavesPreviewer {
             } else if let Some(idx) = self.active_tab {
                 if let Some(tab) = self.tabs.get(idx) {
                     if let Some(id) = self.path_index.get(&tab.path) {
-                        return vec![*id];
+                        return vec![id];
                     }
                 }
             }

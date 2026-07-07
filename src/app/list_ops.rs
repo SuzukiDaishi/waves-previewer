@@ -169,11 +169,7 @@ impl super::WavesPreviewer {
     pub(super) fn replace_with_files(&mut self, paths: &[PathBuf]) {
         self.root = None;
         self.note_files_membership_changed();
-        self.files.clear();
-        self.items.clear();
-        self.item_index.clear();
-        self.path_index.clear();
-        self.original_files.clear();
+        self.drop_list_contents_in_background();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();

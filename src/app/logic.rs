@@ -2223,7 +2223,7 @@ impl super::WavesPreviewer {
         if path.exists() {
             return;
         }
-        let Some(id) = self.path_index.get(path).copied() else {
+        let Some(id) = self.path_index.get(path) else {
             return;
         };
         let selected_path = self.selected_path_buf();
@@ -2338,7 +2338,7 @@ impl super::WavesPreviewer {
 
         let mut removed_ids = HashSet::new();
         for path in unique.iter() {
-            if let Some(id) = self.path_index.get(path).copied() {
+            if let Some(id) = self.path_index.get(path) {
                 removed_ids.insert(id);
             }
         }
@@ -2407,11 +2407,7 @@ impl super::WavesPreviewer {
     }
     pub fn rescan(&mut self) {
         self.note_files_membership_changed();
-        self.files.clear();
-        self.items.clear();
-        self.item_index.clear();
-        self.path_index.clear();
-        self.original_files.clear();
+        self.drop_list_contents_in_background();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();
@@ -2759,12 +2755,14 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn spawn_scan_worker(
-        &self,
+        &mut self,
         request: ScanRequestKind,
         skip_dotfiles: bool,
     ) -> std::sync::mpsc::Receiver<ScanMessage> {
         use std::sync::mpsc;
         let (tx, rx) = mpsc::channel();
+        let found_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        self.scan_found_live = Some(std::sync::Arc::clone(&found_live));
         std::thread::spawn(move || {
             crate::app::threading::lower_current_thread_priority();
             let mut batch: Vec<PathBuf> = Vec::with_capacity(128);
@@ -2794,6 +2792,7 @@ impl super::WavesPreviewer {
                     return Ok(());
                 }
                 *matched = (*matched).saturating_add(1);
+                found_live.store(*matched, std::sync::atomic::Ordering::Relaxed);
                 batch.push(path);
                 if batch.len() >= 128 {
                     flush_batch(tx, batch).map_err(|_| ())?;

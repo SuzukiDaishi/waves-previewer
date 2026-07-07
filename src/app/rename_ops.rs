@@ -32,7 +32,7 @@ impl WavesPreviewer {
     pub(super) fn replace_path_in_state(&mut self, from: &Path, to: &Path) {
         self.invalidate_fs_exists_cache_for_path(from);
         self.invalidate_fs_exists_cache_for_path(to);
-        let Some(id) = self.path_index.get(from).copied() else {
+        let Some(id) = self.path_index.get(from) else {
             return;
         };
         let new_path = to.to_path_buf();

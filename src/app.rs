@@ -391,11 +391,12 @@ pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
     pub items: Vec<MediaItem>,
-    pub item_index: HashMap<MediaId, usize>,
-    pub path_index: HashMap<PathBuf, MediaId>,
+    pub item_index: rustc_hash::FxHashMap<MediaId, usize>,
+    // See types::PathIndex: growth must not re-hash a million PathBufs.
+    pub path_index: types::PathIndex,
     /// Shared folder-name strings, keyed by parent directory (see
     /// MediaItem::display_folder).
-    folder_intern: HashMap<PathBuf, std::sync::Arc<str>>,
+    folder_intern: rustc_hash::FxHashMap<PathBuf, std::sync::Arc<str>>,
     pub files: Vec<MediaId>,
     pub next_media_id: MediaId,
     pub selected: Option<usize>,
@@ -429,7 +430,7 @@ pub struct WavesPreviewer {
     effect_graph: EffectGraphState,
     pub meta_rx: Option<std::sync::mpsc::Receiver<meta::MetaUpdate>>,
     pub meta_pool: Option<meta::MetaPool>,
-    pub meta_inflight: HashSet<PathBuf>,
+    pub meta_inflight: rustc_hash::FxHashSet<PathBuf>,
     meta_sort_pending: bool,
     /// Cached (computed_at, count) for the pending-gain scan; the topbar and
     /// list header read this every frame and a full O(n) item scan at 140k
@@ -564,6 +565,10 @@ pub struct WavesPreviewer {
     pub scan_worker_done: bool,
     pub scan_started_at: Option<std::time::Instant>,
     pub scan_found_count: usize,
+    /// Written directly by the scan worker (not via the message channel):
+    /// discovery runs far ahead of the budgeted appends, and the capacity
+    /// pre-reserve needs the live count to get ahead of hash-map growth.
+    scan_found_live: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     pub scan_visited_count: usize,
     pub scan_load_kind: Option<ListLoadKind>,
     scan_pending_target: Option<PendingListLoadTarget>,
@@ -574,7 +579,7 @@ pub struct WavesPreviewer {
     /// TTL cache for `Path::is_file()` checks in the list view. Probing the
     /// filesystem for every visible row on every frame stalls the UI thread,
     /// especially on network shares.
-    fs_exists_cache: HashMap<PathBuf, (bool, std::time::Instant)>,
+    fs_exists_cache: rustc_hash::FxHashMap<PathBuf, (bool, std::time::Instant)>,
     /// Compiled highlight regex for the current `(search_query, search_use_regex)`.
     /// `None` inner value means the query does not compile / is empty.
     search_highlight_cache: Option<(String, bool, Option<regex::Regex>)>,
@@ -616,6 +621,8 @@ pub struct WavesPreviewer {
     sort_rx: Option<std::sync::mpsc::Receiver<sort_filter_jobs::SortResult>>,
     sort_request_seq: u64,
     filter_job: Option<sort_filter_jobs::FilterJob>,
+    /// Retired sort snapshots, freed a slice per frame (see SortResult).
+    deferred_list_drop: Vec<(sort_filter_jobs::OwnedKey, String, types::MediaId)>,
     // Bumped whenever list membership changes (append/remove/filter swap);
     // stale async sort/filter results are discarded against this.
     files_membership_revision: u64,
@@ -756,7 +763,7 @@ pub struct WavesPreviewer {
     lufs_worker_busy: bool,
     // Sample rate conversion (non-destructive)
     sample_rate_override: HashMap<PathBuf, u32>,
-    sample_rate_probe_cache: HashMap<PathBuf, u32>,
+    sample_rate_probe_cache: rustc_hash::FxHashMap<PathBuf, u32>,
     bit_depth_override: HashMap<PathBuf, crate::wave::WavBitDepth>,
     format_override: HashMap<PathBuf, String>,
     src_quality: SrcQuality,

@@ -24,6 +24,7 @@ image = "0.25.10"
 rustfft = "6"
 realfft = "3"
 regex = "1.12.3"
+rustc-hash = "2"
 ndarray = "0.17"
 rand = "0.9"
 symphonia = { version = "0.5.5", default-features = false, features = ["wav", "aiff", "pcm", "mp3", "isomp4", "aac", "alac", "ogg", "vorbis", "flac"] }

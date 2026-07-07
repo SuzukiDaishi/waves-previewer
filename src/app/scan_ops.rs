@@ -17,17 +17,32 @@ impl WavesPreviewer {
         self.scan_visited_count = 0;
         self.scan_load_kind = None;
         self.scan_pending_target = None;
+        self.scan_found_live = None;
+    }
+
+    /// Dropping a million MediaItems (plus the path/index maps) frees ~1GB
+    /// of heap; doing it inline stalled the UI for hundreds of ms when
+    /// loading a new folder over an existing large list. Hand the old
+    /// contents to a low-priority thread instead.
+    pub(super) fn drop_list_contents_in_background(&mut self) {
+        let items = std::mem::take(&mut self.items);
+        let path_index = std::mem::take(&mut self.path_index);
+        let item_index = std::mem::take(&mut self.item_index);
+        let files = std::mem::take(&mut self.files);
+        let original_files = std::mem::take(&mut self.original_files);
+        let folder_intern = std::mem::take(&mut self.folder_intern);
+        if items.len() > 50_000 {
+            std::thread::spawn(move || {
+                crate::app::threading::lower_current_thread_priority();
+                drop((items, path_index, item_index, files, original_files, folder_intern));
+            });
+        }
     }
 
     fn reset_list_contents_for_folder_load(&mut self) {
         self.clear_list_load_runtime();
         self.note_files_membership_changed();
-        self.items.clear();
-        self.item_index.clear();
-        self.path_index.clear();
-        self.files.clear();
-        self.original_files.clear();
-        self.folder_intern.clear();
+        self.drop_list_contents_in_background();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();
@@ -60,11 +75,7 @@ impl WavesPreviewer {
         self.note_files_membership_changed();
         self.root = None;
         self.clear_list_load_runtime();
-        self.files.clear();
-        self.items.clear();
-        self.item_index.clear();
-        self.path_index.clear();
-        self.original_files.clear();
+        self.drop_list_contents_in_background();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();
@@ -167,7 +178,65 @@ impl WavesPreviewer {
         if !self.external_sources.is_empty() {
             self.apply_external_mapping();
         }
-        self.refresh_filter_then_sort();
+        if self.search_query.trim().is_empty() {
+            // files/original_files were maintained incrementally during the
+            // scan; re-collecting 1M ids here just stalled the finish frame.
+            self.note_files_membership_changed();
+            if self.sort_dir != super::types::SortDir::None {
+                self.request_sort();
+            }
+        } else {
+            self.refresh_filter_then_sort();
+        }
+    }
+
+    /// Grow the list containers toward the scanner's discovery count before
+    /// the appender catches up. Directory discovery runs far ahead of the
+    /// budgeted appends, so the reserve happens while the containers are
+    /// still small - otherwise the path/id hash maps rehashed ~1M entries
+    /// mid-load (a several-hundred-ms UI stall at the 7/8 load-factor
+    /// boundary), and the items vec re-copied hundreds of MB on growth.
+    fn reserve_list_capacity_for_scan(&mut self) {
+        let live = self
+            .scan_found_live
+            .as_ref()
+            .map(|c| c.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0);
+        let target = self.scan_found_count.max(live);
+        if target == 0 {
+            return;
+        }
+        let trace = std::env::var_os("NEOWAVES_BENCH_TRACE").is_some();
+        let t0 = std::time::Instant::now();
+        let before = (self.items.capacity(), self.path_index.capacity(), self.items.len());
+        if self.items.capacity() < target {
+            self.items.reserve(target - self.items.len());
+        }
+        if self.files.capacity() < target {
+            self.files.reserve(target - self.files.len());
+        }
+        if self.original_files.capacity() < target {
+            self.original_files.reserve(target - self.original_files.len());
+        }
+        if self.path_index.capacity() < target {
+            self.path_index.reserve(target - self.path_index.len());
+        }
+        if self.item_index.capacity() < target {
+            self.item_index.reserve(target - self.item_index.len());
+        }
+        if trace {
+            let ms = t0.elapsed().as_secs_f64() * 1000.0;
+            if ms > 30.0 {
+                eprintln!(
+                    "[trace] reserve_list_capacity target={target} len={} items_cap {}->{} map_cap {}->{} took {ms:.1}ms",
+                    before.2,
+                    before.0,
+                    self.items.capacity(),
+                    before.1,
+                    self.path_index.capacity()
+                );
+            }
+        }
     }
 
     pub(super) fn append_scanned_paths(&mut self, batch: Vec<PathBuf>) {
@@ -175,6 +244,7 @@ impl WavesPreviewer {
             return;
         }
         self.note_files_membership_changed();
+        self.reserve_list_capacity_for_scan();
         let has_search = !self.search_query.trim().is_empty();
         let query = self.search_query.to_lowercase();
         self.items.reserve(batch.len());

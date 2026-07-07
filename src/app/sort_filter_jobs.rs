@@ -41,6 +41,11 @@ pub(super) struct SortBuildJob {
 pub(super) struct SortResult {
     pub request_id: u64,
     pub sorted: Vec<MediaId>,
+    /// The sorted snapshot storage, returned so the UI thread can free it a
+    /// slice at a time. Dropping ~1M snapshot strings in one go on the sort
+    /// worker contended on the allocator with the UI thread (the strings
+    /// were allocated there) and showed up as a 200ms+ frame.
+    pub decorated: Vec<(OwnedKey, String, MediaId)>,
     pub membership_revision: u64,
     pub selected_id: Option<MediaId>,
     pub started_at: std::time::Instant,
@@ -261,10 +266,11 @@ impl WavesPreviewer {
         let mut decorated = job.decorated;
         std::thread::spawn(move || {
             decorated.sort_unstable_by(|a, b| Self::compare_decorated_rows(a, b, dir));
-            let sorted: Vec<MediaId> = decorated.into_iter().map(|e| e.2).collect();
+            let sorted: Vec<MediaId> = decorated.iter().map(|e| e.2).collect();
             let _ = tx.send(SortResult {
                 request_id,
                 sorted,
+                decorated,
                 membership_revision,
                 selected_id,
                 started_at,
@@ -287,6 +293,12 @@ impl WavesPreviewer {
             }
         };
         self.sort_rx = None;
+        if self.deferred_list_drop.is_empty() {
+            // Move, don't copy: extending would memcpy the ~50MB snapshot.
+            self.deferred_list_drop = result.decorated;
+        } else {
+            self.deferred_list_drop.extend(result.decorated);
+        }
         if result.request_id != self.sort_request_seq {
             return true;
         }
@@ -475,11 +487,40 @@ impl WavesPreviewer {
 
     /// Per-frame pump for all async list jobs. Returns true while anything is
     /// still in flight so the frame loop keeps repaints scheduled.
+    /// Free a bounded slice of retired sort-snapshot entries per frame.
+    fn pump_deferred_drop(&mut self) -> bool {
+        let len = self.deferred_list_drop.len();
+        if len == 0 {
+            return false;
+        }
+        const DROP_BUDGET: usize = 16_384;
+        if len <= DROP_BUDGET {
+            // Also release the (tens of MB) backing buffer itself.
+            self.deferred_list_drop = Vec::new();
+        } else {
+            self.deferred_list_drop.truncate(len - DROP_BUDGET);
+        }
+        true
+    }
+
     pub(super) fn pump_list_jobs(&mut self) -> bool {
         let mut busy = false;
+        busy |= self.pump_deferred_drop();
+        let t0 = std::time::Instant::now();
         busy |= self.pump_filter_job();
+        let t1 = std::time::Instant::now();
         busy |= self.pump_sort_job();
+        let t2 = std::time::Instant::now();
         busy |= self.drain_sort_results();
+        let t3 = std::time::Instant::now();
+        if std::env::var_os("NEOWAVES_BENCH_TRACE").is_some() {
+            let f = (t1 - t0).as_secs_f64() * 1000.0;
+            let p = (t2 - t1).as_secs_f64() * 1000.0;
+            let d = (t3 - t2).as_secs_f64() * 1000.0;
+            if f > 30.0 || p > 30.0 || d > 30.0 {
+                eprintln!("[trace] pump_list_jobs filter={f:.1}ms pump={p:.1}ms drain={d:.1}ms");
+            }
+        }
         busy
     }
 }
