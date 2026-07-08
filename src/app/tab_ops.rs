@@ -134,6 +134,14 @@ impl super::WavesPreviewer {
                     mini_meter: crate::app::types::MiniMeterState::default(),
                     world_f0_draft: None,
                     world_f0_focus: false,
+                    gain_env_enabled: false,
+                    gain_env_points: Vec::new(),
+                    gain_env_drag: None,
+                    pitch_drag_active: false,
+                    stretch_drag_target: None,
+                    spectral_warp_edit: false,
+                    spectral_warp_points: Vec::new(),
+                    spectral_warp_drag: None,
                 });
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
@@ -253,6 +261,9 @@ impl super::WavesPreviewer {
                     loudness_target_lufs: -14.0,
                     pitch_semitones: 0.0,
                     stretch_rate: 1.0,
+                    speed_rate: 1.0,
+                    warp_time_radius_ms: 150.0,
+                    warp_freq_radius_hz: 300.0,
                     loop_repeat: 2,
                     noise_gate_threshold_db: -40.0,
                     noise_gate_attack_ms: 2.0,
@@ -289,6 +300,14 @@ impl super::WavesPreviewer {
                 mini_meter: crate::app::types::MiniMeterState::default(),
                 world_f0_draft: None,
                 world_f0_focus: false,
+                gain_env_enabled: false,
+                gain_env_points: Vec::new(),
+                gain_env_drag: None,
+                pitch_drag_active: false,
+                stretch_drag_target: None,
+                spectral_warp_edit: false,
+                spectral_warp_points: Vec::new(),
+                spectral_warp_drag: None,
             });
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
@@ -426,6 +445,14 @@ impl super::WavesPreviewer {
                 mini_meter: crate::app::types::MiniMeterState::default(),
                 world_f0_draft: None,
                 world_f0_focus: false,
+                gain_env_enabled: false,
+                gain_env_points: Vec::new(),
+                gain_env_drag: None,
+                pitch_drag_active: false,
+                stretch_drag_target: None,
+                spectral_warp_edit: false,
+                spectral_warp_points: Vec::new(),
+                spectral_warp_drag: None,
             });
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
@@ -544,6 +571,9 @@ impl super::WavesPreviewer {
                 loudness_target_lufs: -14.0,
                 pitch_semitones: 0.0,
                 stretch_rate: 1.0,
+                speed_rate: 1.0,
+                warp_time_radius_ms: 150.0,
+                warp_freq_radius_hz: 300.0,
                 loop_repeat: 2,
                 noise_gate_threshold_db: -40.0,
                 noise_gate_attack_ms: 2.0,
@@ -580,6 +610,14 @@ impl super::WavesPreviewer {
             mini_meter: crate::app::types::MiniMeterState::default(),
             world_f0_draft: None,
             world_f0_focus: false,
+            gain_env_enabled: false,
+            gain_env_points: Vec::new(),
+            gain_env_drag: None,
+            pitch_drag_active: false,
+            stretch_drag_target: None,
+            spectral_warp_edit: false,
+            spectral_warp_points: Vec::new(),
+            spectral_warp_drag: None,
         });
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);

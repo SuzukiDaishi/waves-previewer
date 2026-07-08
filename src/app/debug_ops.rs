@@ -1596,8 +1596,8 @@ impl WavesPreviewer {
                         tab.preview_overlay = None;
                         Self::editor_mixdown_mono(tab)
                     };
-                    self.spawn_heavy_preview_owned(mono, ToolKind::TimeStretch, rate);
-                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::TimeStretch, rate);
+                    self.spawn_heavy_preview_owned(mono, ToolKind::TimeStretch, rate, None);
+                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::TimeStretch, rate, None);
                     self.debug_log("auto: preview time stretch");
                 } else {
                     self.debug_log("auto: preview time stretch skipped (no tab)");
@@ -1613,8 +1613,8 @@ impl WavesPreviewer {
                         tab.preview_overlay = None;
                         Self::editor_mixdown_mono(tab)
                     };
-                    self.spawn_heavy_preview_owned(mono, ToolKind::PitchShift, semi);
-                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::PitchShift, semi);
+                    self.spawn_heavy_preview_owned(mono, ToolKind::PitchShift, semi, None);
+                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::PitchShift, semi, None);
                     self.debug_log("auto: preview pitch shift");
                 } else {
                     self.debug_log("auto: preview pitch shift skipped (no tab)");

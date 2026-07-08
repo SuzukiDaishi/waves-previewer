@@ -1567,6 +1567,7 @@ impl crate::app::WavesPreviewer {
             let mut eq = None;
             let mut compressor = None;
             let mut trim = None;
+            let mut band_split = None;
             let mut bit_depth = None;
             let mut resampler = None;
             let mut waveform_zoom = None;
@@ -1635,11 +1636,17 @@ impl crate::app::WavesPreviewer {
                     spectrum_mode = Some(*mode);
                     spectrum_zoom = Some(*value);
                 }
+                EffectGraphNodeData::BandSplit { low_hz, high_hz } => {
+                    band_split = Some((*low_hz, *high_hz));
+                }
                 EffectGraphNodeData::Input
                 | EffectGraphNodeData::Output
                 | EffectGraphNodeData::Duplicate
                 | EffectGraphNodeData::SplitChannels
-                | EffectGraphNodeData::CombineChannels => {}
+                | EffectGraphNodeData::CombineChannels
+                | EffectGraphNodeData::BandJoin
+                | EffectGraphNodeData::MsSplit
+                | EffectGraphNodeData::MsJoin => {}
             }
             ui.scope_builder(
                 egui::UiBuilder::new().max_rect(body_rect.shrink2(egui::vec2(8.0, 8.0))),
@@ -2229,6 +2236,93 @@ impl crate::app::WavesPreviewer {
                                     .color(Color32::from_rgb(118, 132, 148)),
                             );
                         }
+                        EffectGraphNodeData::BandSplit { .. } => {
+                            ui.label(
+                                RichText::new("Splits into low / mid / high frequency bands")
+                                    .small()
+                                    .color(Color32::from_rgb(160, 176, 192)),
+                            );
+                            ui.label(
+                                RichText::new(
+                                    "Complementary split: Band Join reconstructs the input exactly",
+                                )
+                                .small()
+                                .color(Color32::from_rgb(118, 132, 148)),
+                            );
+                            if let Some((mut low_hz, mut high_hz)) = band_split {
+                                let mut changed = false;
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut low_hz, 20.0..=8_000.0)
+                                            .logarithmic(true)
+                                            .text("Low/Mid Hz"),
+                                    )
+                                    .on_hover_text("Crossover between the low and mid bands")
+                                    .changed();
+                                changed |= ui
+                                    .add(
+                                        egui::Slider::new(&mut high_hz, 40.0..=20_000.0)
+                                            .logarithmic(true)
+                                            .text("Mid/High Hz"),
+                                    )
+                                    .on_hover_text("Crossover between the mid and high bands")
+                                    .changed();
+                                if changed {
+                                    if high_hz <= low_hz {
+                                        high_hz = low_hz * 1.01;
+                                    }
+                                    self.effect_graph_push_undo_snapshot();
+                                    if let Some(node_mut) =
+                                        self.effect_graph.draft.nodes.get_mut(idx)
+                                    {
+                                        node_mut.data =
+                                            EffectGraphNodeData::BandSplit { low_hz, high_hz };
+                                    }
+                                    self.effect_graph.draft_dirty = true;
+                                    self.revalidate_effect_graph_draft();
+                                }
+                            }
+                        }
+                        EffectGraphNodeData::BandJoin => {
+                            ui.label(
+                                RichText::new("Sums the low / mid / high bands back together")
+                                    .small()
+                                    .color(Color32::from_rgb(160, 176, 192)),
+                            );
+                            ui.label(
+                                RichText::new(
+                                    "Straight from Band Split it returns the original audio",
+                                )
+                                .small()
+                                .color(Color32::from_rgb(118, 132, 148)),
+                            );
+                        }
+                        EffectGraphNodeData::MsSplit => {
+                            ui.label(
+                                RichText::new("Encodes stereo into mid (L+R) and side (L-R)")
+                                    .small()
+                                    .color(Color32::from_rgb(160, 176, 192)),
+                            );
+                            ui.label(
+                                RichText::new("Mono input passes through as mid with silent side")
+                                    .small()
+                                    .color(Color32::from_rgb(118, 132, 148)),
+                            );
+                        }
+                        EffectGraphNodeData::MsJoin => {
+                            ui.label(
+                                RichText::new("Decodes mid + side back to stereo (L/R)")
+                                    .small()
+                                    .color(Color32::from_rgb(160, 176, 192)),
+                            );
+                            ui.label(
+                                RichText::new(
+                                    "Straight from MS Split it returns the original stereo",
+                                )
+                                .small()
+                                .color(Color32::from_rgb(118, 132, 148)),
+                            );
+                        }
                         EffectGraphNodeData::SplitChannels => {
                             ui.label(
                                 RichText::new("Splits incoming audio into 8 routed mono outputs")
@@ -2429,6 +2523,21 @@ impl crate::app::WavesPreviewer {
                     }
                     if let Some((mut threshold_db, mut attack_ms, mut release_ms)) = noise_gate {
                         let mut changed = false;
+                        {
+                            let mut plot_params = crate::wave::NoiseGateParams {
+                                threshold_db,
+                                attack_ms,
+                                release_ms,
+                            };
+                            if crate::app::ui::dsp_widgets::noise_gate_plot(
+                                ui,
+                                egui::Id::new(("fx_gate_plot", idx)),
+                                &mut plot_params,
+                            ) {
+                                threshold_db = plot_params.threshold_db;
+                                changed = true;
+                            }
+                        }
                         changed |= ui
                             .add(egui::Slider::new(&mut threshold_db, -80.0..=0.0).text("Threshold dB"))
                             .on_hover_text("Signal below this level is faded toward silence")
@@ -2465,6 +2574,32 @@ impl crate::app::WavesPreviewer {
                     )) = eq
                     {
                         let mut changed = false;
+                        {
+                            let mut plot_params = crate::wave::ThreeBandEqParams {
+                                low_shelf_freq_hz,
+                                low_shelf_gain_db,
+                                mid_freq_hz,
+                                mid_gain_db,
+                                mid_q,
+                                high_shelf_freq_hz,
+                                high_shelf_gain_db,
+                            };
+                            if crate::app::ui::dsp_widgets::eq_response_plot(
+                                ui,
+                                egui::Id::new(("fx_eq_plot", idx)),
+                                &mut plot_params,
+                                48_000,
+                            ) {
+                                low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
+                                low_shelf_gain_db = plot_params.low_shelf_gain_db;
+                                mid_freq_hz = plot_params.mid_freq_hz;
+                                mid_gain_db = plot_params.mid_gain_db;
+                                mid_q = plot_params.mid_q;
+                                high_shelf_freq_hz = plot_params.high_shelf_freq_hz;
+                                high_shelf_gain_db = plot_params.high_shelf_gain_db;
+                                changed = true;
+                            }
+                        }
                         ui.label(RichText::new("Low shelf").small().weak())
                             .on_hover_text("Boosts or cuts everything below this frequency");
                         changed |= ui
@@ -2520,6 +2655,24 @@ impl crate::app::WavesPreviewer {
                         compressor
                     {
                         let mut changed = false;
+                        {
+                            let mut plot_params = crate::wave::CompressorParams {
+                                threshold_db,
+                                ratio,
+                                attack_ms,
+                                release_ms,
+                                makeup_db,
+                            };
+                            if crate::app::ui::dsp_widgets::compressor_transfer_plot(
+                                ui,
+                                egui::Id::new(("fx_comp_plot", idx)),
+                                &mut plot_params,
+                            ) {
+                                threshold_db = plot_params.threshold_db;
+                                ratio = plot_params.ratio;
+                                changed = true;
+                            }
+                        }
                         changed |= ui
                             .add(egui::Slider::new(&mut threshold_db, -60.0..=0.0).text("Threshold dB"))
                             .on_hover_text("Signal above this level gets compressed")

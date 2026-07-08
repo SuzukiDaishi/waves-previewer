@@ -11,10 +11,17 @@ impl super::WavesPreviewer {
                         && expected_path.as_deref() == Some(path.as_path())
                     {
                         if let Some(idx) = self.active_tab {
+                            // View-bound tools (e.g. SpectralWarp) never become
+                            // `active_tool`; they mark `preview_audio_tool`
+                            // when the job is spawned instead.
                             if self
                                 .tabs
                                 .get(idx)
-                                .map(|tab| tab.path == path && tab.active_tool == tool)
+                                .map(|tab| {
+                                    tab.path == path
+                                        && (tab.active_tool == tool
+                                            || tab.preview_audio_tool == Some(tool))
+                                })
                                 .unwrap_or(false)
                             {
                                 self.set_preview_mono(idx, tool, mono);

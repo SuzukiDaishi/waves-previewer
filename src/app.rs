@@ -2253,10 +2253,11 @@ impl WavesPreviewer {
         let mut affect_playing = false;
         for &i in indices {
             if let Some(p) = self.path_for_row(i).cloned() {
-                let cur = self.pending_gain_db_for_path(&p);
-                let new = Self::clamp_gain_db(cur + delta_db);
-                self.set_pending_gain_db_for_path(&p, new);
-                if self.playing_path.as_ref() == Some(&p) {
+                // Unified gain framework: files with an open editor tab get
+                // the delta as a destructive editor edit; the rest keep the
+                // fast pending-gain path.
+                let routed_to_editor = self.apply_file_gain_delta_unified(&p, delta_db);
+                if !routed_to_editor && self.playing_path.as_ref() == Some(&p) {
                     affect_playing = true;
                 }
                 // schedule LUFS recompute for each affected path

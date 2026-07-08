@@ -231,6 +231,7 @@ impl super::WavesPreviewer {
                 waveform_minmax,
                 waveform_pyramid,
                 lufs_override: None,
+                selection_after: None,
             });
         });
         self.editor_apply_state = Some(EditorApplyState {

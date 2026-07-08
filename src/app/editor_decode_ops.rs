@@ -864,6 +864,9 @@ impl super::WavesPreviewer {
             }
         }
         if let Some(idx) = decode_update_tab {
+            // Unified gain framework: a pending list gain becomes a regular
+            // editor edit (undo/dirty) as soon as the tab has real audio.
+            self.editor_bake_pending_gain_into_tab(idx);
             if self.active_tab == Some(idx) {
                 let tab_audio = self.tabs.get(idx).and_then(|tab| {
                     if tab.ch_samples.is_empty() {

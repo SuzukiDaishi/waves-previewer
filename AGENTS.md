@@ -39,7 +39,7 @@ Repository Layout
     - `scan_ops.rs`: folder scan job orchestration + results apply.
     - `transcript_ops.rs`: transcript seek handling.
     - `cli_ops.rs`: `--cli` headless command handlers and JSON/render helpers.
-    - `gain_ops.rs`: pending gain lookup/set helpers for list items.
+    - `gain_ops.rs`: unified per-file gain framework: pending gain lookup/set for list items, plus routing list gain changes into open editor tabs as destructive edits (and baking pending gain on tab open).
     - `list_state_ops.rs`: list accessors, selection helpers, and sort-key visibility guard.
     - `temp_audio_ops.rs`: clipboard temp wav export + virtual audio decode helpers.
     - `rename_ops.rs`: rename dialogs + path replacement and batch rename.

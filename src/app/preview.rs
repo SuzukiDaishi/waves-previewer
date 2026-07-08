@@ -10,9 +10,15 @@ use super::{WavesPreviewer, LIVE_PREVIEW_SAMPLE_LIMIT};
 enum LongPreviewJobKind {
     PitchShift {
         semitones: f32,
+        range: Option<(usize, usize)>,
     },
     TimeStretch {
         rate: f32,
+        range: Option<(usize, usize)>,
+    },
+    Speed {
+        rate: f32,
+        range: Option<(usize, usize)>,
     },
     Fade {
         fade_in_samples: usize,
@@ -30,7 +36,9 @@ enum LongPreviewJobKind {
         target_lufs: f32,
         out_sample_rate: u32,
     },
-    Reverse,
+    Reverse {
+        range: Option<(usize, usize)>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -44,18 +52,32 @@ impl LongPreviewJobKind {
         match self {
             LongPreviewJobKind::PitchShift { .. } => ToolKind::PitchShift,
             LongPreviewJobKind::TimeStretch { .. } => ToolKind::TimeStretch,
+            LongPreviewJobKind::Speed { .. } => ToolKind::Speed,
             LongPreviewJobKind::Fade { .. } => ToolKind::Fade,
             LongPreviewJobKind::Gain { .. } => ToolKind::Gain,
             LongPreviewJobKind::Normalize { .. } => ToolKind::Normalize,
             LongPreviewJobKind::Loudness { .. } => ToolKind::Loudness,
-            LongPreviewJobKind::Reverse => ToolKind::Reverse,
+            LongPreviewJobKind::Reverse { .. } => ToolKind::Reverse,
         }
     }
 
     fn final_timeline_len(self, base_timeline_len: usize) -> usize {
         match self {
-            LongPreviewJobKind::TimeStretch { rate } => {
+            LongPreviewJobKind::TimeStretch { rate, range: None }
+            | LongPreviewJobKind::Speed { rate, range: None } => {
                 ((base_timeline_len as f64) * (rate.max(0.0001) as f64)).round() as usize
+            }
+            LongPreviewJobKind::TimeStretch {
+                rate,
+                range: Some((s, e)),
+            }
+            | LongPreviewJobKind::Speed {
+                rate,
+                range: Some((s, e)),
+            } => {
+                let sel = e.saturating_sub(s).min(base_timeline_len);
+                let stretched = ((sel as f64) / (rate.max(0.0001) as f64)).round() as usize;
+                base_timeline_len - sel + stretched
             }
             _ => base_timeline_len,
         }
@@ -70,6 +92,7 @@ impl WavesPreviewer {
             ToolKind::Fade
                 | ToolKind::PitchShift
                 | ToolKind::TimeStretch
+                | ToolKind::Speed
                 | ToolKind::Gain
                 | ToolKind::Normalize
                 | ToolKind::Loudness
@@ -133,6 +156,8 @@ impl WavesPreviewer {
         Some(match tool {
             Some(ToolKind::PitchShift) => "Previewing PitchShift...".to_string(),
             Some(ToolKind::TimeStretch) => "Previewing TimeStretch...".to_string(),
+            Some(ToolKind::Speed) => "Previewing Speed...".to_string(),
+            Some(ToolKind::SpectralWarp) => "Previewing Spectral Warp...".to_string(),
             _ => "Previewing...".to_string(),
         })
     }
@@ -356,7 +381,9 @@ impl WavesPreviewer {
     ) -> Option<PreviewOverlay> {
         let mut overview = Self::build_source_overview_bins(path, fallback_channels)?;
         match kind {
-            LongPreviewJobKind::PitchShift { .. } | LongPreviewJobKind::TimeStretch { .. } => {}
+            LongPreviewJobKind::PitchShift { .. }
+            | LongPreviewJobKind::TimeStretch { .. }
+            | LongPreviewJobKind::Speed { .. } => {}
             LongPreviewJobKind::Fade {
                 fade_in_samples,
                 fade_out_samples,
@@ -395,9 +422,31 @@ impl WavesPreviewer {
                 let gain = db_to_amp(target_lufs - lufs);
                 Self::scale_overview_in_place(&mut overview, gain, true);
             }
-            LongPreviewJobKind::Reverse => {
-                for channel in &mut overview {
-                    channel.reverse();
+            LongPreviewJobKind::Reverse { range } => {
+                match range.filter(|(s, e)| *e > *s && *e <= base_timeline_len) {
+                    Some((s, e)) => {
+                        for channel in &mut overview {
+                            let bins = channel.len();
+                            if bins == 0 || base_timeline_len == 0 {
+                                continue;
+                            }
+                            let b0 = ((s as u128) * (bins as u128)
+                                / (base_timeline_len as u128))
+                                as usize;
+                            let b1 = (((e as u128) * (bins as u128))
+                                .div_ceil(base_timeline_len as u128))
+                                as usize;
+                            let b1 = b1.min(bins);
+                            if b1 > b0 {
+                                channel[b0..b1].reverse();
+                            }
+                        }
+                    }
+                    None => {
+                        for channel in &mut overview {
+                            channel.reverse();
+                        }
+                    }
                 }
             }
         }
@@ -414,28 +463,22 @@ impl WavesPreviewer {
         sample_rate: u32,
     ) -> Option<PreviewOverlay> {
         let tool = kind.tool();
+        let (param, range) = match kind {
+            LongPreviewJobKind::PitchShift { semitones, range } => (semitones, range),
+            LongPreviewJobKind::TimeStretch { rate, range } => (rate, range),
+            LongPreviewJobKind::Speed { rate, range } => (rate, range),
+            _ => return None,
+        };
         let mut out = Vec::with_capacity(channels.len());
         let mut result_len = 0usize;
         for channel in channels {
-            let processed = match kind {
-                LongPreviewJobKind::PitchShift { semitones } => {
-                    crate::wave::process_pitchshift_offline(
-                        channel,
-                        sample_rate.max(1),
-                        sample_rate.max(1),
-                        semitones,
-                    )
-                }
-                LongPreviewJobKind::TimeStretch { rate } => {
-                    crate::wave::process_timestretch_offline(
-                        channel,
-                        sample_rate.max(1),
-                        sample_rate.max(1),
-                        rate,
-                    )
-                }
-                _ => return None,
-            };
+            let processed = Self::process_tool_segment_spliced(
+                channel,
+                tool,
+                param,
+                sample_rate.max(1),
+                range,
+            );
             result_len = processed.len();
             out.push(processed);
         }
@@ -538,6 +581,58 @@ impl WavesPreviewer {
         self.spawn_overlay_job_for_tab(tab_idx, kind, None, true);
     }
 
+    /// Long-clip Gain-curve preview: build the source overview off-thread and
+    /// scale each bin by the envelope level at the bin's timeline position.
+    fn spawn_gain_env_overview_for_tab(&mut self, tab_idx: usize, points: Vec<(usize, f32)>) {
+        use std::sync::mpsc;
+
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if points.is_empty() {
+            return;
+        }
+        let path = tab.path.clone();
+        let fallback_channels = tab.ch_samples.clone();
+        let base_timeline_len = tab.samples_len.max(1);
+
+        self.clear_heavy_overlay_state();
+        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
+        let gen = self.overlay_gen_counter;
+        self.overlay_expected_gen = gen;
+        self.overlay_expected_path = Some(path.clone());
+        self.overlay_expected_tool = Some(ToolKind::Gain);
+
+        let (tx, rx) = mpsc::channel::<super::HeavyOverlayMessage>();
+        std::thread::spawn(move || {
+            let Some(mut overview) = Self::build_source_overview_bins(&path, &fallback_channels)
+            else {
+                return;
+            };
+            for channel in &mut overview {
+                let bins_len = channel.len().max(1);
+                for (idx, (mn, mx)) in channel.iter_mut().enumerate() {
+                    let pos = (((idx as f64) + 0.5) * (base_timeline_len as f64)
+                        / (bins_len as f64))
+                        .round() as usize;
+                    let db = crate::wave::gain_envelope_db_at(&points, 0.0, pos);
+                    let g = db_to_amp(db);
+                    let lo = *mn * g;
+                    let hi = *mx * g;
+                    *mn = lo.min(hi);
+                    *mx = lo.max(hi);
+                }
+            }
+            let overlay = Self::preview_overlay_from_overview(
+                overview,
+                ToolKind::Gain,
+                base_timeline_len,
+            );
+            let _ = tx.send((path, ToolKind::Gain, overlay, gen, true));
+        });
+        self.heavy_overlay_rx = Some(rx);
+    }
+
     pub(super) fn refresh_tool_preview_for_tab(&mut self, tab_idx: usize) {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
@@ -564,6 +659,12 @@ impl WavesPreviewer {
         let normalize_db = st.normalize_target_db;
         let semitones = st.pitch_semitones;
         let stretch_rate = st.stretch_rate;
+        let speed_rate = st.speed_rate;
+        let sel_range = tab
+            .selection
+            .filter(|(s, e)| *e > *s && *e <= tab.samples_len);
+        let gain_env_active = tab.gain_env_enabled && !tab.gain_env_points.is_empty();
+        let gain_env_points = tab.gain_env_points.clone();
         let allow_light_preview = tab.samples_len <= LIVE_PREVIEW_SAMPLE_LIMIT;
         let use_path_preview = !allow_light_preview && !tab.dirty;
         let tab_path = tab.path.clone();
@@ -575,56 +676,33 @@ impl WavesPreviewer {
         let _ = tab;
 
         match tool {
-            ToolKind::PitchShift => {
-                if semitones.abs() <= 0.0001 || decode_failed {
+            ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed => {
+                let param = match tool {
+                    ToolKind::PitchShift => semitones,
+                    ToolKind::TimeStretch => stretch_rate,
+                    _ => speed_rate,
+                };
+                let is_noop = match tool {
+                    ToolKind::PitchShift => semitones.abs() <= 0.0001,
+                    _ => (param - 1.0).abs() <= 0.0001,
+                };
+                if is_noop || decode_failed {
                     return;
                 }
                 self.audio.stop();
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    tab.preview_audio_tool = Some(ToolKind::PitchShift);
+                    tab.preview_audio_tool = Some(tool);
                 }
                 if use_path_preview {
-                    self.spawn_heavy_preview_from_path(
-                        tab_path.clone(),
-                        ToolKind::PitchShift,
-                        semitones,
-                    );
-                    self.spawn_heavy_overlay_from_path(tab_path, ToolKind::PitchShift, semitones);
+                    self.spawn_heavy_preview_from_path(tab_path.clone(), tool, param, sel_range);
+                    self.spawn_heavy_overlay_from_path(tab_path, tool, param, sel_range);
                 } else {
                     let mono = Self::mixdown_channels(&ch_samples, samples_len);
                     if mono.is_empty() {
                         return;
                     }
-                    self.spawn_heavy_preview_owned(mono, ToolKind::PitchShift, semitones);
-                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::PitchShift, semitones);
-                }
-            }
-            ToolKind::TimeStretch => {
-                if (stretch_rate - 1.0).abs() <= 0.0001 || decode_failed {
-                    return;
-                }
-                self.audio.stop();
-                if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                    tab.preview_audio_tool = Some(ToolKind::TimeStretch);
-                }
-                if use_path_preview {
-                    self.spawn_heavy_preview_from_path(
-                        tab_path.clone(),
-                        ToolKind::TimeStretch,
-                        stretch_rate,
-                    );
-                    self.spawn_heavy_overlay_from_path(
-                        tab_path,
-                        ToolKind::TimeStretch,
-                        stretch_rate,
-                    );
-                } else {
-                    let mono = Self::mixdown_channels(&ch_samples, samples_len);
-                    if mono.is_empty() {
-                        return;
-                    }
-                    self.spawn_heavy_preview_owned(mono, ToolKind::TimeStretch, stretch_rate);
-                    self.spawn_heavy_overlay_for_tab(tab_idx, ToolKind::TimeStretch, stretch_rate);
+                    self.spawn_heavy_preview_owned(mono, tool, param, sel_range);
+                    self.spawn_heavy_overlay_for_tab(tab_idx, tool, param, sel_range);
                 }
             }
             ToolKind::Fade => {
@@ -687,24 +765,41 @@ impl WavesPreviewer {
                 self.set_preview_mono(tab_idx, ToolKind::Fade, mono);
             }
             ToolKind::Gain => {
-                if gain_db.abs() <= 1e-6 {
+                if !gain_env_active && gain_db.abs() <= 1e-6 {
                     return;
                 }
                 if !allow_light_preview {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.preview_audio_tool = None;
                     }
-                    self.spawn_long_preview_overview_for_tab(
-                        tab_idx,
-                        LongPreviewJobKind::Gain { gain_db },
-                    );
+                    if gain_env_active {
+                        // Long clip: scale the overview bins by the envelope so
+                        // the drawn curve still previews visually.
+                        self.spawn_gain_env_overview_for_tab(tab_idx, gain_env_points);
+                    } else {
+                        self.spawn_long_preview_overview_for_tab(
+                            tab_idx,
+                            LongPreviewJobKind::Gain { gain_db },
+                        );
+                    }
                     return;
                 }
-                let g = db_to_amp(gain_db);
                 let mut overlay = ch_samples.clone();
-                for ch in overlay.iter_mut() {
-                    for v in ch.iter_mut() {
-                        *v *= g;
+                if gain_env_active {
+                    for ch in overlay.iter_mut() {
+                        crate::wave::apply_gain_envelope_in_place(
+                            ch,
+                            &gain_env_points,
+                            gain_db,
+                            false,
+                        );
+                    }
+                } else {
+                    let g = db_to_amp(gain_db);
+                    for ch in overlay.iter_mut() {
+                        for v in ch.iter_mut() {
+                            *v *= g;
+                        }
                     }
                 }
                 let mono = Self::mixdown_channels(&overlay, samples_len);
@@ -821,12 +916,22 @@ impl WavesPreviewer {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.preview_audio_tool = None;
                     }
-                    self.spawn_long_preview_overview_for_tab(tab_idx, LongPreviewJobKind::Reverse);
+                    self.spawn_long_preview_overview_for_tab(
+                        tab_idx,
+                        LongPreviewJobKind::Reverse { range: sel_range },
+                    );
                     return;
                 }
                 let mut overlay = ch_samples.clone();
+                let sr = self.audio.shared.out_sample_rate.max(1);
                 for ch in overlay.iter_mut() {
-                    ch.reverse();
+                    match sel_range {
+                        Some((s, e)) => {
+                            let xf = crate::wave::splice_xfade_samples(sr, e - s, e - s).min(256);
+                            crate::wave::reverse_range_with_crossfade(ch, s, e, xf);
+                        }
+                        None => ch.reverse(),
+                    }
                 }
                 let mono = Self::mixdown_channels(&overlay, samples_len);
                 if mono.is_empty() {
@@ -866,7 +971,13 @@ impl WavesPreviewer {
         self.cancel_music_preview_run();
     }
 
-    pub(super) fn spawn_heavy_preview_owned(&mut self, mono: Vec<f32>, tool: ToolKind, param: f32) {
+    pub(super) fn spawn_heavy_preview_owned(
+        &mut self,
+        mono: Vec<f32>,
+        tool: ToolKind,
+        param: f32,
+        range: Option<(usize, usize)>,
+    ) {
         use std::sync::mpsc;
         let sr = self.audio.shared.out_sample_rate;
         let path = self
@@ -882,11 +993,8 @@ impl WavesPreviewer {
         let (tx, rx) = mpsc::channel::<super::HeavyPreviewMessage>();
         std::thread::spawn(move || {
             let out = match tool {
-                ToolKind::PitchShift => {
-                    crate::wave::process_pitchshift_offline(&mono, sr, sr, param)
-                }
-                ToolKind::TimeStretch => {
-                    crate::wave::process_timestretch_offline(&mono, sr, sr, param)
+                ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed => {
+                    Self::process_tool_segment_spliced(&mono, tool, param, sr, range)
                 }
                 _ => mono,
             };
@@ -900,6 +1008,7 @@ impl WavesPreviewer {
         path: PathBuf,
         tool: ToolKind,
         param: f32,
+        range: Option<(usize, usize)>,
     ) {
         use std::sync::mpsc;
         let sr = self.audio.shared.out_sample_rate;
@@ -927,11 +1036,8 @@ impl WavesPreviewer {
                 crate::wave::quantize_mono_in_place(&mut mono, depth);
             }
             let out = match tool {
-                ToolKind::PitchShift => {
-                    crate::wave::process_pitchshift_offline(&mono, sr, sr, param)
-                }
-                ToolKind::TimeStretch => {
-                    crate::wave::process_timestretch_offline(&mono, sr, sr, param)
+                ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed => {
+                    Self::process_tool_segment_spliced(&mono, tool, param, sr, range)
                 }
                 _ => mono,
             };
@@ -947,15 +1053,14 @@ impl WavesPreviewer {
         tab_idx: usize,
         tool: ToolKind,
         param: f32,
+        range: Option<(usize, usize)>,
     ) {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
         let send_overview_first = tab.samples_len > LIVE_PREVIEW_SAMPLE_LIMIT;
-        let kind = match tool {
-            ToolKind::PitchShift => LongPreviewJobKind::PitchShift { semitones: param },
-            ToolKind::TimeStretch => LongPreviewJobKind::TimeStretch { rate: param },
-            _ => return,
+        let Some(kind) = Self::heavy_overlay_job_kind(tool, param, range) else {
+            return;
         };
         self.spawn_overlay_job_for_tab(
             tab_idx,
@@ -965,11 +1070,28 @@ impl WavesPreviewer {
         );
     }
 
+    fn heavy_overlay_job_kind(
+        tool: ToolKind,
+        param: f32,
+        range: Option<(usize, usize)>,
+    ) -> Option<LongPreviewJobKind> {
+        match tool {
+            ToolKind::PitchShift => Some(LongPreviewJobKind::PitchShift {
+                semitones: param,
+                range,
+            }),
+            ToolKind::TimeStretch => Some(LongPreviewJobKind::TimeStretch { rate: param, range }),
+            ToolKind::Speed => Some(LongPreviewJobKind::Speed { rate: param, range }),
+            _ => None,
+        }
+    }
+
     pub(super) fn spawn_heavy_overlay_from_path(
         &mut self,
         path: PathBuf,
         tool: ToolKind,
         param: f32,
+        range: Option<(usize, usize)>,
     ) {
         let Some(tab_idx) = self.tabs.iter().position(|tab| tab.path == path) else {
             return;
@@ -979,10 +1101,8 @@ impl WavesPreviewer {
             .get(tab_idx)
             .map(|tab| tab.samples_len > LIVE_PREVIEW_SAMPLE_LIMIT)
             .unwrap_or(false);
-        let kind = match tool {
-            ToolKind::PitchShift => LongPreviewJobKind::PitchShift { semitones: param },
-            ToolKind::TimeStretch => LongPreviewJobKind::TimeStretch { rate: param },
-            _ => return,
+        let Some(kind) = Self::heavy_overlay_job_kind(tool, param, range) else {
+            return;
         };
         self.spawn_overlay_job_for_tab(
             tab_idx,

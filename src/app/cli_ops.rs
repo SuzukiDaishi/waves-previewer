@@ -1878,6 +1878,9 @@ fn editor_tool_set(args: EditorToolSetArgs) -> Result<CliCommandOutput> {
     if let Some(value) = args.stretch_rate {
         tab.tool_state.stretch_rate = value.max(0.05);
     }
+    if let Some(value) = args.speed_rate {
+        tab.tool_state.speed_rate = value.clamp(0.25, 4.0);
+    }
     if let Some(value) = args.loop_repeat {
         tab.tool_state.loop_repeat = value.max(2);
     }
@@ -2648,6 +2651,9 @@ fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<Proj
             loudness_target_lufs: -14.0,
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
+            speed_rate: 1.0,
+            warp_time_radius_ms: 150.0,
+            warp_freq_radius_hz: 300.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -2947,6 +2953,9 @@ fn resolve_editor_state_for_input(input: &Path) -> Result<EditorTargetState> {
             loudness_target_lufs: -14.0,
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
+            speed_rate: 1.0,
+            warp_time_radius_ms: 150.0,
+            warp_freq_radius_hz: 300.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -3022,6 +3031,9 @@ fn tool_state_json(state: &ToolState) -> Value {
         "loudness_target_lufs": state.loudness_target_lufs,
         "pitch_semitones": state.pitch_semitones,
         "stretch_rate": state.stretch_rate,
+        "speed_rate": state.speed_rate,
+        "warp_time_radius_ms": state.warp_time_radius_ms,
+        "warp_freq_radius_hz": state.warp_freq_radius_hz,
         "loop_repeat": state.loop_repeat,
     })
 }
@@ -3701,6 +3713,10 @@ fn default_effect_graph_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
         EffectGraphNodeKind::PluginFx => [360.0, 320.0],
         EffectGraphNodeKind::SplitChannels => [260.0, 220.0],
         EffectGraphNodeKind::CombineChannels => [300.0, 250.0],
+        EffectGraphNodeKind::BandSplit => [290.0, 210.0],
+        EffectGraphNodeKind::BandJoin
+        | EffectGraphNodeKind::MsSplit
+        | EffectGraphNodeKind::MsJoin => [260.0, 165.0],
         EffectGraphNodeKind::DebugWaveform => [340.0, 250.0],
         EffectGraphNodeKind::DebugSpectrum => [360.0, 300.0],
         EffectGraphNodeKind::Eq => [300.0, 340.0],

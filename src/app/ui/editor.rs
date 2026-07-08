@@ -2751,11 +2751,14 @@ impl crate::app::WavesPreviewer {
         let mut do_trim_virtual_multi: Option<Vec<(usize, usize)>> = None;
         let do_fade: Option<((usize, usize), f32, f32)> = None; // legacy whole-file fade
         let mut do_gain: Option<((usize, usize), f32)> = None;
+        let mut do_gain_env: Option<Vec<(usize, f32)>> = None;
         let mut do_normalize: Option<((usize, usize), f32)> = None;
         let mut do_noise_gate: Option<((usize, usize), f32, f32, f32)> = None;
         let mut do_eq: Option<((usize, usize), crate::wave::ThreeBandEqParams)> = None;
         let mut do_compressor: Option<((usize, usize), crate::wave::CompressorParams)> = None;
         let mut do_reverse: Option<(usize, usize)> = None;
+        let mut pending_spectral_warp_preview = false;
+        let mut pending_spectral_warp_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -2801,8 +2804,9 @@ impl crate::app::WavesPreviewer {
             self.current_tab_preview_busy(tab_idx) || self.music_preview_state.is_some();
         let apply_busy =
             self.editor_apply_state.is_some() || plugin_apply_busy || virtual_trim_busy;
-        let mut pending_overlay_job: Option<(ToolKind, f32)> = None;
-        let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32)> = None;
+        let mut pending_overlay_job: Option<(ToolKind, f32, Option<(usize, usize)>)> = None;
+        let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32, Option<(usize, usize)>)> =
+            None;
         let music_model_ready = self.music_ai_has_model();
         let music_demucs_ready = self.music_ai_has_demucs_model();
         let music_model_downloading = self.music_model_download_state.is_some();
@@ -2960,10 +2964,11 @@ impl crate::app::WavesPreviewer {
                 // Accumulate non-destructive preview audio to audition.
                 // Carry the tool kind to keep preview state consistent.
                 let mut pending_preview: Option<(ToolKind, Vec<f32>)> = None;
-                let mut pending_heavy_preview: Option<(ToolKind, Vec<f32>, f32)> = None;
-                let mut pending_heavy_preview_path: Option<(ToolKind, PathBuf, f32)> = None;
-                let mut pending_pitch_apply: Option<f32> = None;
-                let mut pending_stretch_apply: Option<f32> = None;
+                let mut pending_heavy_preview: Option<(ToolKind, Vec<f32>, f32, Option<(usize, usize)>)> = None;
+                let mut pending_heavy_preview_path: Option<(ToolKind, PathBuf, f32, Option<(usize, usize)>)> = None;
+                let mut pending_pitch_apply: Option<(f32, Option<(usize, usize)>)> = None;
+                let mut pending_stretch_apply: Option<(f32, Option<(usize, usize)>)> = None;
+                let mut pending_speed_apply: Option<(f32, Option<(usize, usize)>)> = None;
                 let mut pending_loudness_apply: Option<f32> = None;
                 let mut pending_plugin_scan = false;
                 let mut pending_plugin_probe: Option<String> = None;
@@ -4300,6 +4305,302 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             }
+            // ---- Tool canvas gestures (Waveform view) ----
+            // Gain curve editing owns the pointer like the WORLD pencil;
+            // PitchShift's pitch line and Speed/TimeStretch's selection-edge
+            // handle only claim the pointer while grabbing their handles, so
+            // seek/selection keep working elsewhere on the canvas.
+            let wave_view_gestures = view_mode == ViewMode::Waveform && display_samples_len > 0;
+            let gain_env_editing = wave_view_gestures
+                && matches!(tab.active_tool, ToolKind::Gain)
+                && tab.gain_env_enabled;
+            // Spectral warp editing owns the pointer on the Spec/Log views
+            // (the input handling itself lives below, after the spectral
+            // y<->Hz helpers are defined).
+            let spectral_warp_editing = matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
+                && tab.spectral_warp_edit
+                && display_samples_len > 0;
+            let canvas_h = rect.height().max(1.0);
+            const GAIN_ENV_DB_RANGE: f32 = 24.0;
+            const PITCH_SEMI_RANGE: f32 = 12.0;
+            let frac_to_y = |frac: f32| rect.top() + (1.0 - frac.clamp(0.0, 1.0)) * canvas_h;
+            let y_to_frac = |y: f32| (1.0 - (y - rect.top()) / canvas_h).clamp(0.0, 1.0);
+            // A flag any gesture sets while it owns the primary button; the
+            // seek / range-select handlers below bail out when set.
+            let mut tool_gesture_active = gain_env_editing || spectral_warp_editing;
+            // Requests deferred to after UI borrows (same pattern as inspector).
+            let mut gesture_refresh_preview = false;
+            let mut gesture_restore_preview = false;
+            let mut gesture_spawn_tool_preview: Option<(ToolKind, f32, Option<(usize, usize)>)> =
+                None;
+            if gain_env_editing {
+                suppress_seek = true;
+                if resp.hovered() {
+                    hover_cursor = Some(egui::CursorIcon::Crosshair);
+                }
+                let db_to_frac = |db: f32| 0.5 + db / (GAIN_ENV_DB_RANGE * 2.0);
+                let frac_to_db = |frac: f32| (frac - 0.5) * GAIN_ENV_DB_RANGE * 2.0;
+                let hit_radius = 8.0f32;
+                let mut env_changed = false;
+                let point_screen = |p: &(usize, f32)| -> egui::Pos2 {
+                    egui::pos2(
+                        geom.sample_center_x(p.0.min(display_samples_len)),
+                        frac_to_y(db_to_frac(p.1)),
+                    )
+                };
+                let nearest_point = |points: &[(usize, f32)], pos: egui::Pos2| -> Option<usize> {
+                    let mut best: Option<(usize, f32)> = None;
+                    for (idx, p) in points.iter().enumerate() {
+                        let sp = point_screen(p);
+                        let d = sp.distance(pos);
+                        if d <= hit_radius && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                            best = Some((idx, d));
+                        }
+                    }
+                    best.map(|(idx, _)| idx)
+                };
+                // Delete: double-click (or right-click) on a breakpoint.
+                let double_clicked = resp.double_clicked_by(egui::PointerButton::Primary);
+                let right_clicked = resp.clicked_by(egui::PointerButton::Secondary);
+                if double_clicked || right_clicked {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        if let Some(idx) = nearest_point(&tab.gain_env_points, pos) {
+                            tab.gain_env_points.remove(idx);
+                            tab.gain_env_drag = None;
+                            env_changed = true;
+                        }
+                    }
+                }
+                // Add / grab on primary press.
+                if !double_clicked
+                    && (resp.drag_started_by(egui::PointerButton::Primary)
+                        || resp.clicked_by(egui::PointerButton::Primary))
+                    && tab.gain_env_drag.is_none()
+                {
+                    if let Some(pos) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .or_else(|| resp.interact_pointer_pos())
+                    {
+                        if let Some(idx) = nearest_point(&tab.gain_env_points, pos) {
+                            tab.gain_env_drag = Some(idx);
+                        } else {
+                            let sample = geom
+                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                            let db = frac_to_db(y_to_frac(pos.y))
+                                .clamp(-GAIN_ENV_DB_RANGE, GAIN_ENV_DB_RANGE);
+                            let insert_at = tab
+                                .gain_env_points
+                                .iter()
+                                .position(|p| p.0 > sample)
+                                .unwrap_or(tab.gain_env_points.len());
+                            tab.gain_env_points.insert(insert_at, (sample, db));
+                            tab.gain_env_drag = Some(insert_at);
+                            env_changed = true;
+                        }
+                    }
+                }
+                // Drag: move the grabbed breakpoint (kept between neighbours).
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    if let (Some(idx), Some(pos)) =
+                        (tab.gain_env_drag, resp.interact_pointer_pos())
+                    {
+                        if idx < tab.gain_env_points.len() {
+                            let mut sample = geom
+                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                            if idx > 0 {
+                                sample = sample.max(tab.gain_env_points[idx - 1].0.saturating_add(1));
+                            }
+                            if idx + 1 < tab.gain_env_points.len() {
+                                sample =
+                                    sample.min(tab.gain_env_points[idx + 1].0.saturating_sub(1));
+                            }
+                            let db = frac_to_db(y_to_frac(pos.y))
+                                .clamp(-GAIN_ENV_DB_RANGE, GAIN_ENV_DB_RANGE);
+                            tab.gain_env_points[idx] = (sample, db);
+                        }
+                    }
+                }
+                // Any primary release (click or drag end) drops the grab and
+                // commits the change to the audio preview.
+                if ui.input(|i| i.pointer.primary_released()) {
+                    if tab.gain_env_drag.take().is_some() {
+                        env_changed = true;
+                    }
+                }
+                if env_changed {
+                    stop_playback = true;
+                    tab.preview_overlay = None;
+                    if tab.gain_env_points.is_empty() {
+                        gesture_restore_preview = true;
+                    } else {
+                        tab.preview_audio_tool = Some(ToolKind::Gain);
+                        gesture_refresh_preview = true;
+                    }
+                }
+            }
+            // PitchShift: draggable horizontal pitch line (up = higher).
+            let pitch_line_tool = wave_view_gestures
+                && !gain_env_editing
+                && matches!(tab.active_tool, ToolKind::PitchShift);
+            if pitch_line_tool {
+                let semi_to_frac = |semi: f32| 0.5 + semi / (PITCH_SEMI_RANGE * 2.0);
+                let frac_to_semi = |frac: f32| (frac - 0.5) * PITCH_SEMI_RANGE * 2.0;
+                let mut semi = tab.tool_state.pitch_semitones;
+                if !semi.is_finite() {
+                    semi = 0.0;
+                }
+                let line_y = frac_to_y(semi_to_frac(semi));
+                let near_line = |pos: egui::Pos2| (pos.y - line_y).abs() <= 8.0;
+                if pointer_over_waveform && tab.stretch_drag_target.is_none() {
+                    if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if near_line(pos) || tab.pitch_drag_active {
+                            hover_cursor = Some(egui::CursorIcon::ResizeVertical);
+                        }
+                    }
+                }
+                if resp.drag_started_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .or_else(|| resp.interact_pointer_pos())
+                    {
+                        if near_line(pos) {
+                            tab.pitch_drag_active = true;
+                        }
+                    }
+                }
+                if tab.pitch_drag_active {
+                    tool_gesture_active = true;
+                    suppress_seek = true;
+                    if resp.dragged_by(egui::PointerButton::Primary) {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            let next = frac_to_semi(y_to_frac(pos.y))
+                                .clamp(-PITCH_SEMI_RANGE, PITCH_SEMI_RANGE);
+                            tab.tool_state = ToolState {
+                                pitch_semitones: next,
+                                ..tab.tool_state
+                            };
+                        }
+                    }
+                    if resp.drag_stopped_by(egui::PointerButton::Primary) {
+                        tab.pitch_drag_active = false;
+                        let semi = tab.tool_state.pitch_semitones;
+                        stop_playback = true;
+                        if semi.abs() <= 0.0001 {
+                            gesture_restore_preview = true;
+                        } else {
+                            let range = Self::editor_selected_range(tab);
+                            tab.preview_audio_tool = Some(ToolKind::PitchShift);
+                            gesture_spawn_tool_preview =
+                                Some((ToolKind::PitchShift, semi, range));
+                        }
+                    }
+                }
+            }
+            // Speed / TimeStretch: drag the selection's right edge to stretch
+            // or shrink the selected part; preview renders on release.
+            let stretch_tool = wave_view_gestures
+                && !gain_env_editing
+                && matches!(tab.active_tool, ToolKind::TimeStretch | ToolKind::Speed);
+            if stretch_tool {
+                if let Some((sel_s, sel_e)) = Self::editor_selected_range(tab) {
+                    let sel_len = (sel_e - sel_s).max(1);
+                    let edge_x = geom.sample_boundary_x(sel_e.min(display_samples_len));
+                    let near_edge = |pos: egui::Pos2| (pos.x - edge_x).abs() <= 8.0;
+                    if pointer_over_waveform && !tab.pitch_drag_active {
+                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                            if near_edge(pos) || tab.stretch_drag_target.is_some() {
+                                hover_cursor = Some(egui::CursorIcon::ResizeHorizontal);
+                            }
+                        }
+                    }
+                    // Unclamped x -> sample so the target can extend past the
+                    // current end of the timeline while slowing down.
+                    let x_to_sample_unclamped = |x: f32| -> usize {
+                        let rel = ((x - wave_left).max(0.0) as f64) * (geom.spp as f64);
+                        (geom.view_offset_exact + rel).round().max(0.0) as usize
+                    };
+                    let clamp_target = |raw: usize| -> usize {
+                        let min_len = (sel_len as f64 / 4.0).ceil().max(1.0) as usize;
+                        let max_len = sel_len.saturating_mul(4);
+                        raw.clamp(sel_s + min_len, sel_s + max_len)
+                    };
+                    if resp.drag_started_by(egui::PointerButton::Primary)
+                        && !tab.pitch_drag_active
+                    {
+                        if let Some(pos) = ui
+                            .input(|i| i.pointer.press_origin())
+                            .or_else(|| resp.interact_pointer_pos())
+                        {
+                            if near_edge(pos) {
+                                tab.stretch_drag_target = Some(sel_e);
+                            }
+                        }
+                    }
+                    if tab.stretch_drag_target.is_some() {
+                        tool_gesture_active = true;
+                        suppress_seek = true;
+                        if resp.dragged_by(egui::PointerButton::Primary) {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                tab.stretch_drag_target =
+                                    Some(clamp_target(x_to_sample_unclamped(pos.x)));
+                            }
+                        }
+                        if resp.drag_stopped_by(egui::PointerButton::Primary) {
+                            let target = tab.stretch_drag_target.take().unwrap_or(sel_e);
+                            let new_len = target.saturating_sub(sel_s).max(1);
+                            let rate =
+                                ((sel_len as f64) / (new_len as f64)).clamp(0.25, 4.0) as f32;
+                            let tool = tab.active_tool;
+                            if matches!(tool, ToolKind::Speed) {
+                                tab.tool_state = ToolState {
+                                    speed_rate: rate,
+                                    ..tab.tool_state
+                                };
+                            } else {
+                                tab.tool_state = ToolState {
+                                    stretch_rate: rate,
+                                    ..tab.tool_state
+                                };
+                            }
+                            stop_playback = true;
+                            if (rate - 1.0).abs() <= 0.0001 {
+                                gesture_restore_preview = true;
+                            } else {
+                                tab.preview_audio_tool = Some(tool);
+                                gesture_spawn_tool_preview =
+                                    Some((tool, rate, Some((sel_s, sel_e))));
+                            }
+                        }
+                    }
+                }
+            }
+            // Safety: never let a gesture grab outlive the pointer button
+            // (e.g. release outside the window where drag_stopped is missed).
+            if !ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary))
+                && !resp.drag_stopped_by(egui::PointerButton::Primary)
+            {
+                tab.pitch_drag_active = false;
+                tab.stretch_drag_target = None;
+                tab.spectral_warp_drag = None;
+            }
+            // Resolve deferred gesture requests into the shared pending slots.
+            if gesture_restore_preview {
+                need_restore_preview = true;
+            }
+            if gesture_refresh_preview {
+                request_preview_refresh = true;
+            }
+            if let Some((tool, param, range)) = gesture_spawn_tool_preview {
+                if preview_ok || tab.dirty {
+                    let mono = Self::editor_mixdown_mono(tab);
+                    pending_heavy_preview = Some((tool, mono, param, range));
+                    pending_overlay_job = Some((tool, param, range));
+                } else {
+                    let path = tab.path.clone();
+                    pending_heavy_preview_path = Some((tool, path.clone(), param, range));
+                    pending_overlay_path = Some((tool, path, param, range));
+                }
+            }
             let alt_now = ui.input(|i| i.modifiers.alt);
             let selection_snap_playhead_display = playhead_display_now.min(display_samples_len);
             let selection_snap_playhead_x = geom.sample_center_x(selection_snap_playhead_display);
@@ -4315,6 +4616,7 @@ impl crate::app::WavesPreviewer {
             // Shift+Right drag switches to range selection with button-down anchor.
             if pointer_over_waveform
                 && !world_f0_editing
+                && !tool_gesture_active
                 && !alt_now
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
@@ -4484,11 +4786,118 @@ impl crate::app::WavesPreviewer {
                     )
                 }
             };
+            // ---- Spectral Warp input (Spec/Log views): while enabled it owns
+            // the pointer — drag pushes frequencies (liquify-style), grabbing
+            // an existing arrow adjusts it, double/right-click removes it.
+            if spectral_warp_editing {
+                suppress_seek = true;
+                if resp.hovered() {
+                    hover_cursor = Some(egui::CursorIcon::Crosshair);
+                }
+                let spec_freq_to_y = |hz: f32, lane: usize| -> f32 {
+                    let frac = Self::editor_spec_freq_to_frac(
+                        view_mode,
+                        hz,
+                        spec_axis_max_freq,
+                        spec_mel_scale,
+                    );
+                    let frac_local = ((frac - spec_vis_min)
+                        / (spec_vis_max - spec_vis_min).max(1e-6))
+                    .clamp(0.0, 1.0);
+                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    lane_top + (1.0 - frac_local) * lane_h.max(1.0)
+                };
+                let hit_radius = 10.0f32;
+                let nearest_warp_point = |points: &[crate::app::types::SpectralWarpPoint],
+                                          pos: egui::Pos2|
+                 -> Option<usize> {
+                    let lane = spec_lane_at_y(pos.y);
+                    let mut best: Option<(usize, f32)> = None;
+                    for (idx, p) in points.iter().enumerate() {
+                        let x = geom.sample_center_x(p.sample.min(display_samples_len));
+                        let d0 = egui::pos2(x, spec_freq_to_y(p.freq_hz, lane)).distance(pos);
+                        let d1 = egui::pos2(x, spec_freq_to_y(p.freq_hz + p.delta_hz, lane))
+                            .distance(pos);
+                        let d = d0.min(d1);
+                        if d <= hit_radius && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                            best = Some((idx, d));
+                        }
+                    }
+                    best.map(|(i, _)| i)
+                };
+                let mut warp_changed = false;
+                let double_clicked = resp.double_clicked_by(egui::PointerButton::Primary);
+                let right_clicked = resp.clicked_by(egui::PointerButton::Secondary);
+                if double_clicked || right_clicked {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        if let Some(idx) = nearest_warp_point(&tab.spectral_warp_points, pos) {
+                            tab.spectral_warp_points.remove(idx);
+                            tab.spectral_warp_drag = None;
+                            warp_changed = true;
+                        }
+                    }
+                }
+                if !double_clicked
+                    && resp.drag_started_by(egui::PointerButton::Primary)
+                    && tab.spectral_warp_drag.is_none()
+                {
+                    if let Some(pos) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .or_else(|| resp.interact_pointer_pos())
+                    {
+                        if let Some(idx) = nearest_warp_point(&tab.spectral_warp_points, pos) {
+                            tab.spectral_warp_drag = Some(idx);
+                        } else {
+                            let sample = geom
+                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                            let lane = spec_lane_at_y(pos.y);
+                            let hz = spec_y_to_freq(pos.y, lane).max(0.0);
+                            tab.spectral_warp_points.push(
+                                crate::app::types::SpectralWarpPoint {
+                                    sample,
+                                    freq_hz: hz,
+                                    delta_hz: 0.0,
+                                },
+                            );
+                            tab.spectral_warp_drag = Some(tab.spectral_warp_points.len() - 1);
+                        }
+                    }
+                }
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    if let (Some(idx), Some(pos)) =
+                        (tab.spectral_warp_drag, resp.interact_pointer_pos())
+                    {
+                        if let Some(p) = tab.spectral_warp_points.get_mut(idx) {
+                            let lane = spec_lane_at_y(pos.y);
+                            let target = spec_y_to_freq(pos.y, lane).max(0.0);
+                            p.delta_hz = target - p.freq_hz;
+                        }
+                    }
+                }
+                if ui.input(|i| i.pointer.primary_released()) {
+                    if tab.spectral_warp_drag.take().is_some() {
+                        warp_changed = true;
+                    }
+                }
+                if warp_changed {
+                    stop_playback = true;
+                    if Self::editor_spectral_warp_ready(tab) {
+                        // Render + audition the new warp right away.
+                        pending_spectral_warp_preview = true;
+                    } else if tab.preview_audio_tool
+                        == Some(crate::app::types::ToolKind::SpectralWarp)
+                        || tab.preview_overlay.is_some()
+                    {
+                        need_restore_preview = true;
+                    }
+                }
+            }
             // Drag to select a range (independent of tool), unless we are dragging markers.
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
             if pointer_over_waveform
                 && !world_f0_editing
+                && !tool_gesture_active
                 && display_samples_len > 0
                 && tab.dragging_marker.is_none()
             {
@@ -4754,7 +5163,7 @@ impl crate::app::WavesPreviewer {
                                 let base_total = tab.samples_len.max(1);
                                 let overlay_total = overlay.timeline_len.max(1);
                                 let is_time_stretch =
-                                    matches!(overlay.source_tool, ToolKind::TimeStretch);
+                                    matches!(overlay.source_tool, ToolKind::TimeStretch | ToolKind::Speed);
                                 if overlay.is_overview_only() {
                                     if let Some(overview) = overlay_overview {
                                         let bins_values = Self::compute_overlay_bins_from_overview(
@@ -4783,7 +5192,7 @@ impl crate::app::WavesPreviewer {
                                 } else if let Some(buf) = overlay_samples {
                                     let base_total = tab.samples_len.max(1);
                                     let overlay_total = overlay.timeline_len.max(1);
-                                    let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
+                                    let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch | ToolKind::Speed);
                                     let unwrap_preview = matches!(overlay.source_tool, ToolKind::LoopEdit)
                                         && overlay_total > base_total
                                         && tab.pending_loop_unwrap.is_some()
@@ -4946,7 +5355,7 @@ impl crate::app::WavesPreviewer {
                         };
                         let base_total = tab.samples_len.max(1);
                         let overlay_total = overlay.timeline_len.max(1);
-                        let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch);
+                        let is_time_stretch = matches!(overlay.source_tool, ToolKind::TimeStretch | ToolKind::Speed);
                         if overlay.is_overview_only() {
                             if let Some(overview) = overlay_overview {
                                 let values = Self::compute_overlay_bins_from_overview(
@@ -5847,6 +6256,266 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            // ---- Tool gesture overlays (drawn above waveform lanes) ----
+            if view_mode == ViewMode::Waveform && display_samples_len > 0 {
+                let overlay_font = TextStyle::Monospace.resolve(ui.style());
+                // Gain automation curve (breakpoint polyline)
+                if matches!(tab.active_tool, ToolKind::Gain) && tab.gain_env_enabled {
+                    let curve_color = Color32::from_rgb(255, 170, 60);
+                    let db_to_frac = |db: f32| 0.5 + db / (GAIN_ENV_DB_RANGE * 2.0);
+                    let fallback_db = if tab.tool_state.gain_db.is_finite() {
+                        tab.tool_state.gain_db
+                    } else {
+                        0.0
+                    };
+                    // Faint 0 dB reference line
+                    let zero_y = frac_to_y(0.5);
+                    painter.line_segment(
+                        [
+                            egui::pos2(wave_left, zero_y),
+                            egui::pos2(wave_left + wave_w, zero_y),
+                        ],
+                        egui::Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(255, 170, 60, 50),
+                        ),
+                    );
+                    let vis_start = tab.view_offset.min(display_samples_len);
+                    let vis_end = ((tab.view_offset as f64
+                        + (wave_w as f64) * (geom.spp.max(0.0001) as f64))
+                        .ceil() as usize)
+                        .min(display_samples_len);
+                    let env_y = |sample: usize| -> f32 {
+                        let db = crate::wave::gain_envelope_db_at(
+                            &tab.gain_env_points,
+                            fallback_db,
+                            sample,
+                        );
+                        frac_to_y(db_to_frac(db))
+                    };
+                    let mut line: Vec<egui::Pos2> =
+                        vec![egui::pos2(wave_left, env_y(vis_start))];
+                    for p in &tab.gain_env_points {
+                        if p.0 > vis_start && p.0 < vis_end {
+                            line.push(egui::pos2(
+                                geom.sample_center_x(p.0),
+                                frac_to_y(db_to_frac(p.1)),
+                            ));
+                        }
+                    }
+                    line.push(egui::pos2(wave_left + wave_w, env_y(vis_end)));
+                    painter.add(egui::Shape::line(
+                        line,
+                        egui::Stroke::new(2.0, curve_color),
+                    ));
+                    let hover = ui.input(|i| i.pointer.hover_pos());
+                    for (idx, p) in tab.gain_env_points.iter().enumerate() {
+                        if p.0 < vis_start || p.0 > vis_end {
+                            continue;
+                        }
+                        let sp = egui::pos2(
+                            geom.sample_center_x(p.0.min(display_samples_len)),
+                            frac_to_y(db_to_frac(p.1)),
+                        );
+                        let grabbed = tab.gain_env_drag == Some(idx);
+                        let hovered = hover.map(|h| h.distance(sp) <= 8.0).unwrap_or(false);
+                        let r = if grabbed || hovered { 5.0 } else { 3.5 };
+                        painter.circle_filled(sp, r, curve_color);
+                        painter.circle_stroke(
+                            sp,
+                            r,
+                            egui::Stroke::new(1.0, Color32::from_rgb(40, 30, 10)),
+                        );
+                        if grabbed || hovered {
+                            painter.text(
+                                sp + egui::vec2(8.0, -8.0),
+                                egui::Align2::LEFT_BOTTOM,
+                                format!("{:+.1} dB", p.1),
+                                overlay_font.clone(),
+                                curve_color,
+                            );
+                        }
+                    }
+                }
+                // PitchShift: horizontal pitch line (drag up = higher)
+                if matches!(tab.active_tool, ToolKind::PitchShift) {
+                    let pitch_color = Color32::from_rgb(220, 140, 255);
+                    let mut semi = tab.tool_state.pitch_semitones;
+                    if !semi.is_finite() {
+                        semi = 0.0;
+                    }
+                    // Faint 0 st reference line
+                    let zero_y = frac_to_y(0.5);
+                    painter.line_segment(
+                        [
+                            egui::pos2(wave_left, zero_y),
+                            egui::pos2(wave_left + wave_w, zero_y),
+                        ],
+                        egui::Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(220, 140, 255, 50),
+                        ),
+                    );
+                    let y = frac_to_y(0.5 + semi / (PITCH_SEMI_RANGE * 2.0));
+                    let width = if tab.pitch_drag_active { 2.5 } else { 2.0 };
+                    painter.line_segment(
+                        [egui::pos2(wave_left, y), egui::pos2(wave_left + wave_w, y)],
+                        egui::Stroke::new(width, pitch_color),
+                    );
+                    painter.text(
+                        egui::pos2(wave_left + wave_w - 6.0, y - 4.0),
+                        egui::Align2::RIGHT_BOTTOM,
+                        format!("{semi:+.2} st"),
+                        overlay_font.clone(),
+                        pitch_color,
+                    );
+                }
+                // Speed / TimeStretch: selection-edge stretch handle + ghost
+                if matches!(tab.active_tool, ToolKind::TimeStretch | ToolKind::Speed) {
+                    if let Some((sel_s, sel_e)) = Self::editor_selected_range(tab) {
+                        let stretch_color = Color32::from_rgb(90, 220, 255);
+                        let edge_x = geom.sample_boundary_x(sel_e.min(display_samples_len));
+                        if edge_x >= wave_left && edge_x <= wave_left + wave_w {
+                            painter.line_segment(
+                                [
+                                    egui::pos2(edge_x, rect.top()),
+                                    egui::pos2(edge_x, rect.bottom()),
+                                ],
+                                egui::Stroke::new(2.0, stretch_color),
+                            );
+                            // Grip chevrons on the handle
+                            let cy = rect.center().y;
+                            for dir in [-1.0f32, 1.0f32] {
+                                painter.add(egui::Shape::line(
+                                    vec![
+                                        egui::pos2(edge_x + dir * 4.0, cy - 5.0),
+                                        egui::pos2(edge_x + dir * 8.0, cy),
+                                        egui::pos2(edge_x + dir * 4.0, cy + 5.0),
+                                    ],
+                                    egui::Stroke::new(1.5, stretch_color),
+                                ));
+                            }
+                        }
+                        if let Some(target) = tab.stretch_drag_target {
+                            let sel_len = (sel_e - sel_s).max(1);
+                            let new_len = target.saturating_sub(sel_s).max(1);
+                            let rate =
+                                ((sel_len as f64) / (new_len as f64)).clamp(0.25, 4.0) as f32;
+                            let sx = geom
+                                .sample_boundary_x(sel_s.min(display_samples_len))
+                                .clamp(wave_left, wave_left + wave_w);
+                            let raw_tx = wave_left
+                                + (((target as f64) - geom.view_offset_exact)
+                                    / (geom.spp.max(0.0001) as f64))
+                                    as f32;
+                            let tx = raw_tx.clamp(wave_left, wave_left + wave_w);
+                            painter.rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(sx.min(tx), rect.top()),
+                                    egui::pos2(sx.max(tx), rect.bottom()),
+                                ),
+                                0.0,
+                                Color32::from_rgba_unmultiplied(90, 220, 255, 24),
+                            );
+                            painter.line_segment(
+                                [egui::pos2(tx, rect.top()), egui::pos2(tx, rect.bottom())],
+                                egui::Stroke::new(2.0, stretch_color),
+                            );
+                            let dir_label = if rate > 1.0001 {
+                                " (faster/shorter)"
+                            } else if rate < 0.9999 {
+                                " (slower/longer)"
+                            } else {
+                                ""
+                            };
+                            painter.text(
+                                egui::pos2(tx + 6.0, rect.top() + 16.0),
+                                egui::Align2::LEFT_TOP,
+                                format!("x{rate:.2}{dir_label}"),
+                                overlay_font.clone(),
+                                stretch_color,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ---- Spectral Warp arrows (Spec/Log views) ----
+            if matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
+                && display_samples_len > 0
+                && (tab.spectral_warp_edit || !tab.spectral_warp_points.is_empty())
+            {
+                let overlay_font = TextStyle::Monospace.resolve(ui.style());
+                let warp_color = Color32::from_rgb(255, 130, 210);
+                let halo = Color32::from_rgba_unmultiplied(0, 0, 0, 170);
+                let spec_freq_to_y = |hz: f32, lane: usize| -> f32 {
+                    let frac = Self::editor_spec_freq_to_frac(
+                        view_mode,
+                        hz,
+                        spec_axis_max_freq,
+                        spec_mel_scale,
+                    );
+                    let frac_local = ((frac - spec_vis_min)
+                        / (spec_vis_max - spec_vis_min).max(1e-6))
+                    .clamp(0.0, 1.0);
+                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    lane_top + (1.0 - frac_local) * lane_h.max(1.0)
+                };
+                let hover = ui.input(|i| i.pointer.hover_pos());
+                for lane in 0..lane_count {
+                    for (idx, p) in tab.spectral_warp_points.iter().enumerate() {
+                        let x = geom.sample_center_x(p.sample.min(display_samples_len));
+                        if x < wave_left - 20.0 || x > wave_left + wave_w + 20.0 {
+                            continue;
+                        }
+                        let y0 = spec_freq_to_y(p.freq_hz, lane);
+                        let y1 = spec_freq_to_y(p.freq_hz + p.delta_hz, lane);
+                        painter.line_segment(
+                            [egui::pos2(x, y0), egui::pos2(x, y1)],
+                            egui::Stroke::new(3.5, halo),
+                        );
+                        painter.line_segment(
+                            [egui::pos2(x, y0), egui::pos2(x, y1)],
+                            egui::Stroke::new(1.8, warp_color),
+                        );
+                        painter.circle_stroke(
+                            egui::pos2(x, y0),
+                            3.5,
+                            egui::Stroke::new(1.5, warp_color),
+                        );
+                        let grabbed = tab.spectral_warp_drag == Some(idx);
+                        let hovered = hover
+                            .map(|h| {
+                                h.distance(egui::pos2(x, y1)) <= 10.0
+                                    || h.distance(egui::pos2(x, y0)) <= 10.0
+                            })
+                            .unwrap_or(false);
+                        let r = if grabbed || hovered { 5.0 } else { 3.5 };
+                        painter.circle_filled(egui::pos2(x, y1), r, warp_color);
+                        if (y1 - y0).abs() > 8.0 {
+                            let dir = (y1 - y0).signum();
+                            painter.add(egui::Shape::line(
+                                vec![
+                                    egui::pos2(x - 4.0, y1 - dir * 6.0),
+                                    egui::pos2(x, y1),
+                                    egui::pos2(x + 4.0, y1 - dir * 6.0),
+                                ],
+                                egui::Stroke::new(1.8, warp_color),
+                            ));
+                        }
+                        if grabbed || hovered {
+                            painter.text(
+                                egui::pos2(x + 8.0, y1),
+                                egui::Align2::LEFT_CENTER,
+                                format!("{:+.0} Hz", p.delta_hz),
+                                overlay_font.clone(),
+                                warp_color,
+                            );
+                        }
+                    }
+                }
+            }
+
             if let Some(amp_rect) = amplitude_nav_rect {
                 if let Some((next_zoom, next_center)) =
                     Self::draw_editor_amplitude_navigator(ui, amp_rect, tab)
@@ -6317,6 +6986,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Normalize => "Normalize",
                                 ToolKind::PitchShift => "Pitch Shift",
                                 ToolKind::TimeStretch => "Time Stretch",
+                                ToolKind::Speed => "Speed",
                                 ToolKind::Loudness => "LoudNorm",
                                 ToolKind::NoiseGate => "Noise Gate",
                                 ToolKind::Eq => "EQ",
@@ -6324,6 +6994,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::MusicAnalyze => "Music Analyze",
                                 ToolKind::PluginFx => "Plugin FX",
                                 ToolKind::Reverse => "Reverse",
+                                // Spectrogram-view tool; never selectable in
+                                // the Waveform tool list.
+                                ToolKind::SpectralWarp => "Spectral Warp",
                             };
                             egui::ComboBox::new(("tool_selector", tab_idx), "Tool")
                                 .selected_text(tool_label(tool))
@@ -6338,6 +7011,7 @@ impl crate::app::WavesPreviewer {
                                     ui.label(RichText::new("More tools").weak());
                                     ui.selectable_value(&mut tool, ToolKind::PitchShift, "Pitch Shift");
                                     ui.selectable_value(&mut tool, ToolKind::TimeStretch, "Time Stretch");
+                                    ui.selectable_value(&mut tool, ToolKind::Speed, "Speed");
                                     ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
                                     ui.selectable_value(&mut tool, ToolKind::NoiseGate, "Noise Gate");
                                     ui.selectable_value(&mut tool, ToolKind::Eq, "EQ");
@@ -6388,11 +7062,18 @@ impl crate::app::WavesPreviewer {
                                 if tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some() {
                                     need_restore_preview = true;
                                 }
+                                // Reset transient canvas-gesture state
+                                tab.gain_env_drag = None;
+                                tab.pitch_drag_active = false;
+                                tab.stretch_drag_target = None;
                                 stop_playback = true;
                                 tab.active_tool = tool;
                             }
                             Self::inspector_section(ui, tool_label(tab.active_tool));
                             match tab.active_tool {
+                                // Spectral Warp lives in the Spec/Log view's
+                                // inspector; it is never active here.
+                                ToolKind::SpectralWarp => {}
                                 // Seek/Select removed: seeking is always available on the canvas
                                 ToolKind::LoopEdit => {
                                     // compact spacing for inspector controls
@@ -7618,6 +8299,13 @@ impl crate::app::WavesPreviewer {
                                         if !preview_ok {
                                             ui.label(RichText::new("Long clip: simplified waveform preview, full preview runs in background").weak());
                                         }
+                                        let sel_range = Self::editor_selected_range(tab);
+                                        if let Some((rs, re)) = sel_range {
+                                            ui.label(RichText::new(format!("Target: selection {rs}..{re} (crossfaded splice)")).weak());
+                                        } else {
+                                            ui.label(RichText::new("Target: whole file (select a range to pitch only that part)").weak());
+                                        }
+                                        ui.label(RichText::new("Tip: drag the pitch line on the waveform up/down").weak());
                                         let mut semi = tab.tool_state.pitch_semitones;
                                         if !semi.is_finite() { semi = 0.0; }
                                         ui.label("Semitones");
@@ -7628,53 +8316,76 @@ impl crate::app::WavesPreviewer {
                                             tab.preview_audio_tool = Some(ToolKind::PitchShift);
                                             if preview_ok || tab.dirty {
                                                 let mono = Self::editor_mixdown_mono(tab);
-                                                pending_heavy_preview = Some((ToolKind::PitchShift, mono, semi));
+                                                pending_heavy_preview = Some((ToolKind::PitchShift, mono, semi, sel_range));
                                                 // Defer overlay spawn to avoid nested &mut borrow
-                                                pending_overlay_job = Some((ToolKind::PitchShift, semi));
+                                                pending_overlay_job = Some((ToolKind::PitchShift, semi, sel_range));
                                             } else {
                                                 let path = tab.path.clone();
-                                                pending_heavy_preview_path = Some((ToolKind::PitchShift, path.clone(), semi));
-                                                pending_overlay_path = Some((ToolKind::PitchShift, path, semi));
+                                                pending_heavy_preview_path = Some((ToolKind::PitchShift, path.clone(), semi, sel_range));
+                                                pending_overlay_path = Some((ToolKind::PitchShift, path, semi, sel_range));
                                             }
                                         }
                                         if overlay_busy || apply_busy { ui.add(egui::Spinner::new()); }
                                         if ui.add_enabled(!apply_busy, egui::Button::new("Apply")).clicked() {
-                                            pending_pitch_apply = Some(tab.tool_state.pitch_semitones);
+                                            pending_pitch_apply = Some((tab.tool_state.pitch_semitones, sel_range));
                                             tab.tool_state = ToolState { pitch_semitones: 0.0, ..tab.tool_state };
                                             tab.preview_audio_tool = None;
                                             tab.preview_overlay = None;
                                         }
                                     });
                                 }
-                                ToolKind::TimeStretch => {
+                                ToolKind::TimeStretch | ToolKind::Speed => {
+                                    let is_speed = matches!(tab.active_tool, ToolKind::Speed);
+                                    let tool = tab.active_tool;
                                     ui.scope(|ui| {
                                         let s = ui.style_mut(); s.spacing.item_spacing = egui::vec2(6.0,6.0); s.spacing.button_padding = egui::vec2(6.0,3.0);
                                         if !preview_ok {
                                             ui.label(RichText::new("Long clip: simplified waveform preview, full preview runs in background").weak());
                                         }
-                                        let mut rate = tab.tool_state.stretch_rate;
+                                        if is_speed {
+                                            ui.label(RichText::new("Playback speed: changes pitch and length (tape-style)").weak());
+                                        } else {
+                                            ui.label(RichText::new("Time stretch: changes length, keeps pitch").weak());
+                                        }
+                                        let sel_range = Self::editor_selected_range(tab);
+                                        if let Some((rs, re)) = sel_range {
+                                            ui.label(RichText::new(format!("Target: selection {rs}..{re} (crossfaded splice)")).weak());
+                                            ui.label(RichText::new("Tip: drag the selection's right edge on the waveform to stretch/shrink it").weak());
+                                        } else {
+                                            ui.label(RichText::new("Target: whole file (select a range to stretch only that part)").weak());
+                                        }
+                                        let mut rate = if is_speed { tab.tool_state.speed_rate } else { tab.tool_state.stretch_rate };
                                         if !rate.is_finite() { rate = 1.0; }
                                         ui.label("Rate");
                                         let changed = ui.add(egui::DragValue::new(&mut rate).range(0.25..=4.0).speed(0.02).fixed_decimals(2)).changed();
                                         if changed {
-                                            tab.tool_state = ToolState{ stretch_rate: rate, ..tab.tool_state };
+                                            if is_speed {
+                                                tab.tool_state = ToolState{ speed_rate: rate, ..tab.tool_state };
+                                            } else {
+                                                tab.tool_state = ToolState{ stretch_rate: rate, ..tab.tool_state };
+                                            }
                                             stop_playback = true;
-                                            tab.preview_audio_tool = Some(ToolKind::TimeStretch);
+                                            tab.preview_audio_tool = Some(tool);
                                             if preview_ok || tab.dirty {
                                                 let mono = Self::editor_mixdown_mono(tab);
-                                                pending_heavy_preview = Some((ToolKind::TimeStretch, mono, rate));
+                                                pending_heavy_preview = Some((tool, mono, rate, sel_range));
                                                 // Defer overlay spawn to avoid nested &mut borrow
-                                                pending_overlay_job = Some((ToolKind::TimeStretch, rate));
+                                                pending_overlay_job = Some((tool, rate, sel_range));
                                             } else {
                                                 let path = tab.path.clone();
-                                                pending_heavy_preview_path = Some((ToolKind::TimeStretch, path.clone(), rate));
-                                                pending_overlay_path = Some((ToolKind::TimeStretch, path, rate));
+                                                pending_heavy_preview_path = Some((tool, path.clone(), rate, sel_range));
+                                                pending_overlay_path = Some((tool, path, rate, sel_range));
                                             }
                                         }
                                         if overlay_busy || apply_busy { ui.add(egui::Spinner::new()); }
                                         if ui.add_enabled(!apply_busy, egui::Button::new("Apply")).clicked() {
-                                            pending_stretch_apply = Some(tab.tool_state.stretch_rate);
-                                            tab.tool_state = ToolState { stretch_rate: 1.0, ..tab.tool_state };
+                                            if is_speed {
+                                                pending_speed_apply = Some((tab.tool_state.speed_rate, sel_range));
+                                                tab.tool_state = ToolState { speed_rate: 1.0, ..tab.tool_state };
+                                            } else {
+                                                pending_stretch_apply = Some((tab.tool_state.stretch_rate, sel_range));
+                                                tab.tool_state = ToolState { stretch_rate: 1.0, ..tab.tool_state };
+                                            }
                                             tab.preview_audio_tool = None;
                                             tab.preview_overlay = None;
                                         }
@@ -7692,27 +8403,58 @@ impl crate::app::WavesPreviewer {
                                     if !gain_db.is_finite() { gain_db = 0.0; }
                                     ui.label("Gain (dB)"); ui.add(egui::DragValue::new(&mut gain_db).range(-24.0..=24.0).speed(0.1));
                                     tab.tool_state = ToolState{ gain_db, ..tab.tool_state };
+                                    let mut env_changed = false;
+                                    let env_resp = ui.checkbox(
+                                        &mut tab.gain_env_enabled,
+                                        "Gain curve (draw on waveform)",
+                                    );
+                                    if env_resp.changed() {
+                                        env_changed = true;
+                                        tab.gain_env_drag = None;
+                                    }
+                                    if tab.gain_env_enabled {
+                                        ui.label(RichText::new("Click the curve on the waveform to add points; drag to move, double-click to remove. DAW-style automation.").weak());
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(format!("{} point(s)", tab.gain_env_points.len())).weak());
+                                            if !tab.gain_env_points.is_empty() && ui.button("Clear points").clicked() {
+                                                tab.gain_env_points.clear();
+                                                tab.gain_env_drag = None;
+                                                env_changed = true;
+                                            }
+                                        });
+                                    }
+                                    let env_active = tab.gain_env_enabled && !tab.gain_env_points.is_empty();
                                     // live preview on change
-                                    if (gain_db - st.gain_db).abs() > 1e-6 {
+                                    let gain_changed = (gain_db - st.gain_db).abs() > 1e-6;
+                                    if gain_changed || env_changed {
                                         if preview_ok {
-                                            let g = db_to_amp(gain_db);
                                             // per-channel overlay
                                             let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                            for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                            let mut mono = Self::editor_mixdown_mono(tab);
+                                            if env_active {
+                                                for ch in overlay.iter_mut() {
+                                                    crate::wave::apply_gain_envelope_in_place(ch, &tab.gain_env_points, gain_db, false);
+                                                }
+                                                crate::wave::apply_gain_envelope_in_place(&mut mono, &tab.gain_env_points, gain_db, false);
+                                            } else {
+                                                let g = db_to_amp(gain_db);
+                                                for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                                for v in &mut mono { *v *= g; }
+                                            }
                                             let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
                                             tab.preview_overlay = Some(Self::preview_overlay_from_channels(
                                                 overlay,
                                                 ToolKind::Gain,
                                                 timeline_len,
                                             ));
-                                            // mono audition
-                                            let mut mono = Self::editor_mixdown_mono(tab);
-                                            for v in &mut mono { *v *= g; }
                                             pending_preview = Some((ToolKind::Gain, mono));
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::Gain);
                                         } else {
-                                            if gain_db.abs() > 1e-6 {
+                                            if env_active || gain_db.abs() > 1e-6 {
+                                                // Drop the stale overlay so the refresh isn't
+                                                // skipped as already-matching this tool.
+                                                tab.preview_overlay = None;
                                                 request_preview_refresh = true;
                                             } else {
                                                 tab.preview_audio_tool = None;
@@ -7721,7 +8463,13 @@ impl crate::app::WavesPreviewer {
                                         }
                                     }
                                     if ui.button("Apply").clicked() {
-                                        do_gain = Some(((0, tab.samples_len), gain_db));
+                                        if env_active {
+                                            do_gain_env = Some(tab.gain_env_points.clone());
+                                            tab.gain_env_points.clear();
+                                            tab.gain_env_drag = None;
+                                        } else {
+                                            do_gain = Some(((0, tab.samples_len), gain_db));
+                                        }
                                         tab.preview_audio_tool = None;
                                         tab.preview_overlay = None;
                                         tab.tool_state = ToolState { gain_db: 0.0, ..tab.tool_state };
@@ -7814,6 +8562,21 @@ impl crate::app::WavesPreviewer {
                                     if !threshold_db.is_finite() { threshold_db = -40.0; }
                                     if !attack_ms.is_finite() { attack_ms = 2.0; }
                                     if !release_ms.is_finite() { release_ms = 100.0; }
+                                    // Graphical gate curve with a draggable threshold handle.
+                                    {
+                                        let mut plot_params = crate::wave::NoiseGateParams {
+                                            threshold_db,
+                                            attack_ms,
+                                            release_ms,
+                                        };
+                                        if crate::app::ui::dsp_widgets::noise_gate_plot(
+                                            ui,
+                                            egui::Id::new(("gate_plot", tab_idx)),
+                                            &mut plot_params,
+                                        ) {
+                                            threshold_db = plot_params.threshold_db;
+                                        }
+                                    }
                                     ui.label("Threshold (dB)").on_hover_text(
                                         "Signal below this level is faded toward silence",
                                     );
@@ -7885,6 +8648,32 @@ impl crate::app::WavesPreviewer {
                                     let mut mid_q = st.eq_mid_q;
                                     let mut high_shelf_freq_hz = st.eq_high_shelf_freq_hz;
                                     let mut high_shelf_gain_db = st.eq_high_shelf_gain_db;
+                                    // Graphical response curve with draggable band handles.
+                                    {
+                                        let mut plot_params = crate::wave::ThreeBandEqParams {
+                                            low_shelf_freq_hz,
+                                            low_shelf_gain_db,
+                                            mid_freq_hz,
+                                            mid_gain_db,
+                                            mid_q,
+                                            high_shelf_freq_hz,
+                                            high_shelf_gain_db,
+                                        };
+                                        if crate::app::ui::dsp_widgets::eq_response_plot(
+                                            ui,
+                                            egui::Id::new(("eq_plot", tab_idx)),
+                                            &mut plot_params,
+                                            tab.buffer_sample_rate.max(1),
+                                        ) {
+                                            low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
+                                            low_shelf_gain_db = plot_params.low_shelf_gain_db;
+                                            mid_freq_hz = plot_params.mid_freq_hz;
+                                            mid_gain_db = plot_params.mid_gain_db;
+                                            mid_q = plot_params.mid_q;
+                                            high_shelf_freq_hz = plot_params.high_shelf_freq_hz;
+                                            high_shelf_gain_db = plot_params.high_shelf_gain_db;
+                                        }
+                                    }
                                     ui.label(RichText::new("Low shelf").small().weak())
                                         .on_hover_text("Boosts or cuts everything below this frequency");
                                     ui.horizontal(|ui| {
@@ -7987,6 +8776,24 @@ impl crate::app::WavesPreviewer {
                                     let mut attack_ms = st.compressor_attack_ms;
                                     let mut release_ms = st.compressor_release_ms;
                                     let mut makeup_db = st.compressor_makeup_db;
+                                    // Graphical transfer curve with draggable knee/ratio handles.
+                                    {
+                                        let mut plot_params = crate::wave::CompressorParams {
+                                            threshold_db,
+                                            ratio,
+                                            attack_ms,
+                                            release_ms,
+                                            makeup_db,
+                                        };
+                                        if crate::app::ui::dsp_widgets::compressor_transfer_plot(
+                                            ui,
+                                            egui::Id::new(("comp_plot", tab_idx)),
+                                            &mut plot_params,
+                                        ) {
+                                            threshold_db = plot_params.threshold_db;
+                                            ratio = plot_params.ratio;
+                                        }
+                                    }
                                     ui.label("Threshold (dB)")
                                         .on_hover_text("Signal above this level gets compressed");
                                     ui.add(egui::DragValue::new(&mut threshold_db).range(-60.0..=0.0).speed(0.5))
@@ -8929,14 +9736,29 @@ impl crate::app::WavesPreviewer {
                                     if let Some(note) = simplified_preview_note {
                                         ui.label(RichText::new(note).weak());
                                     }
+                                    let sel_range = Self::editor_selected_range(tab);
+                                    if let Some((rs, re)) = sel_range {
+                                        ui.label(RichText::new(format!("Target: selection {rs}..{re} (smoothed joins)")).weak());
+                                    } else {
+                                        ui.label(RichText::new("Target: whole file (select a range to reverse only that part)").weak());
+                                    }
                                     ui.horizontal_wrapped(|ui| {
                                         if ui
                                             .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
                                             .clicked()
                                         {
                                             if preview_ok {
+                                                let sr = tab.buffer_sample_rate.max(1);
                                                 let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                for ch in overlay.iter_mut() { ch.reverse(); }
+                                                for ch in overlay.iter_mut() {
+                                                    match sel_range {
+                                                        Some((s, e)) => {
+                                                            let xf = crate::wave::splice_xfade_samples(sr, e - s, e - s).min(256);
+                                                            crate::wave::reverse_range_with_crossfade(ch, s, e, xf);
+                                                        }
+                                                        None => ch.reverse(),
+                                                    }
+                                                }
                                                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
                                                 tab.preview_overlay = Some(Self::preview_overlay_from_channels(
                                                     overlay,
@@ -8944,7 +9766,13 @@ impl crate::app::WavesPreviewer {
                                                     timeline_len,
                                                 ));
                                                 let mut mono = Self::editor_mixdown_mono(tab);
-                                                mono.reverse();
+                                                match sel_range {
+                                                    Some((s, e)) => {
+                                                        let xf = crate::wave::splice_xfade_samples(sr, e - s, e - s).min(256);
+                                                        crate::wave::reverse_range_with_crossfade(&mut mono, s, e, xf);
+                                                    }
+                                                    None => mono.reverse(),
+                                                }
                                                 pending_preview = Some((ToolKind::Reverse, mono));
                                                 stop_playback = true;
                                                 tab.preview_audio_tool = Some(ToolKind::Reverse);
@@ -8952,7 +9780,11 @@ impl crate::app::WavesPreviewer {
                                                 request_preview_refresh = true;
                                             }
                                         }
-                                        if ui.button("Apply").clicked() { do_reverse = Some((0, tab.samples_len)); tab.preview_audio_tool=None; tab.preview_overlay=None; }
+                                        if ui.button("Apply").clicked() {
+                                            do_reverse = Some(sel_range.unwrap_or((0, tab.samples_len)));
+                                            tab.preview_audio_tool=None;
+                                            tab.preview_overlay=None;
+                                        }
                                         if ui.button("Cancel").clicked() { need_restore_preview = true; }
                                     });
                                 }
@@ -8982,6 +9814,110 @@ impl crate::app::WavesPreviewer {
                                 } else {
                                     tab.preview_overlay = None;
                                 }
+                            }
+                            // Spectral Warp: image-like frequency warp. Only on
+                            // views that resynthesize back to the waveform
+                            // (linear / log spectrogram) — Mel stays view-only.
+                            if matches!(leaf_view, ViewMode::Spectrogram | ViewMode::Log) {
+                                ui.separator();
+                                Self::inspector_section(ui, "Spectral Warp");
+                                ui.scope(|ui| {
+                                    let s = ui.style_mut();
+                                    s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                    s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                    let edit_resp = ui.checkbox(
+                                        &mut tab.spectral_warp_edit,
+                                        "Edit warp points on spectrogram",
+                                    );
+                                    if edit_resp.changed() {
+                                        tab.spectral_warp_drag = None;
+                                    }
+                                    if tab.spectral_warp_edit {
+                                        ui.label(
+                                            RichText::new(
+                                                "Drag on the spectrogram to push frequencies up/down (liquify-style). Grab an arrow to adjust it; double-click or right-click removes it.",
+                                            )
+                                            .weak(),
+                                        );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("Radius");
+                                        let mut t_ms = tab.tool_state.warp_time_radius_ms;
+                                        let mut f_hz = tab.tool_state.warp_freq_radius_hz;
+                                        if !t_ms.is_finite() || t_ms <= 0.0 { t_ms = 150.0; }
+                                        if !f_hz.is_finite() || f_hz <= 0.0 { f_hz = 300.0; }
+                                        let rt = ui
+                                            .add(
+                                                egui::DragValue::new(&mut t_ms)
+                                                    .range(10.0..=2000.0)
+                                                    .speed(5.0)
+                                                    .suffix(" ms"),
+                                            )
+                                            .on_hover_text("Time falloff of each warp stroke (Gaussian sigma)");
+                                        let rf = ui
+                                            .add(
+                                                egui::DragValue::new(&mut f_hz)
+                                                    .range(20.0..=8000.0)
+                                                    .speed(10.0)
+                                                    .suffix(" Hz"),
+                                            )
+                                            .on_hover_text("Frequency falloff of each warp stroke (Gaussian sigma)");
+                                        if rt.changed() || rf.changed() {
+                                            tab.tool_state = ToolState {
+                                                warp_time_radius_ms: t_ms,
+                                                warp_freq_radius_hz: f_hz,
+                                                ..tab.tool_state
+                                            };
+                                        }
+                                    });
+                                    let warp_ready = Self::editor_spectral_warp_ready(tab)
+                                        && !tab.loading;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} point(s)",
+                                                tab.spectral_warp_points.len()
+                                            ))
+                                            .weak(),
+                                        );
+                                        if !tab.spectral_warp_points.is_empty()
+                                            && ui.button("Clear points").clicked()
+                                        {
+                                            tab.spectral_warp_points.clear();
+                                            tab.spectral_warp_drag = None;
+                                            need_restore_preview = true;
+                                        }
+                                    });
+                                    if overlay_busy || apply_busy {
+                                        ui.add(egui::Spinner::new());
+                                    }
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                warp_ready && preview_button_enabled,
+                                                egui::Button::new("Preview"),
+                                            )
+                                            .on_hover_text(
+                                                "Render the warp and audition it (green overlay needs \"Waveform overlay\")",
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_spectral_warp_preview = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                warp_ready && !apply_busy,
+                                                egui::Button::new("Apply"),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_spectral_warp_apply = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            need_restore_preview = true;
+                                        }
+                                    });
+                                });
                             }
                         }
                         ViewMode::Tempogram => {
@@ -9272,34 +10208,53 @@ impl crate::app::WavesPreviewer {
                     pending_overlay_job = None;
                     pending_overlay_path = None;
                 }
-                if let Some((tool, mono, p)) = pending_heavy_preview {
+                if let Some((tool, mono, p, range)) = pending_heavy_preview {
                     if self.is_decode_failed_path(&self.tabs[tab_idx].path) {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
                             tab.preview_audio_tool = None;
                             tab.preview_overlay = None;
                         }
                     } else {
-                        self.spawn_heavy_preview_owned(mono, tool, p);
+                        self.spawn_heavy_preview_owned(mono, tool, p, range);
                     }
                 }
-                if let Some((tool, path, p)) = pending_heavy_preview_path {
+                if let Some((tool, path, p, range)) = pending_heavy_preview_path {
                     if self.is_decode_failed_path(&path) {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
                             tab.preview_audio_tool = None;
                             tab.preview_overlay = None;
                         }
                     } else {
-                        self.spawn_heavy_preview_from_path(path, tool, p);
+                        self.spawn_heavy_preview_from_path(path, tool, p, range);
                     }
                 }
-                if let Some(semi) = pending_pitch_apply {
-                    self.spawn_editor_apply_for_tab(tab_idx, ToolKind::PitchShift, semi);
+                if let Some((semi, range)) = pending_pitch_apply {
+                    self.spawn_editor_apply_for_tab_range(
+                        tab_idx,
+                        ToolKind::PitchShift,
+                        semi,
+                        range,
+                    );
                 }
-                if let Some(rate) = pending_stretch_apply {
-                    self.spawn_editor_apply_for_tab(tab_idx, ToolKind::TimeStretch, rate);
+                if let Some((rate, range)) = pending_stretch_apply {
+                    self.spawn_editor_apply_for_tab_range(
+                        tab_idx,
+                        ToolKind::TimeStretch,
+                        rate,
+                        range,
+                    );
+                }
+                if let Some((rate, range)) = pending_speed_apply {
+                    self.spawn_editor_apply_for_tab_range(tab_idx, ToolKind::Speed, rate, range);
                 }
                 if let Some(target) = pending_loudness_apply {
                     self.spawn_editor_apply_for_tab(tab_idx, ToolKind::Loudness, target);
+                }
+                if pending_spectral_warp_preview {
+                    self.spawn_spectral_warp_preview_for_tab(tab_idx);
+                }
+                if pending_spectral_warp_apply {
+                    self.spawn_spectral_warp_apply_for_tab(tab_idx);
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();
@@ -9551,14 +10506,14 @@ impl crate::app::WavesPreviewer {
 
         // perform pending actions after borrows end
         // Defer starting heavy overlay until after UI to avoid nested &mut self borrow (E0499)
-        if let Some((tool, p)) = pending_overlay_job {
+        if let Some((tool, p, range)) = pending_overlay_job {
             if !self.is_decode_failed_path(&self.tabs[tab_idx].path) {
-                self.spawn_heavy_overlay_for_tab(tab_idx, tool, p);
+                self.spawn_heavy_overlay_for_tab(tab_idx, tool, p, range);
             }
         }
-        if let Some((tool, path, p)) = pending_overlay_path {
+        if let Some((tool, path, p, range)) = pending_overlay_path {
             if !self.is_decode_failed_path(&path) {
-                self.spawn_heavy_overlay_from_path(path, tool, p);
+                self.spawn_heavy_overlay_from_path(path, tool, p, range);
             }
         }
         if request_undo {
@@ -9656,6 +10611,9 @@ impl crate::app::WavesPreviewer {
         }
         if let Some(((s, e), gdb)) = do_gain {
             self.editor_apply_gain_range(tab_idx, (s, e), gdb);
+        }
+        if let Some(points) = do_gain_env {
+            self.editor_apply_gain_envelope(tab_idx, &points);
         }
         if let Some(((s, e), tdb)) = do_normalize {
             self.editor_apply_normalize_range(tab_idx, (s, e), tdb);

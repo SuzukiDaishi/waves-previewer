@@ -1267,6 +1267,8 @@ pub struct EditorToolSetArgs {
     pub pitch_semitones: Option<f32>,
     #[arg(long = "stretch-rate")]
     pub stretch_rate: Option<f32>,
+    #[arg(long = "speed-rate")]
+    pub speed_rate: Option<f32>,
     #[arg(long = "loop-repeat")]
     pub loop_repeat: Option<u32>,
 }
@@ -1881,6 +1883,7 @@ pub enum CliEditorTool {
     Fade,
     Pitch,
     Stretch,
+    Speed,
     Gain,
     Normalize,
     Loudness,
@@ -1894,6 +1897,7 @@ impl From<CliEditorTool> for app::ToolKind {
             CliEditorTool::Fade => app::ToolKind::Fade,
             CliEditorTool::Pitch => app::ToolKind::PitchShift,
             CliEditorTool::Stretch => app::ToolKind::TimeStretch,
+            CliEditorTool::Speed => app::ToolKind::Speed,
             CliEditorTool::Gain => app::ToolKind::Gain,
             CliEditorTool::Normalize => app::ToolKind::Normalize,
             CliEditorTool::Loudness => app::ToolKind::Loudness,

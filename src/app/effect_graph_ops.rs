@@ -126,6 +126,9 @@ fn default_tool_state() -> ToolState {
         loudness_target_lufs: -14.0,
         pitch_semitones: 0.0,
         stretch_rate: 1.0,
+        speed_rate: 1.0,
+        warp_time_radius_ms: 150.0,
+        warp_freq_radius_hz: 300.0,
         loop_repeat: 2,
         noise_gate_threshold_db: -40.0,
         noise_gate_attack_ms: 2.0,
@@ -162,6 +165,10 @@ fn effect_graph_default_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
         EffectGraphNodeKind::PluginFx => [360.0, 320.0],
         EffectGraphNodeKind::SplitChannels => [260.0, 220.0],
         EffectGraphNodeKind::CombineChannels => [300.0, 250.0],
+        EffectGraphNodeKind::BandSplit => [290.0, 210.0],
+        EffectGraphNodeKind::BandJoin
+        | EffectGraphNodeKind::MsSplit
+        | EffectGraphNodeKind::MsJoin => [260.0, 165.0],
         EffectGraphNodeKind::DebugWaveform => [340.0, 250.0],
         EffectGraphNodeKind::DebugSpectrum => [360.0, 300.0],
         EffectGraphNodeKind::Eq => [300.0, 340.0],
@@ -861,11 +868,18 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
         EffectGraphNodeData::DebugSpectrum { zoom, .. } => {
             *zoom = zoom.clamp(1.0, 16.0);
         }
+        EffectGraphNodeData::BandSplit { low_hz, high_hz } => {
+            *low_hz = low_hz.clamp(20.0, 8_000.0);
+            *high_hz = high_hz.clamp((*low_hz * 1.01).max(40.0), 20_000.0);
+        }
         EffectGraphNodeData::Input
         | EffectGraphNodeData::Output
         | EffectGraphNodeData::Duplicate
         | EffectGraphNodeData::SplitChannels
-        | EffectGraphNodeData::CombineChannels => {}
+        | EffectGraphNodeData::CombineChannels
+        | EffectGraphNodeData::BandJoin
+        | EffectGraphNodeData::MsSplit
+        | EffectGraphNodeData::MsJoin => {}
     }
 }
 
@@ -985,6 +999,10 @@ fn node_label(kind: EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::Duplicate => "Duplicate",
         EffectGraphNodeKind::SplitChannels => "Split Channels",
         EffectGraphNodeKind::CombineChannels => "Combine Channels",
+        EffectGraphNodeKind::BandSplit => "Band Split",
+        EffectGraphNodeKind::BandJoin => "Band Join",
+        EffectGraphNodeKind::MsSplit => "MS Split",
+        EffectGraphNodeKind::MsJoin => "MS Join",
         EffectGraphNodeKind::DebugWaveform => "Waveform",
         EffectGraphNodeKind::DebugSpectrum => "Spectrum",
     }
@@ -1072,6 +1090,12 @@ fn node_parameter_summary(data: &EffectGraphNodeData) -> String {
         EffectGraphNodeData::Duplicate => "1 in / 2 auto branches".to_string(),
         EffectGraphNodeData::SplitChannels => "1 in / 8 routed mono outs".to_string(),
         EffectGraphNodeData::CombineChannels => "Auto format combine".to_string(),
+        EffectGraphNodeData::BandSplit { low_hz, high_hz } => {
+            format!("Low < {low_hz:.0} Hz < Mid < {high_hz:.0} Hz < High")
+        }
+        EffectGraphNodeData::BandJoin => "Sum of low / mid / high".to_string(),
+        EffectGraphNodeData::MsSplit => "Stereo -> mid + side".to_string(),
+        EffectGraphNodeData::MsJoin => "Mid + side -> stereo".to_string(),
         EffectGraphNodeData::DebugWaveform { zoom } => format!("Test-only waveform / {zoom:.1}x"),
         EffectGraphNodeData::DebugSpectrum { mode, zoom } => match mode {
             EffectGraphSpectrumMode::Linear => format!("Debug spectrum / linear / {zoom:.1}x"),
@@ -1405,6 +1429,39 @@ fn effect_graph_infer_flow_hints(
                     );
                 }
             }
+            EffectGraphNodeData::BandSplit { .. } => {
+                // Each band keeps the input's full channel layout.
+                let input_hint = input_hints
+                    .into_iter()
+                    .next()
+                    .unwrap_or(EffectGraphChannelFlowHint::Unknown);
+                for port in node.data.output_ports().iter() {
+                    output_hints.insert(make_port_key(&node.id, port.id), input_hint.clone());
+                }
+            }
+            EffectGraphNodeData::MsSplit => {
+                // Mid and side are single-channel buses.
+                for port in node.data.output_ports().iter() {
+                    output_hints.insert(
+                        make_port_key(&node.id, port.id),
+                        EffectGraphChannelFlowHint::PlainDense,
+                    );
+                }
+            }
+            EffectGraphNodeData::BandJoin => {
+                // Sum keeps the (shared) layout of its band inputs.
+                let output_hint = input_hints
+                    .into_iter()
+                    .next()
+                    .unwrap_or(EffectGraphChannelFlowHint::Unknown);
+                output_hints.insert(make_port_key(&node.id, "out"), output_hint);
+            }
+            EffectGraphNodeData::MsJoin => {
+                output_hints.insert(
+                    make_port_key(&node.id, "out"),
+                    EffectGraphChannelFlowHint::PlainDense,
+                );
+            }
             EffectGraphNodeData::CombineChannels => {
                 let mode = combine_mode_from_hints(input_hints.iter());
                 let output_hint = match mode {
@@ -1736,7 +1793,11 @@ fn effect_graph_layout_priority(data: &EffectGraphNodeData) -> i32 {
         EffectGraphNodeData::PluginFx { .. } => 45,
         EffectGraphNodeData::Duplicate => 45,
         EffectGraphNodeData::SplitChannels => 50,
+        EffectGraphNodeData::BandSplit { .. } => 50,
+        EffectGraphNodeData::MsSplit => 50,
         EffectGraphNodeData::CombineChannels => 60,
+        EffectGraphNodeData::BandJoin => 60,
+        EffectGraphNodeData::MsJoin => 60,
         EffectGraphNodeData::DebugWaveform { .. } => 70,
         EffectGraphNodeData::DebugSpectrum { .. } => 80,
         EffectGraphNodeData::Output => 100,
@@ -1980,6 +2041,15 @@ fn validate_effect_graph_document(
                     node_id: Some(node.id.clone()),
                 });
             }
+            EffectGraphNodeData::BandSplit { low_hz, high_hz } if *high_hz <= *low_hz => {
+                issues.push(EffectGraphValidationIssue {
+                    severity: EffectGraphSeverity::Warning,
+                    code: "band_split_crossover_order".to_string(),
+                    message: "Band Split's high crossover must sit above the low one; it will be adjusted on save"
+                        .to_string(),
+                    node_id: Some(node.id.clone()),
+                });
+            }
             // Exhaustive on purpose (no `_` arm): adding a node kind must fail
             // to compile here until its validation rules are considered.
             EffectGraphNodeData::Input
@@ -1990,6 +2060,10 @@ fn validate_effect_graph_document(
             | EffectGraphNodeData::Duplicate
             | EffectGraphNodeData::SplitChannels
             | EffectGraphNodeData::CombineChannels
+            | EffectGraphNodeData::BandSplit { .. }
+            | EffectGraphNodeData::BandJoin
+            | EffectGraphNodeData::MsSplit
+            | EffectGraphNodeData::MsJoin
             | EffectGraphNodeData::Gain { .. }
             | EffectGraphNodeData::PitchShift { .. }
             | EffectGraphNodeData::TimeStretch { .. }
@@ -2312,6 +2386,54 @@ fn validate_effect_graph_document(
                             node_id: Some(node.id.clone()),
                         });
                     }
+                }
+            }
+            EffectGraphNodeData::BandSplit { .. } | EffectGraphNodeData::MsSplit => {
+                if active && input_count_for("in") != 1 {
+                    issues.push(EffectGraphValidationIssue {
+                        severity: EffectGraphSeverity::Error,
+                        code: "split_incoming".to_string(),
+                        message: format!(
+                            "{} requires exactly one input",
+                            node.data.display_name()
+                        ),
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+                if active && connected_output_ports == 0 {
+                    issues.push(EffectGraphValidationIssue {
+                        severity: EffectGraphSeverity::Error,
+                        code: "split_outgoing".to_string(),
+                        message: format!(
+                            "{} requires at least one connected output",
+                            node.data.display_name()
+                        ),
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+            EffectGraphNodeData::BandJoin | EffectGraphNodeData::MsJoin => {
+                if active && connected_input_ports == 0 {
+                    issues.push(EffectGraphValidationIssue {
+                        severity: EffectGraphSeverity::Error,
+                        code: "join_incoming".to_string(),
+                        message: format!(
+                            "{} requires at least one connected input",
+                            node.data.display_name()
+                        ),
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+                if active && output_count_for("out") != 1 {
+                    issues.push(EffectGraphValidationIssue {
+                        severity: EffectGraphSeverity::Error,
+                        code: "join_outgoing".to_string(),
+                        message: format!(
+                            "{} requires exactly one output connection",
+                            node.data.display_name()
+                        ),
+                        node_id: Some(node.id.clone()),
+                    });
                 }
             }
             EffectGraphNodeData::PluginFx { config } => {
@@ -2757,6 +2879,185 @@ where
                 };
                 output_buses.insert(make_port_key(&node.id, "out1"), out1);
                 output_buses.insert(make_port_key(&node.id, "out2"), out2);
+            }
+            EffectGraphNodeData::BandSplit { low_hz, high_hz } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let mut low_channels = Vec::with_capacity(bus.channels.len());
+                let mut mid_channels = Vec::with_capacity(bus.channels.len());
+                let mut high_channels = Vec::with_capacity(bus.channels.len());
+                if execution_flavor == EffectGraphExecutionFlavor::FormatOnly {
+                    // Format prediction only: bands carry the input's format.
+                    for channel in bus.channels.iter() {
+                        low_channels.push(channel.clone());
+                        mid_channels.push(vec![0.0; channel.len()]);
+                        high_channels.push(vec![0.0; channel.len()]);
+                    }
+                } else {
+                    for channel in bus.channels.iter() {
+                        let (low, mid, high) = crate::wave::band_split_channel(
+                            channel,
+                            bus.sample_rate,
+                            *low_hz,
+                            *high_hz,
+                        );
+                        low_channels.push(low);
+                        mid_channels.push(mid);
+                        high_channels.push(high);
+                    }
+                }
+                for (port, channels) in [
+                    ("low", low_channels),
+                    ("mid", mid_channels),
+                    ("high", high_channels),
+                ] {
+                    let out_bus = EffectGraphAudioBus {
+                        channels,
+                        sample_rate: bus.sample_rate,
+                        channel_layout: make_duplicate_output_layout(
+                            &bus,
+                            &format!("{}:{}", node.id, port),
+                        ),
+                    };
+                    output_buses.insert(make_port_key(&node.id, port), out_bus);
+                }
+            }
+            EffectGraphNodeData::BandJoin => {
+                let mut inputs: Vec<EffectGraphAudioBus> = Vec::new();
+                for port in node.data.input_ports().iter() {
+                    if let Some(bus) = effect_graph_input_bus_for_port(
+                        &node.id,
+                        port.id,
+                        &input_sources,
+                        &output_buses,
+                    ) {
+                        inputs.push(bus);
+                    }
+                }
+                if inputs.is_empty() {
+                    return Err(effect_graph_node_runtime_error(
+                        &node.id,
+                        format!("{} has no connected inputs", node.id),
+                    ));
+                }
+                let sample_rate = inputs[0].sample_rate;
+                if inputs.iter().any(|bus| bus.sample_rate != sample_rate) {
+                    on_event(EffectGraphRuntimeEvent::NodeLog {
+                        node_id: node.id.clone(),
+                        severity: EffectGraphSeverity::Warning,
+                        message: "Band Join inputs disagree on sample rate; using the first"
+                            .to_string(),
+                    });
+                }
+                let channel_count = inputs
+                    .iter()
+                    .map(|bus| bus.channels.len())
+                    .max()
+                    .unwrap_or(0);
+                let frame_len = inputs
+                    .iter()
+                    .flat_map(|bus| bus.channels.iter().map(Vec::len))
+                    .max()
+                    .unwrap_or(0);
+                let mut channels = vec![vec![0.0f32; frame_len]; channel_count];
+                for bus in &inputs {
+                    for (ch_idx, channel) in bus.channels.iter().enumerate() {
+                        for (i, v) in channel.iter().enumerate() {
+                            channels[ch_idx][i] += *v;
+                        }
+                    }
+                }
+                output_buses.insert(
+                    make_port_key(&node.id, "out"),
+                    dense_audio_bus(channels, sample_rate),
+                );
+            }
+            EffectGraphNodeData::MsSplit => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                if bus.channels.len() > 2 {
+                    on_event(EffectGraphRuntimeEvent::NodeLog {
+                        node_id: node.id.clone(),
+                        severity: EffectGraphSeverity::Warning,
+                        message: format!(
+                            "MS Split uses only the first two of {} channels",
+                            bus.channels.len()
+                        ),
+                    });
+                }
+                let (mid, side) = crate::wave::ms_encode(&bus.channels);
+                output_buses.insert(
+                    make_port_key(&node.id, "mid"),
+                    dense_audio_bus(vec![mid], bus.sample_rate),
+                );
+                output_buses.insert(
+                    make_port_key(&node.id, "side"),
+                    dense_audio_bus(vec![side], bus.sample_rate),
+                );
+            }
+            EffectGraphNodeData::MsJoin => {
+                let mid_bus = effect_graph_input_bus_for_port(
+                    &node.id,
+                    "mid",
+                    &input_sources,
+                    &output_buses,
+                );
+                let side_bus = effect_graph_input_bus_for_port(
+                    &node.id,
+                    "side",
+                    &input_sources,
+                    &output_buses,
+                );
+                if mid_bus.is_none() && side_bus.is_none() {
+                    return Err(effect_graph_node_runtime_error(
+                        &node.id,
+                        format!("{} has no connected inputs", node.id),
+                    ));
+                }
+                let sample_rate = mid_bus
+                    .as_ref()
+                    .or(side_bus.as_ref())
+                    .map(|bus| bus.sample_rate)
+                    .unwrap_or(48_000);
+                for (label, bus) in [("mid", &mid_bus), ("side", &side_bus)] {
+                    if let Some(bus) = bus {
+                        if bus.channels.len() > 1 {
+                            on_event(EffectGraphRuntimeEvent::NodeLog {
+                                node_id: node.id.clone(),
+                                severity: EffectGraphSeverity::Warning,
+                                message: format!(
+                                    "MS Join {label} input has {} channels; using the first",
+                                    bus.channels.len()
+                                ),
+                            });
+                        }
+                    }
+                }
+                let mid = mid_bus
+                    .as_ref()
+                    .and_then(|bus| bus.channels.first().cloned())
+                    .unwrap_or_default();
+                let side = side_bus
+                    .as_ref()
+                    .and_then(|bus| bus.channels.first().cloned())
+                    .unwrap_or_default();
+                let (left, right) = crate::wave::ms_decode(&mid, &side);
+                output_buses.insert(
+                    make_port_key(&node.id, "out"),
+                    dense_audio_bus(vec![left, right], sample_rate),
+                );
             }
             EffectGraphNodeData::MonoMix { ignored_channels } => {
                 let bus =
@@ -7320,5 +7621,171 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|message| message.contains("slot 8 is vacant")));
+    }
+
+    fn routing_node(id: &str, kind: EffectGraphNodeKind) -> EffectGraphNode {
+        EffectGraphNode {
+            id: id.to_string(),
+            ui_pos: [0.0, 0.0],
+            ui_size: [260.0, 165.0],
+            data: EffectGraphNodeData::default_for_kind(kind),
+        }
+    }
+
+    fn sine(freq: f32, sr: u32, len: usize) -> Vec<f32> {
+        (0..len)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr as f32).sin())
+            .collect()
+    }
+
+    #[test]
+    fn band_split_join_roundtrip_returns_original() {
+        // Input -> Band Split -> Band Join -> Output must reproduce the
+        // input exactly (complementary subtraction split).
+        let doc = doc_with_nodes(
+            vec![
+                routing_node("input", EffectGraphNodeKind::Input),
+                routing_node("split", EffectGraphNodeKind::BandSplit),
+                routing_node("join", EffectGraphNodeKind::BandJoin),
+                routing_node("output", EffectGraphNodeKind::Output),
+            ],
+            vec![
+                edge("e1", "input", "out", "split", "in"),
+                edge("e2", "split", "low", "join", "low"),
+                edge("e3", "split", "mid", "join", "mid"),
+                edge("e4", "split", "high", "join", "high"),
+                edge("e5", "join", "out", "output", "in"),
+            ],
+        );
+        assert!(!validate_effect_graph_document(&doc)
+            .iter()
+            .any(|issue| issue.severity == EffectGraphSeverity::Error));
+        let sr = 48_000u32;
+        let left: Vec<f32> = sine(80.0, sr, 4_800)
+            .iter()
+            .zip(&sine(1_000.0, sr, 4_800))
+            .zip(&sine(9_000.0, sr, 4_800))
+            .map(|((a, b), c)| (a + b + c) / 3.0)
+            .collect();
+        let right: Vec<f32> = left.iter().map(|v| v * 0.5).collect();
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![left.clone(), right.clone()], sr),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        assert_eq!(out.channels.len(), 2);
+        for (out_ch, in_ch) in out.channels.iter().zip([&left, &right]) {
+            let max_err = out_ch
+                .iter()
+                .zip(in_ch.iter())
+                .map(|(o, i)| (o - i).abs())
+                .fold(0.0f32, f32::max);
+            assert!(max_err < 1e-5, "band split/join not transparent: {max_err}");
+        }
+    }
+
+    #[test]
+    fn band_split_separates_low_and_high_content() {
+        let sr = 48_000u32;
+        let low_tone = sine(60.0, sr, 9_600);
+        let high_tone = sine(8_000.0, sr, 9_600);
+        let mixed: Vec<f32> = low_tone
+            .iter()
+            .zip(&high_tone)
+            .map(|(a, b)| a + b)
+            .collect();
+        let (low, mid, high) = crate::wave::band_split_channel(&mixed, sr, 200.0, 2_000.0);
+        let rms = |sig: &[f32]| -> f32 {
+            (sig.iter().map(|v| v * v).sum::<f32>() / sig.len().max(1) as f32).sqrt()
+        };
+        // Skip the filter warm-up at the head.
+        let low_rms = rms(&low[2_000..]);
+        let mid_rms = rms(&mid[2_000..]);
+        let high_rms = rms(&high[2_000..]);
+        assert!(low_rms > 0.4, "low band lost the 60 Hz tone: {low_rms}");
+        assert!(high_rms > 0.4, "high band lost the 8 kHz tone: {high_rms}");
+        assert!(
+            mid_rms < low_rms.min(high_rms) * 0.5,
+            "mid band leaked: low {low_rms} mid {mid_rms} high {high_rms}"
+        );
+        // Perfect reconstruction regardless of the crossovers.
+        for i in 0..mixed.len() {
+            let sum = low[i] + mid[i] + high[i];
+            assert!((sum - mixed[i]).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn ms_split_join_roundtrip_returns_stereo() {
+        let doc = doc_with_nodes(
+            vec![
+                routing_node("input", EffectGraphNodeKind::Input),
+                routing_node("split", EffectGraphNodeKind::MsSplit),
+                routing_node("join", EffectGraphNodeKind::MsJoin),
+                routing_node("output", EffectGraphNodeKind::Output),
+            ],
+            vec![
+                edge("e1", "input", "out", "split", "in"),
+                edge("e2", "split", "mid", "join", "mid"),
+                edge("e3", "split", "side", "join", "side"),
+                edge("e4", "join", "out", "output", "in"),
+            ],
+        );
+        assert!(!validate_effect_graph_document(&doc)
+            .iter()
+            .any(|issue| issue.severity == EffectGraphSeverity::Error));
+        let left = vec![0.5f32, -0.25, 0.75, 0.0];
+        let right = vec![0.1f32, 0.9, -0.5, 0.25];
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![left.clone(), right.clone()], 48_000),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        assert_eq!(out.channels.len(), 2);
+        for (out_ch, in_ch) in out.channels.iter().zip([&left, &right]) {
+            for (o, i) in out_ch.iter().zip(in_ch.iter()) {
+                assert!((o - i).abs() < 1e-6, "MS roundtrip drift: {o} vs {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn ms_join_without_side_duplicates_mid() {
+        let doc = doc_with_nodes(
+            vec![
+                routing_node("input", EffectGraphNodeKind::Input),
+                routing_node("split", EffectGraphNodeKind::MsSplit),
+                routing_node("join", EffectGraphNodeKind::MsJoin),
+                routing_node("output", EffectGraphNodeKind::Output),
+            ],
+            vec![
+                edge("e1", "input", "out", "split", "in"),
+                edge("e2", "split", "mid", "join", "mid"),
+                edge("e3", "join", "out", "output", "in"),
+            ],
+        );
+        let left = vec![0.5f32, -0.25, 0.75, 0.0];
+        let right = vec![0.1f32, 0.9, -0.5, 0.25];
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![left.clone(), right.clone()], 48_000),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        assert_eq!(out.channels.len(), 2);
+        // Without the side signal, both channels carry the mid: (L+R)/2.
+        for (i, (l, r)) in left.iter().zip(right.iter()).enumerate() {
+            let mid = (l + r) * 0.5;
+            assert!((out.channels[0][i] - mid).abs() < 1e-6);
+            assert!((out.channels[1][i] - mid).abs() < 1e-6);
+        }
     }
 }
