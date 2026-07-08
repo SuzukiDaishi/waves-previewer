@@ -4,6 +4,25 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+## 0.20260708.0 - 2026-07-08
+
+### Forge-Style Processing Chain: Noise Gate / EQ / Compressor / Trim / Bit Depth / Resampler
+- Six new nodes in the Effect Graph - Noise Gate, EQ, Compressor, Trim, Bit Depth, and Resampler - plus matching Noise Gate/EQ/Compressor tools in the Editor's Inspector panel, so the same "Forge-style" mastering chain (gate -> EQ -> compress -> trim silence) can be built either as a reusable node graph or applied directly to a tab. Noise Gate and Compressor are envelope-follower designs (threshold/attack/release, plus ratio/makeup for the compressor); EQ is a fixed low-shelf/mid-bell/high-shelf topology (RBJ biquads in series) rather than a freeform band count. Trim reuses the existing Auto Trim detector to remove leading/trailing silence only (internal quiet gaps are left alone). Bit Depth previews 16/24-bit quantization in-buffer (true kbps bitrate remains an export-only concept, since it only applies to a lossy codec, not floating-point audio in the graph); Resampler exposes target rate and Fast/Good/Best quality via the existing rubato-based resampler. All three level/dynamics tools share one DSP implementation (`wave.rs`) between the graph node and the Inspector tool, with live preview/audition and full undo on Apply.
+
+### PluginFX Reliability and a Shared Probe-Status UI
+- Native VST3/CLAP parameter probing now retries up to 3 times before falling back to the zero-parameter generic backend, fixing the most common cause of "the plugin's parameters show up sometimes and not other times" - native probing launches the plugin in a separate process and is inherently racy (module load / COM init / plugin init timing), and a single transient failure used to permanently downgrade that probe to Generic.
+- Added a "Load from file..." picker to both the Effect Graph's Plugin FX node and the Editor's Plugin FX tool, so an empty (never-scanned) plugin catalog is no longer a dead end - picking a `.vst3`/`.clap` directly adds it to the catalog and probes it immediately.
+- The two Plugin FX UIs (graph node and Editor tool) now share one `ui_plugin_probe_status` widget for the error / generic-fallback-warning / backend-log display, so a probe failure reads identically in both places.
+
+### Clipboard/Export Consistency, Clear Edit, and Loop Edit / Inspector Polish
+- Fixed clipboard copy (Ctrl+C) silently using a file's original bytes when it only had a pending list-level gain change (no open Editor tab) - drag-export already applied that gain correctly, and copy now shares the same `apply_gain_and_resample` logic instead of a narrower path, so Copy, drag-out, and Export always agree on what "the current version of this file" means.
+- Added a "Clear Edit" button next to Undo/Redo in the Editor: reverts a tab's audio to the original file on disk and wipes its undo/redo history in one step (selection, markers, and loop points are left untouched).
+- Recent Sessions now remembers the last 10 sessions instead of 3.
+- Loop Edit panel: Auto Detect's candidate list is capped to the top 3 (already score-ranked) results instead of every candidate found, and the whole Auto Detect section moved below Seam Check, since it was the least reliable, most-scrolled part of the panel. The "Loop Range" status rows no longer render as their own sub-section header.
+- The Inspector panel no longer reserves a tall empty box under short tool content (e.g. Loop Edit with only a couple of Auto Detect candidates) - it now sizes to its actual content.
+- The ambiguous single "Edge fade" control in the spectral selection tools (which silently mixed a time-domain and a frequency-domain parameter under one label) is now two clearly labeled "Time fade" / "Freq fade" rows under a "Spectral Mute Fade" heading.
+- Investigated (root cause identified, not yet fixed) an occasional waveform/spectrogram visual misalignment at high zoom: the spectral viewport renderer snaps its sample-range bounds down to the nearest analysis-frame boundary via integer division, while the waveform lane renders the exact requested sample range - a real but separate bug from this release's fixes.
+
 ### Hitch-Free Loading (no stalls during or right after big loads)
 - Loading a 1M-file folder no longer produces multi-hundred-ms frame stalls mid-scan. The path->id index is now keyed by a precomputed 64-bit hash (`types::PathIndex`): growing a plain `HashMap<PathBuf, _>` re-hashes every key, which cost ~270ms in one frame at 640k entries; growing the u64-keyed table only moves slots (the worst load-time frame at 1M drops from ~650ms to ~64ms). Hash collisions degrade a slot to a tiny vector, never to a wrong answer. The remaining per-item maps (id index, folder intern, inflight set, stat cache, SR probe cache) switch to FxHash.
 - The list containers pre-reserve toward the scanner's live discovery count (shared via an atomic, not the message channel, so it runs ahead of the budgeted appends).
