@@ -1346,6 +1346,202 @@ pub fn process_speed_offline(mono: &[f32], rate: f32) -> Vec<f32> {
     out
 }
 
+/// Default crossfade length (in milliseconds) used when splicing a processed
+/// segment back into its surrounding audio so the joins stay click-free.
+pub const SPLICE_XFADE_MS: f32 = 8.0;
+
+/// Crossfade length in samples for a splice at `sample_rate`, bounded so the
+/// fades never cover more than half of either the original selection or the
+/// processed segment.
+pub fn splice_xfade_samples(sample_rate: u32, selection_len: usize, processed_len: usize) -> usize {
+    let base = ((SPLICE_XFADE_MS / 1000.0) * sample_rate.max(1) as f32).round() as usize;
+    base.min(selection_len / 2).min(processed_len / 2)
+}
+
+/// Replace `original[start..end)` with `processed`, equal-power crossfading
+/// both joins against the original selection content so the transitions stay
+/// smooth even when the replacement is shorter or longer than the selection.
+///
+/// At the head, the first `xfade` samples blend from the original selection's
+/// opening into the processed segment; at the tail, the last `xfade` samples
+/// blend back into the original selection's ending (which flows continuously
+/// into the suffix). `xfade` is clamped via [`splice_xfade_samples`]-style
+/// bounds internally.
+pub fn splice_range_with_crossfade(
+    original: &[f32],
+    start: usize,
+    end: usize,
+    processed: &[f32],
+    xfade: usize,
+) -> Vec<f32> {
+    let len = original.len();
+    let start = start.min(len);
+    let end = end.clamp(start, len);
+    let sel_len = end - start;
+    let mut seg = processed.to_vec();
+    let xf = xfade.min(sel_len / 2).min(seg.len() / 2);
+    if xf > 0 {
+        let denom = (xf + 1) as f32;
+        // Head join: original selection opening -> processed segment.
+        if start > 0 {
+            for i in 0..xf {
+                let t = (i + 1) as f32 / denom;
+                let w_in = (core::f32::consts::FRAC_PI_2 * t).sin();
+                let w_out = (core::f32::consts::FRAC_PI_2 * t).cos();
+                seg[i] = original[start + i] * w_out + seg[i] * w_in;
+            }
+        }
+        // Tail join: processed segment -> original selection ending, which is
+        // continuous with the suffix that follows.
+        if end < len {
+            let seg_len = seg.len();
+            for i in 0..xf {
+                let t = (i + 1) as f32 / denom;
+                let w_in = (core::f32::consts::FRAC_PI_2 * t).sin();
+                let w_out = (core::f32::consts::FRAC_PI_2 * t).cos();
+                let si = seg_len - xf + i;
+                let oi = end - xf + i;
+                seg[si] = seg[si] * w_out + original[oi] * w_in;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(start + seg.len() + (len - end));
+    out.extend_from_slice(&original[..start]);
+    out.extend_from_slice(&seg);
+    out.extend_from_slice(&original[end..]);
+    out
+}
+
+/// Evaluate a piecewise-linear gain envelope (breakpoints in dB, sorted by
+/// sample position) and apply it in place. Before the first point the first
+/// point's dB is used; after the last point the last point's dB. With no
+/// points, `fallback_db` applies uniformly. Interpolation is linear in dB
+/// (like DAW fader automation).
+pub fn apply_gain_envelope_in_place(
+    samples: &mut [f32],
+    points_db: &[(usize, f32)],
+    fallback_db: f32,
+    clamp_output: bool,
+) {
+    let db_to_amp = |db: f32| 10.0f32.powf(db / 20.0);
+    if points_db.is_empty() {
+        let g = db_to_amp(fallback_db);
+        for v in samples.iter_mut() {
+            *v *= g;
+            if clamp_output {
+                *v = v.clamp(-1.0, 1.0);
+            }
+        }
+        return;
+    }
+    let mut pts: Vec<(usize, f32)> = points_db.to_vec();
+    pts.sort_by_key(|p| p.0);
+    let len = samples.len();
+    // Head: flat at first point's level.
+    let head_end = pts[0].0.min(len);
+    let head_amp = db_to_amp(pts[0].1);
+    for v in &mut samples[..head_end] {
+        *v *= head_amp;
+        if clamp_output {
+            *v = v.clamp(-1.0, 1.0);
+        }
+    }
+    // Segments between consecutive points: interpolate in dB. The dB ramp is
+    // resolved per-sample; segments are usually long enough that the powf cost
+    // stays negligible relative to the buffer scan itself.
+    for w in pts.windows(2) {
+        let (s0, db0) = w[0];
+        let (s1, db1) = w[1];
+        let s0 = s0.min(len);
+        let s1 = s1.min(len);
+        if s1 <= s0 {
+            continue;
+        }
+        let span = (s1 - s0) as f32;
+        for i in s0..s1 {
+            let t = (i - s0) as f32 / span;
+            let g = db_to_amp(db0 + (db1 - db0) * t);
+            let v = &mut samples[i];
+            *v *= g;
+            if clamp_output {
+                *v = v.clamp(-1.0, 1.0);
+            }
+        }
+    }
+    // Tail: flat at last point's level.
+    let tail_start = pts[pts.len() - 1].0.min(len);
+    let tail_amp = db_to_amp(pts[pts.len() - 1].1);
+    for v in &mut samples[tail_start..] {
+        *v *= tail_amp;
+        if clamp_output {
+            *v = v.clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// Evaluate the same piecewise-linear dB envelope used by
+/// [`apply_gain_envelope_in_place`] at a single sample position.
+pub fn gain_envelope_db_at(points_db: &[(usize, f32)], fallback_db: f32, sample: usize) -> f32 {
+    if points_db.is_empty() {
+        return fallback_db;
+    }
+    let mut pts: Vec<(usize, f32)> = points_db.to_vec();
+    pts.sort_by_key(|p| p.0);
+    if sample <= pts[0].0 {
+        return pts[0].1;
+    }
+    for w in pts.windows(2) {
+        let (s0, db0) = w[0];
+        let (s1, db1) = w[1];
+        if sample < s1 {
+            if s1 <= s0 {
+                return db1;
+            }
+            let t = (sample - s0) as f32 / (s1 - s0) as f32;
+            return db0 + (db1 - db0) * t;
+        }
+    }
+    pts[pts.len() - 1].1
+}
+
+/// Reverse `samples[start..end)` in place, equal-power blending the first and
+/// last `xfade` samples of the reversed segment against the original content
+/// so the joins to the untouched prefix/suffix stay click-free. Joins are only
+/// smoothed where neighbouring audio actually exists (`start > 0` / `end < len`).
+pub fn reverse_range_with_crossfade(samples: &mut [f32], start: usize, end: usize, xfade: usize) {
+    let len = samples.len();
+    let start = start.min(len);
+    let end = end.clamp(start, len);
+    let sel_len = end - start;
+    if sel_len < 2 {
+        return;
+    }
+    let original: Vec<f32> = samples[start..end].to_vec();
+    samples[start..end].reverse();
+    let xf = xfade.min(sel_len / 2);
+    if xf == 0 {
+        return;
+    }
+    let denom = (xf + 1) as f32;
+    if start > 0 {
+        for i in 0..xf {
+            let t = (i + 1) as f32 / denom;
+            let w_in = (core::f32::consts::FRAC_PI_2 * t).sin();
+            let w_out = (core::f32::consts::FRAC_PI_2 * t).cos();
+            samples[start + i] = original[i] * w_out + samples[start + i] * w_in;
+        }
+    }
+    if end < len {
+        for i in 0..xf {
+            let t = (i + 1) as f32 / denom;
+            let w_in = (core::f32::consts::FRAC_PI_2 * t).sin();
+            let w_out = (core::f32::consts::FRAC_PI_2 * t).cos();
+            let idx = end - xf + i;
+            samples[idx] = samples[idx] * w_out + original[idx - start] * w_in;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoiseGateParams {
     pub threshold_db: f32,

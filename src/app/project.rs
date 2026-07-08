@@ -449,6 +449,8 @@ pub struct ProjectToolState {
     pub loudness_target_lufs: f32,
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
+    #[serde(default = "default_speed_rate")]
+    pub speed_rate: f32,
     #[serde(default = "default_loop_repeat")]
     pub loop_repeat: u32,
     #[serde(default = "default_noise_gate_threshold_db")]
@@ -625,6 +627,10 @@ fn project_data_dir(path: &Path) -> PathBuf {
 
 fn default_loop_repeat() -> u32 {
     2
+}
+
+fn default_speed_rate() -> f32 {
+    1.0
 }
 
 fn default_loudness_target_lufs() -> f32 {
@@ -842,6 +848,7 @@ pub fn project_tab_from_tab(
             loudness_target_lufs: tab.tool_state.loudness_target_lufs,
             pitch_semitones: tab.tool_state.pitch_semitones,
             stretch_rate: tab.tool_state.stretch_rate,
+            speed_rate: tab.tool_state.speed_rate,
             loop_repeat: tab.tool_state.loop_repeat,
             noise_gate_threshold_db: tab.tool_state.noise_gate_threshold_db,
             noise_gate_attack_ms: tab.tool_state.noise_gate_attack_ms,
@@ -1052,6 +1059,7 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         loudness_target_lufs: t.loudness_target_lufs,
         pitch_semitones: t.pitch_semitones,
         stretch_rate: t.stretch_rate,
+        speed_rate: if t.speed_rate > 0.0 { t.speed_rate } else { 1.0 },
         loop_repeat: t.loop_repeat.max(2),
         noise_gate_threshold_db: t.noise_gate_threshold_db,
         noise_gate_attack_ms: t.noise_gate_attack_ms,
@@ -1090,6 +1098,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "Fade" => ToolKind::Fade,
         "PitchShift" => ToolKind::PitchShift,
         "TimeStretch" => ToolKind::TimeStretch,
+        "Speed" => ToolKind::Speed,
         "Gain" => ToolKind::Gain,
         "Normalize" => ToolKind::Normalize,
         "Loudness" => ToolKind::Loudness,

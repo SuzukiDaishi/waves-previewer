@@ -422,8 +422,16 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state(tab);
+            // Sub-range reverse: smooth the joins with a short crossfade so
+            // the transition into/out of the reversed span stays click-free.
+            let xf = if s > 0 || e < tab.samples_len {
+                crate::wave::splice_xfade_samples(tab.buffer_sample_rate.max(1), e - s, e - s)
+                    .min(256)
+            } else {
+                0
+            };
             for ch in tab.ch_samples.iter_mut() {
-                ch[s..e].reverse();
+                crate::wave::reverse_range_with_crossfade(ch, s, e, xf);
             }
             tab.dirty = true;
             Self::editor_clamp_ranges(tab);
@@ -1521,21 +1529,92 @@ impl crate::app::WavesPreviewer {
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
     }
 
+    /// Run a Pitch/Stretch/Speed tool over `chan`, optionally restricted to
+    /// `range`. Range mode processes just the selection and splices it back
+    /// with click-free crossfades (shared by preview and apply so what you
+    /// hear in preview is exactly what gets applied).
+    pub(super) fn process_tool_segment_spliced(
+        chan: &[f32],
+        tool: ToolKind,
+        param: f32,
+        sr: u32,
+        range: Option<(usize, usize)>,
+    ) -> Vec<f32> {
+        let process = |input: &[f32]| -> Vec<f32> {
+            match tool {
+                ToolKind::PitchShift => {
+                    crate::wave::process_pitchshift_offline(input, sr, sr, param)
+                }
+                ToolKind::TimeStretch => {
+                    crate::wave::process_timestretch_offline(input, sr, sr, param)
+                }
+                ToolKind::Speed => crate::wave::process_speed_offline(input, param),
+                _ => input.to_vec(),
+            }
+        };
+        match range {
+            Some((s, e)) if e > s && e <= chan.len() && (e - s) < chan.len() => {
+                let processed = process(&chan[s..e]);
+                let xf = crate::wave::splice_xfade_samples(sr, e - s, processed.len());
+                crate::wave::splice_range_with_crossfade(chan, s, e, &processed, xf)
+            }
+            _ => process(chan),
+        }
+    }
+
+    /// Destructively apply a breakpoint gain envelope (DAW-style automation
+    /// polyline) to the whole buffer.
+    pub(super) fn editor_apply_gain_envelope(&mut self, tab_idx: usize, points: &[(usize, f32)]) {
+        if points.is_empty() {
+            return;
+        }
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let undo_state = Self::capture_undo_state(tab);
+            for ch in tab.ch_samples.iter_mut() {
+                crate::wave::apply_gain_envelope_in_place(ch, points, 0.0, true);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     pub(super) fn spawn_editor_apply_for_tab(
         &mut self,
         tab_idx: usize,
         tool: ToolKind,
         param: f32,
     ) {
+        self.spawn_editor_apply_for_tab_range(tab_idx, tool, param, None);
+    }
+
+    /// Heavy async apply. When `range` is set (and the tool supports it), only
+    /// `[start, end)` is processed and the result is spliced back with short
+    /// equal-power crossfades at both joins so the audio connects cleanly —
+    /// including when the segment shrinks or grows (Speed / TimeStretch).
+    pub(super) fn spawn_editor_apply_for_tab_range(
+        &mut self,
+        tab_idx: usize,
+        tool: ToolKind,
+        param: f32,
+        range: Option<(usize, usize)>,
+    ) {
         use std::sync::mpsc;
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
-        if matches!(tool, ToolKind::PitchShift | ToolKind::TimeStretch)
-            && self.is_decode_failed_path(&tab.path)
+        if matches!(
+            tool,
+            ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed
+        ) && self.is_decode_failed_path(&tab.path)
         {
             return;
         }
+        let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
         let undo = Some(Self::capture_undo_state(tab));
         // Cancel any previous apply job
         self.editor_apply_state = None;
@@ -1547,17 +1626,10 @@ impl crate::app::WavesPreviewer {
             let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
             let mut lufs_override = None;
             match tool {
-                ToolKind::PitchShift | ToolKind::TimeStretch => {
+                ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed => {
                     for chan in ch.iter() {
-                        let processed = match tool {
-                            ToolKind::PitchShift => {
-                                crate::wave::process_pitchshift_offline(chan, sr, sr, param)
-                            }
-                            ToolKind::TimeStretch => {
-                                crate::wave::process_timestretch_offline(chan, sr, sr, param)
-                            }
-                            _ => chan.clone(),
-                        };
+                        let processed =
+                            Self::process_tool_segment_spliced(chan, tool, param, sr, range);
                         out.push(processed);
                     }
                 }
@@ -1584,6 +1656,14 @@ impl crate::app::WavesPreviewer {
                 }
             }
             let len = out.get(0).map(|c| c.len()).unwrap_or(0);
+            // Keep the selection over the processed span (its length may have
+            // changed for Speed / TimeStretch range applies).
+            let selection_after = range.and_then(|(s, e)| {
+                let orig_len = ch.get(0).map(|c| c.len()).unwrap_or(0);
+                let suffix = orig_len.saturating_sub(e);
+                let new_end = len.saturating_sub(suffix);
+                (new_end > s).then_some((s, new_end))
+            });
             let mut mono = vec![0.0f32; len];
             let chn = out.len() as f32;
             if chn > 0.0 {
@@ -1611,11 +1691,13 @@ impl crate::app::WavesPreviewer {
                 waveform_minmax,
                 waveform_pyramid,
                 lufs_override,
+                selection_after,
             });
         });
         let msg = match tool {
             ToolKind::PitchShift => "Applying PitchShift...".to_string(),
             ToolKind::TimeStretch => "Applying TimeStretch...".to_string(),
+            ToolKind::Speed => "Applying Speed...".to_string(),
             ToolKind::Loudness => "Applying Loudness Normalize...".to_string(),
             _ => "Applying...".to_string(),
         };
@@ -1687,6 +1769,9 @@ impl crate::app::WavesPreviewer {
                     }
                     Self::editor_clamp_vertical_view(tab);
                     tab.dirty = true;
+                    if let Some(sel) = res.selection_after {
+                        tab.selection = Some(sel);
+                    }
                     Self::editor_clamp_ranges(tab);
                     if let Some(v) = res.lufs_override {
                         self.lufs_override.insert(tab.path.clone(), v);

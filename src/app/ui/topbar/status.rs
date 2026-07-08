@@ -238,6 +238,7 @@ impl WavesPreviewer {
             let label = match self.heavy_preview_expected_tool {
                 Some(ToolKind::PitchShift) => "Previewing PitchShift",
                 Some(ToolKind::TimeStretch) => "Previewing TimeStretch",
+                Some(ToolKind::Speed) => "Previewing Speed",
                 _ => "Previewing",
             };
             items.push(TopbarActivityItem {

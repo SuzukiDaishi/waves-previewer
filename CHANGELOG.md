@@ -4,6 +4,13 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Editor Inspector: Gain Curve, Speed Tool, and Selection-Aware Pitch/Stretch/Reverse
+- The Gain tool can now apply a DAW-automation-style gain curve instead of only a uniform value: enable "Gain curve (draw on waveform)" and click the orange polyline on the waveform to add breakpoints, drag them to shape the curve (piecewise-linear in dB, +/-24 dB), double-click or right-click a point to remove it. The curve previews live (green overlay + audition) and Apply bakes it destructively with full undo. Long clips preview the curve by scaling the overview bins.
+- New Speed tool (Inspector, between Time Stretch and LoudNorm): tape-style playback-rate change (0.25x-4x) that shifts pitch and length together, using the existing offline resampler. Same preview/apply flow as Time Stretch, including background preview for long clips and session persistence of the rate.
+- PitchShift, TimeStretch, and Speed now apply to the current selection when one exists (whole file otherwise). The selection is processed on its own and spliced back with short equal-power crossfades at both joins, so the audio connects cleanly even when the segment shrinks or grows; preview renders the exact same splice you get on Apply.
+- Canvas gestures for the preview workflow: with PitchShift active, drag the horizontal pitch line up/down over the waveform (up = higher, +/-12 st, live semitone readout) and release to render the preview. With Speed/TimeStretch active and a selection, grab the selection's right edge and drag left/right to shrink/stretch it - a ghost region and "x1.25 (slower/longer)" readout track the drag, and releasing the mouse renders the stretched waveform and audition.
+- Reverse is selection-aware: with a range selected, Preview/Apply reverse only that range, blending a few milliseconds at each join so the reversed span connects without clicks; without a selection it reverses the whole file as before.
+
 ## 0.20260708.0 - 2026-07-08
 
 ### Forge-Style Processing Chain: Noise Gate / EQ / Compressor / Trim / Bit Depth / Resampler

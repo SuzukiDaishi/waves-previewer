@@ -1538,6 +1538,7 @@ impl super::WavesPreviewer {
             loudness_target_lufs: -14.0,
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
+            speed_rate: 1.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,

@@ -393,6 +393,7 @@ Supported tool values:
 - `fade`
 - `pitch`
 - `stretch`
+- `speed`
 - `gain`
 - `normalize`
 - `loudness`
@@ -408,6 +409,7 @@ Settable fields:
 - `--loudness-target-lufs`
 - `--pitch-semitones`
 - `--stretch-rate`
+- `--speed-rate`
 - `--loop-repeat`
 
 Result highlights:

@@ -302,6 +302,17 @@ impl CliWorkspace {
                     .spawn_editor_apply_for_tab(tab_idx, ToolKind::TimeStretch, rate);
                 self.wait_for_apply()?;
             }
+            ToolKind::Speed => {
+                let rate = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state.speed_rate)
+                    .unwrap_or(1.0);
+                self.app
+                    .spawn_editor_apply_for_tab(tab_idx, ToolKind::Speed, rate);
+                self.wait_for_apply()?;
+            }
             ToolKind::Gain => {
                 let db = self
                     .app

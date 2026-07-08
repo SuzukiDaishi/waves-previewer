@@ -619,6 +619,7 @@ pub enum ToolKind {
     Fade,
     PitchShift,
     TimeStretch,
+    Speed,
     Gain,
     Normalize,
     Loudness,
@@ -740,6 +741,7 @@ pub struct ToolState {
     pub loudness_target_lufs: f32,
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
+    pub speed_rate: f32,
     pub loop_repeat: u32,
     pub noise_gate_threshold_db: f32,
     pub noise_gate_attack_ms: f32,
@@ -1230,6 +1232,13 @@ pub struct EditorTab {
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
     pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
     pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
+    // --- Gain automation curve (DAW-style breakpoint envelope, transient) ---
+    pub gain_env_enabled: bool, // Gain tool: edit the curve on the waveform canvas
+    pub gain_env_points: Vec<(usize, f32)>, // (sample, dB) breakpoints, kept sorted by sample
+    pub gain_env_drag: Option<usize>, // index of the breakpoint being dragged (transient)
+    // --- Canvas gesture state for PitchShift / Speed / TimeStretch (transient) ---
+    pub pitch_drag_active: bool, // dragging the pitch line up/down
+    pub stretch_drag_target: Option<usize>, // dragged selection-end target while stretching
 }
 
 impl EditorTab {
@@ -1627,6 +1636,9 @@ pub struct EditorApplyResult {
     pub waveform_minmax: Vec<(f32, f32)>,
     pub waveform_pyramid: Option<Arc<WaveformPyramidSet>>,
     pub lufs_override: Option<f32>,
+    /// Selection to restore after adoption (range-limited applies keep the
+    /// selection over the processed span, whose length may have changed).
+    pub selection_after: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
