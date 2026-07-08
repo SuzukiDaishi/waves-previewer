@@ -4,6 +4,8 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+## 0.20260709.0 - 2026-07-09
+
 ### Unified Gain Framework: List Volume Changes Are Editor Edits
 - Per-file volume changes made in the list (gain column DragValue, Left/Right arrow keys) and the Editor's Gain tool now live in one edit framework. When a file has an open, fully loaded editor tab, a list gain change is applied as a destructive editor edit: the waveform updates, the tab goes dirty, and Ctrl+Z in the editor undoes it - exactly like using the Gain tool. Files without an open tab keep the fast pending-gain path (essential for very large lists), unchanged.
 - Opening an editor tab for a file that has a pending list gain now bakes that gain into the tab's buffer as a regular editor edit (with undo) the moment decoding finishes, so the editor's waveform finally shows what you will hear and export. The pending value is cleared at that point - playback, save, and export apply the gain exactly once, through the edited samples.
