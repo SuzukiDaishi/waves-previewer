@@ -3713,6 +3713,10 @@ fn default_effect_graph_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
         EffectGraphNodeKind::PluginFx => [360.0, 320.0],
         EffectGraphNodeKind::SplitChannels => [260.0, 220.0],
         EffectGraphNodeKind::CombineChannels => [300.0, 250.0],
+        EffectGraphNodeKind::BandSplit => [290.0, 210.0],
+        EffectGraphNodeKind::BandJoin
+        | EffectGraphNodeKind::MsSplit
+        | EffectGraphNodeKind::MsJoin => [260.0, 165.0],
         EffectGraphNodeKind::DebugWaveform => [340.0, 250.0],
         EffectGraphNodeKind::DebugSpectrum => [360.0, 300.0],
         EffectGraphNodeKind::Eq => [300.0, 340.0],

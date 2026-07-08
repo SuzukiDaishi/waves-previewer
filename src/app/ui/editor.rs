@@ -8562,6 +8562,21 @@ impl crate::app::WavesPreviewer {
                                     if !threshold_db.is_finite() { threshold_db = -40.0; }
                                     if !attack_ms.is_finite() { attack_ms = 2.0; }
                                     if !release_ms.is_finite() { release_ms = 100.0; }
+                                    // Graphical gate curve with a draggable threshold handle.
+                                    {
+                                        let mut plot_params = crate::wave::NoiseGateParams {
+                                            threshold_db,
+                                            attack_ms,
+                                            release_ms,
+                                        };
+                                        if crate::app::ui::dsp_widgets::noise_gate_plot(
+                                            ui,
+                                            egui::Id::new(("gate_plot", tab_idx)),
+                                            &mut plot_params,
+                                        ) {
+                                            threshold_db = plot_params.threshold_db;
+                                        }
+                                    }
                                     ui.label("Threshold (dB)").on_hover_text(
                                         "Signal below this level is faded toward silence",
                                     );
@@ -8633,6 +8648,32 @@ impl crate::app::WavesPreviewer {
                                     let mut mid_q = st.eq_mid_q;
                                     let mut high_shelf_freq_hz = st.eq_high_shelf_freq_hz;
                                     let mut high_shelf_gain_db = st.eq_high_shelf_gain_db;
+                                    // Graphical response curve with draggable band handles.
+                                    {
+                                        let mut plot_params = crate::wave::ThreeBandEqParams {
+                                            low_shelf_freq_hz,
+                                            low_shelf_gain_db,
+                                            mid_freq_hz,
+                                            mid_gain_db,
+                                            mid_q,
+                                            high_shelf_freq_hz,
+                                            high_shelf_gain_db,
+                                        };
+                                        if crate::app::ui::dsp_widgets::eq_response_plot(
+                                            ui,
+                                            egui::Id::new(("eq_plot", tab_idx)),
+                                            &mut plot_params,
+                                            tab.buffer_sample_rate.max(1),
+                                        ) {
+                                            low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
+                                            low_shelf_gain_db = plot_params.low_shelf_gain_db;
+                                            mid_freq_hz = plot_params.mid_freq_hz;
+                                            mid_gain_db = plot_params.mid_gain_db;
+                                            mid_q = plot_params.mid_q;
+                                            high_shelf_freq_hz = plot_params.high_shelf_freq_hz;
+                                            high_shelf_gain_db = plot_params.high_shelf_gain_db;
+                                        }
+                                    }
                                     ui.label(RichText::new("Low shelf").small().weak())
                                         .on_hover_text("Boosts or cuts everything below this frequency");
                                     ui.horizontal(|ui| {
@@ -8735,6 +8776,24 @@ impl crate::app::WavesPreviewer {
                                     let mut attack_ms = st.compressor_attack_ms;
                                     let mut release_ms = st.compressor_release_ms;
                                     let mut makeup_db = st.compressor_makeup_db;
+                                    // Graphical transfer curve with draggable knee/ratio handles.
+                                    {
+                                        let mut plot_params = crate::wave::CompressorParams {
+                                            threshold_db,
+                                            ratio,
+                                            attack_ms,
+                                            release_ms,
+                                            makeup_db,
+                                        };
+                                        if crate::app::ui::dsp_widgets::compressor_transfer_plot(
+                                            ui,
+                                            egui::Id::new(("comp_plot", tab_idx)),
+                                            &mut plot_params,
+                                        ) {
+                                            threshold_db = plot_params.threshold_db;
+                                            ratio = plot_params.ratio;
+                                        }
+                                    }
                                     ui.label("Threshold (dB)")
                                         .on_hover_text("Signal above this level gets compressed");
                                     ui.add(egui::DragValue::new(&mut threshold_db).range(-60.0..=0.0).speed(0.5))

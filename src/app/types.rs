@@ -1878,6 +1878,10 @@ pub enum EffectGraphNodeKind {
     Duplicate,
     SplitChannels,
     CombineChannels,
+    BandSplit,
+    BandJoin,
+    MsSplit,
+    MsJoin,
     DebugWaveform,
     DebugSpectrum,
 }
@@ -1965,6 +1969,24 @@ const EFFECT_GRAPH_SPLIT_OUTPUTS: &[EffectGraphPortSpec] = &[
     effect_graph_audio_out("ch7", "7"),
     effect_graph_audio_out("ch8", "8"),
 ];
+const EFFECT_GRAPH_BAND_SPLIT_OUTPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_out("low", "L"),
+    effect_graph_audio_out("mid", "M"),
+    effect_graph_audio_out("high", "H"),
+];
+const EFFECT_GRAPH_BAND_JOIN_INPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_in("low", "L"),
+    effect_graph_audio_in("mid", "M"),
+    effect_graph_audio_in("high", "H"),
+];
+const EFFECT_GRAPH_MS_SPLIT_OUTPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_out("mid", "M"),
+    effect_graph_audio_out("side", "S"),
+];
+const EFFECT_GRAPH_MS_JOIN_INPUTS: &[EffectGraphPortSpec] = &[
+    effect_graph_audio_in("mid", "M"),
+    effect_graph_audio_in("side", "S"),
+];
 
 /// Palette grouping for node kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2004,7 +2026,7 @@ impl EffectGraphNodeSpec {
 
 impl EffectGraphNodeKind {
     /// All node kinds in palette order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 24] = [
         Self::Input,
         Self::Output,
         Self::Gain,
@@ -2025,6 +2047,10 @@ impl EffectGraphNodeKind {
         Self::Duplicate,
         Self::SplitChannels,
         Self::CombineChannels,
+        Self::BandSplit,
+        Self::BandJoin,
+        Self::MsSplit,
+        Self::MsJoin,
     ];
 
     // Exhaustive by construction: adding a kind fails to compile until a spec
@@ -2158,6 +2184,34 @@ impl EffectGraphNodeKind {
                 inputs: EFFECT_GRAPH_COMBINE_INPUTS,
                 outputs: EFFECT_GRAPH_OUT,
             },
+            Self::BandSplit => &EffectGraphNodeSpec {
+                kind: Self::BandSplit,
+                display_name: "Band Split",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_BAND_SPLIT_OUTPUTS,
+            },
+            Self::BandJoin => &EffectGraphNodeSpec {
+                kind: Self::BandJoin,
+                display_name: "Band Join",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_BAND_JOIN_INPUTS,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::MsSplit => &EffectGraphNodeSpec {
+                kind: Self::MsSplit,
+                display_name: "MS Split",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_MS_SPLIT_OUTPUTS,
+            },
+            Self::MsJoin => &EffectGraphNodeSpec {
+                kind: Self::MsJoin,
+                display_name: "MS Join",
+                category: Cat::Routing,
+                inputs: EFFECT_GRAPH_MS_JOIN_INPUTS,
+                outputs: EFFECT_GRAPH_OUT,
+            },
             Self::DebugWaveform => &EffectGraphNodeSpec {
                 kind: Self::DebugWaveform,
                 display_name: "Waveform",
@@ -2283,6 +2337,15 @@ pub enum EffectGraphNodeData {
     Duplicate,
     SplitChannels,
     CombineChannels,
+    BandSplit {
+        #[serde(default = "default_band_split_low_hz")]
+        low_hz: f32,
+        #[serde(default = "default_band_split_high_hz")]
+        high_hz: f32,
+    },
+    BandJoin,
+    MsSplit,
+    MsJoin,
     DebugWaveform {
         zoom: f32,
     },
@@ -2290,6 +2353,14 @@ pub enum EffectGraphNodeData {
         mode: EffectGraphSpectrumMode,
         zoom: f32,
     },
+}
+
+fn default_band_split_low_hz() -> f32 {
+    200.0
+}
+
+fn default_band_split_high_hz() -> f32 {
+    2_000.0
 }
 
 impl EffectGraphNodeData {
@@ -2313,6 +2384,10 @@ impl EffectGraphNodeData {
             Self::Duplicate => EffectGraphNodeKind::Duplicate,
             Self::SplitChannels => EffectGraphNodeKind::SplitChannels,
             Self::CombineChannels => EffectGraphNodeKind::CombineChannels,
+            Self::BandSplit { .. } => EffectGraphNodeKind::BandSplit,
+            Self::BandJoin => EffectGraphNodeKind::BandJoin,
+            Self::MsSplit => EffectGraphNodeKind::MsSplit,
+            Self::MsJoin => EffectGraphNodeKind::MsJoin,
             Self::DebugWaveform { .. } => EffectGraphNodeKind::DebugWaveform,
             Self::DebugSpectrum { .. } => EffectGraphNodeKind::DebugSpectrum,
         }
@@ -2377,6 +2452,13 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::Duplicate => Self::Duplicate,
             EffectGraphNodeKind::SplitChannels => Self::SplitChannels,
             EffectGraphNodeKind::CombineChannels => Self::CombineChannels,
+            EffectGraphNodeKind::BandSplit => Self::BandSplit {
+                low_hz: default_band_split_low_hz(),
+                high_hz: default_band_split_high_hz(),
+            },
+            EffectGraphNodeKind::BandJoin => Self::BandJoin,
+            EffectGraphNodeKind::MsSplit => Self::MsSplit,
+            EffectGraphNodeKind::MsJoin => Self::MsJoin,
             EffectGraphNodeKind::DebugWaveform => Self::DebugWaveform { zoom: 1.0 },
             EffectGraphNodeKind::DebugSpectrum => Self::DebugSpectrum {
                 mode: EffectGraphSpectrumMode::Log,

@@ -42,6 +42,15 @@
 ### スペクトログラム操作（Spec / Log ビュー）
 - Inspector の「Spectral Warp」で「Edit warp points on spectrogram」を有効にすると、スペクトログラム上をドラッグして周波数成分を上下に押し流せます（Liquify風の画像的ワープ）。ストロークは矢印（起点リング→目標ドット）として表示され、矢印を掴んで再調整、ダブルクリック / 右クリックで削除。Radius (ms / Hz) で時間・周波数方向の影響範囲を調整。ドラッグを離すとワープをレンダリングして即試聴、Apply で破壊的に焼き込み（Undo対応、スペクトログラムは自動再解析）。Mel ビューは閲覧専用のため対象外。
 
+### 音量(Gain)の統一フレームワーク
+- リストの Gain 列 / Left・Right キーでの音量変更は、対象ファイルの Editor タブが開いていればエディタの破壊的編集として適用されます(波形に反映、dirty、Editor 側の Undo 対象)。タブが無いファイルは従来どおり pending gain として保持。
+- pending gain を持つファイルを Editor で開くと、その時点でゲインがバッファへ焼き込まれ(Undo 可)、以降はエディタ編集として一元管理されます(再生・保存・書き出しで二重適用されません)。
+
+### EQ / Compressor / Noise Gate のグラフィカル操作
+- EQ: 周波数応答カーブ上の3つのハンドルをドラッグ(横=周波数、縦=ゲイン)。緑のMidハンドル上でスクロールするとQを調整。
+- Compressor: 伝達カーブのニー(オレンジ)を横ドラッグでThreshold、上端ポイント(緑)を縦ドラッグでRatio。
+- Noise Gate: しきい値ハンドルをドラッグ。Inspector と Effect Graph ノードの両方で使えます。
+
 ## Notes
 - `S` は Editor では View 切り替え専用です。Zero Cross Snap は `R` を使います。
 - List と Editor で同じキーでも意味が異なるものがあります（例: `P`, `R`）。

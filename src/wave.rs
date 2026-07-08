@@ -1628,6 +1628,7 @@ enum BiquadKind {
     LowShelf,
     Peak,
     HighShelf,
+    LowPass,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1640,6 +1641,20 @@ struct Biquad {
 }
 
 impl Biquad {
+    /// Magnitude response in dB at normalized angular frequency `w`
+    /// (`w = 2*pi*f/sr`), evaluated as |B(e^-jw)| / |A(e^-jw)|.
+    fn magnitude_db(&self, w: f32) -> f32 {
+        let (sin1, cos1) = w.sin_cos();
+        let (sin2, cos2) = (2.0 * w).sin_cos();
+        let num_re = self.b0 + self.b1 * cos1 + self.b2 * cos2;
+        let num_im = -(self.b1 * sin1 + self.b2 * sin2);
+        let den_re = 1.0 + self.a1 * cos1 + self.a2 * cos2;
+        let den_im = -(self.a1 * sin1 + self.a2 * sin2);
+        let num = (num_re * num_re + num_im * num_im).max(1e-24);
+        let den = (den_re * den_re + den_im * den_im).max(1e-24);
+        10.0 * (num / den).log10()
+    }
+
     // RBJ Audio EQ Cookbook coefficients.
     fn design(kind: BiquadKind, freq_hz: f32, gain_db: f32, q: f32, sample_rate: f32) -> Self {
         let a = 10.0f32.powf(gain_db / 40.0);
@@ -1674,6 +1689,16 @@ impl Biquad {
                 let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
                 let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
                 let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadKind::LowPass => {
+                // RBJ LPF; `gain_db` is unused for this kind.
+                let b1 = 1.0 - cos_w0;
+                let b0 = b1 * 0.5;
+                let b2 = b0;
+                let a0 = 1.0 + alpha;
+                let a1 = -2.0 * cos_w0;
+                let a2 = 1.0 - alpha;
                 (b0, b1, b2, a0, a1, a2)
             }
         };
@@ -1713,6 +1738,123 @@ pub struct ThreeBandEqParams {
     pub mid_q: f32,
     pub high_shelf_freq_hz: f32,
     pub high_shelf_gain_db: f32,
+}
+
+/// Zero-phase 4th-order Butterworth low-pass: two cascaded RBJ low-pass
+/// biquads run forward and then backward (filtfilt), which squares the
+/// magnitude response and cancels the phase. Zero phase matters here: the
+/// band split forms its complements by subtraction, and any phase lag in
+/// the low-pass would leak phase-rotated residue into the other bands.
+fn zero_phase_lowpass4(mono: &[f32], sample_rate: u32, freq_hz: f32) -> Vec<f32> {
+    let sr = sample_rate.max(1) as f32;
+    let f = freq_hz.clamp(10.0, sr * 0.49);
+    let stage1 = Biquad::design(BiquadKind::LowPass, f, 0.0, 0.541_196_1, sr);
+    let stage2 = Biquad::design(BiquadKind::LowPass, f, 0.0, 1.306_563, sr);
+    let mut out = stage2.process(&stage1.process(mono));
+    out.reverse();
+    let mut out = stage2.process(&stage1.process(&out));
+    out.reverse();
+    out
+}
+
+/// Split one channel into (low, mid, high) bands with guaranteed perfect
+/// reconstruction: `low + mid + high == input` sample-for-sample, because
+/// the bands are complementary subtractions around zero-phase Butterworth
+/// low-passes. Routing a Band Split straight into a Band Join therefore
+/// returns the original audio exactly (up to float rounding).
+pub fn band_split_channel(
+    mono: &[f32],
+    sample_rate: u32,
+    low_hz: f32,
+    high_hz: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    if mono.is_empty() {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    let low_hz = low_hz.max(20.0);
+    let high_hz = high_hz.max(low_hz * 1.01);
+    let low = zero_phase_lowpass4(mono, sample_rate, low_hz);
+    let rest: Vec<f32> = mono.iter().zip(&low).map(|(x, l)| x - l).collect();
+    let mid = zero_phase_lowpass4(&rest, sample_rate, high_hz);
+    let high: Vec<f32> = rest.iter().zip(&mid).map(|(r, m)| r - m).collect();
+    (low, mid, high)
+}
+
+/// Mid/side encode: mono input passes through as mid (silent side); stereo
+/// (or wider — only the first two channels are used) becomes
+/// `M = (L+R)/2`, `S = (L-R)/2`. Exact inverse of [`ms_decode`].
+pub fn ms_encode(channels: &[Vec<f32>]) -> (Vec<f32>, Vec<f32>) {
+    match channels.len() {
+        0 => (Vec::new(), Vec::new()),
+        1 => {
+            let mid = channels[0].clone();
+            let side = vec![0.0f32; mid.len()];
+            (mid, side)
+        }
+        _ => {
+            let left = &channels[0];
+            let right = &channels[1];
+            let len = left.len().max(right.len());
+            let mut mid = Vec::with_capacity(len);
+            let mut side = Vec::with_capacity(len);
+            for i in 0..len {
+                let l = left.get(i).copied().unwrap_or(0.0);
+                let r = right.get(i).copied().unwrap_or(0.0);
+                mid.push((l + r) * 0.5);
+                side.push((l - r) * 0.5);
+            }
+            (mid, side)
+        }
+    }
+}
+
+/// Mid/side decode: `L = M + S`, `R = M - S`. Exact inverse of
+/// [`ms_encode`] for stereo input.
+pub fn ms_decode(mid: &[f32], side: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let len = mid.len().max(side.len());
+    let mut left = Vec::with_capacity(len);
+    let mut right = Vec::with_capacity(len);
+    for i in 0..len {
+        let m = mid.get(i).copied().unwrap_or(0.0);
+        let s = side.get(i).copied().unwrap_or(0.0);
+        left.push(m + s);
+        right.push(m - s);
+    }
+    (left, right)
+}
+
+/// Combined magnitude response of the 3-band EQ at `freq_hz`, in dB.
+/// Used by the graphical EQ curve display; matches
+/// [`process_three_band_eq_offline`]'s series topology exactly.
+pub fn three_band_eq_response_db(
+    params: &ThreeBandEqParams,
+    sample_rate: u32,
+    freq_hz: f32,
+) -> f32 {
+    let sr = sample_rate.max(1) as f32;
+    let w = 2.0 * std::f32::consts::PI * (freq_hz.clamp(1.0, sr * 0.499) / sr);
+    let low = Biquad::design(
+        BiquadKind::LowShelf,
+        params.low_shelf_freq_hz,
+        params.low_shelf_gain_db,
+        0.707,
+        sr,
+    );
+    let mid = Biquad::design(
+        BiquadKind::Peak,
+        params.mid_freq_hz,
+        params.mid_gain_db,
+        params.mid_q.max(0.1),
+        sr,
+    );
+    let high = Biquad::design(
+        BiquadKind::HighShelf,
+        params.high_shelf_freq_hz,
+        params.high_shelf_gain_db,
+        0.707,
+        sr,
+    );
+    low.magnitude_db(w) + mid.magnitude_db(w) + high.magnitude_db(w)
 }
 
 /// Fixed-topology 3-band EQ (low-shelf, peak/bell, high-shelf) built from RBJ

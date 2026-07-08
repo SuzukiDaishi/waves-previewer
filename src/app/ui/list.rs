@@ -1185,8 +1185,14 @@ impl crate::app::WavesPreviewer {
                                         let before = self.capture_list_selection_snapshot();
                                         let before_items =
                                             self.capture_list_undo_items_by_paths(&path_list);
-                                        self.set_pending_gain_db_for_path(&path_owned, new);
-                                        if self.playing_path.as_ref() == Some(&path_owned) {
+                                        // Unified gain framework: with an open
+                                        // editor tab the change is a destructive
+                                        // editor edit (delta), else pending gain.
+                                        let routed_to_editor =
+                                            self.apply_file_gain_delta_unified(&path_owned, delta);
+                                        if !routed_to_editor
+                                            && self.playing_path.as_ref() == Some(&path_owned)
+                                        {
                                             self.apply_effective_volume();
                                         }
                                         self.schedule_lufs_for_path(path_owned.clone());

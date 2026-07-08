@@ -4,6 +4,21 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Unified Gain Framework: List Volume Changes Are Editor Edits
+- Per-file volume changes made in the list (gain column DragValue, Left/Right arrow keys) and the Editor's Gain tool now live in one edit framework. When a file has an open, fully loaded editor tab, a list gain change is applied as a destructive editor edit: the waveform updates, the tab goes dirty, and Ctrl+Z in the editor undoes it - exactly like using the Gain tool. Files without an open tab keep the fast pending-gain path (essential for very large lists), unchanged.
+- Opening an editor tab for a file that has a pending list gain now bakes that gain into the tab's buffer as a regular editor edit (with undo) the moment decoding finishes, so the editor's waveform finally shows what you will hear and export. The pending value is cleared at that point - playback, save, and export apply the gain exactly once, through the edited samples.
+
+### Graphical EQ / Compressor / Noise Gate
+- The EQ, Compressor, and Noise Gate tools (Editor Inspector) and their Effect Graph nodes now lead with interactive plots instead of only numeric fields (the DragValues/sliders stay for exact entry):
+  - EQ: log-frequency response curve (20 Hz - 20 kHz, +/-24 dB) computed from the actual RBJ biquad chain, with three draggable band handles (orange low shelf, green mid, purple high shelf) - horizontal drag sets frequency, vertical sets gain, scrolling over the mid handle adjusts Q.
+  - Compressor: static transfer curve (input dB -> output dB with a unity reference diagonal); drag the orange knee horizontally to set the threshold and the green top endpoint vertically to set the ratio.
+  - Noise Gate: gate transfer curve with the closed region shaded; drag the handle to move the threshold.
+
+### Effect Graph: Band Split / Band Join and MS Split / MS Join
+- Band Split (Routing) splits audio into low / mid / high bands at two adjustable crossovers (log sliders, defaults 200 Hz / 2 kHz). The split is complementary around zero-phase Butterworth low-passes (filtfilt), so the three bands sum back to the input bit-for-bit: Band Split wired straight into Band Join returns the original audio. Each band keeps the input's full channel layout, so per-band processing (e.g. compress only the lows) preserves stereo.
+- Band Join sums whatever bands are connected back into one bus (unconnected bands are simply absent).
+- MS Split encodes stereo into mid (L+R)/2 and side (L-R)/2 buses; mono passes through as mid with a silent side, and inputs wider than stereo use the first two channels (with a runtime warning). MS Join decodes mid + side back to L/R - straight from MS Split it reconstructs the original stereo exactly, and with only mid connected it produces a mono-in-stereo signal, enabling classic MS tricks (widen/narrow, mid-only EQ) as graph routing.
+
 ### Spectrogram: Image-Like Spectral Warp (Spec / Log views)
 - New "Spectral Warp" section in the Inspector for the linear and log spectrogram views (the views that resynthesize back to a waveform; Mel stays view-only). Enable "Edit warp points on spectrogram" and drag directly on the spectrogram to push frequency content up or down, liquify-style: each stroke becomes an arrow (origin ring -> target dot) with Gaussian falloff in time and frequency, controlled by the Radius (ms / Hz) fields. Grab an arrow to re-adjust it; double-click or right-click removes it.
 - Processing runs in the STFT domain (2048/75% Hann WOLA, same engine as the RX-style spectral mute): a backward frequency remap per analysis frame with complex-bin interpolation and per-bin cumulative phase rotation (phase-vocoder style) so shifted partials stay coherent; only the influenced time region is processed and its edges crossfade against the original. Releasing a drag renders the warp on a worker thread and auditions it immediately (green waveform overlay with "Waveform overlay" enabled); Apply bakes it destructively with full undo and re-analyzes the spectrogram.
