@@ -205,7 +205,7 @@ fn apply_virtual_ops(channels: &mut [Vec<f32>], ops: &[VirtualOp]) {
 }
 
 impl super::WavesPreviewer {
-    const RECENT_SESSION_LIMIT: usize = 3;
+    const RECENT_SESSION_LIMIT: usize = 10;
 
     pub(super) fn normalize_recent_session_path(path: &Path) -> Option<PathBuf> {
         let is_nwsess = path
@@ -751,6 +751,21 @@ impl super::WavesPreviewer {
                     pitch_semitones: cached.tool_state.pitch_semitones,
                     stretch_rate: cached.tool_state.stretch_rate,
                     loop_repeat: cached.tool_state.loop_repeat,
+                    noise_gate_threshold_db: cached.tool_state.noise_gate_threshold_db,
+                    noise_gate_attack_ms: cached.tool_state.noise_gate_attack_ms,
+                    noise_gate_release_ms: cached.tool_state.noise_gate_release_ms,
+                    eq_low_shelf_freq_hz: cached.tool_state.eq_low_shelf_freq_hz,
+                    eq_low_shelf_gain_db: cached.tool_state.eq_low_shelf_gain_db,
+                    eq_mid_freq_hz: cached.tool_state.eq_mid_freq_hz,
+                    eq_mid_gain_db: cached.tool_state.eq_mid_gain_db,
+                    eq_mid_q: cached.tool_state.eq_mid_q,
+                    eq_high_shelf_freq_hz: cached.tool_state.eq_high_shelf_freq_hz,
+                    eq_high_shelf_gain_db: cached.tool_state.eq_high_shelf_gain_db,
+                    compressor_threshold_db: cached.tool_state.compressor_threshold_db,
+                    compressor_ratio: cached.tool_state.compressor_ratio,
+                    compressor_attack_ms: cached.tool_state.compressor_attack_ms,
+                    compressor_release_ms: cached.tool_state.compressor_release_ms,
+                    compressor_makeup_db: cached.tool_state.compressor_makeup_db,
                 },
                 active_tool: format!("{:?}", cached.active_tool),
                 show_waveform_overlay: cached.show_waveform_overlay,

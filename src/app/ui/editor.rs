@@ -2752,6 +2752,9 @@ impl crate::app::WavesPreviewer {
         let do_fade: Option<((usize, usize), f32, f32)> = None; // legacy whole-file fade
         let mut do_gain: Option<((usize, usize), f32)> = None;
         let mut do_normalize: Option<((usize, usize), f32)> = None;
+        let mut do_noise_gate: Option<((usize, usize), f32, f32, f32)> = None;
+        let mut do_eq: Option<((usize, usize), crate::wave::ThreeBandEqParams)> = None;
+        let mut do_compressor: Option<((usize, usize), crate::wave::CompressorParams)> = None;
         let mut do_reverse: Option<(usize, usize)> = None;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
@@ -2822,6 +2825,7 @@ impl crate::app::WavesPreviewer {
         let mut pending_music_apply_preview = false;
         let mut request_undo = false;
         let mut request_redo = false;
+        let mut request_clear_edit = false;
         let gain_db = self
             .tabs
             .get(tab_idx)
@@ -2972,6 +2976,7 @@ impl crate::app::WavesPreviewer {
                 let mut pending_plugin_remove_index: Option<usize> = None;
                 let mut pending_plugin_reset_paths = false;
                 let mut pending_plugin_pick_folder = false;
+                let mut pending_plugin_load_from_file = false;
                 if discard_preview_for_view_change {
                     need_restore_preview = true;
                 }
@@ -5987,7 +5992,12 @@ impl crate::app::WavesPreviewer {
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .id_salt(("editor_inspector_scroll", tab_idx))
-                        .auto_shrink([false, false])
+                        // Shrink to content height instead of always filling
+                        // `inspector_area_h`, so short content (e.g. Loop Edit
+                        // with few Auto Detect candidates) doesn't leave a
+                        // large empty scroll box below it. Horizontal stays
+                        // unshrunk so width still matches the panel.
+                        .auto_shrink([false, true])
                         .show(ui, |ui| {
                     {
                         let style = ui.style_mut();
@@ -6123,6 +6133,7 @@ impl crate::app::WavesPreviewer {
                     ui.separator();
                     let can_undo = !tab.undo_stack.is_empty();
                     let can_redo = !tab.redo_stack.is_empty();
+                    let can_clear_edit = tab.dirty;
                     ui.horizontal(|ui| {
                         if ui
                             .add_enabled(can_undo, egui::Button::new("Undo"))
@@ -6135,6 +6146,15 @@ impl crate::app::WavesPreviewer {
                             .clicked()
                         {
                             request_redo = true;
+                        }
+                        if ui
+                            .add_enabled(can_clear_edit, egui::Button::new("Clear Edit"))
+                            .on_hover_text(
+                                "Revert to the original file, discarding all edits made in this tab",
+                            )
+                            .clicked()
+                        {
+                            request_clear_edit = true;
                         }
                     });
                     let sr = sr_ctx.max(1.0);
@@ -6257,8 +6277,13 @@ impl crate::app::WavesPreviewer {
                             }
                         });
                         if sel_ok {
+                            // Two independent axes for the spectral mute fade
+                            // above: each gets its own visible label instead
+                            // of sharing one ambiguous "Edge fade" row, since
+                            // one controls time and the other frequency.
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("Edge fade").weak());
+                                ui.label(RichText::new("Spectral Mute Fade:").weak());
+                                ui.label("Time");
                                 ui.add(
                                     egui::DragValue::new(&mut self.spectral_edit_time_fade_ms)
                                         .range(0.0..=200.0)
@@ -6266,6 +6291,7 @@ impl crate::app::WavesPreviewer {
                                         .suffix(" ms"),
                                 )
                                 .on_hover_text("Time fade at the selection edges");
+                                ui.label("Freq");
                                 ui.add(
                                     egui::DragValue::new(&mut self.spectral_edit_freq_fade_hz)
                                         .range(0.0..=2000.0)
@@ -6292,6 +6318,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::PitchShift => "Pitch Shift",
                                 ToolKind::TimeStretch => "Time Stretch",
                                 ToolKind::Loudness => "LoudNorm",
+                                ToolKind::NoiseGate => "Noise Gate",
+                                ToolKind::Eq => "EQ",
+                                ToolKind::Compressor => "Compressor",
                                 ToolKind::MusicAnalyze => "Music Analyze",
                                 ToolKind::PluginFx => "Plugin FX",
                                 ToolKind::Reverse => "Reverse",
@@ -6310,6 +6339,9 @@ impl crate::app::WavesPreviewer {
                                     ui.selectable_value(&mut tool, ToolKind::PitchShift, "Pitch Shift");
                                     ui.selectable_value(&mut tool, ToolKind::TimeStretch, "Time Stretch");
                                     ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
+                                    ui.selectable_value(&mut tool, ToolKind::NoiseGate, "Noise Gate");
+                                    ui.selectable_value(&mut tool, ToolKind::Eq, "EQ");
+                                    ui.selectable_value(&mut tool, ToolKind::Compressor, "Compressor");
                                     ui.selectable_value(
                                         &mut tool,
                                         ToolKind::MusicAnalyze,
@@ -6368,7 +6400,9 @@ impl crate::app::WavesPreviewer {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
                                         s.spacing.button_padding = egui::vec2(6.0, 3.0);
-                                        Self::inspector_section(ui, "Loop Range");
+                                        // Loop Range status is always-visible, not its own
+                                        // section — it renders directly under the tool's
+                                        // "Loop Edit" header instead of a nested sub-header.
                                         // Fixed-width rows: long sample counts truncate
                                         // with a tooltip instead of widening the panel.
                                         let loop_info_row =
@@ -6618,6 +6652,54 @@ impl crate::app::WavesPreviewer {
                                             }
                                         });
 
+                                        // Seam Check comes before Auto Detect: the
+                                        // detector's candidate list is the least
+                                        // reliable, highest-scroll section, so it
+                                        // sits last in the tool panel.
+                                        Self::inspector_section(ui, "Seam Check");
+                                        let seam_window_id =
+                                            egui::Id::new(("loop_seam_window_ms", tab_idx));
+                                        let mut seam_window_ms: f32 = ui
+                                            .ctx()
+                                            .data_mut(|d| *d.get_temp_mut_or(seam_window_id, 40.0f32));
+                                        ui.horizontal(|ui| {
+                                            ui.label("Window")
+                                                .on_hover_text(
+                                                    "How much audio to show on each side of the loop jump",
+                                                );
+                                            ui.spacing_mut().slider_width =
+                                                (ui.available_width() - 20.0).clamp(80.0, 200.0);
+                                            let resp = ui.add(
+                                                egui::Slider::new(&mut seam_window_ms, 2.0..=250.0)
+                                                    .suffix(" ms")
+                                                    .logarithmic(true)
+                                                    .fixed_decimals(0),
+                                            );
+                                            if resp.changed() {
+                                                ui.ctx().data_mut(|d| {
+                                                    d.insert_temp(seam_window_id, seam_window_ms)
+                                                });
+                                            }
+                                        });
+                                        if let Some(seam_preview) = Self::build_loop_seam_preview(
+                                            tab,
+                                            self.audio.shared.out_sample_rate,
+                                            seam_window_ms / 1000.0,
+                                        ) {
+                                            Self::draw_loop_seam_join(
+                                                ui,
+                                                &seam_preview,
+                                                seam_window_ms,
+                                            );
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Set a loop range to check the seam",
+                                                )
+                                                .weak(),
+                                            );
+                                        }
+
                                         // Auto Loop Detection
                                         Self::inspector_section(ui, "Auto Detect");
                                         let ld_running = tab
@@ -6719,9 +6801,13 @@ impl crate::app::WavesPreviewer {
                                         );
                                         // Candidate list: fixed-width rows that
                                         // truncate instead of widening the panel.
+                                        // Capped to the top 3 by score (candidates
+                                        // already arrive sorted highest-first) —
+                                        // detection can surface many low-value
+                                        // candidates that just add scroll noise.
                                         let sr = tab.buffer_sample_rate.max(1) as f32;
                                         for (ci, (cs, ce, score, conf)) in
-                                            ld_candidates.iter().enumerate()
+                                            ld_candidates.iter().enumerate().take(3)
                                         {
                                             let selected = ci == ld_selected;
                                             let len_secs =
@@ -6752,50 +6838,6 @@ impl crate::app::WavesPreviewer {
                                             {
                                                 do_apply_loop_candidate = Some((tab_idx, ci));
                                             }
-                                        }
-
-                                        Self::inspector_section(ui, "Seam Check");
-                                        let seam_window_id =
-                                            egui::Id::new(("loop_seam_window_ms", tab_idx));
-                                        let mut seam_window_ms: f32 = ui
-                                            .ctx()
-                                            .data_mut(|d| *d.get_temp_mut_or(seam_window_id, 40.0f32));
-                                        ui.horizontal(|ui| {
-                                            ui.label("Window")
-                                                .on_hover_text(
-                                                    "How much audio to show on each side of the loop jump",
-                                                );
-                                            ui.spacing_mut().slider_width =
-                                                (ui.available_width() - 20.0).clamp(80.0, 200.0);
-                                            let resp = ui.add(
-                                                egui::Slider::new(&mut seam_window_ms, 2.0..=250.0)
-                                                    .suffix(" ms")
-                                                    .logarithmic(true)
-                                                    .fixed_decimals(0),
-                                            );
-                                            if resp.changed() {
-                                                ui.ctx().data_mut(|d| {
-                                                    d.insert_temp(seam_window_id, seam_window_ms)
-                                                });
-                                            }
-                                        });
-                                        if let Some(seam_preview) = Self::build_loop_seam_preview(
-                                            tab,
-                                            self.audio.shared.out_sample_rate,
-                                            seam_window_ms / 1000.0,
-                                        ) {
-                                            Self::draw_loop_seam_join(
-                                                ui,
-                                                &seam_preview,
-                                                seam_window_ms,
-                                            );
-                                        } else {
-                                            ui.label(
-                                                RichText::new(
-                                                    "Set a loop range to check the seam",
-                                                )
-                                                .weak(),
-                                            );
                                         }
 
                                         // Dynamic preview overlay for LoopEdit (non-destructive):
@@ -7758,6 +7800,261 @@ impl crate::app::WavesPreviewer {
                                             ToolState { normalize_target_db: -6.0, ..tab.tool_state };
                                     }
                                 }
+                                ToolKind::NoiseGate => {
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
+                                    }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
+                                    }
+                                    let st = tab.tool_state;
+                                    let mut threshold_db = st.noise_gate_threshold_db;
+                                    let mut attack_ms = st.noise_gate_attack_ms;
+                                    let mut release_ms = st.noise_gate_release_ms;
+                                    if !threshold_db.is_finite() { threshold_db = -40.0; }
+                                    if !attack_ms.is_finite() { attack_ms = 2.0; }
+                                    if !release_ms.is_finite() { release_ms = 100.0; }
+                                    ui.label("Threshold (dB)").on_hover_text(
+                                        "Signal below this level is faded toward silence",
+                                    );
+                                    ui.add(egui::DragValue::new(&mut threshold_db).range(-80.0..=0.0).speed(0.5))
+                                        .on_hover_text("Signal below this level is faded toward silence");
+                                    ui.label("Attack (ms)")
+                                        .on_hover_text("How fast the gate opens once the signal crosses the threshold");
+                                    ui.add(egui::DragValue::new(&mut attack_ms).range(0.1..=500.0).speed(0.1))
+                                        .on_hover_text("How fast the gate opens once the signal crosses the threshold");
+                                    ui.label("Release (ms)")
+                                        .on_hover_text("How fast the gate closes once the signal drops below the threshold");
+                                    ui.add(egui::DragValue::new(&mut release_ms).range(1.0..=2000.0).speed(1.0))
+                                        .on_hover_text("How fast the gate closes once the signal drops below the threshold");
+                                    tab.tool_state = ToolState {
+                                        noise_gate_threshold_db: threshold_db,
+                                        noise_gate_attack_ms: attack_ms,
+                                        noise_gate_release_ms: release_ms,
+                                        ..tab.tool_state
+                                    };
+                                    let changed = (threshold_db - st.noise_gate_threshold_db).abs() > 1e-6
+                                        || (attack_ms - st.noise_gate_attack_ms).abs() > 1e-6
+                                        || (release_ms - st.noise_gate_release_ms).abs() > 1e-6;
+                                    if changed {
+                                        if preview_ok {
+                                            let params = crate::wave::NoiseGateParams {
+                                                threshold_db,
+                                                attack_ms,
+                                                release_ms,
+                                            };
+                                            let sr = tab.buffer_sample_rate.max(1);
+                                            let overlay: Vec<Vec<f32>> = tab
+                                                .ch_samples
+                                                .iter()
+                                                .map(|ch| crate::wave::process_noise_gate_offline(ch, sr, &params))
+                                                .collect();
+                                            let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                            let mono = Self::mixdown_channels(&overlay, timeline_len);
+                                            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                overlay,
+                                                ToolKind::NoiseGate,
+                                                timeline_len,
+                                            ));
+                                            pending_preview = Some((ToolKind::NoiseGate, mono));
+                                            stop_playback = true;
+                                            tab.preview_audio_tool = Some(ToolKind::NoiseGate);
+                                        } else {
+                                            request_preview_refresh = true;
+                                        }
+                                    }
+                                    if ui.button("Apply").clicked() {
+                                        do_noise_gate =
+                                            Some(((0, tab.samples_len), threshold_db, attack_ms, release_ms));
+                                        tab.preview_audio_tool = None;
+                                        tab.preview_overlay = None;
+                                    }
+                                }
+                                ToolKind::Eq => {
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
+                                    }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
+                                    }
+                                    let st = tab.tool_state;
+                                    let mut low_shelf_freq_hz = st.eq_low_shelf_freq_hz;
+                                    let mut low_shelf_gain_db = st.eq_low_shelf_gain_db;
+                                    let mut mid_freq_hz = st.eq_mid_freq_hz;
+                                    let mut mid_gain_db = st.eq_mid_gain_db;
+                                    let mut mid_q = st.eq_mid_q;
+                                    let mut high_shelf_freq_hz = st.eq_high_shelf_freq_hz;
+                                    let mut high_shelf_gain_db = st.eq_high_shelf_gain_db;
+                                    ui.label(RichText::new("Low shelf").small().weak())
+                                        .on_hover_text("Boosts or cuts everything below this frequency");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Freq");
+                                        ui.add(egui::DragValue::new(&mut low_shelf_freq_hz).range(20.0..=2000.0).speed(1.0).suffix(" Hz"))
+                                            .on_hover_text("Low shelf corner frequency");
+                                        ui.label("Gain");
+                                        ui.add(egui::DragValue::new(&mut low_shelf_gain_db).range(-24.0..=24.0).speed(0.1).suffix(" dB"))
+                                            .on_hover_text("Low shelf gain");
+                                    });
+                                    ui.label(RichText::new("Mid").small().weak())
+                                        .on_hover_text("Boosts or cuts a band centered on this frequency");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Freq");
+                                        ui.add(egui::DragValue::new(&mut mid_freq_hz).range(50.0..=12_000.0).speed(5.0).suffix(" Hz"))
+                                            .on_hover_text("Mid band center frequency");
+                                        ui.label("Gain");
+                                        ui.add(egui::DragValue::new(&mut mid_gain_db).range(-24.0..=24.0).speed(0.1).suffix(" dB"))
+                                            .on_hover_text("Mid band gain");
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Q");
+                                        ui.add(egui::DragValue::new(&mut mid_q).range(0.1..=10.0).speed(0.05))
+                                            .on_hover_text("Mid band width: higher Q = narrower band");
+                                    });
+                                    ui.label(RichText::new("High shelf").small().weak())
+                                        .on_hover_text("Boosts or cuts everything above this frequency");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Freq");
+                                        ui.add(egui::DragValue::new(&mut high_shelf_freq_hz).range(500.0..=20_000.0).speed(10.0).suffix(" Hz"))
+                                            .on_hover_text("High shelf corner frequency");
+                                        ui.label("Gain");
+                                        ui.add(egui::DragValue::new(&mut high_shelf_gain_db).range(-24.0..=24.0).speed(0.1).suffix(" dB"))
+                                            .on_hover_text("High shelf gain");
+                                    });
+                                    tab.tool_state = ToolState {
+                                        eq_low_shelf_freq_hz: low_shelf_freq_hz,
+                                        eq_low_shelf_gain_db: low_shelf_gain_db,
+                                        eq_mid_freq_hz: mid_freq_hz,
+                                        eq_mid_gain_db: mid_gain_db,
+                                        eq_mid_q: mid_q,
+                                        eq_high_shelf_freq_hz: high_shelf_freq_hz,
+                                        eq_high_shelf_gain_db: high_shelf_gain_db,
+                                        ..tab.tool_state
+                                    };
+                                    let params = crate::wave::ThreeBandEqParams {
+                                        low_shelf_freq_hz,
+                                        low_shelf_gain_db,
+                                        mid_freq_hz,
+                                        mid_gain_db,
+                                        mid_q,
+                                        high_shelf_freq_hz,
+                                        high_shelf_gain_db,
+                                    };
+                                    let changed = (low_shelf_freq_hz - st.eq_low_shelf_freq_hz).abs() > 1e-6
+                                        || (low_shelf_gain_db - st.eq_low_shelf_gain_db).abs() > 1e-6
+                                        || (mid_freq_hz - st.eq_mid_freq_hz).abs() > 1e-6
+                                        || (mid_gain_db - st.eq_mid_gain_db).abs() > 1e-6
+                                        || (mid_q - st.eq_mid_q).abs() > 1e-6
+                                        || (high_shelf_freq_hz - st.eq_high_shelf_freq_hz).abs() > 1e-6
+                                        || (high_shelf_gain_db - st.eq_high_shelf_gain_db).abs() > 1e-6;
+                                    if changed {
+                                        if preview_ok {
+                                            let sr = tab.buffer_sample_rate.max(1);
+                                            let overlay: Vec<Vec<f32>> = tab
+                                                .ch_samples
+                                                .iter()
+                                                .map(|ch| crate::wave::process_three_band_eq_offline(ch, sr, &params))
+                                                .collect();
+                                            let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                            let mono = Self::mixdown_channels(&overlay, timeline_len);
+                                            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                overlay,
+                                                ToolKind::Eq,
+                                                timeline_len,
+                                            ));
+                                            pending_preview = Some((ToolKind::Eq, mono));
+                                            stop_playback = true;
+                                            tab.preview_audio_tool = Some(ToolKind::Eq);
+                                        } else {
+                                            request_preview_refresh = true;
+                                        }
+                                    }
+                                    if ui.button("Apply").clicked() {
+                                        do_eq = Some(((0, tab.samples_len), params));
+                                        tab.preview_audio_tool = None;
+                                        tab.preview_overlay = None;
+                                    }
+                                }
+                                ToolKind::Compressor => {
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
+                                    }
+                                    if let Some(note) = simplified_preview_note {
+                                        ui.label(RichText::new(note).weak());
+                                    }
+                                    let st = tab.tool_state;
+                                    let mut threshold_db = st.compressor_threshold_db;
+                                    let mut ratio = st.compressor_ratio;
+                                    let mut attack_ms = st.compressor_attack_ms;
+                                    let mut release_ms = st.compressor_release_ms;
+                                    let mut makeup_db = st.compressor_makeup_db;
+                                    ui.label("Threshold (dB)")
+                                        .on_hover_text("Signal above this level gets compressed");
+                                    ui.add(egui::DragValue::new(&mut threshold_db).range(-60.0..=0.0).speed(0.5))
+                                        .on_hover_text("Signal above this level gets compressed");
+                                    ui.label("Ratio")
+                                        .on_hover_text("How strongly signal above the threshold is reduced (4:1 = 4 dB in becomes 1 dB out)");
+                                    ui.add(egui::DragValue::new(&mut ratio).range(1.0..=20.0).speed(0.1))
+                                        .on_hover_text("How strongly signal above the threshold is reduced (4:1 = 4 dB in becomes 1 dB out)");
+                                    ui.label("Attack (ms)")
+                                        .on_hover_text("How fast the compressor reacts once the signal crosses the threshold");
+                                    ui.add(egui::DragValue::new(&mut attack_ms).range(0.1..=500.0).speed(0.1))
+                                        .on_hover_text("How fast the compressor reacts once the signal crosses the threshold");
+                                    ui.label("Release (ms)")
+                                        .on_hover_text("How fast the compressor lets go once the signal drops below the threshold");
+                                    ui.add(egui::DragValue::new(&mut release_ms).range(1.0..=2000.0).speed(1.0))
+                                        .on_hover_text("How fast the compressor lets go once the signal drops below the threshold");
+                                    ui.label("Makeup (dB)")
+                                        .on_hover_text("Gain applied after compression to restore overall level");
+                                    ui.add(egui::DragValue::new(&mut makeup_db).range(0.0..=24.0).speed(0.1))
+                                        .on_hover_text("Gain applied after compression to restore overall level");
+                                    tab.tool_state = ToolState {
+                                        compressor_threshold_db: threshold_db,
+                                        compressor_ratio: ratio,
+                                        compressor_attack_ms: attack_ms,
+                                        compressor_release_ms: release_ms,
+                                        compressor_makeup_db: makeup_db,
+                                        ..tab.tool_state
+                                    };
+                                    let params = crate::wave::CompressorParams {
+                                        threshold_db,
+                                        ratio,
+                                        attack_ms,
+                                        release_ms,
+                                        makeup_db,
+                                    };
+                                    let changed = (threshold_db - st.compressor_threshold_db).abs() > 1e-6
+                                        || (ratio - st.compressor_ratio).abs() > 1e-6
+                                        || (attack_ms - st.compressor_attack_ms).abs() > 1e-6
+                                        || (release_ms - st.compressor_release_ms).abs() > 1e-6
+                                        || (makeup_db - st.compressor_makeup_db).abs() > 1e-6;
+                                    if changed {
+                                        if preview_ok {
+                                            let sr = tab.buffer_sample_rate.max(1);
+                                            let overlay: Vec<Vec<f32>> = tab
+                                                .ch_samples
+                                                .iter()
+                                                .map(|ch| crate::wave::process_compressor_offline(ch, sr, &params))
+                                                .collect();
+                                            let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                            let mono = Self::mixdown_channels(&overlay, timeline_len);
+                                            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                overlay,
+                                                ToolKind::Compressor,
+                                                timeline_len,
+                                            ));
+                                            pending_preview = Some((ToolKind::Compressor, mono));
+                                            stop_playback = true;
+                                            tab.preview_audio_tool = Some(ToolKind::Compressor);
+                                        } else {
+                                            request_preview_refresh = true;
+                                        }
+                                    }
+                                    if ui.button("Apply").clicked() {
+                                        do_compressor = Some(((0, tab.samples_len), params));
+                                        tab.preview_audio_tool = None;
+                                        tab.preview_overlay = None;
+                                    }
+                                }
                                 ToolKind::Loudness => {
                                     if let Some(reason) = preview_disabled_reason {
                                         ui.label(RichText::new(reason).weak());
@@ -8417,6 +8714,15 @@ impl crate::app::WavesPreviewer {
                                             {
                                                 pending_plugin_gui_close = true;
                                             }
+                                            if ui
+                                                .button("Load from file...")
+                                                .on_hover_text(
+                                                    "Pick a .vst3/.clap plugin directly, without needing a prior Rescan",
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_plugin_load_from_file = true;
+                                            }
                                         });
                                         ui.collapsing("Search Paths", |ui| {
                                             ui.horizontal_wrapped(|ui| {
@@ -8573,37 +8879,12 @@ impl crate::app::WavesPreviewer {
                                                     }
                                                 }
                                             });
-                                        if let Some(note) = draft.last_backend_note.as_ref() {
-                                            Frame::NONE
-                                                .fill(Color32::from_rgb(80, 60, 20))
-                                                .inner_margin(egui::Margin::symmetric(8, 4))
-                                                .corner_radius(4.0)
-                                                .show(ui, |ui| {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        ui.label(
-                                                            RichText::new("⚠ Generic fallback:")
-                                                                .small()
-                                                                .color(Color32::from_rgb(255, 200, 60)),
-                                                        );
-                                                        ui.label(
-                                                            RichText::new(note.trim())
-                                                                .small()
-                                                                .color(Color32::from_rgb(220, 180, 100)),
-                                                        );
-                                                    });
-                                                });
-                                        }
-                                        if let Some(err) = draft.last_error.as_ref() {
-                                            ui.label(RichText::new(err).color(Color32::LIGHT_RED));
-                                        }
-                                        if let Some(log) = draft.last_backend_log.as_ref() {
-                                            ui.label(
-                                                RichText::new(log.as_str())
-                                                    .small()
-                                                    .monospace()
-                                                    .weak(),
-                                            );
-                                        }
+                                        Self::ui_plugin_probe_status(
+                                            ui,
+                                            draft.last_error.as_deref(),
+                                            draft.last_backend_note.as_deref(),
+                                            draft.last_backend_log.as_deref(),
+                                        );
                                         if plugin_preview_busy || plugin_apply_busy {
                                             ui.horizontal_wrapped(|ui| {
                                                 ui.add(egui::Spinner::new());
@@ -9028,6 +9309,26 @@ impl crate::app::WavesPreviewer {
                         pending_plugin_add_path = Some(folder);
                     }
                 }
+                if pending_plugin_load_from_file {
+                    if let Some(path) = self.pick_plugin_file_dialog() {
+                        if let Some(entry) = self.add_plugin_catalog_entry_from_path(path.clone()) {
+                            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                                let draft = &mut tab.plugin_fx_draft;
+                                draft.plugin_key = Some(entry.key.clone());
+                                draft.plugin_name = entry.name;
+                                draft.params.clear();
+                                draft.last_error = None;
+                                draft.last_backend_log = None;
+                            }
+                            self.spawn_plugin_probe_for_tab(tab_idx, entry.key);
+                        } else if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.plugin_fx_draft.last_error = Some(format!(
+                                "not a recognized VST3/CLAP plugin: {}",
+                                path.display()
+                            ));
+                        }
+                    }
+                }
                 if pending_plugin_reset_paths {
                     self.reset_plugin_search_paths_to_default();
                     self.save_prefs();
@@ -9270,6 +9571,11 @@ impl crate::app::WavesPreviewer {
             self.editor_apply_state = None;
             self.redo_in_tab(tab_idx);
         }
+        if request_clear_edit {
+            self.clear_preview_if_any(tab_idx);
+            self.editor_apply_state = None;
+            self.clear_edit_in_tab(tab_idx);
+        }
         if let Some((s, e)) = do_set_loop_from {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 if s == 0 && e == 0 {
@@ -9353,6 +9659,15 @@ impl crate::app::WavesPreviewer {
         }
         if let Some(((s, e), tdb)) = do_normalize {
             self.editor_apply_normalize_range(tab_idx, (s, e), tdb);
+        }
+        if let Some(((s, e), threshold_db, attack_ms, release_ms)) = do_noise_gate {
+            self.editor_apply_noise_gate_range(tab_idx, (s, e), threshold_db, attack_ms, release_ms);
+        }
+        if let Some(((s, e), params)) = do_eq {
+            self.editor_apply_eq_range(tab_idx, (s, e), params);
+        }
+        if let Some(((s, e), params)) = do_compressor {
+            self.editor_apply_compressor_range(tab_idx, (s, e), params);
         }
         if let Some((s, e)) = do_reverse {
             self.editor_apply_reverse_range(tab_idx, (s, e));

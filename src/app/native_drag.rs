@@ -213,26 +213,16 @@ impl WavesPreviewer {
         if gain_db.abs() <= 0.0001 && target_sr == sample_rate {
             return Ok((audio, sample_rate.max(1)));
         }
-        let gain = crate::app::helpers::db_to_amp(gain_db);
-        let mut channels = audio.channels.clone();
-        if gain_db.abs() > 0.0001 {
-            for channel in &mut channels {
-                for sample in channel {
-                    *sample = (*sample * gain).clamp(-1.0, 1.0);
-                }
-            }
-        }
-        if target_sr != sample_rate {
-            channels = crate::wave::resample_channels_quality(
-                &channels,
-                sample_rate,
-                target_sr,
-                Self::to_wave_resample_quality(self.src_quality),
-            );
-        }
+        let (channels, new_sr) = Self::apply_gain_and_resample(
+            audio.channels.clone(),
+            sample_rate,
+            gain_db,
+            target_sr,
+            Self::to_wave_resample_quality(self.src_quality),
+        );
         Ok((
             Arc::new(crate::audio::AudioBuffer::from_channels(channels)),
-            target_sr.max(1),
+            new_sr,
         ))
     }
 

@@ -141,6 +141,40 @@ impl WavesPreviewer {
         None
     }
 
+    /// Applies a pending list-level gain override and/or sample-rate override
+    /// to already-decoded channels. Shared by the clipboard-copy and
+    /// native-drag export paths so both apply identical overrides instead of
+    /// each hand-rolling the gain/resample math.
+    pub(super) fn apply_gain_and_resample(
+        channels: Vec<Vec<f32>>,
+        sample_rate: u32,
+        gain_db: f32,
+        target_sample_rate: u32,
+        quality: crate::wave::ResampleQuality,
+    ) -> (Vec<Vec<f32>>, u32) {
+        if gain_db.abs() <= 0.0001 && target_sample_rate == sample_rate {
+            return (channels, sample_rate.max(1));
+        }
+        let mut channels = channels;
+        if gain_db.abs() > 0.0001 {
+            let gain = crate::app::helpers::db_to_amp(gain_db);
+            for channel in &mut channels {
+                for sample in channel {
+                    *sample = (*sample * gain).clamp(-1.0, 1.0);
+                }
+            }
+        }
+        if target_sample_rate != sample_rate {
+            channels = crate::wave::resample_channels_quality(
+                &channels,
+                sample_rate,
+                target_sample_rate,
+                quality,
+            );
+        }
+        (channels, target_sample_rate.max(1))
+    }
+
     pub(super) fn decode_audio_for_virtual(
         &self,
         path: &Path,

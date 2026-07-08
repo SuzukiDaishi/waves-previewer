@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use super::helpers::sanitize_filename_component;
 use super::types::{
     AppliedEffectGraphStamp, CachedEdit, EffectGraphApplyPostprocessJob,
-    EffectGraphApplyPostprocessResult, EffectGraphAudioBus, EffectGraphChannelFlowHint,
-    EffectGraphChannelLayout, EffectGraphChannelLayoutEntry, EffectGraphCombineMode,
+    EffectGraphApplyPostprocessResult, EffectGraphAudioBus, EffectGraphBitDepth,
+    EffectGraphChannelFlowHint, EffectGraphChannelLayout, EffectGraphChannelLayoutEntry,
+    EffectGraphCombineMode, EffectGraphResampleQuality,
     EffectGraphDebugPreview, EffectGraphDebugViewState, EffectGraphDocument, EffectGraphEdge,
     EffectGraphInputPreviewResult, EffectGraphLibraryEntry, EffectGraphNode, EffectGraphNodeData,
     EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphNodeRunStatus,
@@ -126,6 +127,21 @@ fn default_tool_state() -> ToolState {
         pitch_semitones: 0.0,
         stretch_rate: 1.0,
         loop_repeat: 2,
+        noise_gate_threshold_db: -40.0,
+        noise_gate_attack_ms: 2.0,
+        noise_gate_release_ms: 100.0,
+        eq_low_shelf_freq_hz: 120.0,
+        eq_low_shelf_gain_db: 0.0,
+        eq_mid_freq_hz: 1000.0,
+        eq_mid_gain_db: 0.0,
+        eq_mid_q: 1.0,
+        eq_high_shelf_freq_hz: 8000.0,
+        eq_high_shelf_gain_db: 0.0,
+        compressor_threshold_db: -18.0,
+        compressor_ratio: 3.0,
+        compressor_attack_ms: 10.0,
+        compressor_release_ms: 150.0,
+        compressor_makeup_db: 0.0,
     }
 }
 
@@ -148,6 +164,11 @@ fn effect_graph_default_node_size(kind: EffectGraphNodeKind) -> [f32; 2] {
         EffectGraphNodeKind::CombineChannels => [300.0, 250.0],
         EffectGraphNodeKind::DebugWaveform => [340.0, 250.0],
         EffectGraphNodeKind::DebugSpectrum => [360.0, 300.0],
+        EffectGraphNodeKind::Eq => [300.0, 340.0],
+        EffectGraphNodeKind::Compressor => [300.0, 260.0],
+        EffectGraphNodeKind::NoiseGate | EffectGraphNodeKind::Trim => [280.0, 220.0],
+        EffectGraphNodeKind::Resampler => [280.0, 200.0],
+        EffectGraphNodeKind::BitDepth => [280.0, 182.0],
         EffectGraphNodeKind::Gain
         | EffectGraphNodeKind::Loudness
         | EffectGraphNodeKind::PitchShift
@@ -780,6 +801,60 @@ fn clamp_node_data(data: &mut EffectGraphNodeData) {
         EffectGraphNodeData::TimeStretch { rate } | EffectGraphNodeData::Speed { rate } => {
             *rate = rate.clamp(0.25, 4.0);
         }
+        EffectGraphNodeData::NoiseGate {
+            threshold_db,
+            attack_ms,
+            release_ms,
+        } => {
+            *threshold_db = threshold_db.clamp(-80.0, 0.0);
+            *attack_ms = attack_ms.clamp(0.1, 500.0);
+            *release_ms = release_ms.clamp(1.0, 2000.0);
+        }
+        EffectGraphNodeData::Eq {
+            low_shelf_freq_hz,
+            low_shelf_gain_db,
+            mid_freq_hz,
+            mid_gain_db,
+            mid_q,
+            high_shelf_freq_hz,
+            high_shelf_gain_db,
+        } => {
+            *low_shelf_freq_hz = low_shelf_freq_hz.clamp(20.0, 2000.0);
+            *low_shelf_gain_db = low_shelf_gain_db.clamp(-24.0, 24.0);
+            *mid_freq_hz = mid_freq_hz.clamp(50.0, 12_000.0);
+            *mid_gain_db = mid_gain_db.clamp(-24.0, 24.0);
+            *mid_q = mid_q.clamp(0.1, 10.0);
+            *high_shelf_freq_hz = high_shelf_freq_hz.clamp(500.0, 20_000.0);
+            *high_shelf_gain_db = high_shelf_gain_db.clamp(-24.0, 24.0);
+        }
+        EffectGraphNodeData::Compressor {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+            makeup_db,
+        } => {
+            *threshold_db = threshold_db.clamp(-60.0, 0.0);
+            *ratio = ratio.clamp(1.0, 20.0);
+            *attack_ms = attack_ms.clamp(0.1, 500.0);
+            *release_ms = release_ms.clamp(1.0, 2000.0);
+            *makeup_db = makeup_db.clamp(0.0, 24.0);
+        }
+        EffectGraphNodeData::Trim {
+            threshold_below_peak_db,
+            pre_roll_ms,
+            post_roll_ms,
+        } => {
+            *threshold_below_peak_db = threshold_below_peak_db.clamp(6.0, 90.0);
+            *pre_roll_ms = pre_roll_ms.clamp(0.0, 1000.0);
+            *post_roll_ms = post_roll_ms.clamp(0.0, 1000.0);
+        }
+        EffectGraphNodeData::BitDepth { .. } => {}
+        EffectGraphNodeData::Resampler {
+            target_sample_rate, ..
+        } => {
+            *target_sample_rate = (*target_sample_rate).clamp(8_000, 192_000);
+        }
         EffectGraphNodeData::DebugWaveform { zoom } => {
             *zoom = zoom.clamp(1.0, 32.0);
         }
@@ -900,6 +975,12 @@ fn node_label(kind: EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::PitchShift => "PitchShift",
         EffectGraphNodeKind::TimeStretch => "TimeStretch",
         EffectGraphNodeKind::Speed => "Speed",
+        EffectGraphNodeKind::NoiseGate => "Noise Gate",
+        EffectGraphNodeKind::Eq => "EQ",
+        EffectGraphNodeKind::Compressor => "Compressor",
+        EffectGraphNodeKind::Trim => "Trim",
+        EffectGraphNodeKind::BitDepth => "Bit Depth",
+        EffectGraphNodeKind::Resampler => "Resampler",
         EffectGraphNodeKind::PluginFx => "Plugin FX",
         EffectGraphNodeKind::Duplicate => "Duplicate",
         EffectGraphNodeKind::SplitChannels => "Split Channels",
@@ -932,6 +1013,41 @@ fn node_parameter_summary(data: &EffectGraphNodeData) -> String {
         EffectGraphNodeData::PitchShift { semitones } => format!("{semitones:+.1} st"),
         EffectGraphNodeData::TimeStretch { rate } => format!("{rate:.2}x"),
         EffectGraphNodeData::Speed { rate } => format!("{rate:.2}x"),
+        EffectGraphNodeData::NoiseGate { threshold_db, .. } => {
+            format!("Gate @ {threshold_db:.1} dB")
+        }
+        EffectGraphNodeData::Eq {
+            low_shelf_gain_db,
+            mid_gain_db,
+            high_shelf_gain_db,
+            ..
+        } => format!(
+            "Low {low_shelf_gain_db:+.1} / Mid {mid_gain_db:+.1} / High {high_shelf_gain_db:+.1} dB"
+        ),
+        EffectGraphNodeData::Compressor {
+            threshold_db,
+            ratio,
+            ..
+        } => format!("{ratio:.1}:1 @ {threshold_db:.1} dB"),
+        EffectGraphNodeData::Trim { pre_roll_ms, post_roll_ms, .. } => {
+            format!("Silence trim / {pre_roll_ms:.0}ms pre / {post_roll_ms:.0}ms post")
+        }
+        EffectGraphNodeData::BitDepth { depth } => match depth {
+            EffectGraphBitDepth::Pcm16 => "16-bit".to_string(),
+            EffectGraphBitDepth::Pcm24 => "24-bit".to_string(),
+            EffectGraphBitDepth::Float32 => "32-bit float".to_string(),
+        },
+        EffectGraphNodeData::Resampler {
+            target_sample_rate,
+            quality,
+        } => {
+            let quality_label = match quality {
+                EffectGraphResampleQuality::Fast => "Fast",
+                EffectGraphResampleQuality::Good => "Good",
+                EffectGraphResampleQuality::Best => "Best",
+            };
+            format!("{target_sample_rate} Hz / {quality_label}")
+        }
         EffectGraphNodeData::PluginFx { config } => {
             let selected_name = config.plugin_name.trim();
             let name = if selected_name.is_empty() {
@@ -1611,6 +1727,12 @@ fn effect_graph_layout_priority(data: &EffectGraphNodeData) -> i32 {
         EffectGraphNodeData::PitchShift { .. } => 20,
         EffectGraphNodeData::TimeStretch { .. } => 30,
         EffectGraphNodeData::Speed { .. } => 40,
+        EffectGraphNodeData::NoiseGate { .. } => 41,
+        EffectGraphNodeData::Eq { .. } => 42,
+        EffectGraphNodeData::Compressor { .. } => 43,
+        EffectGraphNodeData::Trim { .. } => 44,
+        EffectGraphNodeData::BitDepth { .. } => 46,
+        EffectGraphNodeData::Resampler { .. } => 47,
         EffectGraphNodeData::PluginFx { .. } => 45,
         EffectGraphNodeData::Duplicate => 45,
         EffectGraphNodeData::SplitChannels => 50,
@@ -1792,6 +1914,54 @@ fn validate_effect_graph_document(
                     node_id: Some(node.id.clone()),
                 });
             }
+            EffectGraphNodeData::NoiseGate { threshold_db, .. }
+                if *threshold_db < -80.0 || *threshold_db > 0.0 =>
+            {
+                issues.push(EffectGraphValidationIssue {
+                    severity: EffectGraphSeverity::Warning,
+                    code: "noise_gate_threshold_out_of_range".to_string(),
+                    message: "Noise Gate threshold is outside -80..0 dB and will be clamped on save"
+                        .to_string(),
+                    node_id: Some(node.id.clone()),
+                });
+            }
+            EffectGraphNodeData::Eq {
+                low_shelf_gain_db,
+                mid_gain_db,
+                high_shelf_gain_db,
+                ..
+            } if [*low_shelf_gain_db, *mid_gain_db, *high_shelf_gain_db]
+                .iter()
+                .any(|g| *g < -24.0 || *g > 24.0) =>
+            {
+                issues.push(EffectGraphValidationIssue {
+                    severity: EffectGraphSeverity::Warning,
+                    code: "eq_gain_out_of_range".to_string(),
+                    message: "EQ band gain is outside -24..24 dB and will be clamped on save"
+                        .to_string(),
+                    node_id: Some(node.id.clone()),
+                });
+            }
+            EffectGraphNodeData::Compressor { ratio, .. } if *ratio < 1.0 || *ratio > 20.0 => {
+                issues.push(EffectGraphValidationIssue {
+                    severity: EffectGraphSeverity::Warning,
+                    code: "compressor_ratio_out_of_range".to_string(),
+                    message: "Compressor ratio is outside 1..20 and will be clamped on save"
+                        .to_string(),
+                    node_id: Some(node.id.clone()),
+                });
+            }
+            EffectGraphNodeData::Resampler {
+                target_sample_rate, ..
+            } if *target_sample_rate < 8_000 || *target_sample_rate > 192_000 => {
+                issues.push(EffectGraphValidationIssue {
+                    severity: EffectGraphSeverity::Warning,
+                    code: "resampler_rate_out_of_range".to_string(),
+                    message: "Resampler target rate is outside 8000..192000 Hz and will be clamped on save"
+                        .to_string(),
+                    node_id: Some(node.id.clone()),
+                });
+            }
             EffectGraphNodeData::DebugWaveform { zoom } if *zoom < 1.0 || *zoom > 32.0 => {
                 issues.push(EffectGraphValidationIssue {
                     severity: EffectGraphSeverity::Warning,
@@ -1824,6 +1994,12 @@ fn validate_effect_graph_document(
             | EffectGraphNodeData::PitchShift { .. }
             | EffectGraphNodeData::TimeStretch { .. }
             | EffectGraphNodeData::Speed { .. }
+            | EffectGraphNodeData::NoiseGate { .. }
+            | EffectGraphNodeData::Eq { .. }
+            | EffectGraphNodeData::Compressor { .. }
+            | EffectGraphNodeData::Trim { .. }
+            | EffectGraphNodeData::BitDepth { .. }
+            | EffectGraphNodeData::Resampler { .. }
             | EffectGraphNodeData::DebugWaveform { .. }
             | EffectGraphNodeData::DebugSpectrum { .. } => {}
         }
@@ -2759,6 +2935,210 @@ where
                     EffectGraphAudioBus {
                         channels,
                         sample_rate: bus.sample_rate,
+                        channel_layout: bus.channel_layout.clone(),
+                    },
+                );
+            }
+            EffectGraphNodeData::NoiseGate {
+                threshold_db,
+                attack_ms,
+                release_ms,
+            } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let params = crate::wave::NoiseGateParams {
+                    threshold_db: *threshold_db,
+                    attack_ms: *attack_ms,
+                    release_ms: *release_ms,
+                };
+                let channels = bus
+                    .channels
+                    .iter()
+                    .map(|channel| crate::wave::process_noise_gate_offline(channel, bus.sample_rate, &params))
+                    .collect::<Vec<_>>();
+                output_buses.insert(
+                    make_port_key(&node.id, "out"),
+                    EffectGraphAudioBus {
+                        channels,
+                        sample_rate: bus.sample_rate,
+                        channel_layout: bus.channel_layout.clone(),
+                    },
+                );
+            }
+            EffectGraphNodeData::Eq {
+                low_shelf_freq_hz,
+                low_shelf_gain_db,
+                mid_freq_hz,
+                mid_gain_db,
+                mid_q,
+                high_shelf_freq_hz,
+                high_shelf_gain_db,
+            } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let params = crate::wave::ThreeBandEqParams {
+                    low_shelf_freq_hz: *low_shelf_freq_hz,
+                    low_shelf_gain_db: *low_shelf_gain_db,
+                    mid_freq_hz: *mid_freq_hz,
+                    mid_gain_db: *mid_gain_db,
+                    mid_q: *mid_q,
+                    high_shelf_freq_hz: *high_shelf_freq_hz,
+                    high_shelf_gain_db: *high_shelf_gain_db,
+                };
+                let channels = bus
+                    .channels
+                    .iter()
+                    .map(|channel| crate::wave::process_three_band_eq_offline(channel, bus.sample_rate, &params))
+                    .collect::<Vec<_>>();
+                output_buses.insert(
+                    make_port_key(&node.id, "out"),
+                    EffectGraphAudioBus {
+                        channels,
+                        sample_rate: bus.sample_rate,
+                        channel_layout: bus.channel_layout.clone(),
+                    },
+                );
+            }
+            EffectGraphNodeData::Compressor {
+                threshold_db,
+                ratio,
+                attack_ms,
+                release_ms,
+                makeup_db,
+            } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let params = crate::wave::CompressorParams {
+                    threshold_db: *threshold_db,
+                    ratio: *ratio,
+                    attack_ms: *attack_ms,
+                    release_ms: *release_ms,
+                    makeup_db: *makeup_db,
+                };
+                let channels = bus
+                    .channels
+                    .iter()
+                    .map(|channel| crate::wave::process_compressor_offline(channel, bus.sample_rate, &params))
+                    .collect::<Vec<_>>();
+                output_buses.insert(
+                    make_port_key(&node.id, "out"),
+                    EffectGraphAudioBus {
+                        channels,
+                        sample_rate: bus.sample_rate,
+                        channel_layout: bus.channel_layout.clone(),
+                    },
+                );
+            }
+            EffectGraphNodeData::Trim {
+                threshold_below_peak_db,
+                pre_roll_ms,
+                post_roll_ms,
+            } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let mut config = crate::app::auto_trim::AutoTrimConfig::default();
+                config.threshold_below_peak_db = *threshold_below_peak_db;
+                config.pre_roll_secs = (*pre_roll_ms / 1000.0).max(0.0);
+                config.post_roll_secs = (*post_roll_ms / 1000.0).max(0.0);
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let processed_bus = match crate::app::auto_trim::auto_trim(
+                    &bus.channels,
+                    bus.sample_rate,
+                    &config,
+                    &cancel,
+                    &mut |_progress| {},
+                ) {
+                    Ok(result) => {
+                        let channels = bus
+                            .channels
+                            .iter()
+                            .map(|channel| {
+                                let s = result.start.min(channel.len());
+                                let e = result.end.min(channel.len()).max(s);
+                                channel[s..e].to_vec()
+                            })
+                            .collect::<Vec<_>>();
+                        EffectGraphAudioBus {
+                            channels,
+                            sample_rate: bus.sample_rate,
+                            channel_layout: bus.channel_layout.clone(),
+                        }
+                    }
+                    Err(message) => {
+                        on_event(EffectGraphRuntimeEvent::NodeLog {
+                            node_id: node.id.clone(),
+                            severity: EffectGraphSeverity::Warning,
+                            message: format!("Trim: {message}; passing input through"),
+                        });
+                        bus
+                    }
+                };
+                output_buses.insert(make_port_key(&node.id, "out"), processed_bus);
+            }
+            EffectGraphNodeData::BitDepth { depth } => {
+                let mut bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                crate::wave::quantize_channels_in_place(&mut bus.channels, depth.to_wave_bit_depth());
+                output_buses.insert(make_port_key(&node.id, "out"), bus);
+            }
+            EffectGraphNodeData::Resampler {
+                target_sample_rate,
+                quality,
+            } => {
+                let bus =
+                    effect_graph_input_bus_for_port(&node.id, "in", &input_sources, &output_buses)
+                        .ok_or_else(|| {
+                            effect_graph_node_runtime_error(
+                                &node.id,
+                                format!("{} input is missing", node.id),
+                            )
+                        })?;
+                let target_sr = (*target_sample_rate).max(1);
+                let channels = if target_sr == bus.sample_rate {
+                    bus.channels.clone()
+                } else {
+                    crate::wave::resample_channels_quality(
+                        &bus.channels,
+                        bus.sample_rate,
+                        target_sr,
+                        quality.to_wave_resample_quality(),
+                    )
+                };
+                output_buses.insert(
+                    make_port_key(&node.id, "out"),
+                    EffectGraphAudioBus {
+                        channels,
+                        sample_rate: target_sr,
                         channel_layout: bus.channel_layout.clone(),
                     },
                 );
@@ -6030,6 +6410,252 @@ mod tests {
         )
         .expect("runtime ok");
         assert!(out.channels[0].len() < 6);
+    }
+
+    #[test]
+    fn effect_graph_runtime_compressor_reduces_loud_signal() {
+        let sr = 48_000u32;
+        let loud: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32 * 200.0 * std::f32::consts::TAU).sin() * 0.9)
+            .collect();
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "comp".to_string(),
+                    ui_pos: [100.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Compressor {
+                        threshold_db: -12.0,
+                        ratio: 4.0,
+                        attack_ms: 1.0,
+                        release_ms: 50.0,
+                        makeup_db: 0.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [200.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "comp", "in"),
+                edge("b", "comp", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![loud.clone()], sr),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        let tail = loud.len() / 2;
+        let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len().max(1) as f32).sqrt();
+        assert!(rms(&out.channels[0][tail..]) < rms(&loud[tail..]) * 0.9);
+    }
+
+    #[test]
+    fn effect_graph_runtime_noise_gate_silences_quiet_signal() {
+        let sr = 48_000u32;
+        let quiet: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32 * 300.0 * std::f32::consts::TAU).sin() * 0.001)
+            .collect();
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "gate".to_string(),
+                    ui_pos: [100.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::NoiseGate {
+                        threshold_db: -20.0,
+                        attack_ms: 1.0,
+                        release_ms: 20.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [200.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "gate", "in"),
+                edge("b", "gate", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![quiet.clone()], sr),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        let tail = &out.channels[0][quiet.len() / 2..];
+        let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len().max(1) as f32).sqrt();
+        assert!(rms < 0.0005, "expected near-silence, got rms {rms}");
+    }
+
+    #[test]
+    fn effect_graph_runtime_bit_depth_quantizes_output() {
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "bd".to_string(),
+                    ui_pos: [100.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::BitDepth {
+                        depth: crate::app::types::EffectGraphBitDepth::Pcm16,
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [200.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "bd", "in"),
+                edge("b", "bd", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![vec![0.123_456_7, -0.987_654_3]], 48_000),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        let expected = crate::wave::WavBitDepth::Pcm16;
+        let mut quantized = vec![vec![0.123_456_7, -0.987_654_3]];
+        crate::wave::quantize_channels_in_place(&mut quantized, expected);
+        assert_eq!(out.channels[0], quantized[0]);
+    }
+
+    #[test]
+    fn effect_graph_runtime_resampler_changes_sample_rate_and_length() {
+        let sr = 48_000u32;
+        let channel: Vec<f32> = (0..sr as usize).map(|i| (i as f32 / sr as f32).sin()).collect();
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "resample".to_string(),
+                    ui_pos: [100.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Resampler {
+                        target_sample_rate: 24_000,
+                        quality: crate::app::types::EffectGraphResampleQuality::Good,
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [200.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "resample", "in"),
+                edge("b", "resample", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![channel.clone()], sr),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        assert_eq!(out.sample_rate, 24_000);
+        assert!((out.channels[0].len() as f32 - (channel.len() as f32 / 2.0)).abs() < channel.len() as f32 * 0.02);
+    }
+
+    #[test]
+    fn effect_graph_runtime_trim_removes_leading_silence() {
+        let sr = 48_000u32;
+        let silence = vec![0.0f32; sr as usize / 2];
+        let tone: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32 * 440.0 * std::f32::consts::TAU).sin() * 0.5)
+            .collect();
+        let mut channel = silence.clone();
+        channel.extend_from_slice(&tone);
+        channel.extend_from_slice(&silence);
+        let doc = doc_with_nodes(
+            vec![
+                EffectGraphNode {
+                    id: "input".to_string(),
+                    ui_pos: [0.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Input,
+                },
+                EffectGraphNode {
+                    id: "trim".to_string(),
+                    ui_pos: [100.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Trim {
+                        threshold_below_peak_db: 40.0,
+                        pre_roll_ms: 10.0,
+                        post_roll_ms: 10.0,
+                    },
+                },
+                EffectGraphNode {
+                    id: "output".to_string(),
+                    ui_pos: [200.0, 0.0],
+                    ui_size: [200.0, 100.0],
+                    data: EffectGraphNodeData::Output,
+                },
+            ],
+            vec![
+                edge("a", "input", "out", "trim", "in"),
+                edge("b", "trim", "out", "output", "in"),
+            ],
+        );
+        let out = run_effect_graph_document(
+            &doc,
+            test_bus(vec![channel.clone()], sr),
+            EffectGraphRunMode::TestPreview,
+            crate::wave::ResampleQuality::Good,
+            |_| {},
+        )
+        .expect("runtime ok");
+        assert!(
+            out.channels[0].len() < channel.len(),
+            "trim should shorten the buffer: {} vs {}",
+            out.channels[0].len(),
+            channel.len()
+        );
+        assert!(out.channels[0].len() as f32 > sr as f32 * 0.9);
     }
 
     #[test]

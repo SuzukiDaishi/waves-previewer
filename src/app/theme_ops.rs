@@ -896,19 +896,30 @@ mod tests {
         for path in [&first, &second, &third, &fourth, &legacy] {
             touch(path);
         }
+        // Extra distinct sessions beyond the limit so truncation is actually
+        // exercised (RECENT_SESSION_LIMIT is 10).
+        let extras: Vec<std::path::PathBuf> = (5..=11)
+            .map(|i| {
+                let p = dir.join(format!("extra{i}.nwsess"));
+                touch(&p);
+                p
+            })
+            .collect();
         let prefs = dir.join("prefs.txt");
 
         let mut app =
             WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
-        app.set_recent_sessions_from_prefs(vec![
+        let mut input = vec![
             first.clone(),
             second.clone(),
             second.clone(),
             legacy,
             missing,
             third.clone(),
-            fourth,
-        ]);
+            fourth.clone(),
+        ];
+        input.extend(extras.iter().cloned());
+        app.set_recent_sessions_from_prefs(input);
         app.save_prefs_to_path(&prefs);
 
         let mut loaded =
@@ -916,12 +927,20 @@ mod tests {
         loaded.set_recent_sessions_from_prefs(Vec::new());
         loaded.load_prefs_from_path(&prefs);
 
-        let expected = vec![
+        let mut expected = vec![
             std::fs::canonicalize(first).expect("first canonical"),
             std::fs::canonicalize(second).expect("second canonical"),
             std::fs::canonicalize(third).expect("third canonical"),
+            std::fs::canonicalize(fourth).expect("fourth canonical"),
         ];
+        expected.extend(
+            extras
+                .iter()
+                .take(6)
+                .map(|p| std::fs::canonicalize(p).expect("extra canonical")),
+        );
         assert_eq!(loaded.recent_session_paths_for_menu(), expected);
+        assert_eq!(expected.len(), 10, "limit should cap the list at 10");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -945,12 +964,43 @@ mod tests {
         assert!(app.insert_recent_session_path(&second));
         assert!(app.insert_recent_session_path(&fourth));
 
+        // Under the 10-entry limit nothing is evicted; "second" moves to
+        // front on its second insert instead of duplicating.
         let expected = vec![
             std::fs::canonicalize(fourth).expect("fourth canonical"),
             std::fs::canonicalize(second).expect("second canonical"),
             std::fs::canonicalize(third).expect("third canonical"),
+            std::fs::canonicalize(first).expect("first canonical"),
         ];
         assert_eq!(app.recent_session_paths_for_menu(), expected);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recent_session_insert_evicts_oldest_past_limit() {
+        let dir = temp_dir("insert_limit");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.set_recent_sessions_from_prefs(Vec::new());
+        let paths: Vec<std::path::PathBuf> = (0..12)
+            .map(|i| {
+                let p = dir.join(format!("session{i}.nwsess"));
+                touch(&p);
+                p
+            })
+            .collect();
+        for path in &paths {
+            assert!(app.insert_recent_session_path(path));
+        }
+        let menu = app.recent_session_paths_for_menu();
+        assert_eq!(menu.len(), 10, "list should cap at RECENT_SESSION_LIMIT");
+        // Most-recently-inserted first; the two oldest (session0, session1) are evicted.
+        assert_eq!(
+            menu[0],
+            std::fs::canonicalize(&paths[11]).expect("canonical")
+        );
+        assert!(!menu.contains(&std::fs::canonicalize(&paths[0]).expect("canonical")));
+        assert!(!menu.contains(&std::fs::canonicalize(&paths[1]).expect("canonical")));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

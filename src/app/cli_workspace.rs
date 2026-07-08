@@ -337,6 +337,64 @@ impl CliWorkspace {
                 let len = self.tab_len(tab_idx)?;
                 self.app.editor_apply_reverse_range(tab_idx, (0, len));
             }
+            ToolKind::NoiseGate => {
+                let st = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state)
+                    .context("missing target tab")?;
+                let len = self.tab_len(tab_idx)?;
+                self.app.editor_apply_noise_gate_range(
+                    tab_idx,
+                    (0, len),
+                    st.noise_gate_threshold_db,
+                    st.noise_gate_attack_ms,
+                    st.noise_gate_release_ms,
+                );
+            }
+            ToolKind::Eq => {
+                let st = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state)
+                    .context("missing target tab")?;
+                let len = self.tab_len(tab_idx)?;
+                self.app.editor_apply_eq_range(
+                    tab_idx,
+                    (0, len),
+                    crate::wave::ThreeBandEqParams {
+                        low_shelf_freq_hz: st.eq_low_shelf_freq_hz,
+                        low_shelf_gain_db: st.eq_low_shelf_gain_db,
+                        mid_freq_hz: st.eq_mid_freq_hz,
+                        mid_gain_db: st.eq_mid_gain_db,
+                        mid_q: st.eq_mid_q,
+                        high_shelf_freq_hz: st.eq_high_shelf_freq_hz,
+                        high_shelf_gain_db: st.eq_high_shelf_gain_db,
+                    },
+                );
+            }
+            ToolKind::Compressor => {
+                let st = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state)
+                    .context("missing target tab")?;
+                let len = self.tab_len(tab_idx)?;
+                self.app.editor_apply_compressor_range(
+                    tab_idx,
+                    (0, len),
+                    crate::wave::CompressorParams {
+                        threshold_db: st.compressor_threshold_db,
+                        ratio: st.compressor_ratio,
+                        attack_ms: st.compressor_attack_ms,
+                        release_ms: st.compressor_release_ms,
+                        makeup_db: st.compressor_makeup_db,
+                    },
+                );
+            }
             ToolKind::LoopEdit
             | ToolKind::Markers
             | ToolKind::PluginFx

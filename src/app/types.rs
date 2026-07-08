@@ -623,6 +623,9 @@ pub enum ToolKind {
     Normalize,
     Loudness,
     Reverse,
+    NoiseGate,
+    Eq,
+    Compressor,
     MusicAnalyze,
     PluginFx,
 }
@@ -738,6 +741,21 @@ pub struct ToolState {
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
     pub loop_repeat: u32,
+    pub noise_gate_threshold_db: f32,
+    pub noise_gate_attack_ms: f32,
+    pub noise_gate_release_ms: f32,
+    pub eq_low_shelf_freq_hz: f32,
+    pub eq_low_shelf_gain_db: f32,
+    pub eq_mid_freq_hz: f32,
+    pub eq_mid_gain_db: f32,
+    pub eq_mid_q: f32,
+    pub eq_high_shelf_freq_hz: f32,
+    pub eq_high_shelf_gain_db: f32,
+    pub compressor_threshold_db: f32,
+    pub compressor_ratio: f32,
+    pub compressor_attack_ms: f32,
+    pub compressor_release_ms: f32,
+    pub compressor_makeup_db: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1821,6 +1839,12 @@ pub enum EffectGraphNodeKind {
     PitchShift,
     TimeStretch,
     Speed,
+    NoiseGate,
+    Eq,
+    Compressor,
+    Trim,
+    BitDepth,
+    Resampler,
     PluginFx,
     Duplicate,
     SplitChannels,
@@ -1951,7 +1975,7 @@ impl EffectGraphNodeSpec {
 
 impl EffectGraphNodeKind {
     /// All node kinds in palette order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 20] = [
         Self::Input,
         Self::Output,
         Self::Gain,
@@ -1960,6 +1984,12 @@ impl EffectGraphNodeKind {
         Self::PitchShift,
         Self::TimeStretch,
         Self::Speed,
+        Self::NoiseGate,
+        Self::Eq,
+        Self::Compressor,
+        Self::Trim,
+        Self::BitDepth,
+        Self::Resampler,
         Self::PluginFx,
         Self::DebugWaveform,
         Self::DebugSpectrum,
@@ -2029,6 +2059,48 @@ impl EffectGraphNodeKind {
                 inputs: EFFECT_GRAPH_IN,
                 outputs: EFFECT_GRAPH_OUT,
             },
+            Self::NoiseGate => &EffectGraphNodeSpec {
+                kind: Self::NoiseGate,
+                display_name: "Noise Gate",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Eq => &EffectGraphNodeSpec {
+                kind: Self::Eq,
+                display_name: "EQ",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Compressor => &EffectGraphNodeSpec {
+                kind: Self::Compressor,
+                display_name: "Compressor",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Trim => &EffectGraphNodeSpec {
+                kind: Self::Trim,
+                display_name: "Trim",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::BitDepth => &EffectGraphNodeSpec {
+                kind: Self::BitDepth,
+                display_name: "Bit Depth",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
+            Self::Resampler => &EffectGraphNodeSpec {
+                kind: Self::Resampler,
+                display_name: "Resampler",
+                category: Cat::Standard,
+                inputs: EFFECT_GRAPH_IN,
+                outputs: EFFECT_GRAPH_OUT,
+            },
             Self::PluginFx => &EffectGraphNodeSpec {
                 kind: Self::PluginFx,
                 display_name: "Plugin FX",
@@ -2075,6 +2147,48 @@ impl EffectGraphNodeKind {
     }
 }
 
+/// Node-local bit depth choice for the [`EffectGraphNodeData::BitDepth`]
+/// node. Kept separate from `wave::WavBitDepth` (not serde-enabled) so graph
+/// documents persist independently of that lower-level type's representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectGraphBitDepth {
+    Pcm16,
+    Pcm24,
+    Float32,
+}
+
+impl EffectGraphBitDepth {
+    pub fn to_wave_bit_depth(self) -> crate::wave::WavBitDepth {
+        match self {
+            Self::Pcm16 => crate::wave::WavBitDepth::Pcm16,
+            Self::Pcm24 => crate::wave::WavBitDepth::Pcm24,
+            Self::Float32 => crate::wave::WavBitDepth::Float32,
+        }
+    }
+}
+
+/// Node-local resample quality for the [`EffectGraphNodeData::Resampler`]
+/// node. Kept separate from `wave::ResampleQuality` (not serde-enabled) for
+/// the same reason as [`EffectGraphBitDepth`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectGraphResampleQuality {
+    Fast,
+    Good,
+    Best,
+}
+
+impl EffectGraphResampleQuality {
+    pub fn to_wave_resample_quality(self) -> crate::wave::ResampleQuality {
+        match self {
+            Self::Fast => crate::wave::ResampleQuality::Fast,
+            Self::Good => crate::wave::ResampleQuality::Good,
+            Self::Best => crate::wave::ResampleQuality::Best,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EffectGraphNodeData {
@@ -2097,6 +2211,41 @@ pub enum EffectGraphNodeData {
     },
     Speed {
         rate: f32,
+    },
+    NoiseGate {
+        threshold_db: f32,
+        attack_ms: f32,
+        release_ms: f32,
+    },
+    Eq {
+        low_shelf_freq_hz: f32,
+        low_shelf_gain_db: f32,
+        mid_freq_hz: f32,
+        mid_gain_db: f32,
+        mid_q: f32,
+        high_shelf_freq_hz: f32,
+        high_shelf_gain_db: f32,
+    },
+    Compressor {
+        threshold_db: f32,
+        ratio: f32,
+        attack_ms: f32,
+        release_ms: f32,
+        makeup_db: f32,
+    },
+    /// Detects and removes leading/trailing silence only (front/back trim);
+    /// internal quiet gaps are left intact.
+    Trim {
+        threshold_below_peak_db: f32,
+        pre_roll_ms: f32,
+        post_roll_ms: f32,
+    },
+    BitDepth {
+        depth: EffectGraphBitDepth,
+    },
+    Resampler {
+        target_sample_rate: u32,
+        quality: EffectGraphResampleQuality,
     },
     PluginFx {
         #[serde(default)]
@@ -2125,6 +2274,12 @@ impl EffectGraphNodeData {
             Self::PitchShift { .. } => EffectGraphNodeKind::PitchShift,
             Self::TimeStretch { .. } => EffectGraphNodeKind::TimeStretch,
             Self::Speed { .. } => EffectGraphNodeKind::Speed,
+            Self::NoiseGate { .. } => EffectGraphNodeKind::NoiseGate,
+            Self::Eq { .. } => EffectGraphNodeKind::Eq,
+            Self::Compressor { .. } => EffectGraphNodeKind::Compressor,
+            Self::Trim { .. } => EffectGraphNodeKind::Trim,
+            Self::BitDepth { .. } => EffectGraphNodeKind::BitDepth,
+            Self::Resampler { .. } => EffectGraphNodeKind::Resampler,
             Self::PluginFx { .. } => EffectGraphNodeKind::PluginFx,
             Self::Duplicate => EffectGraphNodeKind::Duplicate,
             Self::SplitChannels => EffectGraphNodeKind::SplitChannels,
@@ -2154,6 +2309,39 @@ impl EffectGraphNodeData {
             EffectGraphNodeKind::PitchShift => Self::PitchShift { semitones: 0.0 },
             EffectGraphNodeKind::TimeStretch => Self::TimeStretch { rate: 1.0 },
             EffectGraphNodeKind::Speed => Self::Speed { rate: 1.0 },
+            EffectGraphNodeKind::NoiseGate => Self::NoiseGate {
+                threshold_db: -40.0,
+                attack_ms: 2.0,
+                release_ms: 100.0,
+            },
+            EffectGraphNodeKind::Eq => Self::Eq {
+                low_shelf_freq_hz: 120.0,
+                low_shelf_gain_db: 0.0,
+                mid_freq_hz: 1000.0,
+                mid_gain_db: 0.0,
+                mid_q: 1.0,
+                high_shelf_freq_hz: 8000.0,
+                high_shelf_gain_db: 0.0,
+            },
+            EffectGraphNodeKind::Compressor => Self::Compressor {
+                threshold_db: -18.0,
+                ratio: 3.0,
+                attack_ms: 10.0,
+                release_ms: 150.0,
+                makeup_db: 0.0,
+            },
+            EffectGraphNodeKind::Trim => Self::Trim {
+                threshold_below_peak_db: 40.0,
+                pre_roll_ms: 50.0,
+                post_roll_ms: 100.0,
+            },
+            EffectGraphNodeKind::BitDepth => Self::BitDepth {
+                depth: EffectGraphBitDepth::Pcm16,
+            },
+            EffectGraphNodeKind::Resampler => Self::Resampler {
+                target_sample_rate: 48_000,
+                quality: EffectGraphResampleQuality::Good,
+            },
             EffectGraphNodeKind::PluginFx => Self::PluginFx {
                 config: EffectGraphPluginNodeConfig::default(),
             },
@@ -2745,7 +2933,6 @@ pub enum ClipboardPrepAudio {
         audio: Arc<AudioBuffer>,
         sample_rate: u32,
         bits_per_sample: u16,
-        export_tmp: bool,
     },
     /// File-backed item: the worker decodes it for the in-app payload.
     DecodeFromFile {
@@ -2758,6 +2945,12 @@ pub struct ClipboardPrepItem {
     pub display_name: String,
     pub source_path: Option<PathBuf>,
     pub audio: ClipboardPrepAudio,
+    /// Pending gain / sample-rate overrides (list-level, independent of any
+    /// in-memory edited audio) applied on the worker thread so clipboard
+    /// copies match the same overrides `native_drag` already applies.
+    pub gain_db: f32,
+    pub target_sample_rate: Option<u32>,
+    pub resample_quality: crate::wave::ResampleQuality,
 }
 
 pub struct ClipboardPrepDone {

@@ -119,6 +119,19 @@ impl WavesPreviewer {
         }
     }
 
+    pub(super) fn pick_plugin_file_dialog(&mut self) -> Option<PathBuf> {
+        #[cfg(feature = "kittest")]
+        {
+            return None;
+        }
+        #[cfg(not(feature = "kittest"))]
+        {
+            rfd::FileDialog::new()
+                .add_filter("VST3/CLAP plugin", &["vst3", "clap"])
+                .pick_file()
+        }
+    }
+
     pub(super) fn pick_list_csv_save_dialog(&mut self) -> Option<PathBuf> {
         #[cfg(feature = "kittest")]
         {

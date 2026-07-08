@@ -28,6 +28,38 @@ fn plugin_is_allowed_for_fx(path: &std::path::Path, format: crate::plugin::Plugi
     }
 }
 
+/// Native probing launches the plugin in-process and is inherently racy
+/// (module load / COM init / plugin init timing), so a single transient
+/// failure would otherwise permanently downgrade a session to the
+/// zero-param Generic backend. Retry a couple of times before giving up.
+const PROBE_RETRY_ATTEMPTS: u32 = 3;
+const PROBE_RETRY_DELAY_MS: u64 = 150;
+
+type ProbeOk = (
+    crate::plugin::PluginDescriptorInfo,
+    Vec<crate::plugin::PluginParamInfo>,
+    Option<String>,
+);
+
+fn probe_with_retry<F>(mut probe_fn: F) -> Result<ProbeOk, String>
+where
+    F: FnMut() -> Result<ProbeOk, String>,
+{
+    let mut last_err = String::new();
+    for attempt in 0..PROBE_RETRY_ATTEMPTS {
+        match probe_fn() {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                last_err = err;
+                if attempt + 1 < PROBE_RETRY_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(PROBE_RETRY_DELAY_MS));
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
 pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
     match request {
         WorkerRequest::Ping => WorkerResponse::Pong,
@@ -70,7 +102,7 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                 };
             }
             let native_error = match format {
-                crate::plugin::PluginFormat::Vst3 => match vst3::probe(&path) {
+                crate::plugin::PluginFormat::Vst3 => match probe_with_retry(|| vst3::probe(&path)) {
                     Ok((plugin, params, state_blob_b64)) => {
                         return WorkerResponse::ProbeResult {
                             plugin,
@@ -88,9 +120,11 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                             backend_note: None,
                         };
                     }
-                    Err(err) => Some(format!("native VST3 probe failed, fallback=Generic: {err}")),
+                    Err(err) => Some(format!(
+                        "native VST3 probe failed after {PROBE_RETRY_ATTEMPTS} attempts, fallback=Generic: {err}"
+                    )),
                 },
-                crate::plugin::PluginFormat::Clap => match clap::probe(&path) {
+                crate::plugin::PluginFormat::Clap => match probe_with_retry(|| clap::probe(&path)) {
                     Ok((plugin, params, state_blob_b64)) => {
                         return WorkerResponse::ProbeResult {
                             plugin,
@@ -108,7 +142,9 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
                             backend_note: None,
                         };
                     }
-                    Err(err) => Some(format!("native CLAP probe failed, fallback=Generic: {err}")),
+                    Err(err) => Some(format!(
+                        "native CLAP probe failed after {PROBE_RETRY_ATTEMPTS} attempts, fallback=Generic: {err}"
+                    )),
                 },
             };
             let (plugin, _params, state_blob_b64) = generic::default_probe_result(&path, format);
@@ -232,5 +268,61 @@ pub fn handle_request(request: WorkerRequest) -> WorkerResponse {
         | WorkerRequest::Heartbeat { .. } => WorkerResponse::Error {
             message: "GUI session requests require neowaves_plugin_gui_worker".to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn probe_ok() -> ProbeOk {
+        (
+            crate::plugin::PluginDescriptorInfo {
+                key: "k".to_string(),
+                name: "n".to_string(),
+                path: "p".to_string(),
+                format: crate::plugin::PluginFormat::Vst3,
+            },
+            Vec::new(),
+            None,
+        )
+    }
+
+    #[test]
+    fn probe_with_retry_succeeds_after_transient_failures() {
+        let attempts = AtomicU32::new(0);
+        let result = probe_with_retry(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < PROBE_RETRY_ATTEMPTS - 1 {
+                Err("transient".to_string())
+            } else {
+                Ok(probe_ok())
+            }
+        });
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), PROBE_RETRY_ATTEMPTS);
+    }
+
+    #[test]
+    fn probe_with_retry_gives_up_after_max_attempts() {
+        let attempts = AtomicU32::new(0);
+        let result = probe_with_retry(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err::<ProbeOk, String>("permanent".to_string())
+        });
+        assert_eq!(result.unwrap_err(), "permanent");
+        assert_eq!(attempts.load(Ordering::SeqCst), PROBE_RETRY_ATTEMPTS);
+    }
+
+    #[test]
+    fn probe_with_retry_succeeds_first_try_without_retrying() {
+        let attempts = AtomicU32::new(0);
+        let result = probe_with_retry(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(probe_ok())
+        });
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

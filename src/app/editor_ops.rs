@@ -172,6 +172,59 @@ impl crate::app::WavesPreviewer {
         self.cancel_feature_analysis_for_path(&path);
     }
 
+    /// Reverts a tab to the original file on disk, discarding all destructive
+    /// edits (gain/fade/effects/etc.) made since it was opened. Selection,
+    /// markers and loop-range annotations are left untouched — only the
+    /// audio buffer and edit history are reset.
+    pub(super) fn clear_edit_in_tab(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let path = tab.path.clone();
+        let target_sr = self
+            .sample_rate_override
+            .get(&path)
+            .copied()
+            .filter(|v| *v > 0);
+        let bit_depth = self.bit_depth_override.get(&path).copied();
+        let out_sr = self.audio.shared.out_sample_rate;
+        let resample_quality = Self::to_wave_resample_quality(self.src_quality);
+        let Ok((chans, in_sr)) = crate::audio_io::decode_audio_multi(&path) else {
+            self.debug_log(format!("clear edit: decode failed for {}", path.display()));
+            return;
+        };
+        let channels = Self::process_editor_decode_channels(
+            chans,
+            in_sr.max(1),
+            out_sr,
+            target_sr,
+            bit_depth,
+            resample_quality,
+        );
+
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let undo_state = Self::capture_undo_state(tab);
+            tab.ch_samples = channels;
+            tab.buffer_sample_rate = out_sr.max(1);
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.edited_cache.remove(&path);
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        // Clear Edit is a hard reset: unlike other destructive edits, it does
+        // not leave behind an undo point back to the pre-clear (edited) state.
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.dirty = false;
+            tab.undo_stack.clear();
+            tab.undo_bytes = 0;
+            tab.redo_stack.clear();
+            tab.redo_bytes = 0;
+        }
+    }
+
     pub(super) fn fade_weight(shape: crate::app::types::FadeShape, t: f32) -> f32 {
         let x = t.clamp(0.0, 1.0);
         match shape {
@@ -1073,6 +1126,94 @@ impl crate::app::WavesPreviewer {
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
     }
 
+    pub(super) fn editor_apply_noise_gate_range(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+        threshold_db: f32,
+        attack_ms: f32,
+        release_ms: f32,
+    ) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            let sample_rate = tab.buffer_sample_rate.max(1);
+            let params = crate::wave::NoiseGateParams {
+                threshold_db,
+                attack_ms,
+                release_ms,
+            };
+            for ch in tab.ch_samples.iter_mut() {
+                let processed = crate::wave::process_noise_gate_offline(&ch[s..e], sample_rate, &params);
+                ch[s..e].copy_from_slice(&processed);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
+    pub(super) fn editor_apply_eq_range(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+        params: crate::wave::ThreeBandEqParams,
+    ) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            let sample_rate = tab.buffer_sample_rate.max(1);
+            for ch in tab.ch_samples.iter_mut() {
+                let processed = crate::wave::process_three_band_eq_offline(&ch[s..e], sample_rate, &params);
+                ch[s..e].copy_from_slice(&processed);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
+    pub(super) fn editor_apply_compressor_range(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+        params: crate::wave::CompressorParams,
+    ) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            let sample_rate = tab.buffer_sample_rate.max(1);
+            for ch in tab.ch_samples.iter_mut() {
+                let processed = crate::wave::process_compressor_offline(&ch[s..e], sample_rate, &params);
+                ch[s..e].copy_from_slice(&processed);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     pub(super) fn editor_apply_mute_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (_channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
@@ -1758,5 +1899,146 @@ impl crate::app::WavesPreviewer {
             return None;
         }
         Some((s, e.min(tab.samples_len)))
+    }
+}
+
+#[cfg(test)]
+mod clear_edit_tests {
+    use crate::app::WavesPreviewer;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_clear_edit_test_{tag}_{}_{}",
+            std::process::id(),
+            ts
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn wait_for_decode(app: &mut WavesPreviewer, tab_idx: usize) {
+        let started = Instant::now();
+        loop {
+            app.drain_editor_decode();
+            if let Some(tab) = app.tabs.get(tab_idx) {
+                if !tab.loading {
+                    return;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "editor decode timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn clear_edit_reverts_gain_and_resets_edit_state() {
+        let dir = temp_dir("gain");
+        let wav = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.2, 0.2, 0.2, 0.2]], 48_000, &wav)
+            .expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        app.open_or_activate_tab(&wav);
+        let tab_idx = app
+            .tabs
+            .iter()
+            .position(|t| t.path == wav)
+            .expect("tab opened");
+        wait_for_decode(&mut app, tab_idx);
+
+        let len = app.tabs[tab_idx].samples_len;
+        app.editor_apply_gain_range(tab_idx, (0, len), -6.0);
+        assert!(app.tabs[tab_idx].dirty, "gain apply should dirty the tab");
+        assert!(!app.tabs[tab_idx].undo_stack.is_empty());
+        let gained = app.tabs[tab_idx].ch_samples[0][0];
+        assert!(
+            (gained - 0.2).abs() > 1e-4,
+            "gain should have changed the sample value"
+        );
+
+        app.clear_edit_in_tab(tab_idx);
+
+        let tab = &app.tabs[tab_idx];
+        assert!(!tab.dirty, "clear edit should mark the tab clean");
+        assert!(tab.undo_stack.is_empty(), "clear edit should wipe undo history");
+        assert!(tab.redo_stack.is_empty(), "clear edit should wipe redo history");
+        assert!(
+            (tab.ch_samples[0][0] - 0.2).abs() < 1e-4,
+            "clear edit should restore the original sample value, got {}",
+            tab.ch_samples[0][0]
+        );
+    }
+
+    #[test]
+    fn inspector_noise_gate_eq_compressor_apply_and_undo() {
+        let dir = temp_dir("inspector_tools");
+        let wav = dir.join("source.wav");
+        let sr = 48_000u32;
+        let tone: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32 * 440.0 * std::f32::consts::TAU).sin() * 0.4)
+            .collect();
+        crate::wave::export_channels_audio(&[tone.clone()], sr, &wav).expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        app.open_or_activate_tab(&wav);
+        let tab_idx = app
+            .tabs
+            .iter()
+            .position(|t| t.path == wav)
+            .expect("tab opened");
+        wait_for_decode(&mut app, tab_idx);
+        let len = app.tabs[tab_idx].samples_len;
+
+        // Noise Gate
+        let before = app.tabs[tab_idx].ch_samples[0].clone();
+        app.editor_apply_noise_gate_range(tab_idx, (0, len), -10.0, 1.0, 20.0);
+        assert!(app.tabs[tab_idx].dirty);
+        assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
+        assert!(app.undo_in_tab(tab_idx));
+        assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
+
+        // EQ
+        app.editor_apply_eq_range(
+            tab_idx,
+            (0, len),
+            crate::wave::ThreeBandEqParams {
+                low_shelf_freq_hz: 120.0,
+                low_shelf_gain_db: 0.0,
+                mid_freq_hz: 440.0,
+                mid_gain_db: 12.0,
+                mid_q: 1.0,
+                high_shelf_freq_hz: 8000.0,
+                high_shelf_gain_db: 0.0,
+            },
+        );
+        assert!(app.tabs[tab_idx].dirty);
+        assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
+        assert!(app.undo_in_tab(tab_idx));
+        assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
+
+        // Compressor
+        app.editor_apply_compressor_range(
+            tab_idx,
+            (0, len),
+            crate::wave::CompressorParams {
+                threshold_db: -12.0,
+                ratio: 4.0,
+                attack_ms: 1.0,
+                release_ms: 50.0,
+                makeup_db: 0.0,
+            },
+        );
+        assert!(app.tabs[tab_idx].dirty);
+        assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
+        assert!(app.undo_in_tab(tab_idx));
+        assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
     }
 }

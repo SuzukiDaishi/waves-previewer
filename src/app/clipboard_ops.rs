@@ -106,7 +106,6 @@ impl super::WavesPreviewer {
             let meta_bits = item.meta.as_ref().map(|m| m.bits_per_sample).unwrap_or(0);
             let audio = if let Some(audio) = self.edited_audio_for_path(&item.path) {
                 crate::app::types::ClipboardPrepAudio::Ready {
-                    export_tmp: audio.len() > 0,
                     audio,
                     sample_rate: out_sr,
                     bits_per_sample: 32,
@@ -117,10 +116,23 @@ impl super::WavesPreviewer {
                     bits_per_sample: meta_bits,
                 }
             };
+            // Pending gain/sample-rate overrides are list-level and independent
+            // of any in-memory edited audio above; apply them the same way
+            // native_drag does so copy and drag-export never diverge.
+            let gain_db = self.pending_gain_db_for_path(&item.path);
+            let target_sample_rate = self
+                .sample_rate_override
+                .get(&item.path)
+                .copied()
+                .filter(|sr| *sr > 0);
+            let resample_quality = Self::to_wave_resample_quality(self.src_quality);
             prep_items.push(crate::app::types::ClipboardPrepItem {
                 display_name,
                 source_path,
                 audio,
+                gain_db,
+                target_sample_rate,
+                resample_quality,
             });
         }
         if prep_items.is_empty() {
@@ -152,33 +164,17 @@ impl super::WavesPreviewer {
         let mut os_paths: Vec<PathBuf> = Vec::new();
         let mut temp_files: Vec<PathBuf> = Vec::new();
         for item in prep_items {
-            let (audio, sample_rate, bits_per_sample) = match item.audio {
+            let gain_db = item.gain_db;
+            let target_sample_rate = item.target_sample_rate;
+            let resample_quality = item.resample_quality;
+            let was_ready = matches!(item.audio, ClipboardPrepAudio::Ready { .. });
+            let (mut audio, mut sample_rate, bits_per_sample) = match item.audio {
                 ClipboardPrepAudio::Ready {
                     audio,
                     sample_rate,
                     bits_per_sample,
-                    export_tmp,
-                } => {
-                    if export_tmp {
-                        if let Some(tmp) = crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
-                            "clipboard", "wav",
-                        ) {
-                            let range = (0, audio.len());
-                            if crate::wave::export_selection_wav(
-                                &audio.channels,
-                                sample_rate,
-                                range,
-                                &tmp,
-                            )
-                            .is_ok()
-                            {
-                                os_paths.push(tmp.clone());
-                                temp_files.push(tmp);
-                            }
-                        }
-                    }
-                    (Some(audio), sample_rate, bits_per_sample)
-                }
+                    ..
+                } => (Some(audio), sample_rate, bits_per_sample),
                 ClipboardPrepAudio::DecodeFromFile {
                     sample_rate,
                     bits_per_sample,
@@ -196,13 +192,60 @@ impl super::WavesPreviewer {
                                 crate::audio::AudioBuffer::from_channels(chans),
                             ));
                         }
-                        if path.is_file() {
-                            os_paths.push(path.clone());
-                        }
                     }
                     (audio, sr, bits)
                 }
             };
+
+            let target_sr = target_sample_rate.unwrap_or(sample_rate);
+            let has_override = gain_db.abs() > 0.0001 || target_sr != sample_rate;
+            if has_override {
+                if let Some(current) = audio.take() {
+                    let (channels, new_sr) = super::WavesPreviewer::apply_gain_and_resample(
+                        current.channels.clone(),
+                        sample_rate,
+                        gain_db,
+                        target_sr,
+                        resample_quality,
+                    );
+                    sample_rate = new_sr;
+                    audio = Some(std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
+                        channels,
+                    )));
+                }
+            }
+
+            // Only re-export a temp WAV when the audio differs from the
+            // original file bytes (edited/virtual audio, or an override was
+            // applied); otherwise reference the original file, same as before.
+            let needs_temp_export = was_ready || has_override;
+            if needs_temp_export {
+                if let Some(audio_ref) = audio.as_ref().filter(|a| a.len() > 0) {
+                    if let Some(tmp) =
+                        crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
+                            "clipboard", "wav",
+                        )
+                    {
+                        let range = (0, audio_ref.len());
+                        if crate::wave::export_selection_wav(
+                            &audio_ref.channels,
+                            sample_rate,
+                            range,
+                            &tmp,
+                        )
+                        .is_ok()
+                        {
+                            os_paths.push(tmp.clone());
+                            temp_files.push(tmp);
+                        }
+                    }
+                }
+            } else if let Some(path) = item.source_path.as_ref() {
+                if path.is_file() {
+                    os_paths.push(path.clone());
+                }
+            }
+
             payload_items.push(ClipboardItem {
                 display_name: item.display_name,
                 source_path: item.source_path,
@@ -606,6 +649,92 @@ impl super::WavesPreviewer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod prep_tests {
+    use super::super::types::{ClipboardPrepAudio, ClipboardPrepItem};
+    use crate::wave::ResampleQuality;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_clipboard_prep_test_{tag}_{}_{}",
+            std::process::id(),
+            ts
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn pending_gain_override_materializes_and_applies_gain() {
+        let dir = temp_dir("gain");
+        let wav = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.2, 0.2, 0.2]], 48_000, &wav)
+            .expect("write wav");
+        let item = ClipboardPrepItem {
+            display_name: "source.wav".to_string(),
+            source_path: Some(wav.clone()),
+            audio: ClipboardPrepAudio::DecodeFromFile {
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+            },
+            gain_db: -6.0,
+            target_sample_rate: None,
+            resample_quality: ResampleQuality::Fast,
+        };
+
+        let done = crate::WavesPreviewer::run_clipboard_prep(vec![item]);
+
+        assert_eq!(done.payload.items.len(), 1);
+        assert_eq!(done.os_paths.len(), 1);
+        assert_ne!(
+            done.os_paths[0],
+            std::fs::canonicalize(&wav).unwrap(),
+            "gain override must materialize a new file, not reference the original"
+        );
+        assert_eq!(done.temp_files.len(), 1);
+        let audio = done.payload.items[0]
+            .audio
+            .as_ref()
+            .expect("decoded audio present");
+        let expected = 0.2 * crate::app::helpers::db_to_amp(-6.0);
+        assert!(
+            (audio.channels[0][0] - expected).abs() < 1e-4,
+            "expected gain applied: got {} want ~{}",
+            audio.channels[0][0],
+            expected
+        );
+    }
+
+    #[test]
+    fn no_override_references_original_file() {
+        let dir = temp_dir("plain");
+        let wav = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.1, 0.1, 0.1]], 48_000, &wav)
+            .expect("write wav");
+        let item = ClipboardPrepItem {
+            display_name: "source.wav".to_string(),
+            source_path: Some(wav.clone()),
+            audio: ClipboardPrepAudio::DecodeFromFile {
+                sample_rate: 48_000,
+                bits_per_sample: 32,
+            },
+            gain_db: 0.0,
+            target_sample_rate: None,
+            resample_quality: ResampleQuality::Fast,
+        };
+
+        let done = crate::WavesPreviewer::run_clipboard_prep(vec![item]);
+
+        assert_eq!(done.os_paths, vec![wav]);
+        assert!(done.temp_files.is_empty());
     }
 }
 

@@ -1346,6 +1346,217 @@ pub fn process_speed_offline(mono: &[f32], rate: f32) -> Vec<f32> {
     out
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoiseGateParams {
+    pub threshold_db: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+}
+
+/// Envelope-follower noise gate: below `threshold_db` the signal is ramped
+/// toward silence over `release_ms`; at/above it, ramped back to unity gain
+/// over `attack_ms`. Shared by the EffectGraph NoiseGate node and the Editor
+/// Inspector NoiseGate tool so both apply identical math.
+pub fn process_noise_gate_offline(mono: &[f32], sample_rate: u32, params: &NoiseGateParams) -> Vec<f32> {
+    if mono.is_empty() {
+        return Vec::new();
+    }
+    let sr = sample_rate.max(1) as f32;
+    let threshold_lin = 10.0f32.powf(params.threshold_db / 20.0);
+    let attack_coeff = one_pole_coeff(params.attack_ms.max(0.01), sr);
+    let release_coeff = one_pole_coeff(params.release_ms.max(0.01), sr);
+    let mut envelope = 0.0f32;
+    let mut gain = 0.0f32;
+    let mut out = Vec::with_capacity(mono.len());
+    for &sample in mono {
+        let rectified = sample.abs();
+        envelope = if rectified > envelope {
+            rectified + attack_coeff * (envelope - rectified)
+        } else {
+            rectified + release_coeff * (envelope - rectified)
+        };
+        let target_gain = if envelope >= threshold_lin { 1.0 } else { 0.0 };
+        let coeff = if target_gain > gain { attack_coeff } else { release_coeff };
+        gain = target_gain + coeff * (gain - target_gain);
+        out.push(sample * gain);
+    }
+    out
+}
+
+/// One-pole smoothing coefficient for a time constant of `time_ms` at
+/// `sample_rate_hz`, shared by the gate and compressor envelope followers.
+fn one_pole_coeff(time_ms: f32, sample_rate_hz: f32) -> f32 {
+    (-1.0 / (time_ms * 0.001 * sample_rate_hz)).exp()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompressorParams {
+    pub threshold_db: f32,
+    pub ratio: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub makeup_db: f32,
+}
+
+/// Feedforward peak compressor with a one-pole envelope follower. Shared by
+/// the EffectGraph Compressor node and the Editor Inspector Compressor tool.
+pub fn process_compressor_offline(mono: &[f32], sample_rate: u32, params: &CompressorParams) -> Vec<f32> {
+    if mono.is_empty() {
+        return Vec::new();
+    }
+    let sr = sample_rate.max(1) as f32;
+    let ratio = params.ratio.max(1.0);
+    let attack_coeff = one_pole_coeff(params.attack_ms.max(0.01), sr);
+    let release_coeff = one_pole_coeff(params.release_ms.max(0.01), sr);
+    let makeup = 10.0f32.powf(params.makeup_db / 20.0);
+    let mut envelope_db = -120.0f32;
+    let mut out = Vec::with_capacity(mono.len());
+    for &sample in mono {
+        let level_db = 20.0 * sample.abs().max(1e-9).log10();
+        let coeff = if level_db > envelope_db { attack_coeff } else { release_coeff };
+        envelope_db = level_db + coeff * (envelope_db - level_db);
+        let over_db = envelope_db - params.threshold_db;
+        let gain_db = if over_db > 0.0 {
+            -over_db * (1.0 - 1.0 / ratio)
+        } else {
+            0.0
+        };
+        let gain = 10.0f32.powf(gain_db / 20.0) * makeup;
+        out.push((sample * gain).clamp(-1.0, 1.0));
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BiquadKind {
+    LowShelf,
+    Peak,
+    HighShelf,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+}
+
+impl Biquad {
+    // RBJ Audio EQ Cookbook coefficients.
+    fn design(kind: BiquadKind, freq_hz: f32, gain_db: f32, q: f32, sample_rate: f32) -> Self {
+        let a = 10.0f32.powf(gain_db / 40.0);
+        let w0 = 2.0 * std::f32::consts::PI * (freq_hz.max(1.0) / sample_rate.max(1.0));
+        let (sin_w0, cos_w0) = w0.sin_cos();
+        let alpha = sin_w0 / (2.0 * q.max(0.01));
+        let (b0, b1, b2, a0, a1, a2) = match kind {
+            BiquadKind::Peak => {
+                let b0 = 1.0 + alpha * a;
+                let b1 = -2.0 * cos_w0;
+                let b2 = 1.0 - alpha * a;
+                let a0 = 1.0 + alpha / a;
+                let a1 = -2.0 * cos_w0;
+                let a2 = 1.0 - alpha / a;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadKind::LowShelf => {
+                let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+                let b0 = a * ((a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+                let b1 = 2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0);
+                let b2 = a * ((a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+                let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+                let a1 = -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0);
+                let a2 = (a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+            BiquadKind::HighShelf => {
+                let two_sqrt_a_alpha = 2.0 * a.sqrt() * alpha;
+                let b0 = a * ((a + 1.0) + (a - 1.0) * cos_w0 + two_sqrt_a_alpha);
+                let b1 = -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0);
+                let b2 = a * ((a + 1.0) + (a - 1.0) * cos_w0 - two_sqrt_a_alpha);
+                let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + two_sqrt_a_alpha;
+                let a1 = 2.0 * ((a - 1.0) - (a + 1.0) * cos_w0);
+                let a2 = (a + 1.0) - (a - 1.0) * cos_w0 - two_sqrt_a_alpha;
+                (b0, b1, b2, a0, a1, a2)
+            }
+        };
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
+    }
+
+    fn process(&self, mono: &[f32]) -> Vec<f32> {
+        let mut x1 = 0.0f32;
+        let mut x2 = 0.0f32;
+        let mut y1 = 0.0f32;
+        let mut y2 = 0.0f32;
+        let mut out = Vec::with_capacity(mono.len());
+        for &x0 in mono {
+            let y0 = self.b0 * x0 + self.b1 * x1 + self.b2 * x2 - self.a1 * y1 - self.a2 * y2;
+            x2 = x1;
+            x1 = x0;
+            y2 = y1;
+            y1 = y0;
+            out.push(y0);
+        }
+        out
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThreeBandEqParams {
+    pub low_shelf_freq_hz: f32,
+    pub low_shelf_gain_db: f32,
+    pub mid_freq_hz: f32,
+    pub mid_gain_db: f32,
+    pub mid_q: f32,
+    pub high_shelf_freq_hz: f32,
+    pub high_shelf_gain_db: f32,
+}
+
+/// Fixed-topology 3-band EQ (low-shelf, peak/bell, high-shelf) built from RBJ
+/// cookbook biquads applied in series. Shared by the EffectGraph Eq node and
+/// the Editor Inspector Eq tool.
+pub fn process_three_band_eq_offline(
+    mono: &[f32],
+    sample_rate: u32,
+    params: &ThreeBandEqParams,
+) -> Vec<f32> {
+    if mono.is_empty() {
+        return Vec::new();
+    }
+    let sr = sample_rate.max(1) as f32;
+    let low_shelf = Biquad::design(
+        BiquadKind::LowShelf,
+        params.low_shelf_freq_hz,
+        params.low_shelf_gain_db,
+        0.707,
+        sr,
+    );
+    let mid = Biquad::design(
+        BiquadKind::Peak,
+        params.mid_freq_hz,
+        params.mid_gain_db,
+        params.mid_q.max(0.1),
+        sr,
+    );
+    let high_shelf = Biquad::design(
+        BiquadKind::HighShelf,
+        params.high_shelf_freq_hz,
+        params.high_shelf_gain_db,
+        0.707,
+        sr,
+    );
+    let stage1 = low_shelf.process(mono);
+    let stage2 = mid.process(&stage1);
+    high_shelf.process(&stage2)
+}
+
 fn stretch_seek_preroll(stretch: &mut Stretch, input: &[f32], playback_rate: f32) {
     let in_lat = stretch.input_latency();
     if in_lat == 0 {
@@ -2537,9 +2748,11 @@ pub fn lufs_integrated_from_multi(chans_in: &[Vec<f32>], in_sr: u32) -> Result<f
 mod tests {
     use super::{
         encode_riff_wave_chunks, export_channels_audio, export_gain_audio, overwrite_gain_wav,
-        parse_riff_wave_chunks, resample_channels_quality, resample_channels_with_rubato,
-        resample_quality_params, resample_with_rubato, unique_sibling_tmp, ResampleQuality,
-        RiffWaveChunk, RubatoWindowFunction, SincInterpolationParameters,
+        parse_riff_wave_chunks, process_compressor_offline, process_noise_gate_offline,
+        process_three_band_eq_offline, resample_channels_quality, resample_channels_with_rubato,
+        resample_quality_params, resample_with_rubato, unique_sibling_tmp, CompressorParams,
+        NoiseGateParams, ResampleQuality, RiffWaveChunk, RubatoWindowFunction,
+        SincInterpolationParameters, ThreeBandEqParams,
     };
     use id3::TagLike;
     use std::io::Cursor;
@@ -3104,6 +3317,165 @@ mod tests {
         assert!(
             l_lfe == f32::NEG_INFINITY || l_lfe < -60.0,
             "LFE-only signal should gate out, got {l_lfe}"
+        );
+    }
+
+    #[test]
+    fn noise_gate_silences_signal_below_threshold() {
+        let sr = 48_000;
+        let quiet: Vec<f32> = make_signal(sr as usize, 3.0).iter().map(|v| v * 0.001).collect();
+        let params = NoiseGateParams {
+            threshold_db: -20.0,
+            attack_ms: 1.0,
+            release_ms: 20.0,
+        };
+        let out = process_noise_gate_offline(&quiet, sr, &params);
+        let tail_rms = rms(&out[out.len() / 2..]);
+        assert!(
+            tail_rms < 0.0005,
+            "signal below threshold should be gated to near-silence, got rms {tail_rms}"
+        );
+    }
+
+    #[test]
+    fn noise_gate_passes_signal_above_threshold() {
+        let sr = 48_000;
+        let loud = make_signal(sr as usize, 3.0);
+        let params = NoiseGateParams {
+            threshold_db: -40.0,
+            attack_ms: 1.0,
+            release_ms: 20.0,
+        };
+        let out = process_noise_gate_offline(&loud, sr, &params);
+        let tail_rms = rms(&out[out.len() / 2..]);
+        let src_rms = rms(&loud[loud.len() / 2..]);
+        assert!(
+            (tail_rms - src_rms).abs() < 0.05,
+            "signal above threshold should pass through near-unaffected: src {src_rms} out {tail_rms}"
+        );
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn compressor_reduces_gain_above_threshold() {
+        let sr = 48_000;
+        let loud: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32 * 200.0 * std::f32::consts::TAU).sin() * 0.9)
+            .collect();
+        let params = CompressorParams {
+            threshold_db: -12.0,
+            ratio: 4.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            makeup_db: 0.0,
+        };
+        let out = process_compressor_offline(&loud, sr, &params);
+        // Compare steady-state (tail) RMS rather than whole-buffer peak: a
+        // fast-attack compressor legitimately lets the very first transient
+        // through before the envelope has risen, so an early sample can
+        // still hit full amplitude even though the signal is being reduced
+        // everywhere else.
+        let tail = loud.len() / 2;
+        let src_rms = rms(&loud[tail..]);
+        let out_rms = rms(&out[tail..]);
+        assert!(
+            out_rms < src_rms * 0.9,
+            "compressor should reduce steady-state level above threshold: src {src_rms} out {out_rms}"
+        );
+    }
+
+    #[test]
+    fn compressor_passthrough_below_threshold() {
+        let sr = 48_000;
+        let quiet: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32 * 200.0 * std::f32::consts::TAU).sin() * 0.01)
+            .collect();
+        let params = CompressorParams {
+            threshold_db: -12.0,
+            ratio: 4.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            makeup_db: 0.0,
+        };
+        let out = process_compressor_offline(&quiet, sr, &params);
+        let src_peak = quiet.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        let out_peak = out.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+        assert!(
+            (out_peak - src_peak).abs() < 0.001,
+            "signal below threshold should pass through unaffected: src {src_peak} out {out_peak}"
+        );
+    }
+
+    #[test]
+    fn three_band_eq_boosts_targeted_frequency() {
+        let sr = 48_000;
+        let secs = 0.5;
+        let len = (sr as f32 * secs) as usize;
+        let target_hz = 1_000.0;
+        let tone: Vec<f32> = (0..len)
+            .map(|i| (i as f32 / sr as f32 * target_hz * std::f32::consts::TAU).sin() * 0.2)
+            .collect();
+        let flat = ThreeBandEqParams {
+            low_shelf_freq_hz: 100.0,
+            low_shelf_gain_db: 0.0,
+            mid_freq_hz: target_hz,
+            mid_gain_db: 0.0,
+            mid_q: 1.0,
+            high_shelf_freq_hz: 8_000.0,
+            high_shelf_gain_db: 0.0,
+        };
+        let boosted = ThreeBandEqParams {
+            mid_gain_db: 12.0,
+            ..flat
+        };
+        let out_flat = process_three_band_eq_offline(&tone, sr, &flat);
+        let out_boosted = process_three_band_eq_offline(&tone, sr, &boosted);
+        // Settle past the filters' transient before comparing steady-state level.
+        let tail = len / 2;
+        let rms_flat = rms(&out_flat[tail..]);
+        let rms_boosted = rms(&out_boosted[tail..]);
+        assert!(
+            rms_boosted > rms_flat * 1.5,
+            "12dB mid boost at the tone's frequency should raise its level: flat {rms_flat} boosted {rms_boosted}"
+        );
+    }
+
+    #[test]
+    fn three_band_eq_cuts_targeted_frequency() {
+        let sr = 48_000;
+        let secs = 0.5;
+        let len = (sr as f32 * secs) as usize;
+        let target_hz = 1_000.0;
+        let tone: Vec<f32> = (0..len)
+            .map(|i| (i as f32 / sr as f32 * target_hz * std::f32::consts::TAU).sin() * 0.2)
+            .collect();
+        let flat = ThreeBandEqParams {
+            low_shelf_freq_hz: 100.0,
+            low_shelf_gain_db: 0.0,
+            mid_freq_hz: target_hz,
+            mid_gain_db: 0.0,
+            mid_q: 1.0,
+            high_shelf_freq_hz: 8_000.0,
+            high_shelf_gain_db: 0.0,
+        };
+        let cut = ThreeBandEqParams {
+            mid_gain_db: -12.0,
+            ..flat
+        };
+        let out_flat = process_three_band_eq_offline(&tone, sr, &flat);
+        let out_cut = process_three_band_eq_offline(&tone, sr, &cut);
+        let tail = len / 2;
+        let rms_flat = rms(&out_flat[tail..]);
+        let rms_cut = rms(&out_cut[tail..]);
+        assert!(
+            rms_cut < rms_flat * 0.7,
+            "12dB mid cut at the tone's frequency should lower its level: flat {rms_flat} cut {rms_cut}"
         );
     }
 }

@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use crate::app::helpers::db_to_color;
 use crate::app::types::{
-    EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphNodeCategory, EffectGraphNodeData,
-    EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphPlaybackTarget,
-    EffectGraphPortDirection, EffectGraphPortKey, EffectGraphSeverity, EffectGraphSpectrumMode,
+    EffectGraphBitDepth, EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphNodeCategory,
+    EffectGraphNodeData, EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphPlaybackTarget,
+    EffectGraphPortDirection, EffectGraphPortKey, EffectGraphResampleQuality, EffectGraphSeverity,
+    EffectGraphSpectrumMode,
 };
 
 const EFFECT_GRAPH_MONITOR_DOWNMIX_NOTE: &str = "Preview monitor downmixes >2ch to stereo";
@@ -410,6 +411,54 @@ fn draw_spectrum_preview(
 }
 
 impl crate::app::WavesPreviewer {
+    /// Renders a plugin probe's error / generic-fallback-warning / backend-log
+    /// status, shared by the EffectGraph PluginFx node and the Editor's
+    /// PluginFx tool so both surface probe failures identically.
+    pub(in crate::app) fn ui_plugin_probe_status(
+        ui: &mut egui::Ui,
+        error: Option<&str>,
+        backend_note: Option<&str>,
+        backend_log: Option<&str>,
+    ) {
+        if let Some(err) = error {
+            ui.label(
+                RichText::new(err)
+                    .small()
+                    .color(Color32::from_rgb(240, 120, 120)),
+            );
+        }
+        if let Some(note) = backend_note {
+            Frame::NONE
+                .fill(Color32::from_rgb(80, 60, 20))
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .corner_radius(4.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("⚠ Generic fallback:")
+                                .small()
+                                .color(Color32::from_rgb(255, 200, 60)),
+                        );
+                        ui.label(
+                            RichText::new(note.trim())
+                                .small()
+                                .color(Color32::from_rgb(220, 180, 100)),
+                        );
+                    });
+                });
+        }
+        if let Some(log) = backend_log {
+            ui.collapsing("Backend Log", |ui| {
+                ui.label(
+                    RichText::new(log)
+                        .small()
+                        .monospace()
+                        .color(Color32::from_rgb(160, 176, 192)),
+                );
+            });
+        }
+    }
+
     pub(in crate::app) fn ui_effect_graph_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.request_plugin_scan_if_needed();
         self.handle_effect_graph_shortcuts(ctx);
@@ -1248,6 +1297,7 @@ impl crate::app::WavesPreviewer {
 
         let mut pending_connect: Option<(String, String, String, String)> = None;
         let mut clear_connect = false;
+        let mut pending_plugin_load_from_file: Option<String> = None;
         for idx in 0..self.effect_graph.draft.nodes.len() {
             let node = self.effect_graph.draft.nodes[idx].clone();
             let min = world_to_screen(canvas_rect, pan, zoom, node.ui_pos);
@@ -1513,6 +1563,12 @@ impl crate::app::WavesPreviewer {
             let mut mono_mix_ignored_channels = None;
             let mut semitones = None;
             let mut rate = None;
+            let mut noise_gate = None;
+            let mut eq = None;
+            let mut compressor = None;
+            let mut trim = None;
+            let mut bit_depth = None;
+            let mut resampler = None;
             let mut waveform_zoom = None;
             let mut spectrum_mode = None;
             let mut spectrum_zoom = None;
@@ -1532,6 +1588,47 @@ impl crate::app::WavesPreviewer {
                 EffectGraphNodeData::PitchShift { semitones: value } => semitones = Some(*value),
                 EffectGraphNodeData::TimeStretch { rate: value }
                 | EffectGraphNodeData::Speed { rate: value } => rate = Some(*value),
+                EffectGraphNodeData::NoiseGate {
+                    threshold_db,
+                    attack_ms,
+                    release_ms,
+                } => noise_gate = Some((*threshold_db, *attack_ms, *release_ms)),
+                EffectGraphNodeData::Eq {
+                    low_shelf_freq_hz,
+                    low_shelf_gain_db,
+                    mid_freq_hz,
+                    mid_gain_db,
+                    mid_q,
+                    high_shelf_freq_hz,
+                    high_shelf_gain_db,
+                } => {
+                    eq = Some((
+                        *low_shelf_freq_hz,
+                        *low_shelf_gain_db,
+                        *mid_freq_hz,
+                        *mid_gain_db,
+                        *mid_q,
+                        *high_shelf_freq_hz,
+                        *high_shelf_gain_db,
+                    ))
+                }
+                EffectGraphNodeData::Compressor {
+                    threshold_db,
+                    ratio,
+                    attack_ms,
+                    release_ms,
+                    makeup_db,
+                } => compressor = Some((*threshold_db, *ratio, *attack_ms, *release_ms, *makeup_db)),
+                EffectGraphNodeData::Trim {
+                    threshold_below_peak_db,
+                    pre_roll_ms,
+                    post_roll_ms,
+                } => trim = Some((*threshold_below_peak_db, *pre_roll_ms, *post_roll_ms)),
+                EffectGraphNodeData::BitDepth { depth } => bit_depth = Some(*depth),
+                EffectGraphNodeData::Resampler {
+                    target_sample_rate,
+                    quality,
+                } => resampler = Some((*target_sample_rate, *quality)),
                 EffectGraphNodeData::PluginFx { config } => plugin_config = Some(config.clone()),
                 EffectGraphNodeData::DebugWaveform { zoom: value } => waveform_zoom = Some(*value),
                 EffectGraphNodeData::DebugSpectrum { mode, zoom: value } => {
@@ -1704,6 +1801,15 @@ impl crate::app::WavesPreviewer {
                                                 Some("plugin not selected".to_string());
                                         }
                                     }
+                                    if ui
+                                        .button("Load from file...")
+                                        .on_hover_text(
+                                            "Pick a .vst3/.clap plugin directly, without needing a prior Rescan",
+                                        )
+                                        .clicked()
+                                    {
+                                        pending_plugin_load_from_file = Some(node.id.clone());
+                                    }
                                 });
 
                                 let mut filter_text = config.filter.clone();
@@ -1846,43 +1952,12 @@ impl crate::app::WavesPreviewer {
                                         .color(Color32::from_rgb(118, 132, 148)),
                                     );
                                 }
-                                if let Some(err) = plugin_runtime.last_error.as_deref() {
-                                    ui.label(
-                                        RichText::new(err)
-                                            .small()
-                                            .color(Color32::from_rgb(240, 120, 120)),
-                                    );
-                                }
-                                if let Some(note) = plugin_runtime.last_backend_note.as_deref() {
-                                    Frame::NONE
-                                        .fill(Color32::from_rgb(80, 60, 20))
-                                        .inner_margin(egui::Margin::symmetric(8, 4))
-                                        .corner_radius(4.0)
-                                        .show(ui, |ui| {
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.label(
-                                                    RichText::new("⚠ Generic fallback:")
-                                                        .small()
-                                                        .color(Color32::from_rgb(255, 200, 60)),
-                                                );
-                                                ui.label(
-                                                    RichText::new(note.trim())
-                                                        .small()
-                                                        .color(Color32::from_rgb(220, 180, 100)),
-                                                );
-                                            });
-                                        });
-                                }
-                                if let Some(log) = plugin_runtime.last_backend_log.as_deref() {
-                                    ui.collapsing("Backend Log", |ui| {
-                                        ui.label(
-                                            RichText::new(log)
-                                                .small()
-                                                .monospace()
-                                                .color(Color32::from_rgb(160, 176, 192)),
-                                        );
-                                    });
-                                }
+                                Self::ui_plugin_probe_status(
+                                    ui,
+                                    plugin_runtime.last_error.as_deref(),
+                                    plugin_runtime.last_backend_note.as_deref(),
+                                    plugin_runtime.last_backend_log.as_deref(),
+                                );
                                 egui::CollapsingHeader::new(format!(
                                     "Parameters ({})",
                                     config.params.len()
@@ -2262,7 +2337,13 @@ impl crate::app::WavesPreviewer {
                         EffectGraphNodeData::Gain { .. }
                         | EffectGraphNodeData::PitchShift { .. }
                         | EffectGraphNodeData::TimeStretch { .. }
-                        | EffectGraphNodeData::Speed { .. } => {}
+                        | EffectGraphNodeData::Speed { .. }
+                        | EffectGraphNodeData::NoiseGate { .. }
+                        | EffectGraphNodeData::Eq { .. }
+                        | EffectGraphNodeData::Compressor { .. }
+                        | EffectGraphNodeData::Trim { .. }
+                        | EffectGraphNodeData::BitDepth { .. }
+                        | EffectGraphNodeData::Resampler { .. } => {}
                     }
                     if let Some(mut value) = waveform_zoom {
                         let response =
@@ -2346,6 +2427,228 @@ impl crate::app::WavesPreviewer {
                             self.revalidate_effect_graph_draft();
                         }
                     }
+                    if let Some((mut threshold_db, mut attack_ms, mut release_ms)) = noise_gate {
+                        let mut changed = false;
+                        changed |= ui
+                            .add(egui::Slider::new(&mut threshold_db, -80.0..=0.0).text("Threshold dB"))
+                            .on_hover_text("Signal below this level is faded toward silence")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut attack_ms, 0.1..=500.0).logarithmic(true).text("Attack ms"))
+                            .on_hover_text("How fast the gate opens once the signal crosses the threshold")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut release_ms, 1.0..=2000.0).logarithmic(true).text("Release ms"))
+                            .on_hover_text("How fast the gate closes once the signal drops below the threshold")
+                            .changed();
+                        if changed {
+                            self.effect_graph_push_undo_snapshot();
+                            if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                node_mut.data = EffectGraphNodeData::NoiseGate {
+                                    threshold_db,
+                                    attack_ms,
+                                    release_ms,
+                                };
+                            }
+                            self.effect_graph.draft_dirty = true;
+                            self.revalidate_effect_graph_draft();
+                        }
+                    }
+                    if let Some((
+                        mut low_shelf_freq_hz,
+                        mut low_shelf_gain_db,
+                        mut mid_freq_hz,
+                        mut mid_gain_db,
+                        mut mid_q,
+                        mut high_shelf_freq_hz,
+                        mut high_shelf_gain_db,
+                    )) = eq
+                    {
+                        let mut changed = false;
+                        ui.label(RichText::new("Low shelf").small().weak())
+                            .on_hover_text("Boosts or cuts everything below this frequency");
+                        changed |= ui
+                            .add(egui::Slider::new(&mut low_shelf_freq_hz, 20.0..=2000.0).logarithmic(true).text("Freq Hz"))
+                            .on_hover_text("Low shelf corner frequency")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut low_shelf_gain_db, -24.0..=24.0).text("Gain dB"))
+                            .on_hover_text("Low shelf gain")
+                            .changed();
+                        ui.label(RichText::new("Mid").small().weak())
+                            .on_hover_text("Boosts or cuts a band centered on this frequency");
+                        changed |= ui
+                            .add(egui::Slider::new(&mut mid_freq_hz, 50.0..=12_000.0).logarithmic(true).text("Freq Hz"))
+                            .on_hover_text("Mid band center frequency")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut mid_gain_db, -24.0..=24.0).text("Gain dB"))
+                            .on_hover_text("Mid band gain")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut mid_q, 0.1..=10.0).logarithmic(true).text("Q"))
+                            .on_hover_text("Mid band width: higher Q = narrower band")
+                            .changed();
+                        ui.label(RichText::new("High shelf").small().weak())
+                            .on_hover_text("Boosts or cuts everything above this frequency");
+                        changed |= ui
+                            .add(egui::Slider::new(&mut high_shelf_freq_hz, 500.0..=20_000.0).logarithmic(true).text("Freq Hz"))
+                            .on_hover_text("High shelf corner frequency")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut high_shelf_gain_db, -24.0..=24.0).text("Gain dB"))
+                            .on_hover_text("High shelf gain")
+                            .changed();
+                        if changed {
+                            self.effect_graph_push_undo_snapshot();
+                            if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                node_mut.data = EffectGraphNodeData::Eq {
+                                    low_shelf_freq_hz,
+                                    low_shelf_gain_db,
+                                    mid_freq_hz,
+                                    mid_gain_db,
+                                    mid_q,
+                                    high_shelf_freq_hz,
+                                    high_shelf_gain_db,
+                                };
+                            }
+                            self.effect_graph.draft_dirty = true;
+                            self.revalidate_effect_graph_draft();
+                        }
+                    }
+                    if let Some((mut threshold_db, mut ratio, mut attack_ms, mut release_ms, mut makeup_db)) =
+                        compressor
+                    {
+                        let mut changed = false;
+                        changed |= ui
+                            .add(egui::Slider::new(&mut threshold_db, -60.0..=0.0).text("Threshold dB"))
+                            .on_hover_text("Signal above this level gets compressed")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut ratio, 1.0..=20.0).text("Ratio"))
+                            .on_hover_text("How strongly signal above the threshold is reduced (4:1 = 4 dB in becomes 1 dB out)")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut attack_ms, 0.1..=500.0).logarithmic(true).text("Attack ms"))
+                            .on_hover_text("How fast the compressor reacts once the signal crosses the threshold")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut release_ms, 1.0..=2000.0).logarithmic(true).text("Release ms"))
+                            .on_hover_text("How fast the compressor lets go once the signal drops below the threshold")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut makeup_db, 0.0..=24.0).text("Makeup dB"))
+                            .on_hover_text("Gain applied after compression to restore overall level")
+                            .changed();
+                        if changed {
+                            self.effect_graph_push_undo_snapshot();
+                            if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                node_mut.data = EffectGraphNodeData::Compressor {
+                                    threshold_db,
+                                    ratio,
+                                    attack_ms,
+                                    release_ms,
+                                    makeup_db,
+                                };
+                            }
+                            self.effect_graph.draft_dirty = true;
+                            self.revalidate_effect_graph_draft();
+                        }
+                    }
+                    if let Some((mut threshold_below_peak_db, mut pre_roll_ms, mut post_roll_ms)) = trim {
+                        let mut changed = false;
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut threshold_below_peak_db, 6.0..=90.0)
+                                    .text("Threshold below peak dB"),
+                            )
+                            .on_hover_text("How far below the loudest point counts as silence")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut pre_roll_ms, 0.0..=1000.0).text("Pre-roll ms"))
+                            .on_hover_text("Audio kept before the detected start of sound")
+                            .changed();
+                        changed |= ui
+                            .add(egui::Slider::new(&mut post_roll_ms, 0.0..=1000.0).text("Post-roll ms"))
+                            .on_hover_text("Audio kept after the detected end of sound")
+                            .changed();
+                        if changed {
+                            self.effect_graph_push_undo_snapshot();
+                            if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                node_mut.data = EffectGraphNodeData::Trim {
+                                    threshold_below_peak_db,
+                                    pre_roll_ms,
+                                    post_roll_ms,
+                                };
+                            }
+                            self.effect_graph.draft_dirty = true;
+                            self.revalidate_effect_graph_draft();
+                        }
+                        ui.label(
+                            RichText::new("Removes leading/trailing silence only")
+                                .small()
+                                .weak(),
+                        );
+                    }
+                    if let Some(depth) = bit_depth {
+                        ui.horizontal(|ui| {
+                            ui.label("Depth")
+                                .on_hover_text("Quantizes the signal to this bit depth (preview of the resolution loss)");
+                            for (option, label) in [
+                                (EffectGraphBitDepth::Pcm16, "16-bit"),
+                                (EffectGraphBitDepth::Pcm24, "24-bit"),
+                                (EffectGraphBitDepth::Float32, "32-bit float"),
+                            ] {
+                                if ui.selectable_label(depth == option, label).clicked() && depth != option {
+                                    self.effect_graph_push_undo_snapshot();
+                                    if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                        node_mut.data = EffectGraphNodeData::BitDepth { depth: option };
+                                    }
+                                    self.effect_graph.draft_dirty = true;
+                                    self.revalidate_effect_graph_draft();
+                                }
+                            }
+                        });
+                    }
+                    if let Some((mut target_sample_rate, quality)) = resampler {
+                        let mut changed = false;
+                        let mut sr_f = target_sample_rate as f32;
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut sr_f, 8_000.0..=192_000.0)
+                                    .logarithmic(true)
+                                    .text("Target Hz"),
+                            )
+                            .on_hover_text("Sample rate to convert to")
+                            .changed();
+                        target_sample_rate = sr_f.round() as u32;
+                        let mut new_quality = quality;
+                        ui.horizontal(|ui| {
+                            ui.label("Quality")
+                                .on_hover_text("Resampling quality: higher is slower but cleaner");
+                            for (option, label) in [
+                                (EffectGraphResampleQuality::Fast, "Fast"),
+                                (EffectGraphResampleQuality::Good, "Good"),
+                                (EffectGraphResampleQuality::Best, "Best"),
+                            ] {
+                                if ui.selectable_label(quality == option, label).clicked() {
+                                    new_quality = option;
+                                    changed = true;
+                                }
+                            }
+                        });
+                        if changed {
+                            self.effect_graph_push_undo_snapshot();
+                            if let Some(node_mut) = self.effect_graph.draft.nodes.get_mut(idx) {
+                                node_mut.data = EffectGraphNodeData::Resampler {
+                                    target_sample_rate,
+                                    quality: new_quality,
+                                };
+                            }
+                            self.effect_graph.draft_dirty = true;
+                            self.revalidate_effect_graph_draft();
+                        }
+                    }
                 },
             );
             if matches!(
@@ -2368,6 +2671,23 @@ impl crate::app::WavesPreviewer {
                 &to_node_id,
                 &to_port_id,
             );
+        }
+        if let Some(node_id) = pending_plugin_load_from_file {
+            if let Some(path) = self.pick_plugin_file_dialog() {
+                if let Some(entry) = self.add_plugin_catalog_entry_from_path(path.clone()) {
+                    self.effect_graph_push_undo_snapshot();
+                    self.effect_graph_select_plugin(&node_id, entry.key, entry.name);
+                } else {
+                    self.effect_graph
+                        .plugin_runtime
+                        .entry(node_id.clone())
+                        .or_default()
+                        .last_error = Some(format!(
+                        "not a recognized VST3/CLAP plugin: {}",
+                        path.display()
+                    ));
+                }
+            }
         }
         if clear_connect
             || (self.effect_graph.canvas.connecting_from_port.is_some()

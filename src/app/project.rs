@@ -451,6 +451,36 @@ pub struct ProjectToolState {
     pub stretch_rate: f32,
     #[serde(default = "default_loop_repeat")]
     pub loop_repeat: u32,
+    #[serde(default = "default_noise_gate_threshold_db")]
+    pub noise_gate_threshold_db: f32,
+    #[serde(default = "default_noise_gate_attack_ms")]
+    pub noise_gate_attack_ms: f32,
+    #[serde(default = "default_noise_gate_release_ms")]
+    pub noise_gate_release_ms: f32,
+    #[serde(default = "default_eq_low_shelf_freq_hz")]
+    pub eq_low_shelf_freq_hz: f32,
+    #[serde(default)]
+    pub eq_low_shelf_gain_db: f32,
+    #[serde(default = "default_eq_mid_freq_hz")]
+    pub eq_mid_freq_hz: f32,
+    #[serde(default)]
+    pub eq_mid_gain_db: f32,
+    #[serde(default = "default_eq_mid_q")]
+    pub eq_mid_q: f32,
+    #[serde(default = "default_eq_high_shelf_freq_hz")]
+    pub eq_high_shelf_freq_hz: f32,
+    #[serde(default)]
+    pub eq_high_shelf_gain_db: f32,
+    #[serde(default = "default_compressor_threshold_db")]
+    pub compressor_threshold_db: f32,
+    #[serde(default = "default_compressor_ratio")]
+    pub compressor_ratio: f32,
+    #[serde(default = "default_compressor_attack_ms")]
+    pub compressor_attack_ms: f32,
+    #[serde(default = "default_compressor_release_ms")]
+    pub compressor_release_ms: f32,
+    #[serde(default)]
+    pub compressor_makeup_db: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -599,6 +629,50 @@ fn default_loop_repeat() -> u32 {
 
 fn default_loudness_target_lufs() -> f32 {
     -14.0
+}
+
+fn default_noise_gate_threshold_db() -> f32 {
+    -40.0
+}
+
+fn default_noise_gate_attack_ms() -> f32 {
+    2.0
+}
+
+fn default_noise_gate_release_ms() -> f32 {
+    100.0
+}
+
+fn default_eq_low_shelf_freq_hz() -> f32 {
+    120.0
+}
+
+fn default_eq_mid_freq_hz() -> f32 {
+    1000.0
+}
+
+fn default_eq_mid_q() -> f32 {
+    1.0
+}
+
+fn default_eq_high_shelf_freq_hz() -> f32 {
+    8000.0
+}
+
+fn default_compressor_threshold_db() -> f32 {
+    -18.0
+}
+
+fn default_compressor_ratio() -> f32 {
+    3.0
+}
+
+fn default_compressor_attack_ms() -> f32 {
+    10.0
+}
+
+fn default_compressor_release_ms() -> f32 {
+    150.0
 }
 
 fn default_bpm_value() -> f32 {
@@ -769,6 +843,21 @@ pub fn project_tab_from_tab(
             pitch_semitones: tab.tool_state.pitch_semitones,
             stretch_rate: tab.tool_state.stretch_rate,
             loop_repeat: tab.tool_state.loop_repeat,
+            noise_gate_threshold_db: tab.tool_state.noise_gate_threshold_db,
+            noise_gate_attack_ms: tab.tool_state.noise_gate_attack_ms,
+            noise_gate_release_ms: tab.tool_state.noise_gate_release_ms,
+            eq_low_shelf_freq_hz: tab.tool_state.eq_low_shelf_freq_hz,
+            eq_low_shelf_gain_db: tab.tool_state.eq_low_shelf_gain_db,
+            eq_mid_freq_hz: tab.tool_state.eq_mid_freq_hz,
+            eq_mid_gain_db: tab.tool_state.eq_mid_gain_db,
+            eq_mid_q: tab.tool_state.eq_mid_q,
+            eq_high_shelf_freq_hz: tab.tool_state.eq_high_shelf_freq_hz,
+            eq_high_shelf_gain_db: tab.tool_state.eq_high_shelf_gain_db,
+            compressor_threshold_db: tab.tool_state.compressor_threshold_db,
+            compressor_ratio: tab.tool_state.compressor_ratio,
+            compressor_attack_ms: tab.tool_state.compressor_attack_ms,
+            compressor_release_ms: tab.tool_state.compressor_release_ms,
+            compressor_makeup_db: tab.tool_state.compressor_makeup_db,
         },
         bpm_enabled: tab.bpm_enabled,
         bpm_value: tab.bpm_value,
@@ -964,6 +1053,21 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         pitch_semitones: t.pitch_semitones,
         stretch_rate: t.stretch_rate,
         loop_repeat: t.loop_repeat.max(2),
+        noise_gate_threshold_db: t.noise_gate_threshold_db,
+        noise_gate_attack_ms: t.noise_gate_attack_ms,
+        noise_gate_release_ms: t.noise_gate_release_ms,
+        eq_low_shelf_freq_hz: t.eq_low_shelf_freq_hz,
+        eq_low_shelf_gain_db: t.eq_low_shelf_gain_db,
+        eq_mid_freq_hz: t.eq_mid_freq_hz,
+        eq_mid_gain_db: t.eq_mid_gain_db,
+        eq_mid_q: t.eq_mid_q,
+        eq_high_shelf_freq_hz: t.eq_high_shelf_freq_hz,
+        eq_high_shelf_gain_db: t.eq_high_shelf_gain_db,
+        compressor_threshold_db: t.compressor_threshold_db,
+        compressor_ratio: t.compressor_ratio,
+        compressor_attack_ms: t.compressor_attack_ms,
+        compressor_release_ms: t.compressor_release_ms,
+        compressor_makeup_db: t.compressor_makeup_db,
     }
 }
 

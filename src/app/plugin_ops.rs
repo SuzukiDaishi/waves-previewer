@@ -101,6 +101,43 @@ impl crate::app::WavesPreviewer {
         Self::is_native_plugin_path(Path::new(key))
     }
 
+    /// Registers a plugin the user picked directly via a file dialog, so an
+    /// empty (unscanned) catalog isn't a dead end. Returns `None` if the
+    /// path isn't a recognized plugin bundle/file.
+    pub(super) fn add_plugin_catalog_entry_from_path(
+        &mut self,
+        path: PathBuf,
+    ) -> Option<PluginCatalogEntry> {
+        let ext = path
+            .extension()
+            .and_then(|v| v.to_str())
+            .map(|v| v.to_ascii_lowercase());
+        let format = match ext.as_deref() {
+            Some("vst3") => crate::plugin::PluginFormat::Vst3,
+            Some("clap") => crate::plugin::PluginFormat::Clap,
+            _ => return None,
+        };
+        let name = path
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .unwrap_or("plugin")
+            .to_string();
+        let key = Self::plugin_path_key(&path);
+        if let Some(existing) = self.plugin_catalog.iter().find(|entry| entry.key == key) {
+            return Some(existing.clone());
+        }
+        let entry = PluginCatalogEntry {
+            key,
+            name,
+            path,
+            format,
+        };
+        self.plugin_catalog.push(entry.clone());
+        self.plugin_catalog
+            .sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
+        Some(entry)
+    }
+
     pub(super) fn default_plugin_search_paths() -> Vec<PathBuf> {
         let mut out = Vec::new();
         #[cfg(windows)]
@@ -2211,5 +2248,47 @@ impl crate::app::WavesPreviewer {
             .and_then(|n| n.to_str())
             .unwrap_or("(plugin)")
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod load_from_file_tests {
+    use crate::app::WavesPreviewer;
+    use std::path::PathBuf;
+
+    #[test]
+    fn add_plugin_catalog_entry_from_path_accepts_vst3_and_clap() {
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let entry = app
+            .add_plugin_catalog_entry_from_path(PathBuf::from("C:/Plugins/MyComp.vst3"))
+            .expect("vst3 accepted");
+        assert_eq!(entry.name, "MyComp");
+        assert_eq!(entry.format, crate::plugin::PluginFormat::Vst3);
+        assert_eq!(app.plugin_catalog.len(), 1);
+
+        let entry2 = app
+            .add_plugin_catalog_entry_from_path(PathBuf::from("C:/Plugins/OtherComp.clap"))
+            .expect("clap accepted");
+        assert_eq!(entry2.format, crate::plugin::PluginFormat::Clap);
+        assert_eq!(app.plugin_catalog.len(), 2);
+    }
+
+    #[test]
+    fn add_plugin_catalog_entry_from_path_rejects_unknown_extension() {
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let result = app.add_plugin_catalog_entry_from_path(PathBuf::from("C:/Plugins/notes.txt"));
+        assert!(result.is_none());
+        assert!(app.plugin_catalog.is_empty());
+    }
+
+    #[test]
+    fn add_plugin_catalog_entry_from_path_dedupes_same_path() {
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        let path = PathBuf::from("C:/Plugins/MyComp.vst3");
+        app.add_plugin_catalog_entry_from_path(path.clone())
+            .expect("first add");
+        app.add_plugin_catalog_entry_from_path(path)
+            .expect("second add");
+        assert_eq!(app.plugin_catalog.len(), 1, "same path should not duplicate");
     }
 }
