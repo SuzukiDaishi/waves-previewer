@@ -2757,6 +2757,8 @@ impl crate::app::WavesPreviewer {
         let mut do_eq: Option<((usize, usize), crate::wave::ThreeBandEqParams)> = None;
         let mut do_compressor: Option<((usize, usize), crate::wave::CompressorParams)> = None;
         let mut do_reverse: Option<(usize, usize)> = None;
+        let mut pending_spectral_warp_preview = false;
+        let mut pending_spectral_warp_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -4312,6 +4314,12 @@ impl crate::app::WavesPreviewer {
             let gain_env_editing = wave_view_gestures
                 && matches!(tab.active_tool, ToolKind::Gain)
                 && tab.gain_env_enabled;
+            // Spectral warp editing owns the pointer on the Spec/Log views
+            // (the input handling itself lives below, after the spectral
+            // y<->Hz helpers are defined).
+            let spectral_warp_editing = matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
+                && tab.spectral_warp_edit
+                && display_samples_len > 0;
             let canvas_h = rect.height().max(1.0);
             const GAIN_ENV_DB_RANGE: f32 = 24.0;
             const PITCH_SEMI_RANGE: f32 = 12.0;
@@ -4319,7 +4327,7 @@ impl crate::app::WavesPreviewer {
             let y_to_frac = |y: f32| (1.0 - (y - rect.top()) / canvas_h).clamp(0.0, 1.0);
             // A flag any gesture sets while it owns the primary button; the
             // seek / range-select handlers below bail out when set.
-            let mut tool_gesture_active = gain_env_editing;
+            let mut tool_gesture_active = gain_env_editing || spectral_warp_editing;
             // Requests deferred to after UI borrows (same pattern as inspector).
             let mut gesture_refresh_preview = false;
             let mut gesture_restore_preview = false;
@@ -4573,6 +4581,7 @@ impl crate::app::WavesPreviewer {
             {
                 tab.pitch_drag_active = false;
                 tab.stretch_drag_target = None;
+                tab.spectral_warp_drag = None;
             }
             // Resolve deferred gesture requests into the shared pending slots.
             if gesture_restore_preview {
@@ -4777,6 +4786,112 @@ impl crate::app::WavesPreviewer {
                     )
                 }
             };
+            // ---- Spectral Warp input (Spec/Log views): while enabled it owns
+            // the pointer — drag pushes frequencies (liquify-style), grabbing
+            // an existing arrow adjusts it, double/right-click removes it.
+            if spectral_warp_editing {
+                suppress_seek = true;
+                if resp.hovered() {
+                    hover_cursor = Some(egui::CursorIcon::Crosshair);
+                }
+                let spec_freq_to_y = |hz: f32, lane: usize| -> f32 {
+                    let frac = Self::editor_spec_freq_to_frac(
+                        view_mode,
+                        hz,
+                        spec_axis_max_freq,
+                        spec_mel_scale,
+                    );
+                    let frac_local = ((frac - spec_vis_min)
+                        / (spec_vis_max - spec_vis_min).max(1e-6))
+                    .clamp(0.0, 1.0);
+                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    lane_top + (1.0 - frac_local) * lane_h.max(1.0)
+                };
+                let hit_radius = 10.0f32;
+                let nearest_warp_point = |points: &[crate::app::types::SpectralWarpPoint],
+                                          pos: egui::Pos2|
+                 -> Option<usize> {
+                    let lane = spec_lane_at_y(pos.y);
+                    let mut best: Option<(usize, f32)> = None;
+                    for (idx, p) in points.iter().enumerate() {
+                        let x = geom.sample_center_x(p.sample.min(display_samples_len));
+                        let d0 = egui::pos2(x, spec_freq_to_y(p.freq_hz, lane)).distance(pos);
+                        let d1 = egui::pos2(x, spec_freq_to_y(p.freq_hz + p.delta_hz, lane))
+                            .distance(pos);
+                        let d = d0.min(d1);
+                        if d <= hit_radius && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                            best = Some((idx, d));
+                        }
+                    }
+                    best.map(|(i, _)| i)
+                };
+                let mut warp_changed = false;
+                let double_clicked = resp.double_clicked_by(egui::PointerButton::Primary);
+                let right_clicked = resp.clicked_by(egui::PointerButton::Secondary);
+                if double_clicked || right_clicked {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        if let Some(idx) = nearest_warp_point(&tab.spectral_warp_points, pos) {
+                            tab.spectral_warp_points.remove(idx);
+                            tab.spectral_warp_drag = None;
+                            warp_changed = true;
+                        }
+                    }
+                }
+                if !double_clicked
+                    && resp.drag_started_by(egui::PointerButton::Primary)
+                    && tab.spectral_warp_drag.is_none()
+                {
+                    if let Some(pos) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .or_else(|| resp.interact_pointer_pos())
+                    {
+                        if let Some(idx) = nearest_warp_point(&tab.spectral_warp_points, pos) {
+                            tab.spectral_warp_drag = Some(idx);
+                        } else {
+                            let sample = geom
+                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                            let lane = spec_lane_at_y(pos.y);
+                            let hz = spec_y_to_freq(pos.y, lane).max(0.0);
+                            tab.spectral_warp_points.push(
+                                crate::app::types::SpectralWarpPoint {
+                                    sample,
+                                    freq_hz: hz,
+                                    delta_hz: 0.0,
+                                },
+                            );
+                            tab.spectral_warp_drag = Some(tab.spectral_warp_points.len() - 1);
+                        }
+                    }
+                }
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    if let (Some(idx), Some(pos)) =
+                        (tab.spectral_warp_drag, resp.interact_pointer_pos())
+                    {
+                        if let Some(p) = tab.spectral_warp_points.get_mut(idx) {
+                            let lane = spec_lane_at_y(pos.y);
+                            let target = spec_y_to_freq(pos.y, lane).max(0.0);
+                            p.delta_hz = target - p.freq_hz;
+                        }
+                    }
+                }
+                if ui.input(|i| i.pointer.primary_released()) {
+                    if tab.spectral_warp_drag.take().is_some() {
+                        warp_changed = true;
+                    }
+                }
+                if warp_changed {
+                    stop_playback = true;
+                    if Self::editor_spectral_warp_ready(tab) {
+                        // Render + audition the new warp right away.
+                        pending_spectral_warp_preview = true;
+                    } else if tab.preview_audio_tool
+                        == Some(crate::app::types::ToolKind::SpectralWarp)
+                        || tab.preview_overlay.is_some()
+                    {
+                        need_restore_preview = true;
+                    }
+                }
+            }
             // Drag to select a range (independent of tool), unless we are dragging markers.
             // Alt+Drag: both endpoints snap to nearest zero crossing.
             // Ctrl+Drag: push current selection to extra_selections and start a new one.
@@ -6325,6 +6440,82 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            // ---- Spectral Warp arrows (Spec/Log views) ----
+            if matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
+                && display_samples_len > 0
+                && (tab.spectral_warp_edit || !tab.spectral_warp_points.is_empty())
+            {
+                let overlay_font = TextStyle::Monospace.resolve(ui.style());
+                let warp_color = Color32::from_rgb(255, 130, 210);
+                let halo = Color32::from_rgba_unmultiplied(0, 0, 0, 170);
+                let spec_freq_to_y = |hz: f32, lane: usize| -> f32 {
+                    let frac = Self::editor_spec_freq_to_frac(
+                        view_mode,
+                        hz,
+                        spec_axis_max_freq,
+                        spec_mel_scale,
+                    );
+                    let frac_local = ((frac - spec_vis_min)
+                        / (spec_vis_max - spec_vis_min).max(1e-6))
+                    .clamp(0.0, 1.0);
+                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    lane_top + (1.0 - frac_local) * lane_h.max(1.0)
+                };
+                let hover = ui.input(|i| i.pointer.hover_pos());
+                for lane in 0..lane_count {
+                    for (idx, p) in tab.spectral_warp_points.iter().enumerate() {
+                        let x = geom.sample_center_x(p.sample.min(display_samples_len));
+                        if x < wave_left - 20.0 || x > wave_left + wave_w + 20.0 {
+                            continue;
+                        }
+                        let y0 = spec_freq_to_y(p.freq_hz, lane);
+                        let y1 = spec_freq_to_y(p.freq_hz + p.delta_hz, lane);
+                        painter.line_segment(
+                            [egui::pos2(x, y0), egui::pos2(x, y1)],
+                            egui::Stroke::new(3.5, halo),
+                        );
+                        painter.line_segment(
+                            [egui::pos2(x, y0), egui::pos2(x, y1)],
+                            egui::Stroke::new(1.8, warp_color),
+                        );
+                        painter.circle_stroke(
+                            egui::pos2(x, y0),
+                            3.5,
+                            egui::Stroke::new(1.5, warp_color),
+                        );
+                        let grabbed = tab.spectral_warp_drag == Some(idx);
+                        let hovered = hover
+                            .map(|h| {
+                                h.distance(egui::pos2(x, y1)) <= 10.0
+                                    || h.distance(egui::pos2(x, y0)) <= 10.0
+                            })
+                            .unwrap_or(false);
+                        let r = if grabbed || hovered { 5.0 } else { 3.5 };
+                        painter.circle_filled(egui::pos2(x, y1), r, warp_color);
+                        if (y1 - y0).abs() > 8.0 {
+                            let dir = (y1 - y0).signum();
+                            painter.add(egui::Shape::line(
+                                vec![
+                                    egui::pos2(x - 4.0, y1 - dir * 6.0),
+                                    egui::pos2(x, y1),
+                                    egui::pos2(x + 4.0, y1 - dir * 6.0),
+                                ],
+                                egui::Stroke::new(1.8, warp_color),
+                            ));
+                        }
+                        if grabbed || hovered {
+                            painter.text(
+                                egui::pos2(x + 8.0, y1),
+                                egui::Align2::LEFT_CENTER,
+                                format!("{:+.0} Hz", p.delta_hz),
+                                overlay_font.clone(),
+                                warp_color,
+                            );
+                        }
+                    }
+                }
+            }
+
             if let Some(amp_rect) = amplitude_nav_rect {
                 if let Some((next_zoom, next_center)) =
                     Self::draw_editor_amplitude_navigator(ui, amp_rect, tab)
@@ -6803,6 +6994,9 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::MusicAnalyze => "Music Analyze",
                                 ToolKind::PluginFx => "Plugin FX",
                                 ToolKind::Reverse => "Reverse",
+                                // Spectrogram-view tool; never selectable in
+                                // the Waveform tool list.
+                                ToolKind::SpectralWarp => "Spectral Warp",
                             };
                             egui::ComboBox::new(("tool_selector", tab_idx), "Tool")
                                 .selected_text(tool_label(tool))
@@ -6877,6 +7071,9 @@ impl crate::app::WavesPreviewer {
                             }
                             Self::inspector_section(ui, tool_label(tab.active_tool));
                             match tab.active_tool {
+                                // Spectral Warp lives in the Spec/Log view's
+                                // inspector; it is never active here.
+                                ToolKind::SpectralWarp => {}
                                 // Seek/Select removed: seeking is always available on the canvas
                                 ToolKind::LoopEdit => {
                                     // compact spacing for inspector controls
@@ -9559,6 +9756,110 @@ impl crate::app::WavesPreviewer {
                                     tab.preview_overlay = None;
                                 }
                             }
+                            // Spectral Warp: image-like frequency warp. Only on
+                            // views that resynthesize back to the waveform
+                            // (linear / log spectrogram) — Mel stays view-only.
+                            if matches!(leaf_view, ViewMode::Spectrogram | ViewMode::Log) {
+                                ui.separator();
+                                Self::inspector_section(ui, "Spectral Warp");
+                                ui.scope(|ui| {
+                                    let s = ui.style_mut();
+                                    s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                    s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                    let edit_resp = ui.checkbox(
+                                        &mut tab.spectral_warp_edit,
+                                        "Edit warp points on spectrogram",
+                                    );
+                                    if edit_resp.changed() {
+                                        tab.spectral_warp_drag = None;
+                                    }
+                                    if tab.spectral_warp_edit {
+                                        ui.label(
+                                            RichText::new(
+                                                "Drag on the spectrogram to push frequencies up/down (liquify-style). Grab an arrow to adjust it; double-click or right-click removes it.",
+                                            )
+                                            .weak(),
+                                        );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("Radius");
+                                        let mut t_ms = tab.tool_state.warp_time_radius_ms;
+                                        let mut f_hz = tab.tool_state.warp_freq_radius_hz;
+                                        if !t_ms.is_finite() || t_ms <= 0.0 { t_ms = 150.0; }
+                                        if !f_hz.is_finite() || f_hz <= 0.0 { f_hz = 300.0; }
+                                        let rt = ui
+                                            .add(
+                                                egui::DragValue::new(&mut t_ms)
+                                                    .range(10.0..=2000.0)
+                                                    .speed(5.0)
+                                                    .suffix(" ms"),
+                                            )
+                                            .on_hover_text("Time falloff of each warp stroke (Gaussian sigma)");
+                                        let rf = ui
+                                            .add(
+                                                egui::DragValue::new(&mut f_hz)
+                                                    .range(20.0..=8000.0)
+                                                    .speed(10.0)
+                                                    .suffix(" Hz"),
+                                            )
+                                            .on_hover_text("Frequency falloff of each warp stroke (Gaussian sigma)");
+                                        if rt.changed() || rf.changed() {
+                                            tab.tool_state = ToolState {
+                                                warp_time_radius_ms: t_ms,
+                                                warp_freq_radius_hz: f_hz,
+                                                ..tab.tool_state
+                                            };
+                                        }
+                                    });
+                                    let warp_ready = Self::editor_spectral_warp_ready(tab)
+                                        && !tab.loading;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} point(s)",
+                                                tab.spectral_warp_points.len()
+                                            ))
+                                            .weak(),
+                                        );
+                                        if !tab.spectral_warp_points.is_empty()
+                                            && ui.button("Clear points").clicked()
+                                        {
+                                            tab.spectral_warp_points.clear();
+                                            tab.spectral_warp_drag = None;
+                                            need_restore_preview = true;
+                                        }
+                                    });
+                                    if overlay_busy || apply_busy {
+                                        ui.add(egui::Spinner::new());
+                                    }
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                warp_ready && preview_button_enabled,
+                                                egui::Button::new("Preview"),
+                                            )
+                                            .on_hover_text(
+                                                "Render the warp and audition it (green overlay needs \"Waveform overlay\")",
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_spectral_warp_preview = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                warp_ready && !apply_busy,
+                                                egui::Button::new("Apply"),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_spectral_warp_apply = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            need_restore_preview = true;
+                                        }
+                                    });
+                                });
+                            }
                         }
                         ViewMode::Tempogram => {
                             Self::inspector_section(ui, "Tempogram");
@@ -9889,6 +10190,12 @@ impl crate::app::WavesPreviewer {
                 }
                 if let Some(target) = pending_loudness_apply {
                     self.spawn_editor_apply_for_tab(tab_idx, ToolKind::Loudness, target);
+                }
+                if pending_spectral_warp_preview {
+                    self.spawn_spectral_warp_preview_for_tab(tab_idx);
+                }
+                if pending_spectral_warp_apply {
+                    self.spawn_spectral_warp_apply_for_tab(tab_idx);
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();

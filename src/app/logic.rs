@@ -1539,6 +1539,8 @@ impl super::WavesPreviewer {
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
             speed_rate: 1.0,
+            warp_time_radius_ms: 150.0,
+            warp_freq_radius_hz: 300.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,

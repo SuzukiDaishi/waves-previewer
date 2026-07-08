@@ -239,6 +239,7 @@ impl WavesPreviewer {
                 Some(ToolKind::PitchShift) => "Previewing PitchShift",
                 Some(ToolKind::TimeStretch) => "Previewing TimeStretch",
                 Some(ToolKind::Speed) => "Previewing Speed",
+                Some(ToolKind::SpectralWarp) => "Previewing Spectral Warp",
                 _ => "Previewing",
             };
             items.push(TopbarActivityItem {

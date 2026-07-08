@@ -2652,6 +2652,8 @@ fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<Proj
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
             speed_rate: 1.0,
+            warp_time_radius_ms: 150.0,
+            warp_freq_radius_hz: 300.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -2952,6 +2954,8 @@ fn resolve_editor_state_for_input(input: &Path) -> Result<EditorTargetState> {
             pitch_semitones: 0.0,
             stretch_rate: 1.0,
             speed_rate: 1.0,
+            warp_time_radius_ms: 150.0,
+            warp_freq_radius_hz: 300.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -3028,6 +3032,8 @@ fn tool_state_json(state: &ToolState) -> Value {
         "pitch_semitones": state.pitch_semitones,
         "stretch_rate": state.stretch_rate,
         "speed_rate": state.speed_rate,
+        "warp_time_radius_ms": state.warp_time_radius_ms,
+        "warp_freq_radius_hz": state.warp_freq_radius_hz,
         "loop_repeat": state.loop_repeat,
     })
 }

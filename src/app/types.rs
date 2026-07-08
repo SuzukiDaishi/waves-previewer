@@ -629,6 +629,7 @@ pub enum ToolKind {
     Compressor,
     MusicAnalyze,
     PluginFx,
+    SpectralWarp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -742,6 +743,8 @@ pub struct ToolState {
     pub pitch_semitones: f32,
     pub stretch_rate: f32,
     pub speed_rate: f32,
+    pub warp_time_radius_ms: f32,
+    pub warp_freq_radius_hz: f32,
     pub loop_repeat: u32,
     pub noise_gate_threshold_db: f32,
     pub noise_gate_attack_ms: f32,
@@ -1239,6 +1242,20 @@ pub struct EditorTab {
     // --- Canvas gesture state for PitchShift / Speed / TimeStretch (transient) ---
     pub pitch_drag_active: bool, // dragging the pitch line up/down
     pub stretch_drag_target: Option<usize>, // dragged selection-end target while stretching
+    // --- Spectral warp (image-like frequency warp on Spec/Log views, transient) ---
+    pub spectral_warp_edit: bool, // canvas warp editing enabled (owns the pointer)
+    pub spectral_warp_points: Vec<SpectralWarpPoint>, // accumulated warp strokes
+    pub spectral_warp_drag: Option<usize>, // index of the point being dragged
+}
+
+/// One spectral-warp control point: spectrogram content around
+/// (`sample`, `freq_hz`) is pushed by `delta_hz` along the frequency axis,
+/// with Gaussian falloff in time and frequency (radii live in `ToolState`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralWarpPoint {
+    pub sample: usize,
+    pub freq_hz: f32,
+    pub delta_hz: f32,
 }
 
 impl EditorTab {

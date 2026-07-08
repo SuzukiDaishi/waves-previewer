@@ -157,6 +157,7 @@ impl WavesPreviewer {
             Some(ToolKind::PitchShift) => "Previewing PitchShift...".to_string(),
             Some(ToolKind::TimeStretch) => "Previewing TimeStretch...".to_string(),
             Some(ToolKind::Speed) => "Previewing Speed...".to_string(),
+            Some(ToolKind::SpectralWarp) => "Previewing Spectral Warp...".to_string(),
             _ => "Previewing...".to_string(),
         })
     }

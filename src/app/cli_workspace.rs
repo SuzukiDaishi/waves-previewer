@@ -348,6 +348,9 @@ impl CliWorkspace {
                 let len = self.tab_len(tab_idx)?;
                 self.app.editor_apply_reverse_range(tab_idx, (0, len));
             }
+            ToolKind::SpectralWarp => {
+                anyhow::bail!("SpectralWarp is interactive-only (warp points live in the editor)")
+            }
             ToolKind::NoiseGate => {
                 let st = self
                     .app

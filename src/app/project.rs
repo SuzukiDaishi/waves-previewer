@@ -451,6 +451,10 @@ pub struct ProjectToolState {
     pub stretch_rate: f32,
     #[serde(default = "default_speed_rate")]
     pub speed_rate: f32,
+    #[serde(default = "default_warp_time_radius_ms")]
+    pub warp_time_radius_ms: f32,
+    #[serde(default = "default_warp_freq_radius_hz")]
+    pub warp_freq_radius_hz: f32,
     #[serde(default = "default_loop_repeat")]
     pub loop_repeat: u32,
     #[serde(default = "default_noise_gate_threshold_db")]
@@ -631,6 +635,14 @@ fn default_loop_repeat() -> u32 {
 
 fn default_speed_rate() -> f32 {
     1.0
+}
+
+fn default_warp_time_radius_ms() -> f32 {
+    150.0
+}
+
+fn default_warp_freq_radius_hz() -> f32 {
+    300.0
 }
 
 fn default_loudness_target_lufs() -> f32 {
@@ -849,6 +861,8 @@ pub fn project_tab_from_tab(
             pitch_semitones: tab.tool_state.pitch_semitones,
             stretch_rate: tab.tool_state.stretch_rate,
             speed_rate: tab.tool_state.speed_rate,
+            warp_time_radius_ms: tab.tool_state.warp_time_radius_ms,
+            warp_freq_radius_hz: tab.tool_state.warp_freq_radius_hz,
             loop_repeat: tab.tool_state.loop_repeat,
             noise_gate_threshold_db: tab.tool_state.noise_gate_threshold_db,
             noise_gate_attack_ms: tab.tool_state.noise_gate_attack_ms,
@@ -1060,6 +1074,16 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         pitch_semitones: t.pitch_semitones,
         stretch_rate: t.stretch_rate,
         speed_rate: if t.speed_rate > 0.0 { t.speed_rate } else { 1.0 },
+        warp_time_radius_ms: if t.warp_time_radius_ms > 0.0 {
+            t.warp_time_radius_ms
+        } else {
+            150.0
+        },
+        warp_freq_radius_hz: if t.warp_freq_radius_hz > 0.0 {
+            t.warp_freq_radius_hz
+        } else {
+            300.0
+        },
         loop_repeat: t.loop_repeat.max(2),
         noise_gate_threshold_db: t.noise_gate_threshold_db,
         noise_gate_attack_ms: t.noise_gate_attack_ms,
@@ -1099,6 +1123,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "PitchShift" => ToolKind::PitchShift,
         "TimeStretch" => ToolKind::TimeStretch,
         "Speed" => ToolKind::Speed,
+        "SpectralWarp" => ToolKind::SpectralWarp,
         "Gain" => ToolKind::Gain,
         "Normalize" => ToolKind::Normalize,
         "Loudness" => ToolKind::Loudness,

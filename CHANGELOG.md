@@ -4,6 +4,10 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Spectrogram: Image-Like Spectral Warp (Spec / Log views)
+- New "Spectral Warp" section in the Inspector for the linear and log spectrogram views (the views that resynthesize back to a waveform; Mel stays view-only). Enable "Edit warp points on spectrogram" and drag directly on the spectrogram to push frequency content up or down, liquify-style: each stroke becomes an arrow (origin ring -> target dot) with Gaussian falloff in time and frequency, controlled by the Radius (ms / Hz) fields. Grab an arrow to re-adjust it; double-click or right-click removes it.
+- Processing runs in the STFT domain (2048/75% Hann WOLA, same engine as the RX-style spectral mute): a backward frequency remap per analysis frame with complex-bin interpolation and per-bin cumulative phase rotation (phase-vocoder style) so shifted partials stay coherent; only the influenced time region is processed and its edges crossfade against the original. Releasing a drag renders the warp on a worker thread and auditions it immediately (green waveform overlay with "Waveform overlay" enabled); Apply bakes it destructively with full undo and re-analyzes the spectrogram.
+
 ### Editor Inspector: Gain Curve, Speed Tool, and Selection-Aware Pitch/Stretch/Reverse
 - The Gain tool can now apply a DAW-automation-style gain curve instead of only a uniform value: enable "Gain curve (draw on waveform)" and click the orange polyline on the waveform to add breakpoints, drag them to shape the curve (piecewise-linear in dB, +/-24 dB), double-click or right-click a point to remove it. The curve previews live (green overlay + audition) and Apply bakes it destructively with full undo. Long clips preview the curve by scaling the overview bins.
 - New Speed tool (Inspector, between Time Stretch and LoudNorm): tape-style playback-rate change (0.25x-4x) that shifts pitch and length together, using the existing offline resampler. Same preview/apply flow as Time Stretch, including background preview for long clips and session persistence of the rate.

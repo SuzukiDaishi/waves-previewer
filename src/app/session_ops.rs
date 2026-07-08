@@ -751,6 +751,8 @@ impl super::WavesPreviewer {
                     pitch_semitones: cached.tool_state.pitch_semitones,
                     stretch_rate: cached.tool_state.stretch_rate,
                     speed_rate: cached.tool_state.speed_rate,
+                    warp_time_radius_ms: cached.tool_state.warp_time_radius_ms,
+                    warp_freq_radius_hz: cached.tool_state.warp_freq_radius_hz,
                     loop_repeat: cached.tool_state.loop_repeat,
                     noise_gate_threshold_db: cached.tool_state.noise_gate_threshold_db,
                     noise_gate_attack_ms: cached.tool_state.noise_gate_attack_ms,
