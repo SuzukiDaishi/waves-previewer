@@ -196,12 +196,19 @@ impl super::WavesPreviewer {
                         .get(tab_idx)
                         .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
                         .unwrap_or(0);
+                    let mut undo_state = None;
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         let end = tab.loop_region.map(|(_, e)| e).unwrap_or(pos_now);
                         let s = pos_now.min(end);
                         let e = end.max(s);
+                        if tab.loop_region != Some((s, e)) {
+                            undo_state = Some(Self::capture_undo_state(tab));
+                        }
                         tab.loop_region = Some((s, e));
                         Self::update_loop_markers_dirty(tab);
+                    }
+                    if let Some(state) = undo_state {
+                        self.push_editor_undo_state(tab_idx, state, true);
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
@@ -216,12 +223,19 @@ impl super::WavesPreviewer {
                         .get(tab_idx)
                         .map(|tab_ro| self.map_audio_to_display_sample(tab_ro, pos_audio))
                         .unwrap_or(0);
+                    let mut undo_state = None;
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         let start = tab.loop_region.map(|(s, _)| s).unwrap_or(pos_now);
                         let s = start.min(pos_now);
                         let e = pos_now.max(start);
+                        if tab.loop_region != Some((s, e)) {
+                            undo_state = Some(Self::capture_undo_state(tab));
+                        }
                         tab.loop_region = Some((s, e));
                         Self::update_loop_markers_dirty(tab);
+                    }
+                    if let Some(state) = undo_state {
+                        self.push_editor_undo_state(tab_idx, state, true);
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L)) {
@@ -312,35 +326,24 @@ impl super::WavesPreviewer {
                         self.try_add_trim_range_as_virtual_shortcut(tab_idx);
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num0)) {
-                    self.seek_to_fraction_in_active_tab(1, 1);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num1)) {
-                    self.seek_to_fraction_in_active_tab(1, 1);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num2)) {
-                    self.seek_to_fraction_in_active_tab(1, 2);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num3)) {
-                    self.seek_to_fraction_in_active_tab(1, 3);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num4)) {
-                    self.seek_to_fraction_in_active_tab(1, 4);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num5)) {
-                    self.seek_to_fraction_in_active_tab(1, 5);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num6)) {
-                    self.seek_to_fraction_in_active_tab(1, 6);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num7)) {
-                    self.seek_to_fraction_in_active_tab(1, 7);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num8)) {
-                    self.seek_to_fraction_in_active_tab(1, 8);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Num9)) {
-                    self.seek_to_fraction_in_active_tab(1, 9);
+                // Digit seek: keyboard row order 1..9,0 spans start -> end
+                // (1 = 0%, 2 = 1/9, ..., 9 = 8/9, 0 = 100%). See CONTROLS.md.
+                const DIGIT_SEEK: [(egui::Key, usize); 10] = [
+                    (egui::Key::Num1, 0),
+                    (egui::Key::Num2, 1),
+                    (egui::Key::Num3, 2),
+                    (egui::Key::Num4, 3),
+                    (egui::Key::Num5, 4),
+                    (egui::Key::Num6, 5),
+                    (egui::Key::Num7, 6),
+                    (egui::Key::Num8, 7),
+                    (egui::Key::Num9, 8),
+                    (egui::Key::Num0, 9),
+                ];
+                for (key, numer) in DIGIT_SEEK {
+                    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                        self.seek_to_fraction_in_active_tab(numer, 9);
+                    }
                 }
             }
         }
