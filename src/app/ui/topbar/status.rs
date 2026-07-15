@@ -586,13 +586,48 @@ impl WavesPreviewer {
         let painter = ui.painter_at(rect);
         let track_rect = rect.shrink(1.0);
         painter.rect_filled(track_rect, 2.0, Color32::from_rgb(18, 18, 22));
-        let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        if norm > 0.0 {
-            let fill = egui::Rect::from_min_size(
-                track_rect.min,
-                egui::vec2(track_rect.width() * norm, track_rect.height()),
-            );
-            painter.rect_filled(fill, 2.0, Color32::from_rgb(100, 220, 120));
+        let norm_of = |db: f32| ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        let ch_count = self.meter_ch_db.len();
+        if ch_count >= 2 {
+            // Per-output-channel sub-bars (RMS fill + peak-hold tick).
+            let sub_h = track_rect.height() / ch_count as f32;
+            for (i, &(rms_db, _peak_db)) in self.meter_ch_db.iter().enumerate() {
+                let top = track_rect.top() + sub_h * i as f32;
+                let sub = egui::Rect::from_min_max(
+                    egui::pos2(track_rect.left(), top + 0.5),
+                    egui::pos2(track_rect.right(), top + sub_h - 0.5),
+                );
+                let n = norm_of(rms_db);
+                if n > 0.0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            sub.min,
+                            egui::vec2(sub.width() * n, sub.height()),
+                        ),
+                        1.0,
+                        Color32::from_rgb(100, 220, 120),
+                    );
+                }
+                if let Some(&hold_db) = self.meter_ch_hold_db.get(i) {
+                    let hn = norm_of(hold_db);
+                    if hn > 0.01 {
+                        let x = sub.left() + sub.width() * hn;
+                        painter.line_segment(
+                            [egui::pos2(x, sub.top()), egui::pos2(x, sub.bottom())],
+                            egui::Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+                        );
+                    }
+                }
+            }
+        } else {
+            let norm = norm_of(db);
+            if norm > 0.0 {
+                let fill = egui::Rect::from_min_size(
+                    track_rect.min,
+                    egui::vec2(track_rect.width() * norm, track_rect.height()),
+                );
+                painter.rect_filled(fill, 2.0, Color32::from_rgb(100, 220, 120));
+            }
         }
         painter.rect_stroke(
             track_rect,

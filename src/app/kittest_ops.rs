@@ -108,6 +108,23 @@ impl super::WavesPreviewer {
         self.audio.channel_masks()
     }
 
+    /// Write per-channel meter values into the shared engine state as if the
+    /// audio callback had produced them (no real device in tests).
+    pub fn test_inject_channel_meters(&mut self, levels: &[(f32, f32)]) {
+        use std::sync::atomic::Ordering;
+        let n = levels.len().min(crate::audio::METER_CH_SLOTS);
+        for i in 0..crate::audio::METER_CH_SLOTS {
+            let (rms, peak) = levels.get(i).copied().unwrap_or((0.0, 0.0));
+            self.audio.shared.meter_ch_rms[i].store(rms, Ordering::Relaxed);
+            self.audio.shared.meter_ch_peak[i].store(peak, Ordering::Relaxed);
+        }
+        self.audio.shared.meter_ch_count.store(n, Ordering::Relaxed);
+    }
+
+    pub fn test_channel_meter_db(&self) -> Vec<(f32, f32)> {
+        self.meter_ch_db.clone()
+    }
+
     pub fn test_set_inline_rename_buffer(&mut self, text: &str) -> bool {
         if self.inline_rename_path.is_none() {
             return false;

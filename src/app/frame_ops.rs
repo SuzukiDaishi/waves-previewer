@@ -124,6 +124,7 @@ impl WavesPreviewer {
         self.playback_sync_state_snapshot();
         self.sync_channel_masks_to_engine();
         self.meter_db = self.current_output_meter_db();
+        self.update_channel_meters();
         self.apply_effective_volume();
         trace_stage!("process_scan_messages", self.process_scan_messages());
         trace_stage!("pump_list_jobs", {

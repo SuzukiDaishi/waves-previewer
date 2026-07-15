@@ -421,6 +421,10 @@ pub struct WavesPreviewer {
     // unified numeric control via DragValue; no string normalization
     pub pitch_semitones: f32,
     pub meter_db: f32,
+    // per-output-channel meter readback (rms_db, peak_db) + UI peak hold
+    meter_ch_db: Vec<(f32, f32)>,
+    meter_ch_hold_db: Vec<f32>,
+    meter_ch_last_time: Option<std::time::Instant>,
     topbar_volume_rect: Option<egui::Rect>,
     topbar_output_meter_rect: Option<egui::Rect>,
     topbar_search_rect: Option<egui::Rect>,
@@ -1170,6 +1174,36 @@ impl WavesPreviewer {
     /// engine every frame. Anything other than the editor workspace (list
     /// preview, effect graph) plays with all channels audible, so a stale
     /// mask can never leak across sources.
+    /// Read the callback's per-channel meters and maintain UI-side peak-hold
+    /// ballistics. `meter_ch_db` holds (rms_db, peak_db) per output channel.
+    pub(super) fn update_channel_meters(&mut self) {
+        const FLOOR_DB: f32 = -80.0;
+        let (count, rms, peak) = self.audio.channel_meter_snapshot();
+        let now = std::time::Instant::now();
+        let dt = self
+            .meter_ch_last_time
+            .map(|t| now.duration_since(t).as_secs_f32())
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.25);
+        self.meter_ch_last_time = Some(now);
+        let db_of = |v: f32| {
+            if v <= 1.0e-4 {
+                FLOOR_DB
+            } else {
+                (20.0 * v.log10()).max(FLOOR_DB)
+            }
+        };
+        self.meter_ch_db.resize(count, (FLOOR_DB, FLOOR_DB));
+        self.meter_ch_hold_db.resize(count, FLOOR_DB);
+        for i in 0..count {
+            let rms_db = db_of(rms[i]);
+            let peak_db = db_of(peak[i]);
+            self.meter_ch_db[i] = (rms_db, peak_db);
+            let hold = &mut self.meter_ch_hold_db[i];
+            *hold = (*hold - dt * 12.0).max(peak_db).max(FLOOR_DB);
+        }
+    }
+
     pub(super) fn sync_channel_masks_to_engine(&self) {
         let (mute, solo) = if self.is_editor_workspace_active() {
             self.active_tab

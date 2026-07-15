@@ -425,6 +425,47 @@ mod p1_operability {
     }
 
     #[test]
+    fn channel_meters_read_back_and_render() {
+        let dir = make_temp_dir("ch_meters");
+        neowaves::wave::export_channels_audio(
+            &synth_stereo(48_000, 0.3),
+            48_000,
+            &dir.join("m.wav"),
+        )
+        .expect("export wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        // Inject callback-side meter values and let the frame read them back.
+        harness
+            .state_mut()
+            .test_inject_channel_meters(&[(0.5, 0.9), (0.1, 0.2)]);
+        harness.run_steps(1);
+        // A later frame keeps re-reading the injected shared state; peak hold
+        // must not exceed the injected peak.
+        harness
+            .state_mut()
+            .test_inject_channel_meters(&[(0.5, 0.9), (0.1, 0.2)]);
+        harness.run_steps(2);
+
+        let ch = harness.state().test_channel_meter_db();
+        assert_eq!(ch.len(), 2);
+        assert!(
+            (ch[0].0 - 20.0 * 0.5f32.log10()).abs() < 0.2,
+            "ch0 rms db: {:?}",
+            ch
+        );
+        assert!((ch[1].1 - 20.0 * 0.2f32.log10()).abs() < 0.2);
+
+        // Zeroed meters shrink back gracefully (no stale channels).
+        harness.state_mut().test_inject_channel_meters(&[]);
+        harness.run_steps(2);
+        assert!(harness.state().test_channel_meter_db().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn destructive_keys_show_undo_toast() {
         let (mut harness, dir) = open_editor_tab("ct_toast");
 
