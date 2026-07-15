@@ -690,13 +690,6 @@ impl AudioEngine {
                                 Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                            let src_ch = if src_channels == 1 {
-                                0
-                            } else if out_ch < src_channels {
-                                out_ch
-                            } else {
-                                src_channels - 1
-                            };
                             let sample = if valid_loop && xfade > 0 {
                                 Self::sample_loop_with_xfade(
                                     pos_f,
@@ -705,11 +698,23 @@ impl AudioEngine {
                                     xfade,
                                     loop_xfade_shape,
                                     |sample_pos| {
-                                        Self::sample_at_interp(samples, src_ch, sample_pos)
+                                        Self::fold_src_sample(
+                                            src_channels,
+                                            channels,
+                                            out_ch,
+                                            sample_pos,
+                                            |c, p| Self::sample_at_interp(samples, c, p),
+                                        )
                                     },
                                 )
                             } else {
-                                Self::sample_at_interp(samples, src_ch, pos_f)
+                                Self::fold_src_sample(
+                                    src_channels,
+                                    channels,
+                                    out_ch,
+                                    pos_f,
+                                    |c, p| Self::sample_at_interp(samples, c, p),
+                                )
                             };
                             let out = (sample * vol).clamp(-1.0, 1.0);
                             *out_sample = T::from_sample(out);
@@ -794,13 +799,6 @@ impl AudioEngine {
                                 Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
-                            let src_ch = if src_channels == 1 {
-                                0
-                            } else if out_ch < src_channels {
-                                out_ch
-                            } else {
-                                src_channels - 1
-                            };
                             let sample = if valid_loop && xfade > 0 {
                                 Self::sample_loop_with_xfade(
                                     pos_f,
@@ -808,10 +806,20 @@ impl AudioEngine {
                                     loop_end,
                                     xfade,
                                     loop_xfade_shape,
-                                    |sample_pos| stream.sample_at_interp(src_ch, sample_pos),
+                                    |sample_pos| {
+                                        Self::fold_src_sample(
+                                            src_channels,
+                                            channels,
+                                            out_ch,
+                                            sample_pos,
+                                            |c, p| stream.sample_at_interp(c, p),
+                                        )
+                                    },
                                 )
                             } else {
-                                stream.sample_at_interp(src_ch, pos_f)
+                                Self::fold_src_sample(src_channels, channels, out_ch, pos_f, |c, p| {
+                                    stream.sample_at_interp(c, p)
+                                })
                             };
                             let out = (sample * vol).clamp(-1.0, 1.0);
                             *out_sample = T::from_sample(out);
@@ -1179,6 +1187,44 @@ impl AudioEngine {
     }
 
     #[allow(dead_code)]
+    /// Map planar source channels onto output channel `out_ch`:
+    /// - mono source: duplicated to every output (unchanged)
+    /// - src <= out: direct mapping; extra outputs repeat the last source
+    ///   channel (unchanged)
+    /// - src > out: output `o` averages source channels `{c | c % out == o}`
+    ///   so no source channel is silently dropped. This is a generic
+    ///   fold-down (pure mapping arithmetic, not DSP), not a standards
+    ///   surround downmix.
+    #[inline]
+    fn fold_src_sample<F: Fn(usize, f64) -> f32>(
+        src_channels: usize,
+        out_channels: usize,
+        out_ch: usize,
+        pos: f64,
+        sample_at: F,
+    ) -> f32 {
+        if src_channels <= 1 {
+            return sample_at(0, pos);
+        }
+        if src_channels <= out_channels {
+            return sample_at(out_ch.min(src_channels - 1), pos);
+        }
+        let step = out_channels.max(1);
+        let mut sum = 0.0f32;
+        let mut n = 0u32;
+        let mut c = out_ch.min(step - 1);
+        while c < src_channels {
+            sum += sample_at(c, pos);
+            n += 1;
+            c += step;
+        }
+        if n > 0 {
+            sum / n as f32
+        } else {
+            0.0
+        }
+    }
+
     fn sample_at_interp(buffer: &AudioBuffer, ch_idx: usize, pos_f: f64) -> f32 {
         let channel = buffer
             .channels
@@ -1362,6 +1408,47 @@ mod tests {
                 .expect("write r");
         }
         writer.finalize().expect("finalize wav");
+    }
+
+    fn fold_const(src: &[f32], out_channels: usize, out_ch: usize) -> f32 {
+        AudioEngine::fold_src_sample(src.len(), out_channels, out_ch, 0.0, |c, _| src[c])
+    }
+
+    #[test]
+    fn fold_src_sample_duplicates_mono_to_all_outputs() {
+        let src = [0.5f32];
+        assert_eq!(fold_const(&src, 2, 0), 0.5);
+        assert_eq!(fold_const(&src, 2, 1), 0.5);
+    }
+
+    #[test]
+    fn fold_src_sample_keeps_stereo_identity() {
+        let src = [0.25f32, -0.75];
+        assert_eq!(fold_const(&src, 2, 0), 0.25);
+        assert_eq!(fold_const(&src, 2, 1), -0.75);
+    }
+
+    #[test]
+    fn fold_src_sample_repeats_last_channel_on_extra_outputs() {
+        let src = [0.25f32, -0.75];
+        assert_eq!(fold_const(&src, 4, 2), -0.75);
+        assert_eq!(fold_const(&src, 4, 3), -0.75);
+    }
+
+    #[test]
+    fn fold_src_sample_averages_surplus_channels_to_stereo() {
+        // 4ch -> 2ch: L = (c0 + c2) / 2, R = (c1 + c3) / 2
+        let src = [0.2f32, 0.4, 0.6, 0.8];
+        assert!((fold_const(&src, 2, 0) - 0.4).abs() < 1e-6);
+        assert!((fold_const(&src, 2, 1) - 0.6).abs() < 1e-6);
+        // 3ch -> 2ch: L = (c0 + c2) / 2, R = c1 (no channel dropped)
+        let src3 = [0.3f32, -0.9, 0.5];
+        assert!((fold_const(&src3, 2, 0) - 0.4).abs() < 1e-6);
+        assert!((fold_const(&src3, 2, 1) - (-0.9)).abs() < 1e-6);
+        // 6ch -> 2ch: L = (c0 + c2 + c4) / 3, R = (c1 + c3 + c5) / 3
+        let src6 = [0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
+        assert!((fold_const(&src6, 2, 0) - 0.3).abs() < 1e-6);
+        assert!((fold_const(&src6, 2, 1) - 0.4).abs() < 1e-6);
     }
 
     #[test]
