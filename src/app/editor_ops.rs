@@ -1085,9 +1085,10 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             let g = crate::app::helpers::db_to_amp(gain_db);
+            // Editing buffers keep float headroom; no clamp here.
             for ch in tab.ch_samples.iter_mut() {
                 for i in s..e {
-                    ch[i] = (ch[i] * g).clamp(-1.0, 1.0);
+                    ch[i] *= g;
                 }
             }
             tab.dirty = true;
@@ -1095,6 +1096,7 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.notify_if_tab_over_fs(tab_idx);
     }
 
     pub(super) fn editor_apply_normalize_range(
@@ -1122,9 +1124,10 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             let g = crate::app::helpers::db_to_amp(target_db) / peak.max(1e-12);
+            // Editing buffers keep float headroom; no clamp here.
             for ch in tab.ch_samples.iter_mut() {
                 for i in s..e {
-                    ch[i] = (ch[i] * g).clamp(-1.0, 1.0);
+                    ch[i] *= g;
                 }
             }
             tab.dirty = true;
@@ -1132,6 +1135,7 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.notify_if_tab_over_fs(tab_idx);
     }
 
     pub(super) fn editor_apply_noise_gate_range(
@@ -1641,8 +1645,9 @@ impl crate::app::WavesPreviewer {
                         let gain = 10.0f32.powf(gain_db / 20.0);
                         for chan in ch.iter() {
                             let mut processed = chan.clone();
+                            // Editing buffers keep float headroom; no clamp.
                             for v in processed.iter_mut() {
-                                *v = (*v * gain).clamp(-1.0, 1.0);
+                                *v *= gain;
                             }
                             out.push(processed);
                         }
@@ -1804,6 +1809,7 @@ impl crate::app::WavesPreviewer {
                 self.cancel_spectrogram_for_path(&path);
                 self.cancel_feature_analysis_for_path(&path);
             }
+            self.notify_if_tab_over_fs(res.tab_idx);
             self.editor_apply_state = None;
             ctx.request_repaint();
         }

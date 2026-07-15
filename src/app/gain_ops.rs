@@ -102,9 +102,11 @@ impl WavesPreviewer {
             };
             let undo_state = Self::capture_undo_state(tab);
             let gain = crate::app::helpers::db_to_amp(gain_db);
+            // Editing buffers keep float headroom; clipping happens only at
+            // export/playback boundaries (see notify_if_tab_over_fs).
             for ch in tab.ch_samples.iter_mut() {
                 for v in ch.iter_mut() {
-                    *v = (*v * gain).clamp(-1.0, 1.0);
+                    *v *= gain;
                 }
             }
             tab.dirty = true;
@@ -112,6 +114,7 @@ impl WavesPreviewer {
             undo_state
         };
         self.set_pending_gain_db_for_path(&path, 0.0);
+        self.notify_if_tab_over_fs(tab_idx);
         // Keep playback running: the buffer swap below preserves the
         // position, and the gain layer previously applied at playback time
         // is now part of the samples themselves.

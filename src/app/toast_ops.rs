@@ -38,6 +38,27 @@ impl WavesPreviewer {
         });
     }
 
+    /// Editing buffers keep float headroom instead of hard-clipping, so warn
+    /// once when an edit leaves peaks above full scale: they will clip at
+    /// export/playback boundaries unless gain is reduced.
+    pub(super) fn notify_if_tab_over_fs(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let peak = tab
+            .ch_samples
+            .iter()
+            .flat_map(|ch| ch.iter())
+            .fold(0.0f32, |m, v| m.max(v.abs()));
+        if peak > 1.0 {
+            let db = 20.0 * peak.log10();
+            self.push_toast(
+                ToastSeverity::Info,
+                format!("Peak +{db:.1} dB above 0 dBFS — audio will clip on export unless gain is reduced"),
+            );
+        }
+    }
+
     pub(super) fn ui_toast_overlay(&mut self, ctx: &egui::Context) {
         self.toasts
             .retain(|t| t.created_at.elapsed() < toast_lifetime(t.severity));

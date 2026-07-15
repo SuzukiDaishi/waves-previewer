@@ -8869,9 +8869,10 @@ impl crate::app::WavesPreviewer {
                                                     let gain_db = target_lufs - lufs;
                                                     let gain = db_to_amp(gain_db);
                                                     let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                    // Match the unclamped destructive apply.
                                                     for ch in overlay.iter_mut() {
                                                         for v in ch.iter_mut() {
-                                                            *v = (*v * gain).clamp(-1.0, 1.0);
+                                                            *v *= gain;
                                                         }
                                                     }
                                                     let timeline_len = overlay
@@ -8885,7 +8886,7 @@ impl crate::app::WavesPreviewer {
                                                     ));
                                                     let mut mono = Self::editor_mixdown_mono(tab);
                                                     for v in &mut mono {
-                                                        *v = (*v * gain).clamp(-1.0, 1.0);
+                                                        *v *= gain;
                                                     }
                                                     pending_preview = Some((ToolKind::Loudness, mono));
                                                     stop_playback = true;
