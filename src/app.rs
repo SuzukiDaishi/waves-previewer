@@ -79,6 +79,7 @@ mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
 mod threading;
+mod toast_ops;
 mod tool_ops;
 mod tooling;
 mod transcript;
@@ -775,6 +776,8 @@ pub struct WavesPreviewer {
     // leaving dirty editor confirmation
     leave_intent: Option<LeaveIntent>,
     show_leave_prompt: bool,
+    /// Transient user-facing notifications (see toast_ops).
+    toasts: Vec<Toast>,
     pending_activate_path: Option<PathBuf>,
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,

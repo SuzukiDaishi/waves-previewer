@@ -1067,6 +1067,22 @@ pub enum LeaveIntent {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToastSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// Transient user-facing notification shown by the toast overlay.
+pub struct Toast {
+    pub message: String,
+    pub severity: ToastSeverity,
+    pub created_at: std::time::Instant,
+    /// Consecutive duplicates collapse into one toast with a counter.
+    pub count: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChannelViewMode {
     Mixdown,
     All,

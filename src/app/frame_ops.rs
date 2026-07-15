@@ -488,6 +488,7 @@ impl WavesPreviewer {
         self.handle_global_shortcuts(ctx);
         self.handle_clipboard_hotkeys(ctx);
         self.handle_undo_redo_hotkeys(ctx);
+        self.ui_toast_overlay(ctx);
     }
 
     fn run_frame_leave_prompt(&mut self, ctx: &egui::Context) {

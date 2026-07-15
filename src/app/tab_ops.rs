@@ -31,6 +31,13 @@ impl super::WavesPreviewer {
                     crate::app::MAX_EDITOR_TABS,
                     path.display()
                 ));
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Warning,
+                    format!(
+                        "Tab limit ({}) reached — not opening more editors",
+                        crate::app::MAX_EDITOR_TABS
+                    ),
+                );
                 return;
             }
             if let Some(cached) = self.edited_cache.remove(path) {
@@ -341,6 +348,13 @@ impl super::WavesPreviewer {
                 crate::app::MAX_EDITOR_TABS,
                 path.display()
             ));
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!(
+                    "Tab limit ({}) reached — not opening more editors",
+                    crate::app::MAX_EDITOR_TABS
+                ),
+            );
             return;
         }
         if let Some(cached) = self.edited_cache.remove(path) {

@@ -133,6 +133,10 @@ impl super::WavesPreviewer {
                 }
                 if let Err(err) = self.save_project_as(path) {
                     self.debug_log(format!("session save-as error: {err}"));
+                    self.push_toast(
+                        super::types::ToastSeverity::Error,
+                        format!("Session save-as failed: {err}"),
+                    );
                 }
             }
         } else if save {
@@ -147,6 +151,10 @@ impl super::WavesPreviewer {
                 }
             } else if let Err(err) = self.save_project() {
                 self.debug_log(format!("session save error: {err}"));
+                self.push_toast(
+                    super::types::ToastSeverity::Error,
+                    format!("Session save failed: {err}"),
+                );
             }
         }
 

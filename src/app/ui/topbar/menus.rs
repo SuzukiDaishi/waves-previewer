@@ -62,6 +62,10 @@ impl WavesPreviewer {
             if ui.button("Session Save (Ctrl+S)").clicked() {
                 if let Err(err) = self.save_project() {
                     self.debug_log(format!("session save error: {err}"));
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        format!("Session save failed: {err}"),
+                    );
                 }
                 ui.close();
             }
@@ -70,6 +74,10 @@ impl WavesPreviewer {
                     let path = ensure_extension(path, "nwsess");
                     if let Err(err) = self.save_project_as(path) {
                         self.debug_log(format!("session save error: {err}"));
+                        self.push_toast(
+                            crate::app::types::ToastSeverity::Error,
+                            format!("Session save-as failed: {err}"),
+                        );
                     }
                 }
                 ui.close();
@@ -77,6 +85,10 @@ impl WavesPreviewer {
             if ui.button("Session Close").clicked() {
                 if let Err(err) = self.close_project_with_autosave() {
                     self.debug_log(format!("session close save error: {err}"));
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        format!("Session close autosave failed: {err}"),
+                    );
                 }
                 ui.close();
             }
