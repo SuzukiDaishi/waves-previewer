@@ -408,7 +408,7 @@ fn read_wav_frame_channel_sample(
         }
         (1, 8) if !sample.is_empty() => Some(((sample[0] as f32 - 128.0) / 128.0).clamp(-1.0, 1.0)),
         (1, 16) if sample.len() >= 2 => Some(
-            (i16::from_le_bytes([sample[0], sample[1]]) as f32 / i16::MAX as f32).clamp(-1.0, 1.0),
+            (i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0).clamp(-1.0, 1.0),
         ),
         (1, 24) if sample.len() >= 3 => {
             let sign = if (sample[2] & 0x80) != 0 { 0xFF } else { 0x00 };
@@ -650,7 +650,7 @@ pub fn build_wav_proxy_preview(
                     )?
                 }
             } else if bits <= 16 {
-                let scale = i16::MAX as f32;
+                let scale = 32768.0f32;
                 if keep_channels == 1 {
                     let mut samples = reader.samples::<i16>();
                     collect_wav_proxy_mono(source_channels, stride, total_source_frames, || {
@@ -842,7 +842,7 @@ fn decode_m4a_fdk(path: &Path, max_secs: Option<f32>) -> Result<(Vec<Vec<f32>>, 
                     }
                     for i in 0..frames {
                         for c in 0..ch {
-                            let v = pcm[i * ch + c] as f32 / i16::MAX as f32;
+                            let v = pcm[i * ch + c] as f32 / 32768.0;
                             chans[c].push(v);
                         }
                     }
@@ -1054,7 +1054,7 @@ where
                     }
                     for i in 0..frames {
                         for c in 0..ch {
-                            let v = pcm[i * ch + c] as f32 / i16::MAX as f32;
+                            let v = pcm[i * ch + c] as f32 / 32768.0;
                             pending[c].push(v);
                         }
                     }

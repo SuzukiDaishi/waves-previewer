@@ -82,13 +82,24 @@ impl WavBitDepth {
     }
 }
 
+/// Symmetric 16-bit conversion (standard PCM convention): full-scale -1.0
+/// maps to i16::MIN (-32768); +1.0 clamps to i16::MAX (32767).
+#[inline]
+pub fn f32_to_i16_sym(v: f32) -> i16 {
+    (v * 32768.0)
+        .round()
+        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[inline]
+pub fn i16_to_f32_sym(v: i16) -> f32 {
+    v as f32 / 32768.0
+}
+
 fn quantize_sample(sample: f32, depth: WavBitDepth) -> f32 {
     let sample = sample.clamp(-1.0, 1.0);
     match depth {
-        WavBitDepth::Pcm16 => {
-            let max_abs = i16::MAX as f32;
-            ((sample * max_abs).round().clamp(-max_abs, max_abs)) / max_abs
-        }
+        WavBitDepth::Pcm16 => f32_to_i16_sym(sample) as f32 / 32768.0,
         WavBitDepth::Pcm24 => {
             let max_abs = 8_388_607.0f32;
             ((sample * max_abs).round().clamp(-max_abs, max_abs)) / max_abs
@@ -161,7 +172,7 @@ fn write_wav_range_with_depth(
                 .clamp(-1.0, 1.0);
             match depth {
                 WavBitDepth::Pcm16 => {
-                    writer.write_sample::<i16>((v * i16::MAX as f32).round() as i16)?;
+                    writer.write_sample::<i16>(f32_to_i16_sym(v))?;
                 }
                 WavBitDepth::Pcm24 => {
                     let max_abs = 8_388_607.0f32;
@@ -241,7 +252,7 @@ fn write_aiff_with_depth(
                 .clamp(-1.0, 1.0);
             match depth {
                 WavBitDepth::Pcm16 => {
-                    let q = (v * i16::MAX as f32).round() as i16;
+                    let q = f32_to_i16_sym(v);
                     sound.extend_from_slice(&q.to_be_bytes());
                 }
                 WavBitDepth::Pcm24 => {
@@ -1969,17 +1980,13 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
             }
         }
         hound::SampleFormat::Int => {
-            let max_abs = match spec.bits_per_sample {
-                8 => 127.0,
-                16 => 32767.0,
-                24 => 8_388_607.0,
-                32 => 2_147_483_647.0,
-                b => ((1u64 << (b - 1)) - 1) as f64 as f32,
-            };
+            // Symmetric scaling: -1.0 -> -2^(bits-1), +1.0 clamps to
+            // 2^(bits-1) - 1. f64 keeps 32-bit quantization exact.
+            let scale = (1u64 << (spec.bits_per_sample - 1)) as f64;
             for i in 0..frames {
                 for ch in 0..(spec.channels as usize) {
                     let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
-                    let v = (s * max_abs).round().clamp(-(max_abs), max_abs) as i32;
+                    let v = (s as f64 * scale).round().clamp(-scale, scale - 1.0) as i32;
                     writer.write_sample::<i32>(v)?;
                 }
             }
@@ -2621,8 +2628,7 @@ fn interleave_i16(chans: &[Vec<f32>]) -> Vec<i16> {
 }
 
 fn f32_to_i16(v: f32) -> i16 {
-    let clamped = v.clamp(-1.0, 1.0);
-    (clamped * i16::MAX as f32).round() as i16
+    f32_to_i16_sym(v.clamp(-1.0, 1.0))
 }
 
 fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
