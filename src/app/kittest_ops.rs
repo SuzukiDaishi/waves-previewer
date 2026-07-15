@@ -34,6 +34,10 @@ impl super::WavesPreviewer {
         self.audio.has_audio_source()
     }
 
+    pub fn test_toast_messages(&self) -> Vec<String> {
+        self.toasts.iter().map(|t| t.message.clone()).collect()
+    }
+
     pub fn test_audio_is_streaming_wav(&self, path: &Path) -> bool {
         self.audio.is_streaming_wav_path(path)
     }

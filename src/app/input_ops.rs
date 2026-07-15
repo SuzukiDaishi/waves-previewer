@@ -306,18 +306,38 @@ impl super::WavesPreviewer {
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
                     let ranges = self.all_selected_ranges(tab_idx);
-                    if ranges.len() > 1 {
+                    let fired = if ranges.len() > 1 {
                         self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
+                        true
                     } else if let Some((s, e)) = self.selected_range(tab_idx) {
                         self.editor_delete_range_and_join(tab_idx, (s, e));
+                        true
+                    } else {
+                        false
+                    };
+                    if fired {
+                        self.push_toast(
+                            super::types::ToastSeverity::Info,
+                            "Deleted selection (Ctrl+Z to undo)",
+                        );
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::T)) {
                     let ranges = self.all_selected_ranges(tab_idx);
-                    if ranges.len() > 1 {
+                    let fired = if ranges.len() > 1 {
                         self.editor_apply_trim_multi_ranges(tab_idx, ranges);
+                        true
                     } else if let Some((s, e)) = self.selected_range(tab_idx) {
                         self.editor_apply_trim_range(tab_idx, (s, e));
+                        true
+                    } else {
+                        false
+                    };
+                    if fired {
+                        self.push_toast(
+                            super::types::ToastSeverity::Info,
+                            "Trimmed to selection (Ctrl+Z to undo)",
+                        );
                     }
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::V)) {
