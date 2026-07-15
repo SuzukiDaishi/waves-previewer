@@ -4138,22 +4138,6 @@ impl crate::app::WavesPreviewer {
                 } else {
                     None
                 };
-                // Debug trace (dev builds): log incoming deltas and modifiers when over canvas
-                #[cfg(debug_assertions)]
-                if wheel_smooth != egui::Vec2::ZERO
-                    || zoom_factor_from_input.is_some()
-                {
-                    eprintln!(
-                        "wheel_smooth=({:.2},{:.2}) wheel_used=({:.2},{:.2}) ctrl={} shift={} zoom_delta={:.3}",
-                        wheel_smooth.x,
-                        wheel_smooth.y,
-                        wheel.x,
-                        wheel.y,
-                        modifiers.ctrl,
-                        modifiers.shift,
-                        zoom_delta
-                    );
-                }
                 // Zoom: plain wheel (unless Shift is held for pan) or gesture zoom.
                 if (((scroll_y.abs() > 0.0) && !modifiers.shift && !horizontal_wheel_pan)
                     || zoom_factor_from_input.is_some())
@@ -4198,16 +4182,6 @@ impl crate::app::WavesPreviewer {
                     );
                     let next_exact =
                         Self::editor_exact_view_for_anchor(anchor, t, wave_w, tab.samples_per_px);
-                    #[cfg(debug_assertions)]
-                    {
-                        let vis = (wave_w * old_spp).ceil() as usize;
-                        let mode = if tab.samples_per_px >= 1.0 { "agg" } else { "line" };
-                        let fit_whole = (new_spp - max_spp_fit).abs() < 1e-6;
-                        eprintln!(
-                            "ZOOM change: spp {:.5} -> {:.5} ({mode}) factor {:.3} vis={} -> {} anchor={} new_view_exact={:.3} wave_w={:.1} fit_whole={}",
-                            old_spp, new_spp, factor, vis, geom2.visible_count, anchor, next_exact, wave_w, fit_whole
-                        );
-                    }
                     Self::editor_set_view_offset_exact(tab, next_exact, geom2.max_left());
                 }
                 // Pan with trackpad horizontal wheel, or Shift + wheel for mouse wheels.

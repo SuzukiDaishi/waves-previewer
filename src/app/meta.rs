@@ -158,7 +158,7 @@ pub struct MetaPool {
 impl MetaPool {
     pub fn enqueue(&self, task: MetaTask) {
         let path = task_path(&task).clone();
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.tasks.insert(path.clone(), task).is_none() {
             inner.lo.push_back(path);
         }
@@ -167,7 +167,7 @@ impl MetaPool {
 
     pub fn enqueue_front(&self, task: MetaTask) {
         let path = task_path(&task).clone();
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.insert(path.clone(), task);
         if inner.promoted.insert(path.clone()) {
             inner.hi.push_front(path);
@@ -176,7 +176,7 @@ impl MetaPool {
     }
 
     pub fn promote_path(&self, path: &PathBuf) {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.tasks.contains_key(path) && inner.promoted.insert(path.clone()) {
             inner.hi.push_front(path.clone());
             self.shared.cv.notify_one();
@@ -189,7 +189,7 @@ impl MetaPool {
     /// was removed — in that case no `MetaUpdate` will arrive and the caller
     /// must clear its own inflight bookkeeping.
     pub fn cancel_path(&self, path: &Path) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.promoted.remove(path);
         let removed = inner.tasks.remove(path).is_some();
         if let Some(flag) = inner.running.get(path) {
@@ -492,7 +492,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
             crate::app::threading::lower_current_thread_priority();
             loop {
                 let popped = {
-                    let mut guard = shared.inner.lock().unwrap();
+                    let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     loop {
                         let next_path = loop {
                             if let Some(p) = guard.hi.pop_front() {
@@ -527,7 +527,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                 };
                 let task_path_owned = task_path(&task).clone();
                 run_meta_task(task, &cancel, &tx);
-                let mut guard = shared.inner.lock().unwrap();
+                let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 guard.running.remove(&task_path_owned);
             }
         });

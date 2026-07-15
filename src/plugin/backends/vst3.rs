@@ -336,7 +336,7 @@ mod native {
             if buffer.is_null() || num_bytes < 0 {
                 return Steinberg::kInvalidArgument;
             }
-            let guard = self.buf.lock().unwrap();
+            let guard = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             let pos = &mut *self.pos.get();
             let available = guard.len().saturating_sub(*pos);
             let to_read = (num_bytes as usize).min(available);
@@ -358,7 +358,7 @@ mod native {
             if buffer.is_null() || num_bytes < 0 {
                 return Steinberg::kInvalidArgument;
             }
-            let mut guard = self.buf.lock().unwrap();
+            let mut guard = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             let pos = &mut *self.pos.get();
             let to_write = num_bytes as usize;
             let end = *pos + to_write;
@@ -378,7 +378,7 @@ mod native {
             mode: Steinberg::int32,
             result: *mut Steinberg::int64,
         ) -> Steinberg::tresult {
-            let guard = self.buf.lock().unwrap();
+            let guard = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             let cur = &mut *self.pos.get();
             let new_pos: i64 = match mode {
                 0 => pos,                          // kIBSeekSet
@@ -446,7 +446,7 @@ mod native {
         if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
             let save_r = component.getState(stream_ptr.as_ptr());
             if save_r == Steinberg::kResultOk || save_r == Steinberg::kResultTrue {
-                let data = save_buf.lock().unwrap().clone();
+                let data = save_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 if !data.is_empty() {
                     out = Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode(&data));
                 }
