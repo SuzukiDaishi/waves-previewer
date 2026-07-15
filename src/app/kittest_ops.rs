@@ -54,6 +54,14 @@ impl super::WavesPreviewer {
         self.auto_play_list_nav = enabled;
     }
 
+    pub fn test_set_list_click_audition(&mut self, enabled: bool) {
+        self.list_click_audition = enabled;
+    }
+
+    pub fn test_list_click_audition(&self) -> bool {
+        self.list_click_audition
+    }
+
     pub fn test_mode_name(&self) -> &'static str {
         match self.mode {
             crate::app::types::RateMode::Speed => "Speed",

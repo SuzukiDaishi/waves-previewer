@@ -407,6 +407,8 @@ impl WavesPreviewer {
                 };
             } else if let Some(rest) = line.strip_prefix("auto_play_list_nav=") {
                 self.auto_play_list_nav = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
+                self.list_click_audition = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("transcript_ai_opt_in=") {
                 self.transcript_ai_opt_in = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("transcript_language=") {
@@ -639,6 +641,7 @@ impl WavesPreviewer {
         };
         let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
         let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
+        let list_click_audition = if self.list_click_audition { "1" } else { "0" };
         let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
         let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
             "1"
@@ -723,6 +726,7 @@ item_bg_mode={}\n\
 src_quality={}\n\
 audio_output_device={}\n\
 auto_play_list_nav={}\n\
+list_click_audition={}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -784,6 +788,7 @@ zoo_flip_manual={}\n",
             src_quality,
             audio_output_device,
             auto_play_list_nav,
+            list_click_audition,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,

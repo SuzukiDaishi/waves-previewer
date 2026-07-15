@@ -117,6 +117,83 @@ mod p1_operability {
     }
 
     #[test]
+    fn single_click_select_only_when_pref_off() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let dir = make_temp_dir("click_pref_off");
+        let wav = dir.join("click_target.wav");
+        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.4), 48_000, &wav)
+            .expect("export wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_list_click_audition(false);
+        harness.run_steps(2);
+
+        harness.get_by_label("click_target.wav").click();
+        harness.run_steps(3);
+
+        assert_eq!(harness.state().selected, Some(0), "click should select");
+        assert_eq!(
+            harness.state().test_playing_path(),
+            None,
+            "click must not load/audition when the pref is off"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn single_click_auditions_by_default() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let dir = make_temp_dir("click_pref_on");
+        let wav = dir.join("click_target.wav");
+        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.4), 48_000, &wav)
+            .expect("export wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state().test_list_click_audition());
+        harness.run_steps(2);
+
+        harness.get_by_label("click_target.wav").click();
+        harness.run_steps(3);
+
+        assert_eq!(harness.state().selected, Some(0));
+        assert_eq!(
+            harness.state().test_playing_path().map(|p| p.clone()),
+            Some(wav.clone()),
+            "default behavior keeps click = select + load"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn space_plays_selected_row_when_pref_off() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let dir = make_temp_dir("click_pref_space");
+        let wav = dir.join("click_target.wav");
+        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.4), 48_000, &wav)
+            .expect("export wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        harness.state_mut().test_set_list_click_audition(false);
+        harness.run_steps(2);
+
+        harness.get_by_label("click_target.wav").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_playing_path(), None);
+
+        harness.key_press(Key::Space);
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_playing_path().map(|p| p.clone()),
+            Some(wav.clone()),
+            "Space should load and play the selected row"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn editor_home_end_seek() {
         let (mut harness, dir) = open_editor_tab("home_end");
 

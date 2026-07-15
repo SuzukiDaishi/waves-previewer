@@ -1317,9 +1317,11 @@ impl crate::app::WavesPreviewer {
                         } else if clicked_any {
                             let mods = ctx.input(|i| i.modifiers);
                             self.update_selection_on_click(row_idx, mods);
-                            self.select_and_load(row_idx, false);
-                            if self.auto_play_list_nav {
-                                self.request_list_autoplay();
+                            if self.list_click_audition {
+                                self.select_and_load(row_idx, false);
+                                if self.auto_play_list_nav {
+                                    self.request_list_autoplay();
+                                }
                             }
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;

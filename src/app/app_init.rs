@@ -202,6 +202,7 @@ impl WavesPreviewer {
             scroll_to_selected: false,
             last_list_scroll_at: None,
             auto_play_list_nav: false,
+            list_click_audition: true,
             suppress_list_enter: false,
             list_has_focus: false,
             search_has_focus: false,

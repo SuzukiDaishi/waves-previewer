@@ -638,6 +638,9 @@ pub struct WavesPreviewer {
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,
+    // single click = select + audition (default). When false, single click only
+    // selects; audition happens via Space / keyboard nav / autoplay.
+    list_click_audition: bool,
     suppress_list_enter: bool,
     list_has_focus: bool,
     search_has_focus: bool,

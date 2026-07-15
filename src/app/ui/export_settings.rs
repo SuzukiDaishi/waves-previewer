@@ -292,6 +292,20 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                             ui.separator();
+                            if ui
+                                .checkbox(
+                                    &mut self.list_click_audition,
+                                    "Single click auditions (select + load/play)",
+                                )
+                                .on_hover_text(
+                                    "Off: single click only selects; play the selection with \
+                                     Space or keyboard navigation.",
+                                )
+                                .changed()
+                            {
+                                self.save_prefs();
+                            }
+                            ui.separator();
                             ui.label("List Columns:");
                             let mut next_cols = self.list_columns;
                             ui.horizontal_wrapped(|ui| {
