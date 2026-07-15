@@ -194,6 +194,82 @@ mod p1_operability {
     }
 
     #[test]
+    fn f2_inline_rename_commits_and_cancels() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let dir = make_temp_dir("inline_rename");
+        let wav = dir.join("old_name.wav");
+        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.3), 48_000, &wav)
+            .expect("export wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        harness.get_by_label("old_name.wav").click();
+        harness.run_steps(2);
+        harness.key_press(Key::F2);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_inline_rename_path(),
+            Some(wav.as_path()),
+            "F2 should start inline rename on the selected row"
+        );
+
+        // Escape cancels without renaming.
+        harness.key_press(Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().test_inline_rename_path(), None);
+        assert!(wav.exists());
+
+        // F2 again, type a new name, Enter commits.
+        harness.key_press(Key::F2);
+        harness.run_steps(2);
+        assert!(harness
+            .state_mut()
+            .test_set_inline_rename_buffer("new_name.wav"));
+        harness.run_steps(1);
+        harness.key_press(Key::Enter);
+        harness.run_steps(3);
+
+        assert_eq!(harness.state().test_inline_rename_path(), None);
+        assert!(dir.join("new_name.wav").exists(), "file renamed on disk");
+        assert!(!wav.exists());
+        assert!(
+            harness.query_by_label("new_name.wav").is_some(),
+            "list shows the new name"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inline_rename_guards_list_nav() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let dir = make_temp_dir("inline_rename_guard");
+        for name in ["a_first.wav", "b_second.wav"] {
+            neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.2), 48_000, &dir.join(name))
+                .expect("export wav");
+        }
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+
+        harness.get_by_label("a_first.wav").click();
+        harness.run_steps(2);
+        let selected_before = harness.state().selected;
+        harness.key_press(Key::F2);
+        harness.run_steps(2);
+        assert!(harness.state().test_inline_rename_path().is_some());
+
+        harness.key_press(Key::ArrowDown);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().selected,
+            selected_before,
+            "arrow keys must not move the selection while renaming"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn editor_home_end_seek() {
         let (mut harness, dir) = open_editor_tab("home_end");
 

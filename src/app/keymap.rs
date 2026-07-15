@@ -37,6 +37,7 @@ pub enum Action {
     ListOpenSelected,
     ListNavigate,
     ListCopyPaste,
+    ListRenameInline,
     // Editor
     EditorSetLoopStart,
     EditorSetLoopEnd,
@@ -240,6 +241,14 @@ pub const KEYMAP: &[KeyBinding] = &[
         chord: None,
         keys_label: "Up/Down, PgUp/PgDn, Home/End",
         desc: "Move the selection (Shift extends the range)",
+        dispatch: Dispatch::Manual,
+    },
+    KeyBinding {
+        action: Action::ListRenameInline,
+        context: KeyContext::List,
+        chord: Some((Mods::None, Key::F2)),
+        keys_label: "",
+        desc: "Rename the selected file in place",
         dispatch: Dispatch::Manual,
     },
     KeyBinding {

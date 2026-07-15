@@ -744,6 +744,11 @@ pub struct WavesPreviewer {
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,
     rename_target: Option<PathBuf>,
+    // inline (in-cell) rename state; path identifies the row so sorting can't
+    // retarget the edit.
+    inline_rename_path: Option<PathBuf>,
+    inline_rename_buffer: String,
+    inline_rename_focus_next: bool,
     rename_input: String,
     rename_focus_next: bool,
     rename_error: Option<String>,

@@ -486,6 +486,12 @@ impl crate::app::WavesPreviewer {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                 }
                                 ui.visuals_mut().override_text_color = row_fg;
+                                if self.inline_rename_path.as_deref()
+                                    == Some(path_owned.as_path())
+                                {
+                                    self.ui_inline_rename_cell(ui, &path_owned);
+                                    return;
+                                }
                                 let cell_resp = self.attach_row_context_menu(
                                     ui.interact(
                                         ui.max_rect(),
@@ -1354,5 +1360,42 @@ impl crate::app::WavesPreviewer {
             },
             interaction,
         );
+    }
+
+    /// In-cell rename editor shown in the file column while
+    /// `inline_rename_path` targets this row. Enter commits, Escape or
+    /// clicking elsewhere cancels; a failed commit keeps editing.
+    fn ui_inline_rename_cell(&mut self, ui: &mut egui::Ui, path: &std::path::PathBuf) {
+        let edit_id = egui::Id::new("list_inline_rename_edit");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.inline_rename_buffer)
+                .id(edit_id)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(ui.available_width().max(60.0)),
+        );
+        if self.inline_rename_focus_next {
+            self.inline_rename_focus_next = false;
+            resp.request_focus();
+        }
+        if resp.lost_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let new_name = self.inline_rename_buffer.clone();
+                match self.rename_file_path(path, &new_name) {
+                    Ok(_) => {
+                        self.inline_rename_path = None;
+                    }
+                    Err(err) => {
+                        self.push_toast(
+                            crate::app::types::ToastSeverity::Error,
+                            format!("Rename failed: {err}"),
+                        );
+                        // Keep the editor open so the name can be fixed.
+                        self.inline_rename_focus_next = true;
+                    }
+                }
+            } else {
+                self.inline_rename_path = None;
+            }
+        }
     }
 }

@@ -62,6 +62,18 @@ impl super::WavesPreviewer {
         self.list_click_audition
     }
 
+    pub fn test_inline_rename_path(&self) -> Option<&Path> {
+        self.inline_rename_path.as_deref()
+    }
+
+    pub fn test_set_inline_rename_buffer(&mut self, text: &str) -> bool {
+        if self.inline_rename_path.is_none() {
+            return false;
+        }
+        self.inline_rename_buffer = text.to_string();
+        true
+    }
+
     pub fn test_mode_name(&self) -> &'static str {
         match self.mode {
             crate::app::types::RateMode::Speed => "Speed",

@@ -20,6 +20,20 @@ impl WavesPreviewer {
         self.rename_focus_next = true;
     }
 
+    pub(super) fn begin_inline_rename(&mut self, path: PathBuf) {
+        self.inline_rename_buffer = self
+            .item_for_path(&path)
+            .map(|item| item.display_name.clone())
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
+        self.inline_rename_path = Some(path);
+        self.inline_rename_focus_next = true;
+    }
+
     pub(super) fn open_batch_rename_dialog(&mut self, paths: Vec<PathBuf>) {
         self.batch_rename_targets = paths;
         self.batch_rename_pattern = "{name}_{n}".into();

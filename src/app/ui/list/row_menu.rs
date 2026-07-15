@@ -114,6 +114,10 @@ impl WavesPreviewer {
         }
         let renameable_selected = self.selected_renameable_paths();
         if renameable_selected.len() == 1 {
+            if ui.button("Rename (F2, inline)").clicked() {
+                self.begin_inline_rename(renameable_selected[0].clone());
+                ui.close();
+            }
             if ui.button("Rename...").clicked() {
                 self.open_rename_dialog(renameable_selected[0].clone());
                 ui.close();
