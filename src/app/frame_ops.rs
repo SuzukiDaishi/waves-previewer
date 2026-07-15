@@ -122,6 +122,7 @@ impl WavesPreviewer {
         self.ensure_theme_visuals(ctx);
         self.tick_project_open();
         self.playback_sync_state_snapshot();
+        self.sync_channel_masks_to_engine();
         self.meter_db = self.current_output_meter_db();
         self.apply_effective_volume();
         trace_stage!("process_scan_messages", self.process_scan_messages());

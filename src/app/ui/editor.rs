@@ -2454,6 +2454,46 @@ impl crate::app::WavesPreviewer {
                     view.selected.retain(|&idx| idx < channel_count);
                     requested_channel_view = Some(view);
                 }
+                // Playback-only channel mute/solo (mapping in the audio
+                // callback; not an edit, so not undoable and never saved).
+                let ms_active = tab.ch_muted.iter().any(|&m| m)
+                    || tab.ch_solo.iter().any(|&s| s);
+                let ms_label = if ms_active { "M/S*" } else { "M/S" };
+                ui.menu_button(ms_label, |ui| {
+                    tab.ch_muted.resize(channel_count, false);
+                    tab.ch_solo.resize(channel_count, false);
+                    ui.label("Playback mute / solo");
+                    for idx in 0..channel_count {
+                        ui.horizontal(|ui| {
+                            let name = match (channel_count, idx) {
+                                (2, 0) => "L".to_string(),
+                                (2, 1) => "R".to_string(),
+                                _ => format!("Ch {}", idx + 1),
+                            };
+                            ui.label(name);
+                            if ui
+                                .selectable_label(tab.ch_muted[idx], "M")
+                                .on_hover_text("Mute this channel during playback")
+                                .clicked()
+                            {
+                                tab.ch_muted[idx] = !tab.ch_muted[idx];
+                            }
+                            if ui
+                                .selectable_label(tab.ch_solo[idx], "S")
+                                .on_hover_text("Solo this channel during playback")
+                                .clicked()
+                            {
+                                tab.ch_solo[idx] = !tab.ch_solo[idx];
+                            }
+                        });
+                    }
+                    if ui.button("Clear").clicked() {
+                        tab.ch_muted.iter_mut().for_each(|m| *m = false);
+                        tab.ch_solo.iter_mut().for_each(|s| *s = false);
+                    }
+                })
+                .response
+                .on_hover_text("Per-channel playback mute/solo (monitoring only)");
             }
             ui.separator();
             ui.menu_button("Grid", |ui| {

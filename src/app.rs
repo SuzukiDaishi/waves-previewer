@@ -1166,6 +1166,36 @@ impl WavesPreviewer {
         self.audio.seek_to_sample(audio_sample);
     }
 
+    /// Push the active editor tab's channel mute/solo state to the audio
+    /// engine every frame. Anything other than the editor workspace (list
+    /// preview, effect graph) plays with all channels audible, so a stale
+    /// mask can never leak across sources.
+    pub(super) fn sync_channel_masks_to_engine(&self) {
+        let (mute, solo) = if self.is_editor_workspace_active() {
+            self.active_tab
+                .and_then(|idx| self.tabs.get(idx))
+                .map(|tab| {
+                    let mut mute = 0u64;
+                    let mut solo = 0u64;
+                    for (c, &m) in tab.ch_muted.iter().enumerate().take(64) {
+                        if m {
+                            mute |= 1 << c;
+                        }
+                    }
+                    for (c, &s) in tab.ch_solo.iter().enumerate().take(64) {
+                        if s {
+                            solo |= 1 << c;
+                        }
+                    }
+                    (mute, solo)
+                })
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        self.audio.set_channel_masks(mute, solo);
+    }
+
     pub(super) fn playback_sync_state_snapshot(&mut self) {
         let was_playing = self.playback_session.is_playing;
         let is_playing = self.playback_is_playing_now();

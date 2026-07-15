@@ -1154,6 +1154,10 @@ pub struct EditorTab {
     pub loop_enabled: bool,
     pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
+    // Monitoring-only channel mute/solo (indexed by source channel). Not part
+    // of the edit state: excluded from undo/dirty and never saved.
+    pub ch_muted: Vec<bool>,
+    pub ch_solo: Vec<bool>,
     pub ch_samples_arc: Arc<Vec<Vec<f32>>>, // Arc mirror of ch_samples for worker sends (updated after every write to ch_samples)
     pub buffer_sample_rate: u32,            // current sample rate of ch_samples
     pub samples_len: usize,                 // length in samples

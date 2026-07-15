@@ -386,6 +386,45 @@ mod p1_operability {
     }
 
     #[test]
+    fn channel_mute_updates_engine_mask() {
+        let (mut harness, dir) = open_editor_tab("ch_masks");
+
+        assert!(harness.state_mut().test_set_channel_mute(1, true));
+        harness.run_steps(2);
+        let (mute, solo) = harness.state().test_engine_channel_masks();
+        assert_eq!(mute, 0b10, "mute mask reflects channel 1");
+        assert_eq!(solo, 0);
+
+        assert!(harness.state_mut().test_set_channel_solo(0, true));
+        harness.run_steps(2);
+        let (mute, solo) = harness.state().test_engine_channel_masks();
+        assert_eq!(mute, 0b10);
+        assert_eq!(solo, 0b01, "solo mask reflects channel 0");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_view_clears_editor_channel_masks() {
+        let (mut harness, dir) = open_editor_tab("ch_masks_list");
+
+        assert!(harness.state_mut().test_set_channel_mute(0, true));
+        harness.run_steps(2);
+        assert_ne!(harness.state().test_engine_channel_masks().0, 0);
+
+        // Back to the list workspace: playback must be all-audible again.
+        harness.state_mut().test_switch_to_list_workspace();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_engine_channel_masks(),
+            (0, 0),
+            "list playback ignores editor masks"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn destructive_keys_show_undo_toast() {
         let (mut harness, dir) = open_editor_tab("ct_toast");
 

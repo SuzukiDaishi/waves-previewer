@@ -78,6 +78,36 @@ impl super::WavesPreviewer {
         self.apply_seen_col_widths();
     }
 
+    pub fn test_set_channel_mute(&mut self, ch: usize, muted: bool) -> bool {
+        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) else {
+            return false;
+        };
+        let n = tab.ch_samples.len();
+        if ch >= n {
+            return false;
+        }
+        tab.ch_muted.resize(n, false);
+        tab.ch_muted[ch] = muted;
+        true
+    }
+
+    pub fn test_set_channel_solo(&mut self, ch: usize, solo: bool) -> bool {
+        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) else {
+            return false;
+        };
+        let n = tab.ch_samples.len();
+        if ch >= n {
+            return false;
+        }
+        tab.ch_solo.resize(n, false);
+        tab.ch_solo[ch] = solo;
+        true
+    }
+
+    pub fn test_engine_channel_masks(&self) -> (u64, u64) {
+        self.audio.channel_masks()
+    }
+
     pub fn test_set_inline_rename_buffer(&mut self, text: &str) -> bool {
         if self.inline_rename_path.is_none() {
             return false;

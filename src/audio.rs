@@ -56,6 +56,11 @@ pub struct SharedAudio {
     pub play_pos: std::sync::atomic::AtomicUsize,
     pub play_pos_f: AtomicF64, // high-precision fractional playhead for rate-converted playback
     pub meter_rms: AtomicF32,
+    // Channel audibility masks (bit N = source channel N). Solo wins over
+    // mute; both zero = everything audible. Consulted by the callback's
+    // channel mapping — selection only, no DSP.
+    pub chan_mute_mask: std::sync::atomic::AtomicU64,
+    pub chan_solo_mask: std::sync::atomic::AtomicU64,
     #[allow(dead_code)]
     pub _out_channels: usize,
     pub out_sample_rate: u32,
@@ -420,6 +425,8 @@ impl AudioEngine {
             play_pos: std::sync::atomic::AtomicUsize::new(0),
             play_pos_f: AtomicF64::new(0.0),
             meter_rms: AtomicF32::new(0.0),
+            chan_mute_mask: std::sync::atomic::AtomicU64::new(0),
+            chan_solo_mask: std::sync::atomic::AtomicU64::new(0),
             _out_channels: out_channels,
             out_sample_rate,
             loop_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -615,6 +622,13 @@ impl AudioEngine {
                 }
 
                 let vol = shared.vol.load(std::sync::atomic::Ordering::Relaxed);
+                let mute_mask = shared
+                    .chan_mute_mask
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let solo_mask = shared
+                    .chan_solo_mask
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let audible_mask: u64 = if solo_mask != 0 { solo_mask } else { !mute_mask };
                 let rate = shared
                     .rate
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -703,6 +717,7 @@ impl AudioEngine {
                                             channels,
                                             out_ch,
                                             sample_pos,
+                                            audible_mask,
                                             |c, p| Self::sample_at_interp(samples, c, p),
                                         )
                                     },
@@ -713,6 +728,7 @@ impl AudioEngine {
                                     channels,
                                     out_ch,
                                     pos_f,
+                                    audible_mask,
                                     |c, p| Self::sample_at_interp(samples, c, p),
                                 )
                             };
@@ -812,14 +828,20 @@ impl AudioEngine {
                                             channels,
                                             out_ch,
                                             sample_pos,
+                                            audible_mask,
                                             |c, p| stream.sample_at_interp(c, p),
                                         )
                                     },
                                 )
                             } else {
-                                Self::fold_src_sample(src_channels, channels, out_ch, pos_f, |c, p| {
-                                    stream.sample_at_interp(c, p)
-                                })
+                                Self::fold_src_sample(
+                                    src_channels,
+                                    channels,
+                                    out_ch,
+                                    pos_f,
+                                    audible_mask,
+                                    |c, p| stream.sample_at_interp(c, p),
+                                )
                             };
                             let out = (sample * vol).clamp(-1.0, 1.0);
                             *out_sample = T::from_sample(out);
@@ -1089,6 +1111,29 @@ impl AudioEngine {
         }
     }
 
+    /// Set per-source-channel mute/solo bitmasks consulted by the playback
+    /// callback's channel mapping. Bit N = source channel N; solo wins.
+    pub fn set_channel_masks(&self, mute: u64, solo: u64) {
+        self.shared
+            .chan_mute_mask
+            .store(mute, std::sync::atomic::Ordering::Relaxed);
+        self.shared
+            .chan_solo_mask
+            .store(solo, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn channel_masks(&self) -> (u64, u64) {
+        (
+            self.shared
+                .chan_mute_mask
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.shared
+                .chan_solo_mask
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     pub fn set_volume(&self, v: f32) {
         self.shared
             .vol
@@ -1195,27 +1240,37 @@ impl AudioEngine {
     ///   so no source channel is silently dropped. This is a generic
     ///   fold-down (pure mapping arithmetic, not DSP), not a standards
     ///   surround downmix.
+    /// `audible` masks source channels (bit N = channel N audible; channels
+    /// >= 64 are always audible). Solo/mute is resolved by the caller into
+    /// this single mask. Skipping a channel is still pure mapping: silenced
+    /// channels simply do not contribute, and fold-down averages only the
+    /// audible members.
     #[inline]
     fn fold_src_sample<F: Fn(usize, f64) -> f32>(
         src_channels: usize,
         out_channels: usize,
         out_ch: usize,
         pos: f64,
+        audible: u64,
         sample_at: F,
     ) -> f32 {
+        let is_audible = |c: usize| c >= 64 || (audible >> c) & 1 == 1;
         if src_channels <= 1 {
-            return sample_at(0, pos);
+            return if is_audible(0) { sample_at(0, pos) } else { 0.0 };
         }
         if src_channels <= out_channels {
-            return sample_at(out_ch.min(src_channels - 1), pos);
+            let c = out_ch.min(src_channels - 1);
+            return if is_audible(c) { sample_at(c, pos) } else { 0.0 };
         }
         let step = out_channels.max(1);
         let mut sum = 0.0f32;
         let mut n = 0u32;
         let mut c = out_ch.min(step - 1);
         while c < src_channels {
-            sum += sample_at(c, pos);
-            n += 1;
+            if is_audible(c) {
+                sum += sample_at(c, pos);
+                n += 1;
+            }
             c += step;
         }
         if n > 0 {
@@ -1411,7 +1466,11 @@ mod tests {
     }
 
     fn fold_const(src: &[f32], out_channels: usize, out_ch: usize) -> f32 {
-        AudioEngine::fold_src_sample(src.len(), out_channels, out_ch, 0.0, |c, _| src[c])
+        fold_masked(src, out_channels, out_ch, u64::MAX)
+    }
+
+    fn fold_masked(src: &[f32], out_channels: usize, out_ch: usize, audible: u64) -> f32 {
+        AudioEngine::fold_src_sample(src.len(), out_channels, out_ch, 0.0, audible, |c, _| src[c])
     }
 
     #[test]
@@ -1433,6 +1492,49 @@ mod tests {
         let src = [0.25f32, -0.75];
         assert_eq!(fold_const(&src, 4, 2), -0.75);
         assert_eq!(fold_const(&src, 4, 3), -0.75);
+    }
+
+    #[test]
+    fn fold_masked_mutes_direct_channel() {
+        let src = [0.25f32, 0.75];
+        // Mute channel 1: right output goes silent, left unaffected.
+        let audible = !(1u64 << 1);
+        assert_eq!(fold_masked(&src, 2, 0, audible), 0.25);
+        assert_eq!(fold_masked(&src, 2, 1, audible), 0.0);
+    }
+
+    #[test]
+    fn fold_masked_solo_equivalent_mask_keeps_only_solo_channel() {
+        let src = [0.25f32, 0.75];
+        // Callers resolve solo into the audible mask: solo ch1 == only bit 1.
+        let audible = 1u64 << 1;
+        assert_eq!(fold_masked(&src, 2, 0, audible), 0.0);
+        assert_eq!(fold_masked(&src, 2, 1, audible), 0.75);
+    }
+
+    #[test]
+    fn fold_masked_mutes_mono_source() {
+        let src = [0.5f32];
+        assert_eq!(fold_masked(&src, 2, 0, !1u64), 0.0);
+        assert_eq!(fold_masked(&src, 2, 1, !1u64), 0.0);
+    }
+
+    #[test]
+    fn fold_masked_averages_only_audible_in_folddown() {
+        // 4ch -> stereo: left output normally averages ch0 and ch2.
+        let src = [0.2f32, 0.4, 0.6, 0.8];
+        // Mute ch0: left output should be just ch2 (not (0 + 0.6) / 2).
+        let audible = !(1u64 << 0);
+        assert!((fold_masked(&src, 2, 0, audible) - 0.6).abs() < 1e-6);
+        // Right output (ch1, ch3) unaffected.
+        assert!((fold_masked(&src, 2, 1, audible) - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fold_masked_all_muted_is_silent() {
+        let src = [0.2f32, 0.4, 0.6, 0.8];
+        assert_eq!(fold_masked(&src, 2, 0, 0), 0.0);
+        assert_eq!(fold_masked(&src, 2, 1, 0), 0.0);
     }
 
     #[test]
