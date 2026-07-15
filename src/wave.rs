@@ -2742,6 +2742,37 @@ fn unique_sibling_tmp(src: &Path, tag: &str, ext: &str) -> std::path::PathBuf {
     ))
 }
 
+/// Atomic replace on Windows: ReplaceFileW swaps `src`'s contents with `tmp`
+/// in one filesystem transaction, so a crash never leaves the destination
+/// path missing (unlike the park-and-rename fallback below).
+#[cfg(windows)]
+fn replace_file_atomic_win(tmp: &Path, src: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReplaceFileW, REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS,
+    };
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+    let replaced = wide(src);
+    let replacement = wide(tmp);
+    let ok = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Replace `src` with the finished `tmp`, never leaving a window where the
 /// original is deleted and unrecoverable. Optionally keeps `<name>.bak`.
 fn replace_file_with_tmp(tmp: &Path, src: &Path, backup: bool) -> Result<()> {
@@ -2756,8 +2787,16 @@ fn replace_file_with_tmp(tmp: &Path, src: &Path, backup: bool) -> Result<()> {
     if fs::rename(tmp, src).is_ok() {
         return Ok(());
     }
-    // Park the original under a unique sidecar name, move the new file in,
-    // then drop the sidecar; on failure the original is restored.
+    // Windows: ReplaceFileW swaps the file atomically (no crash window).
+    #[cfg(windows)]
+    if src.exists() && replace_file_atomic_win(tmp, src).is_ok() {
+        return Ok(());
+    }
+    // Last resort: park the original under a unique sidecar name, move the
+    // new file in, then drop the sidecar; on failure the original is
+    // restored. A crash between the two renames can leave `src` missing
+    // (recoverable from the sidecar), which is why ReplaceFileW is tried
+    // first.
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
     let sidecar = unique_sibling_tmp(src, "old", ext);
     fs::rename(src, &sidecar)
