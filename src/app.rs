@@ -778,6 +778,8 @@ pub struct WavesPreviewer {
     show_leave_prompt: bool,
     /// Transient user-facing notifications (see toast_ops).
     toasts: Vec<Toast>,
+    /// Watermark over wave::RESAMPLE_FALLBACK_COUNT (see toast_ops).
+    last_seen_resample_fallbacks: u64,
     pending_activate_path: Option<PathBuf>,
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,

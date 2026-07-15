@@ -38,6 +38,20 @@ impl WavesPreviewer {
         });
     }
 
+    /// Surface silent resampler quality downgrades (see
+    /// wave::RESAMPLE_FALLBACK_COUNT) as one batched warning toast per frame.
+    pub(super) fn poll_resample_fallbacks(&mut self) {
+        let seen = crate::wave::RESAMPLE_FALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+        if seen > self.last_seen_resample_fallbacks {
+            let new = seen - self.last_seen_resample_fallbacks;
+            self.last_seen_resample_fallbacks = seen;
+            self.push_toast(
+                ToastSeverity::Warning,
+                format!("Resampler fell back to linear quality (x{new}) — output may alias"),
+            );
+        }
+    }
+
     /// Editing buffers keep float headroom instead of hard-clipping, so warn
     /// once when an edit leaves peaks above full scale: they will clip at
     /// export/playback boundaries unless gain is reduced.

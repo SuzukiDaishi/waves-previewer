@@ -603,6 +603,18 @@ fn resample_channels_with_rubato_fft(
     resample_all_channels(chans, resampler)
 }
 
+/// Counts silent downgrades from the rubato resampler to naive linear
+/// interpolation. The UI polls this each frame and surfaces a warning toast
+/// when it grows (the resample functions themselves stay pure and are called
+/// from worker threads).
+pub static RESAMPLE_FALLBACK_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn note_resample_fallback(in_sr: u32, out_sr: u32) {
+    RESAMPLE_FALLBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("resample: rubato failed, fell back to linear interpolation ({in_sr} -> {out_sr} Hz)");
+}
+
 pub fn resample_quality(
     mono: &[f32],
     in_sr: u32,
@@ -623,7 +635,10 @@ pub fn resample_quality(
     };
     match resample_with_rubato(mono, in_sr, out_sr, params, chunk_size) {
         Ok(out) if !out.is_empty() => out,
-        _ => resample_linear(mono, in_sr, out_sr),
+        _ => {
+            note_resample_fallback(in_sr, out_sr);
+            resample_linear(mono, in_sr, out_sr)
+        }
     }
 }
 
