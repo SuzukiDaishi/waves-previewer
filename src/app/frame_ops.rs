@@ -12,7 +12,59 @@ impl WavesPreviewer {
         frame_started: Instant,
         had_ui_input: bool,
     ) {
+        self.run_frame_close_guard(ctx);
         self.run_frame_pre_ui(ctx, frame_started, had_ui_input);
+    }
+
+    /// Intercept the window close request while unsaved in-memory edits
+    /// exist. Automation paths (screenshot exit, debug Exit) set
+    /// `force_quit` before sending Close so they never hit the prompt.
+    fn run_frame_close_guard(&mut self, ctx: &egui::Context) {
+        if self.force_quit {
+            return;
+        }
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested && self.has_unsaved_work() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.show_quit_prompt = true;
+        }
+    }
+
+    fn has_unsaved_work(&mut self) -> bool {
+        self.tabs.iter().any(|t| t.dirty)
+            || !self.edited_cache.is_empty()
+            || self.pending_gain_count_throttled() > 0
+    }
+
+    fn run_frame_quit_prompt(&mut self, ctx: &egui::Context) {
+        if !self.show_quit_prompt {
+            return;
+        }
+        let mut open = self.show_quit_prompt;
+        egui::Window::new("Quit NeoWaves?")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(
+                    "There are unsaved in-memory edits (modified tabs or pending gains).\n\
+                     They will be lost if you quit now.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Quit without saving").clicked() {
+                        self.force_quit = true;
+                        self.show_quit_prompt = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_quit_prompt = false;
+                    }
+                });
+            });
+        if !open {
+            self.show_quit_prompt = false;
+        }
     }
 
     pub(super) fn run_frame_ui(&mut self, ui: &mut egui::Ui, frame_started: Instant) {
@@ -474,6 +526,7 @@ impl WavesPreviewer {
 
     fn run_frame_modal_windows(&mut self, ctx: &egui::Context) {
         self.run_frame_leave_prompt(ctx);
+        self.run_frame_quit_prompt(ctx);
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
         self.ui_transcription_settings_window(ctx);

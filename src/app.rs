@@ -780,6 +780,9 @@ pub struct WavesPreviewer {
     toasts: Vec<Toast>,
     /// Watermark over wave::RESAMPLE_FALLBACK_COUNT (see toast_ops).
     last_seen_resample_fallbacks: u64,
+    // quit confirmation for unsaved in-memory edits
+    show_quit_prompt: bool,
+    force_quit: bool,
     pending_activate_path: Option<PathBuf>,
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,

@@ -333,6 +333,8 @@ impl WavesPreviewer {
             show_leave_prompt: false,
             toasts: Vec::new(),
             last_seen_resample_fallbacks: 0,
+            show_quit_prompt: false,
+            force_quit: false,
             pending_activate_path: None,
             pending_activate_kind: None,
             pending_activate_ready: false,

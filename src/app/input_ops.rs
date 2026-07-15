@@ -166,7 +166,17 @@ impl super::WavesPreviewer {
             if self.is_effect_graph_workspace_active() {
                 self.request_close_effect_graph_workspace();
             } else if let Some(active_idx) = self.active_tab {
-                self.close_tab_at(active_idx, ctx);
+                let dirty = self
+                    .tabs
+                    .get(active_idx)
+                    .map(|t| t.dirty)
+                    .unwrap_or(false);
+                if dirty {
+                    self.leave_intent = Some(crate::app::LeaveIntent::CloseTab(active_idx));
+                    self.show_leave_prompt = true;
+                } else {
+                    self.close_tab_at(active_idx, ctx);
+                }
             }
         }
 
