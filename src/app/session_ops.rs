@@ -1606,15 +1606,18 @@ impl super::WavesPreviewer {
             let preview = self.tabs.get(active).and_then(|tab| {
                 let tool = tab.preview_audio_tool?;
                 let overlay = tab.preview_overlay.as_ref()?;
-                let mono = if let Some(m) = overlay.mixdown.as_ref() {
-                    m.clone()
-                } else {
-                    overlay.channels.get(0).cloned().unwrap_or_default()
-                };
-                Some((tool, mono))
+                if !overlay.channels.is_empty() {
+                    return Some((tool, overlay.channels.clone(), Vec::new()));
+                }
+                let mono = overlay.mixdown.as_ref().cloned().unwrap_or_default();
+                Some((tool, Vec::new(), mono))
             });
-            if let Some((tool, mono)) = preview {
-                self.set_preview_mono(active, tool, mono);
+            if let Some((tool, channels, mono)) = preview {
+                if !channels.is_empty() {
+                    self.set_preview_channels(active, tool, channels);
+                } else if !mono.is_empty() {
+                    self.set_preview_mono(active, tool, mono);
+                }
             }
         }
         if let Some(path) = selected_path {

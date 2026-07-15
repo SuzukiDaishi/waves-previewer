@@ -816,6 +816,7 @@ impl crate::app::WavesPreviewer {
                     .map(|c| c.len())
                     .unwrap_or_else(|| self.tabs[tab_idx].samples_len)
                     .max(1);
+                let playback = overlay.clone();
                 if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
                     tab_mut.preview_overlay = Some(Self::preview_overlay_from_channels(
                         overlay,
@@ -827,7 +828,11 @@ impl crate::app::WavesPreviewer {
                     tab_mut.music_analysis_draft.preview_clip_applied = result.clip_applied;
                     tab_mut.music_analysis_draft.preview_error = None;
                 }
-                self.set_preview_mono(tab_idx, ToolKind::MusicAnalyze, mono);
+                if playback.first().map(|c| !c.is_empty()).unwrap_or(false) {
+                    self.set_preview_channels(tab_idx, ToolKind::MusicAnalyze, playback);
+                } else {
+                    self.set_preview_mono(tab_idx, ToolKind::MusicAnalyze, mono);
+                }
                 ctx.request_repaint();
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {

@@ -710,7 +710,6 @@ impl WavesPreviewer {
                     return;
                 }
                 let mut overlay = ch_samples.clone();
-                let len = samples_len.max(1);
                 let n_in = ((fade_in_ms / 1000.0) * sr).round() as usize;
                 let n_out = ((fade_out_ms / 1000.0) * sr).round() as usize;
                 if !allow_light_preview {
@@ -750,10 +749,10 @@ impl WavesPreviewer {
                         }
                     }
                 }
-                let mono = Self::mixdown_channels(&overlay, len);
-                if mono.is_empty() {
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                     return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -762,7 +761,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Fade, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Fade, playback);
             }
             ToolKind::Gain => {
                 if !gain_env_active && gain_db.abs() <= 1e-6 {
@@ -802,10 +801,10 @@ impl WavesPreviewer {
                         }
                     }
                 }
-                let mono = Self::mixdown_channels(&overlay, samples_len);
-                if mono.is_empty() {
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                     return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -814,7 +813,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Gain, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Gain, playback);
             }
             ToolKind::Normalize => {
                 const DEFAULT_NORMALIZE_DB: f32 = -6.0;
@@ -833,13 +832,13 @@ impl WavesPreviewer {
                     );
                     return;
                 }
-                let mut mono = Self::mixdown_channels(&ch_samples, samples_len);
-                if mono.is_empty() {
-                    return;
-                }
+                // Peak across all channels (matches the destructive apply),
+                // then one uniform gain so the stereo balance is preserved.
                 let mut peak = 0.0f32;
-                for &v in &mono {
-                    peak = peak.max(v.abs());
+                for ch in &ch_samples {
+                    for &v in ch.iter() {
+                        peak = peak.max(v.abs());
+                    }
                 }
                 if peak <= 0.0 {
                     return;
@@ -851,9 +850,10 @@ impl WavesPreviewer {
                         *v *= g;
                     }
                 }
-                for v in &mut mono {
-                    *v *= g;
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
+                    return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -862,7 +862,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Normalize, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Normalize, playback);
             }
             ToolKind::Loudness => {
                 const DEFAULT_LOUDNESS_LUFS: f32 = -14.0;
@@ -891,15 +891,16 @@ impl WavesPreviewer {
                     let gain_db = st.loudness_target_lufs - lufs;
                     let gain = db_to_amp(gain_db);
                     let mut overlay = ch_samples.clone();
+                    // Match the unclamped destructive apply.
                     for ch in overlay.iter_mut() {
                         for v in ch.iter_mut() {
-                            *v = (*v * gain).clamp(-1.0, 1.0);
+                            *v *= gain;
                         }
                     }
-                    let mono = Self::mixdown_channels(&overlay, samples_len);
-                    if mono.is_empty() {
+                    if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                         return;
                     }
+                    let playback = overlay.clone();
                     let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -908,7 +909,7 @@ impl WavesPreviewer {
                             timeline_len,
                         ));
                     }
-                    self.set_preview_mono(tab_idx, ToolKind::Loudness, mono);
+                    self.set_preview_channels(tab_idx, ToolKind::Loudness, playback);
                 }
             }
             ToolKind::Reverse => {
@@ -933,10 +934,10 @@ impl WavesPreviewer {
                         None => ch.reverse(),
                     }
                 }
-                let mono = Self::mixdown_channels(&overlay, samples_len);
-                if mono.is_empty() {
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                     return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -945,7 +946,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Reverse, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Reverse, playback);
             }
             _ => {}
         }

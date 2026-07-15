@@ -2963,7 +2963,7 @@ impl crate::app::WavesPreviewer {
                 let mut need_restore_preview = false;
                 // Accumulate non-destructive preview audio to audition.
                 // Carry the tool kind to keep preview state consistent.
-                let mut pending_preview: Option<(ToolKind, Vec<f32>)> = None;
+                let mut pending_preview: Option<(ToolKind, Vec<Vec<f32>>)> = None;
                 let mut pending_heavy_preview: Option<(ToolKind, Vec<f32>, f32, Option<(usize, usize)>)> = None;
                 let mut pending_heavy_preview_path: Option<(ToolKind, PathBuf, f32, Option<(usize, usize)>)> = None;
                 let mut pending_pitch_apply: Option<(f32, Option<(usize, usize)>)> = None;
@@ -8142,11 +8142,7 @@ impl crate::app::WavesPreviewer {
                                                         ToolKind::Fade,
                                                         timeline_len,
                                                     ));
-                                                    // Mono audition
-                                                    let mut mono = Self::editor_mixdown_mono(tab);
-                                                    let nn = n.min(mono.len());
-                                                    for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight(tab.fade_in_shape, t); mono[i] *= w; }
-                                                    pending_preview = Some((ToolKind::Fade, mono));
+                                                    pending_preview = Some((ToolKind::Fade, overlay));
                                                     stop_playback = true;
                                                     tab.preview_audio_tool = Some(ToolKind::Fade);
                                                 } else {
@@ -8239,11 +8235,7 @@ impl crate::app::WavesPreviewer {
                                                         ToolKind::Fade,
                                                         timeline_len,
                                                     ));
-                                                    // mono audition
-                                                    let mut mono = Self::editor_mixdown_mono(tab);
-                                                    let len = mono.len(); let nn = n.min(len);
-                                                    for i in 0..nn { let t = i as f32 / nn.max(1) as f32; let w = Self::fade_weight_out(tab.fade_out_shape, t); let idx = len - nn + i; mono[idx] *= w; }
-                                                    pending_preview = Some((ToolKind::Fade, mono));
+                                                    pending_preview = Some((ToolKind::Fade, overlay));
                                                     stop_playback = true;
                                                     tab.preview_audio_tool = Some(ToolKind::Fade);
                                                 } else {
@@ -8404,24 +8396,21 @@ impl crate::app::WavesPreviewer {
                                         if preview_ok {
                                             // per-channel overlay
                                             let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                            let mut mono = Self::editor_mixdown_mono(tab);
                                             if env_active {
                                                 for ch in overlay.iter_mut() {
                                                     crate::wave::apply_gain_envelope_in_place(ch, &tab.gain_env_points, gain_db, false);
                                                 }
-                                                crate::wave::apply_gain_envelope_in_place(&mut mono, &tab.gain_env_points, gain_db, false);
                                             } else {
                                                 let g = db_to_amp(gain_db);
                                                 for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
-                                                for v in &mut mono { *v *= g; }
                                             }
                                             let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
                                             tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                overlay,
+                                                overlay.clone(),
                                                 ToolKind::Gain,
                                                 timeline_len,
                                             ));
-                                            pending_preview = Some((ToolKind::Gain, mono));
+                                            pending_preview = Some((ToolKind::Gain, overlay));
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::Gain);
                                         } else {
@@ -8462,27 +8451,25 @@ impl crate::app::WavesPreviewer {
                                     ui.label("Target dBFS"); ui.add(egui::DragValue::new(&mut target_db).range(-24.0..=0.0).speed(0.1));
                                     tab.tool_state = ToolState{ normalize_target_db: target_db, ..tab.tool_state };
                                     let mut preview_normalize = |target_db: f32, tab: &mut EditorTab| {
-                                        let mut mono = Self::editor_mixdown_mono(tab);
-                                        if !mono.is_empty() {
-                                            let mut peak = 0.0f32;
-                                            for &v in &mono { peak = peak.max(v.abs()); }
-                                            if peak > 0.0 {
-                                                let g = db_to_amp(target_db) / peak.max(1e-12);
-                                                // per-channel overlay
-                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
-                                                for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
-                                                let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
-                                                tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                    overlay,
-                                                    ToolKind::Normalize,
-                                                    timeline_len,
-                                                ));
-                                                // mono audition
-                                                for v in &mut mono { *v *= g; }
-                                                pending_preview = Some((ToolKind::Normalize, mono));
-                                                stop_playback = true;
-                                                tab.preview_audio_tool = Some(ToolKind::Normalize);
-                                            }
+                                        // Peak across all channels (matches the destructive apply).
+                                        let mut peak = 0.0f32;
+                                        for ch in &tab.ch_samples {
+                                            for &v in ch.iter() { peak = peak.max(v.abs()); }
+                                        }
+                                        if peak > 0.0 {
+                                            let g = db_to_amp(target_db) / peak.max(1e-12);
+                                            // per-channel overlay
+                                            let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                            for ch in overlay.iter_mut() { for v in ch.iter_mut() { *v *= g; } }
+                                            let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
+                                            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                overlay.clone(),
+                                                ToolKind::Normalize,
+                                                timeline_len,
+                                            ));
+                                            pending_preview = Some((ToolKind::Normalize, overlay));
+                                            stop_playback = true;
+                                            tab.preview_audio_tool = Some(ToolKind::Normalize);
                                         }
                                     };
                                     if preview_button_enabled {
@@ -8587,13 +8574,12 @@ impl crate::app::WavesPreviewer {
                                                 .map(|ch| crate::wave::process_noise_gate_offline(ch, sr, &params))
                                                 .collect();
                                             let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
-                                            let mono = Self::mixdown_channels(&overlay, timeline_len);
                                             tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                overlay,
+                                                overlay.clone(),
                                                 ToolKind::NoiseGate,
                                                 timeline_len,
                                             ));
-                                            pending_preview = Some((ToolKind::NoiseGate, mono));
+                                            pending_preview = Some((ToolKind::NoiseGate, overlay));
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::NoiseGate);
                                         } else {
@@ -8718,13 +8704,12 @@ impl crate::app::WavesPreviewer {
                                                 .map(|ch| crate::wave::process_three_band_eq_offline(ch, sr, &params))
                                                 .collect();
                                             let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
-                                            let mono = Self::mixdown_channels(&overlay, timeline_len);
                                             tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                overlay,
+                                                overlay.clone(),
                                                 ToolKind::Eq,
                                                 timeline_len,
                                             ));
-                                            pending_preview = Some((ToolKind::Eq, mono));
+                                            pending_preview = Some((ToolKind::Eq, overlay));
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::Eq);
                                         } else {
@@ -8817,13 +8802,12 @@ impl crate::app::WavesPreviewer {
                                                 .map(|ch| crate::wave::process_compressor_offline(ch, sr, &params))
                                                 .collect();
                                             let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
-                                            let mono = Self::mixdown_channels(&overlay, timeline_len);
                                             tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                overlay,
+                                                overlay.clone(),
                                                 ToolKind::Compressor,
                                                 timeline_len,
                                             ));
-                                            pending_preview = Some((ToolKind::Compressor, mono));
+                                            pending_preview = Some((ToolKind::Compressor, overlay));
                                             stop_playback = true;
                                             tab.preview_audio_tool = Some(ToolKind::Compressor);
                                         } else {
@@ -8880,15 +8864,11 @@ impl crate::app::WavesPreviewer {
                                                         .map(|c| c.len())
                                                         .unwrap_or(tab.samples_len);
                                                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                        overlay,
+                                                        overlay.clone(),
                                                         ToolKind::Loudness,
                                                         timeline_len,
                                                     ));
-                                                    let mut mono = Self::editor_mixdown_mono(tab);
-                                                    for v in &mut mono {
-                                                        *v *= gain;
-                                                    }
-                                                    pending_preview = Some((ToolKind::Loudness, mono));
+                                                    pending_preview = Some((ToolKind::Loudness, overlay));
                                                     stop_playback = true;
                                                     tab.preview_audio_tool = Some(ToolKind::Loudness);
                                                 }
@@ -9736,19 +9716,11 @@ impl crate::app::WavesPreviewer {
                                                 }
                                                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(tab.samples_len);
                                                 tab.preview_overlay = Some(Self::preview_overlay_from_channels(
-                                                    overlay,
+                                                    overlay.clone(),
                                                     ToolKind::Reverse,
                                                     timeline_len,
                                                 ));
-                                                let mut mono = Self::editor_mixdown_mono(tab);
-                                                match sel_range {
-                                                    Some((s, e)) => {
-                                                        let xf = crate::wave::splice_xfade_samples(sr, e - s, e - s).min(256);
-                                                        crate::wave::reverse_range_with_crossfade(&mut mono, s, e, xf);
-                                                    }
-                                                    None => mono.reverse(),
-                                                }
-                                                pending_preview = Some((ToolKind::Reverse, mono));
+                                                pending_preview = Some((ToolKind::Reverse, overlay));
                                                 stop_playback = true;
                                                 tab.preview_audio_tool = Some(ToolKind::Reverse);
                                             } else {
@@ -10362,8 +10334,8 @@ impl crate::app::WavesPreviewer {
                         }
                     }
                 }
-                if let Some((tool_kind, mono)) = pending_preview {
-                    self.set_preview_mono(tab_idx, tool_kind, mono);
+                if let Some((tool_kind, channels)) = pending_preview {
+                    self.set_preview_channels(tab_idx, tool_kind, channels);
                 }
             };
             if stacked_editor {
@@ -10669,7 +10641,7 @@ impl crate::app::WavesPreviewer {
                 if let Some(tab) = self.tabs.get(tab_idx) {
                     if let Some(chans) = self.editor_preview_loop_unwrap(tab, repeat) {
                         let timeline_len = chans.get(0).map(|c| c.len()).unwrap_or(0);
-                        let mono = Self::mixdown_channels(&chans, timeline_len);
+                        let playback = chans.clone();
                         let markers = Self::build_loop_unwrap_markers(
                             &tab.markers,
                             tab.loop_region.map(|v| v.0).unwrap_or(0),
@@ -10686,8 +10658,8 @@ impl crate::app::WavesPreviewer {
                                 timeline_len,
                             ));
                         }
-                        if !mono.is_empty() {
-                            self.set_preview_mono(tab_idx, ToolKind::LoopEdit, mono);
+                        if !playback.first().map(|c| c.is_empty()).unwrap_or(true) {
+                            self.set_preview_channels(tab_idx, ToolKind::LoopEdit, playback);
                         }
                     }
                 }
