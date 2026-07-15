@@ -409,6 +409,18 @@ impl WavesPreviewer {
                 self.auto_play_list_nav = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
                 self.list_click_audition = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_col_widths=") {
+                self.list_col_widths.clear();
+                for part in rest.split(',') {
+                    let Some((key, w)) = part.split_once(':') else {
+                        continue;
+                    };
+                    if let Ok(w) = w.trim().parse::<f32>() {
+                        if w.is_finite() && w >= 10.0 && !key.trim().is_empty() {
+                            self.list_col_widths.insert(key.trim().to_string(), w);
+                        }
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("transcript_ai_opt_in=") {
                 self.transcript_ai_opt_in = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("transcript_language=") {
@@ -642,6 +654,12 @@ impl WavesPreviewer {
         let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
         let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
         let list_click_audition = if self.list_click_audition { "1" } else { "0" };
+        let list_col_widths = self
+            .list_col_widths
+            .iter()
+            .map(|(k, w)| format!("{k}:{w:.1}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
         let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
             "1"
@@ -727,6 +745,7 @@ src_quality={}\n\
 audio_output_device={}\n\
 auto_play_list_nav={}\n\
 list_click_audition={}\n\
+list_col_widths={}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -789,6 +808,7 @@ zoo_flip_manual={}\n",
             audio_output_device,
             auto_play_list_nav,
             list_click_audition,
+            list_col_widths,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,
@@ -1006,6 +1026,45 @@ mod tests {
         );
         assert!(!menu.contains(&std::fs::canonicalize(&paths[0]).expect("canonical")));
         assert!(!menu.contains(&std::fs::canonicalize(&paths[1]).expect("canonical")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn col_width_prefs_roundtrip() {
+        let dir = temp_dir("col_widths");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.list_col_widths.insert("file".to_string(), 314.5);
+        app.list_col_widths.insert("wave".to_string(), 220.0);
+        app.list_click_audition = false;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.list_col_widths.get("file").copied(), Some(314.5));
+        assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
+        assert!(!loaded.list_click_audition);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn col_width_prefs_reject_bogus_values() {
+        let dir = temp_dir("col_widths_bogus");
+        let prefs = dir.join("prefs.txt");
+        std::fs::write(
+            &prefs,
+            "list_col_widths=file:nan,gain:5.0,wave:220.0,:60.0,broken\n",
+        )
+        .expect("write prefs");
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
+        assert!(!loaded.list_col_widths.contains_key("file"));
+        assert!(!loaded.list_col_widths.contains_key("gain"));
+        assert_eq!(loaded.list_col_widths.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

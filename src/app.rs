@@ -577,6 +577,12 @@ pub struct WavesPreviewer {
     // dynamic row height for wave thumbnails (list view)
     pub wave_row_h: f32,
     pub list_columns: ListColumnConfig,
+    // persisted per-column widths (prefs.txt); key = column id in table.rs
+    list_col_widths: std::collections::BTreeMap<String, f32>,
+    // widths observed while rendering the current frame's header
+    list_col_widths_seen: Vec<(&'static str, f32)>,
+    list_table_ui_id: Option<egui::Id>,
+    list_table_col_count: usize,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
     /// TTL cache for `Path::is_file()` checks in the list view. Probing the
     /// filesystem for every visible row on every frame stalls the UI thread,

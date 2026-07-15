@@ -66,6 +66,18 @@ impl super::WavesPreviewer {
         self.inline_rename_path.as_deref()
     }
 
+    pub fn test_list_col_width_stored(&self, key: &str) -> Option<f32> {
+        self.list_col_widths.get(key).copied()
+    }
+
+    pub fn test_push_seen_col_width(&mut self, key: &'static str, width: f32) {
+        self.list_col_widths_seen.push((key, width));
+    }
+
+    pub fn test_apply_seen_col_widths(&mut self) {
+        self.apply_seen_col_widths();
+    }
+
     pub fn test_set_inline_rename_buffer(&mut self, text: &str) -> bool {
         if self.inline_rename_path.is_none() {
             return false;

@@ -1348,6 +1348,7 @@ impl crate::app::WavesPreviewer {
             });
 
         self.ui_list_scrollbar(ui, &metrics);
+        self.commit_list_col_widths(ctx);
 
         interaction.list_has_focus = list_has_focus;
         self.finish_list_view(

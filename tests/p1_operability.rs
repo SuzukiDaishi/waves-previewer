@@ -194,6 +194,39 @@ mod p1_operability {
     }
 
     #[test]
+    fn column_widths_store_only_on_change() {
+        let dir = make_temp_dir("col_widths");
+        let wav = dir.join("a.wav");
+        neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.2), 48_000, &wav)
+            .expect("export wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        harness.run_steps(3);
+
+        // Plain rendering (including window-squeeze relayouts) must not
+        // persist anything: only a real resize-handle drag commits.
+        assert_eq!(harness.state().test_list_col_width_stored("file"), None);
+
+        // Simulate the commit that runs when a resize drag stops.
+        harness.state_mut().test_push_seen_col_width("file", 321.0);
+        harness.state_mut().test_apply_seen_col_widths();
+        assert_eq!(
+            harness.state().test_list_col_width_stored("file"),
+            Some(321.0)
+        );
+
+        // Re-observing the same width is not a change.
+        harness.state_mut().test_push_seen_col_width("file", 321.2);
+        harness.state_mut().test_apply_seen_col_widths();
+        assert_eq!(
+            harness.state().test_list_col_width_stored("file"),
+            Some(321.0)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn f2_inline_rename_commits_and_cancels() {
         use egui_kittest::kittest::{NodeT, Queryable};
         let dir = make_temp_dir("inline_rename");
