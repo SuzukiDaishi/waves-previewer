@@ -43,6 +43,7 @@ mod gain_ops;
 mod helpers;
 mod hf_cache;
 mod input_ops;
+pub mod keymap;
 #[cfg(feature = "kittest")]
 mod kittest_ops;
 mod list_ops;
@@ -729,6 +730,7 @@ pub struct WavesPreviewer {
     // export/save settings (simple, in-memory)
     export_cfg: ExportConfig,
     show_export_settings: bool,
+    show_shortcuts_window: bool,
     show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,

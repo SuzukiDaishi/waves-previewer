@@ -96,6 +96,26 @@ mod p1_operability {
     }
 
     #[test]
+    fn shortcuts_window_lists_all_contexts() {
+        use egui_kittest::kittest::Queryable;
+        let mut harness = harness_with_startup(StartupConfig::default());
+        harness.run_steps(1);
+
+        harness.state_mut().test_set_shortcuts_window_open(true);
+        harness.run_steps(2);
+
+        assert!(harness.query_by_label("Keyboard Shortcuts").is_some());
+        // One representative row per context group.
+        assert!(harness.query_by_label("Focus the search box").is_some());
+        assert!(harness
+            .query_by_label("Toggle auto-play on navigation")
+            .is_some());
+        assert!(harness
+            .query_by_label("Set loop start at the playhead")
+            .is_some());
+    }
+
+    #[test]
     fn destructive_keys_show_undo_toast() {
         let (mut harness, dir) = open_editor_tab("ct_toast");
 

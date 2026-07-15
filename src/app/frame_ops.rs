@@ -529,6 +529,7 @@ impl WavesPreviewer {
         self.run_frame_quit_prompt(ctx);
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
+        self.ui_shortcuts_window(ctx);
         self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);

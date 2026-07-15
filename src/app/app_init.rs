@@ -288,6 +288,7 @@ impl WavesPreviewer {
                 codec: Default::default(),
             },
             show_export_settings: false,
+            show_shortcuts_window: false,
             show_transcription_settings: false,
             show_first_save_prompt: false,
             project_path: None,

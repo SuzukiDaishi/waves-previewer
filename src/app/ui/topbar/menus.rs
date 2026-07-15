@@ -24,6 +24,16 @@ impl WavesPreviewer {
             self.ui_topbar_export_menu(ui);
             self.ui_topbar_list_menu(ui);
             self.ui_topbar_tools_menu(ui, ctx);
+            self.ui_topbar_help_menu(ui);
+        });
+    }
+
+    fn ui_topbar_help_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Help", |ui| {
+            if ui.button("Keyboard Shortcuts...").clicked() {
+                self.show_shortcuts_window = true;
+                ui.close();
+            }
         });
     }
 

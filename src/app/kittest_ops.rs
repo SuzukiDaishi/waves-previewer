@@ -38,6 +38,14 @@ impl super::WavesPreviewer {
         self.toasts.iter().map(|t| t.message.clone()).collect()
     }
 
+    pub fn test_set_shortcuts_window_open(&mut self, open: bool) {
+        self.show_shortcuts_window = open;
+    }
+
+    pub fn test_shortcuts_window_open(&self) -> bool {
+        self.show_shortcuts_window
+    }
+
     pub fn test_audio_is_streaming_wav(&self, path: &Path) -> bool {
         self.audio.is_streaming_wav_path(path)
     }

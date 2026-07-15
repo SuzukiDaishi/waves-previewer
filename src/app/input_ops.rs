@@ -1,3 +1,4 @@
+use super::keymap::{self, Action};
 use super::types::{LoopMode, ToolKind, UndoScope, ViewMode};
 
 impl super::WavesPreviewer {
@@ -21,14 +22,14 @@ impl super::WavesPreviewer {
         let wants_kb = ctx.egui_wants_keyboard_input();
         let search_focused = ctx.memory(|m| m.has_focus(Self::search_box_id()));
 
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+        if keymap::consume(ctx, Action::FocusSearch) {
             ctx.memory_mut(|m| m.request_focus(Self::search_box_id()));
             self.search_has_focus = true;
             self.list_has_focus = false;
         }
 
         if !search_focused {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+            if keymap::consume(ctx, Action::TogglePlay) {
                 self.request_workspace_play_toggle();
             }
         }
@@ -38,10 +39,10 @@ impl super::WavesPreviewer {
         let allow_volume_shortcuts =
             !search_focused && (self.is_list_workspace_active() || !wants_kb);
         if allow_volume_shortcuts {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::A)) {
+            if keymap::consume(ctx, Action::VolumeDown) {
                 self.adjust_volume_db(-1.0);
             }
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::D)) {
+            if keymap::consume(ctx, Action::VolumeUp) {
                 self.adjust_volume_db(1.0);
             }
         }
@@ -106,21 +107,11 @@ impl super::WavesPreviewer {
             }
         }
 
-        let save_as = ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::S,
-            )
-        });
-        if ctx.input_mut(|i| {
-            i.consume_key(
-                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                egui::Key::N,
-            )
-        }) {
+        let save_as = keymap::consume(ctx, Action::SaveSessionAs);
+        if keymap::consume(ctx, Action::NewWindow) {
             self.open_new_window();
         }
-        let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S));
+        let save = keymap::consume(ctx, Action::SaveSession);
         if save_as {
             if let Some(mut path) = self.pick_project_save_dialog() {
                 let needs_ext = path
@@ -158,11 +149,11 @@ impl super::WavesPreviewer {
             }
         }
 
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::E)) {
+        if keymap::consume(ctx, Action::ExportSelected) {
             self.trigger_save_selected();
         }
 
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W)) {
+        if keymap::consume(ctx, Action::CloseTab) {
             if self.is_effect_graph_workspace_active() {
                 self.request_close_effect_graph_workspace();
             } else if let Some(active_idx) = self.active_tab {
@@ -181,11 +172,11 @@ impl super::WavesPreviewer {
         }
 
         if allow_list_shortcuts {
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
+            if keymap::consume(ctx, Action::ListToggleAutoplay) {
                 self.auto_play_list_nav = !self.auto_play_list_nav;
                 self.save_prefs();
             }
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
+            if keymap::consume(ctx, Action::ListToggleRegex) {
                 self.search_use_regex = !self.search_use_regex;
                 self.refresh_filter_then_sort();
             }
@@ -194,7 +185,7 @@ impl super::WavesPreviewer {
         // Editor-specific shortcuts.
         if let Some(tab_idx) = self.active_tab {
             if !wants_kb {
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::K)) {
+                if keymap::consume(ctx, Action::EditorSetLoopStart) {
                     // Set Loop Start
                     let pos_audio = self
                         .audio
@@ -221,7 +212,7 @@ impl super::WavesPreviewer {
                         self.push_editor_undo_state(tab_idx, state, true);
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::P)) {
+                if keymap::consume(ctx, Action::EditorSetLoopEnd) {
                     // Set Loop End
                     let pos_audio = self
                         .audio
@@ -248,7 +239,7 @@ impl super::WavesPreviewer {
                         self.push_editor_undo_state(tab_idx, state, true);
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::L)) {
+                if keymap::consume(ctx, Action::EditorApplyLoop) {
                     if !self.apply_current_loop_region(tab_idx) {
                         if self.has_selected_range(tab_idx) {
                             self.apply_loop_from_selection(tab_idx);
@@ -270,7 +261,7 @@ impl super::WavesPreviewer {
                         }
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::S)) {
+                if keymap::consume(ctx, Action::EditorCycleViewMode) {
                     let prev = self.tabs[tab_idx].leaf_view_mode();
                     let next = match prev {
                         ViewMode::Waveform => ViewMode::Spectrogram,
@@ -291,20 +282,20 @@ impl super::WavesPreviewer {
                         self.clear_preview_if_any(tab_idx);
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::B)) {
+                if keymap::consume(ctx, Action::EditorToggleBpm) {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.bpm_enabled = !tab.bpm_enabled;
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::M)) {
+                if keymap::consume(ctx, Action::EditorAddMarker) {
                     self.add_applied_marker_at_playhead(tab_idx);
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::R)) {
+                if keymap::consume(ctx, Action::EditorToggleZeroCross) {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.snap_zero_cross = !tab.snap_zero_cross;
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
+                if keymap::consume(ctx, Action::EditorDeleteSelection) {
                     let ranges = self.all_selected_ranges(tab_idx);
                     let fired = if ranges.len() > 1 {
                         self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
@@ -322,7 +313,7 @@ impl super::WavesPreviewer {
                         );
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::T)) {
+                if keymap::consume(ctx, Action::EditorTrimSelection) {
                     let ranges = self.all_selected_ranges(tab_idx);
                     let fired = if ranges.len() > 1 {
                         self.editor_apply_trim_multi_ranges(tab_idx, ranges);
@@ -340,7 +331,7 @@ impl super::WavesPreviewer {
                         );
                     }
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::V)) {
+                if keymap::consume(ctx, Action::EditorVirtualTrim) {
                     let ranges = self.all_selected_ranges(tab_idx);
                     if ranges.len() > 1 {
                         if let Some(path) = self.tabs.get(tab_idx).map(|t| t.path.clone()) {
