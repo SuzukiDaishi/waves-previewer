@@ -4,6 +4,25 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Data Safety
+- Windows file overwrite now uses `ReplaceFileW` (atomic swap), removing the crash window where the destination could be left missing during the park-and-rename fallback (which remains as last resort).
+- Gain / Normalize / Loudness applies no longer hard-clip the editing buffer to +/-1.0; editing buffers keep full float headroom (boost then cut round-trips losslessly). Clipping only happens at export/quantize and playback output. An info toast reports when an edit leaves peaks above 0 dBFS.
+- Closing the window with unsaved in-memory edits (dirty tabs, cached edits, pending gains) now asks for confirmation instead of silently discarding them; Ctrl+W on a dirty tab routes through the Leave Editor prompt. Screenshot/debug automation exits bypass the prompt.
+
+### Notifications
+- New toast overlay (below the topbar, click to dismiss, auto-expiring) surfaces failures that previously only reached the debug log or stderr: session save/save-as/close errors, export failures, editor tab-limit skips, and resampler quality fallbacks.
+
+### Playback
+- Sources with more channels than the output device are folded down (each output channel averages the source channels congruent to it) instead of dropping the surplus channels.
+- Tool previews (Fade / Gain / Normalize / Loudness / Reverse / NoiseGate / EQ / Compressor / LoopEdit unwrap / MusicAnalyze) now play the per-channel buffer instead of a mono mixdown, preserving stereo imaging. Normalize previews measure peak across all channels, matching the destructive apply.
+
+### Correctness
+- Loop edits via the K/P shortcuts now push editor undo states (matching L / Inspector loop applies).
+- Digit-key seek fixed: both `0` and `1` used to jump to the end. Keys `1..9,0` now span start (0%) to end (100%) in keyboard row order.
+- 16-bit PCM encode/decode uses symmetric 32768 scaling (standard convention; -1.0 maps to -32768). The generic integer writer quantizes symmetrically for all depths.
+- Spectral/feature lanes (Spec/Log/Mel/Tempogram/Chromagram/World) no longer drift up to one STFT hop against the waveform lane at high zoom (fractional per-column frame mapping).
+- Meta pool and VST3 state-stream mutexes recover from poisoning instead of cascading panics; removed per-event wheel debug prints.
+
 ## 0.20260709.0 - 2026-07-09
 
 ### Unified Gain Framework: List Volume Changes Are Editor Edits
