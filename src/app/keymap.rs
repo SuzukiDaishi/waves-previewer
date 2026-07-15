@@ -50,6 +50,10 @@ pub enum Action {
     EditorVirtualTrim,
     EditorDigitSeek,
     EditorArrowKeys,
+    EditorSeekStart,
+    EditorSeekEnd,
+    EditorZoomToSelection,
+    EditorCancelPreview,
 }
 
 /// Modifier sets used by the table (const-friendly subset of `egui::Modifiers`).
@@ -334,6 +338,38 @@ pub const KEYMAP: &[KeyBinding] = &[
         keys_label: "1..9, 0",
         desc: "Seek across the file (1 = start, ..., 0 = end)",
         dispatch: Dispatch::Manual,
+    },
+    KeyBinding {
+        action: Action::EditorSeekStart,
+        context: KeyContext::Editor,
+        chord: Some((Mods::None, Key::Home)),
+        keys_label: "",
+        desc: "Seek to the start of the file",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorSeekEnd,
+        context: KeyContext::Editor,
+        chord: Some((Mods::None, Key::End)),
+        keys_label: "",
+        desc: "Seek to the end of the file",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorZoomToSelection,
+        context: KeyContext::Editor,
+        chord: Some((Mods::None, Key::Z)),
+        keys_label: "",
+        desc: "Zoom the view to the selection",
+        dispatch: Dispatch::Table,
+    },
+    KeyBinding {
+        action: Action::EditorCancelPreview,
+        context: KeyContext::Editor,
+        chord: Some((Mods::None, Key::Escape)),
+        keys_label: "",
+        desc: "Discard the pending tool preview",
+        dispatch: Dispatch::Table,
     },
     KeyBinding {
         action: Action::EditorArrowKeys,

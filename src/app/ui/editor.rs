@@ -377,6 +377,39 @@ impl crate::app::WavesPreviewer {
         covers_whole || close_to_fit
     }
 
+    /// Fit the view to the primary selection with a small margin (Z shortcut).
+    pub(in crate::app) fn editor_zoom_to_selection(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        let Some((sel_start, sel_end)) = tab.selection else {
+            return;
+        };
+        if sel_end <= sel_start {
+            return;
+        }
+        let wave_w = tab.last_wave_w;
+        if wave_w <= 0.0 {
+            return;
+        }
+        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
+            tab.samples_len_visual
+        } else {
+            tab.samples_len
+        };
+        if display_samples_len == 0 {
+            return;
+        }
+        let sel_len = sel_end - sel_start;
+        let pad = ((sel_len as f64) * 0.05).ceil().max(1.0) as usize;
+        let spp = Self::editor_fit_samples_per_px(sel_len + pad * 2, wave_w);
+        tab.samples_per_px = spp;
+        let visible = ((wave_w * spp).ceil()).max(1.0) as usize;
+        let max_left = display_samples_len.saturating_sub(visible);
+        Self::editor_set_view_offset_exact(tab, sel_start as f64 - pad as f64, max_left);
+        Self::invalidate_editor_viewport_cache(tab);
+    }
+
     fn editor_selection_anchor_or(tab: &EditorTab, fallback: usize) -> usize {
         tab.selection_anchor_sample
             .or_else(|| tab.selection.map(|(a, b)| a.min(b)))

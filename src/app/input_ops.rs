@@ -366,6 +366,28 @@ impl super::WavesPreviewer {
                         self.seek_to_fraction_in_active_tab(numer, 9);
                     }
                 }
+                // Keys below are new additions: gate on the editor workspace
+                // actually being visible so a background tab never swallows
+                // list-context keys (Home/End) or Escape.
+                if self.is_editor_workspace_active() {
+                    if keymap::consume(ctx, Action::EditorSeekStart) {
+                        self.seek_to_fraction_in_active_tab(0, 9);
+                    }
+                    if keymap::consume(ctx, Action::EditorSeekEnd) {
+                        self.seek_to_fraction_in_active_tab(9, 9);
+                    }
+                    if keymap::consume(ctx, Action::EditorZoomToSelection) {
+                        self.editor_zoom_to_selection(tab_idx);
+                    }
+                    let has_preview = self
+                        .tabs
+                        .get(tab_idx)
+                        .map(|t| t.preview_audio_tool.is_some() || t.preview_overlay.is_some())
+                        .unwrap_or(false);
+                    if has_preview && keymap::consume(ctx, Action::EditorCancelPreview) {
+                        self.clear_preview_if_any(tab_idx);
+                    }
+                }
             }
         }
     }

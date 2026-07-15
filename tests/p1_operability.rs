@@ -6,6 +6,7 @@ mod p1_operability {
 
     use egui::Key;
     use egui_kittest::Harness;
+    use neowaves::app::ToolKind;
     use neowaves::kittest::harness_with_startup;
     use neowaves::{StartupConfig, WavesPreviewer};
 
@@ -113,6 +114,89 @@ mod p1_operability {
         assert!(harness
             .query_by_label("Set loop start at the playhead")
             .is_some());
+    }
+
+    #[test]
+    fn editor_home_end_seek() {
+        let (mut harness, dir) = open_editor_tab("home_end");
+
+        harness.key_press(Key::End);
+        harness.run_steps(2);
+        let len = harness.state().test_tab_samples_len();
+        let pos_end = harness.state().test_audio_play_pos();
+        assert!(
+            pos_end > len / 2,
+            "End should seek near the end: pos={pos_end} len={len}"
+        );
+
+        harness.key_press(Key::Home);
+        harness.run_steps(2);
+        let pos_home = harness.state().test_audio_play_pos();
+        assert!(
+            pos_home < len / 10,
+            "Home should seek to the start: pos={pos_home} len={len}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_z_zooms_to_selection() {
+        let (mut harness, dir) = open_editor_tab("zoom_sel");
+        // Let the editor render once so last_wave_w is captured.
+        harness.run_steps(3);
+
+        assert!(harness.state_mut().test_set_selection_frac(0.4, 0.5));
+        harness.run_steps(1);
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let spp_before = harness.state().tabs[tab_idx].samples_per_px;
+        assert!(spp_before > 0.0);
+
+        harness.key_press(Key::Z);
+        harness.run_steps(2);
+
+        let tab = &harness.state().tabs[tab_idx];
+        assert!(
+            tab.samples_per_px < spp_before * 0.5,
+            "Z should zoom in: before={spp_before} after={}",
+            tab.samples_per_px
+        );
+        let (sel_s, _sel_e) = tab.selection.expect("selection kept");
+        assert!(
+            tab.view_offset <= sel_s,
+            "view should start at or before the selection: view={} sel={}",
+            tab.view_offset,
+            sel_s
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_esc_clears_preview() {
+        let (mut harness, dir) = open_editor_tab("esc_preview");
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Fade));
+        assert!(harness.state_mut().test_set_tool_fade_ms(120.0, 80.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_preview_audio_tool() == Some(ToolKind::Fade) {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                panic!("fade preview timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        harness.key_press(Key::Escape);
+        harness.run_steps(3);
+        assert_eq!(harness.state().test_preview_audio_tool(), None);
+        assert!(!harness.state().test_preview_overlay_present());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
