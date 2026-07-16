@@ -242,6 +242,16 @@ impl WavesPreviewer {
                 self.show_engine_export_dialog = true;
                 ui.close();
             }
+            if ui
+                .button("Edit BWF Metadata...")
+                .on_hover_text(
+                    "Write bext (Broadcast WAV) description/originator into the selected WAV files",
+                )
+                .clicked()
+            {
+                self.open_bwf_dialog();
+                ui.close();
+            }
             ui.separator();
             let multi = self.selected_paths().len() >= 2;
             if ui

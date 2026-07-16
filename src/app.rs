@@ -21,6 +21,7 @@ mod app_init;
 mod audio_ops;
 mod audition_ops;
 mod auto_trim;
+mod bwf_ops;
 mod auto_trim_ops;
 mod capture;
 mod cli_ops;
@@ -715,6 +716,8 @@ pub struct WavesPreviewer {
     show_duplicates_window: bool,
     show_engine_export_dialog: bool,
     engine_export_profile: engine_export::EngineProfile,
+    show_bwf_dialog: bool,
+    bwf_fields: crate::wave::BextFields,
     list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,

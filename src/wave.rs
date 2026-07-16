@@ -1072,6 +1072,125 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
     replace_file_with_tmp(&tmp, path, false)
 }
 
+/// BWF `bext` fields we read/write. Only the human-facing strings are
+/// exposed; time reference and UMID are written as zeros.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BextFields {
+    /// Up to 256 bytes.
+    pub description: String,
+    /// Up to 32 bytes.
+    pub originator: String,
+    /// Up to 32 bytes.
+    pub originator_reference: String,
+    /// `yyyy-mm-dd`; filled with the current date when empty.
+    pub origination_date: String,
+    /// `hh:mm:ss`; filled with the current time when empty.
+    pub origination_time: String,
+}
+
+fn push_fixed_ascii(out: &mut Vec<u8>, s: &str, len: usize) {
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(len);
+    out.extend_from_slice(&bytes[..n]);
+    out.resize(out.len() + (len - n), 0);
+}
+
+fn read_fixed_ascii(data: &[u8], start: usize, len: usize) -> String {
+    let end = (start + len).min(data.len());
+    let slice = &data[start.min(end)..end];
+    let trimmed: Vec<u8> = slice
+        .iter()
+        .copied()
+        .take_while(|&b| b != 0)
+        .collect();
+    String::from_utf8_lossy(&trimmed).trim_end().to_string()
+}
+
+/// Serialize a BWF version-1 `bext` payload (602 bytes, empty coding
+/// history, zero time reference / UMID).
+fn encode_bext_payload(fields: &BextFields) -> Vec<u8> {
+    let now = chrono::Local::now();
+    let date = if fields.origination_date.trim().is_empty() {
+        now.format("%Y-%m-%d").to_string()
+    } else {
+        fields.origination_date.clone()
+    };
+    let time = if fields.origination_time.trim().is_empty() {
+        now.format("%H:%M:%S").to_string()
+    } else {
+        fields.origination_time.clone()
+    };
+    let mut out = Vec::with_capacity(602);
+    push_fixed_ascii(&mut out, &fields.description, 256);
+    push_fixed_ascii(&mut out, &fields.originator, 32);
+    push_fixed_ascii(&mut out, &fields.originator_reference, 32);
+    push_fixed_ascii(&mut out, &date, 10);
+    push_fixed_ascii(&mut out, &time, 8);
+    out.extend_from_slice(&0u32.to_le_bytes()); // TimeReferenceLow
+    out.extend_from_slice(&0u32.to_le_bytes()); // TimeReferenceHigh
+    out.extend_from_slice(&1u16.to_le_bytes()); // Version
+    out.resize(out.len() + 64, 0); // UMID (zero)
+    out.resize(602, 0); // Reserved + no coding history
+    out
+}
+
+/// Write (or replace) the BWF `bext` chunk in a WAV file, preserving all
+/// other chunks. The chunk is placed where the old one was, or right
+/// before `data` for files that had none.
+pub fn write_wav_bext(path: &Path, fields: &BextFields) -> Result<()> {
+    use std::fs;
+    let mut chunks = parse_riff_wave_chunks(path)?;
+    let payload = encode_bext_payload(fields);
+    if let Some(existing) = chunks.iter_mut().find(|c| &c.id == b"bext") {
+        existing.payload = payload;
+    } else {
+        let data_pos = chunks
+            .iter()
+            .position(|c| &c.id == b"data")
+            .unwrap_or(chunks.len());
+        chunks.insert(
+            data_pos,
+            RiffWaveChunk {
+                id: *b"bext",
+                payload,
+            },
+        );
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(b"WAVE");
+    for chunk in &chunks {
+        out.extend_from_slice(&chunk.id);
+        out.extend_from_slice(&(chunk.payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&chunk.payload);
+        if chunk.payload.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+    let riff_size = (out.len().saturating_sub(8)) as u32;
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let tmp = unique_sibling_tmp(path, "bext", "wav");
+    fs::write(&tmp, out)?;
+    replace_file_with_tmp(&tmp, path, false)
+}
+
+/// Read the BWF `bext` fields from a WAV file (None when absent).
+pub fn read_wav_bext(path: &Path) -> Result<Option<BextFields>> {
+    let chunks = parse_riff_wave_chunks(path)?;
+    let Some(chunk) = chunks.iter().find(|c| &c.id == b"bext") else {
+        return Ok(None);
+    };
+    let d = &chunk.payload;
+    Ok(Some(BextFields {
+        description: read_fixed_ascii(d, 0, 256),
+        originator: read_fixed_ascii(d, 256, 32),
+        originator_reference: read_fixed_ascii(d, 288, 32),
+        origination_date: read_fixed_ascii(d, 320, 10),
+        origination_time: read_fixed_ascii(d, 330, 8),
+    }))
+}
+
 #[derive(Clone)]
 struct RiffWaveChunk {
     id: [u8; 4],
@@ -3486,6 +3605,81 @@ mod tests {
             max_right_diff < 1.0e-4,
             "right channel drifted from sinc per-channel path: {max_right_diff}"
         );
+    }
+
+    #[test]
+    fn bext_write_read_roundtrip_preserves_other_chunks() {
+        use crate::wave::{read_wav_bext, write_wav_bext, BextFields};
+        let dir = make_temp_dir("bext_roundtrip");
+        let src = dir.join("bwf.wav");
+        export_channels_audio(&synth_stereo(48_000, 0.5), 48_000, &src).expect("export wav");
+        crate::loop_markers::write_loop_markers(&src, Some((5_000, 20_000)))
+            .expect("write loop markers");
+        let audio_before = crate::audio_io::decode_audio_multi(&src).expect("decode before").0;
+
+        // A file without bext reads as None.
+        assert_eq!(read_wav_bext(&src).expect("read"), None);
+
+        let fields = BextFields {
+            description: "Town ambience, morning market".to_string(),
+            originator: "NeoWaves".to_string(),
+            originator_reference: "NW-0042".to_string(),
+            origination_date: "2026-07-16".to_string(),
+            origination_time: "12:34:56".to_string(),
+        };
+        write_wav_bext(&src, &fields).expect("write bext");
+        let loaded = read_wav_bext(&src).expect("read back").expect("bext present");
+        assert_eq!(loaded, fields);
+        // Fixed BWF v1 payload size.
+        let bext = parse_riff_wave_chunks(&src)
+            .unwrap()
+            .into_iter()
+            .find(|c| &c.id == b"bext")
+            .expect("bext chunk");
+        assert_eq!(bext.payload.len(), 602);
+        // Loops and audio survive the rewrite bit-exactly.
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&src),
+            Some((5_000, 20_000))
+        );
+        assert_eq!(
+            crate::audio_io::decode_audio_multi(&src).expect("decode after").0,
+            audio_before
+        );
+
+        // Overwrite updates in place (no duplicate chunk).
+        let mut updated = fields.clone();
+        updated.description = "Updated".to_string();
+        write_wav_bext(&src, &updated).expect("overwrite bext");
+        let n_bext = parse_riff_wave_chunks(&src)
+            .unwrap()
+            .iter()
+            .filter(|c| &c.id == b"bext")
+            .count();
+        assert_eq!(n_bext, 1);
+        assert_eq!(
+            read_wav_bext(&src).unwrap().unwrap().description,
+            "Updated"
+        );
+
+        // Empty date/time are auto-stamped as yyyy-mm-dd / hh:mm:ss.
+        write_wav_bext(&src, &BextFields::default()).expect("auto stamp");
+        let stamped = read_wav_bext(&src).unwrap().unwrap();
+        assert_eq!(stamped.origination_date.len(), 10);
+        assert_eq!(stamped.origination_time.len(), 8);
+
+        // Over-long fields are truncated to the fixed layout.
+        let long = BextFields {
+            description: "x".repeat(400),
+            originator: "y".repeat(64),
+            ..Default::default()
+        };
+        write_wav_bext(&src, &long).expect("write long fields");
+        let clipped = read_wav_bext(&src).unwrap().unwrap();
+        assert_eq!(clipped.description.len(), 256);
+        assert_eq!(clipped.originator.len(), 32);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

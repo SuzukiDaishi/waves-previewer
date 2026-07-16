@@ -545,6 +545,7 @@ impl WavesPreviewer {
         self.ui_plugin_manager_window(ctx);
         self.ui_duplicates_window(ctx);
         self.ui_engine_export_dialog(ctx);
+        self.ui_bwf_dialog(ctx);
         self.ui_inspection_dialog(ctx);
         self.ui_loudnorm_dialog(ctx);
         self.ui_transcription_settings_window(ctx);
