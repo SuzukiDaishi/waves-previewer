@@ -4,6 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Pipeline & QA (Stage B / P3)
+- **Naming-rule check** in batch inspection (GUI dialog + CLI `--naming-pattern`): file stems failing the regex get warnings; an invalid pattern reports a config error on every row. Pattern persists to prefs.
+- **Find Duplicates** (List menu): worker-pool fingerprinting (gain-invariant spectral-shape hashes + exact content hash) clusters exact duplicates and perceptually similar files into a results window with click-to-select and CSV export.
+- **Export Engine Metadata** (List menu + CLI `batch engine-export`): Unity JSON / FMOD JSON / Wwise TSV metadata tables (loops, sample rate, channels, length, LUFS) for the selection or list — no audio conversion.
+- **Edit BWF Metadata** (List menu): batch-write the bext chunk (description/originator/reference, auto-stamped date/time) into selected WAVs, preserving all other chunks; non-WAV files are skipped and counted. iXML remains out of scope.
+- **WORLD formant editing**: a Formant slider (0.5x-2.0x) in the World view warps the spectral envelope along frequency at resynthesis — formant shifts without pitch changes, applied in both the display-grid and fine 5 ms re-analysis paths.
+- **Light theme pass**: hand-painted widgets (list selection/markers, dirty/error accents, volume slider, output meter) now draw through a theme-aware palette; the editor's audio canvas intentionally stays dark (DAW-style) in both themes.
+
 ### Spectral Repair & Restoration (Stage A)
 - **Spectral Brush** (Spec/Log views, next to Spectral Warp): drag on the spectrogram to paint content out RX-eraser-style. Stamps attenuate magnitude with Gaussian falloff in time and frequency (Strength 3-80 dB, Radius ms/Hz baked per stamp), stack additively in dB (clamped at 80 dB), render a preview on release, and Apply through the async pipeline with undo. Only the influenced region is processed; audio outside the stroke stays bit-identical.
 - **Heal Selection** (beside the spectral Mute button): rebuilds the selected time range (optionally band-limited by a frequency selection) from the surrounding audio — per-bin magnitudes interpolate across the gap between the context averages and phase advances at the measured per-bin velocity, so steady tones bridge dropouts coherently. Selections over 120 s are refused with a toast.

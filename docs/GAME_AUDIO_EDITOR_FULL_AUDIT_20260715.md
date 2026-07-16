@@ -328,6 +328,13 @@
 > - ✅ 16: プラグインプリセット(JSON、プラグイン毎)+A/B 比較(Effect Graph ノード / Plugin FX 両対応)、Plugin Manager ウィンドウ(Tools メニュー、検索パス prefs 永続化)、Auto preview(300ms デバウンス・再生位置維持スワップの先行レンダ差し替え型)を実装。**選択範囲限定の部分レンダリング高速化は見送り(KNOWN_ISSUES 記載)**
 > - ✅ 17: マルチバリエーション試聴(List > Audition Selection、ラウンドロビン / ランダム、自然終了で自動前進、topbar に進捗+Cancel)を実装
 
+> **2026-07-16 P3(Stage B)進捗**(本ブランチの後続コミットで対応):
+> - ✅ 18: エンジン連携エクスポート(Unity JSON / FMOD JSON / Wwise TSV、GUI + CLI `batch engine-export`)を実装(メタデータテーブルのみ、音声変換なし)
+> - ✅ 19(一部): WORLD フォルマント編集(包絡の周波数ワープ、Resynthesize 時適用)を実装。**非周期性編集は未対応**
+> - ✅ 20(大半): 重複/類似音検出(List > Find Duplicates、指紋+content hash) / 命名規則バリデーション(検査 + CLI `--naming-pattern`) / BWF bext 一括書込を実装。**iXML は未対応(KNOWN_ISSUES 記載)**
+> - ✅ 21(一部): Light テーマの手描きウィジェット対応(Palette 化: リスト/トップバー全面、エディタキャンバスは意図的にダーク維持)。**i18n はユーザー判断で見送り、アクセシビリティは未着手**
+> - ⬜ 22(残): mutex ポイズニング対策は P0 バッチで回復パス対応済み、tab_ops 重複は Stage A の EditorTab::new_base 統合で対応済み
+
 ### P2 — 代替ツールとしての本丸
 13. エディタ内 paste-insert / 無音挿入 / DC除去 / 位相反転 / ディザ…§2.2
 14. スペクトル編集第2弾: ブラシ減衰 → Heal/inpaint → De-click → De-noise(プロファイル学習)…§2.3

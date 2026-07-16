@@ -31,6 +31,11 @@
 - **List > Inspect Files (QA)...**(行コンテキストメニューにも有り)で一括検査(ピーク超過 / LUFS 逸脱 / 無音余白 / ループ不整合)を実行できます。結果ウィンドウは severity フィルタ・行クリックでリスト選択・CSV 保存に対応。
 - **List > Normalize Loudness...** で選択(または全件)のラウドネスを目標 LUFS へ非破壊で揃えられます(pending gain を設定。ファイルは書き換えません。バッチ全体で 1 回の Undo)。
 - **List > Audition Selection (Round-robin / Random)**: 2 件以上選択した状態で、選択ファイルを順番（またはランダム、同一ファイル連続なし）に連続試聴します。各ファイルの自然終了で次へ進み、停止（Space / 別の行を選択 / topbar の「Audition n/m」の Cancel）で終了します。
+- **List > Find Duplicates...**: 選択(または全件)を指紋化して、完全一致(exact)と知覚的に近い(similar、音量違いも検出)ファイルをグループ表示します。行クリックでリスト選択、CSV 保存対応。
+- **List > Export Engine Metadata...**: Unity(JSON) / FMOD(JSON) / Wwise(TSV) 向けのメタデータテーブル(ループ・SR・ch・長さ・LUFS)を書き出します(音声変換なし)。CLI は `batch engine-export`。
+- **List > Edit BWF Metadata...**: 選択した WAV に bext チャンク(Description / Originator / Reference、日時は自動)を一括書き込みします(他のチャンクは保全、非 WAV はスキップ)。
+- Inspect Files (QA) に命名規則チェック(ファイル名 stem への正規表現)が追加されました。CLI は `--naming-pattern`。
+- World ビューの Inspector に **Formant** スライダ(0.5x〜2.0x)が追加されました。Resynthesize 時にスペクトル包絡を周波数方向にワープし、ピッチを変えずにフォルマントだけ動かせます。
 - **Tools > Plugin Manager...**: プラグインカタログの一覧・再スキャン・検索パスの管理（prefs に永続化）を行うウィンドウです。
 - Plugin FX ツール / Effect Graph のプラグインノードでは、パラメータのプリセット保存/読み込み/削除と A/B 比較（Store B → A/B Swap）が使えます。Plugin FX の「Auto preview」を ON にすると、パラメータ変更の約 300 ms 後に自動でプレビューを再レンダリングします（再生位置は維持）。
 
