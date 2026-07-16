@@ -4,6 +4,12 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Waveform Editing Basics (P2 batch)
+- New editor tools: **Invert Polarity** (flip sample polarity over the selection or whole file) and **DC Offset** removal (per-channel mean subtraction with a live measured-DC readout), both with preview, undo, session restore, and CLI apply support.
+- **Insert Silence** tool inserts N ms of zeros at the selection start (or the playhead); markers, loop regions, selections, and fade ranges after the insert point shift right. Built on a shared insert infrastructure (`editor_insert_channels_at`).
+- **In-editor audio cut/copy/paste-insert**: Ctrl+C/X/V in the editor workspace operate on an in-app audio clipboard. Paste splices at the selection start / playhead with undo; cross-tab pastes are resampled to the target buffer rate and channel-adapted.
+- **TPDF dither** (default on, Settings toggle) when quantizing to 16-bit integer PCM in the WAV/AIFF/FLAC/gain-export writers. Deterministic generator keeps FLAC's two-pass MD5 self-consistent.
+
 ### Usability (P1 batch)
 - New Help menu with a read-only Keyboard Shortcuts window, generated from a central keymap table (`src/app/keymap.rs`); simple shortcut dispatch now goes through the table so a future rebinding UI only needs to swap the lookup.
 - Destructive editor keys `C` (delete+join) and `T` (trim) show an info toast pointing at Ctrl+Z after they fire.
