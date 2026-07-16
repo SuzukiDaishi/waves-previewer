@@ -391,6 +391,11 @@ impl CliWorkspace {
                     .spawn_editor_apply_for_tab_range(tab_idx, ToolKind::DeClick, sens, None);
                 self.wait_for_apply()?;
             }
+            ToolKind::DeNoise => {
+                anyhow::bail!(
+                    "DeNoise is interactive-only (the noise profile is learned in the editor)"
+                )
+            }
             ToolKind::NoiseGate => {
                 let st = self
                     .app

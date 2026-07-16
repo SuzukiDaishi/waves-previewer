@@ -629,6 +629,7 @@ pub enum ToolKind {
     InsertSilence,
     Pencil,
     DeClick,
+    DeNoise,
     NoiseGate,
     Eq,
     Compressor,
@@ -818,6 +819,8 @@ impl ToolState {
             brush_time_radius_ms: 60.0,
             brush_freq_radius_hz: 200.0,
             declick_sensitivity: 0.5,
+            denoise_reduction_db: 12.0,
+            denoise_strength: 2.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -855,6 +858,8 @@ pub struct ToolState {
     pub brush_time_radius_ms: f32,
     pub brush_freq_radius_hz: f32,
     pub declick_sensitivity: f32,
+    pub denoise_reduction_db: f32,
+    pub denoise_strength: f32,
     pub loop_repeat: u32,
     pub noise_gate_threshold_db: f32,
     pub noise_gate_attack_ms: f32,
@@ -1388,6 +1393,20 @@ pub struct EditorTab {
     pub spectral_brush_last: Option<(usize, f32)>, // last stamp (sample, hz) this stroke
     // --- De-click scan result (transient; invalidated by edits) ---
     pub declick_scan: Option<DeclickScan>,
+    // --- De-noise learned profile (transient; SR-checked on use) ---
+    pub noise_profile: Option<NoiseProfile>,
+}
+
+/// Per-bin average noise magnitudes learned from a selection, used by the
+/// De-noise tool's spectral subtraction.
+#[derive(Clone, Debug)]
+pub struct NoiseProfile {
+    pub fft_size: usize,
+    pub sample_rate: u32,
+    /// One magnitude vector per channel (mono profiles apply to all).
+    pub mag_per_channel: Vec<Vec<f32>>,
+    /// Where the profile came from, for the inspector status line (ms).
+    pub learned_from_ms: (f32, f32),
 }
 
 /// Result of a de-click Scan pass, drawn as red span markers on the
@@ -1537,6 +1556,7 @@ impl EditorTab {
             spectral_brush_stamps: Vec::new(),
             spectral_brush_last: None,
             declick_scan: None,
+            noise_profile: None,
         }
     }
 

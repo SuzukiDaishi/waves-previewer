@@ -261,4 +261,54 @@ mod p3_spectral_tools {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn denoise_learn_and_apply_reduces_noise_floor() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("denoise");
+        let src = dir.join("noisy.wav");
+        // First half: noise only. Second half: noise + tone.
+        let len = (sr * 2) as usize;
+        let noise_amp = 10f32.powf(-30.0 / 20.0);
+        let mut state = 99u64;
+        let mut ch: Vec<f32> = (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0) * noise_amp
+            })
+            .collect();
+        for (i, v) in ch.iter_mut().enumerate().skip(len / 2) {
+            *v += (i as f32 / sr as f32 * 1_000.0 * std::f32::consts::TAU).sin() * 0.25;
+        }
+        neowaves::wave::export_channels_audio(&[ch], sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // Learn from the noise-only first half.
+        assert!(harness.state_mut().test_set_selection_frac(0.02, 0.48));
+        assert!(harness.state_mut().test_denoise_learn(), "learn failed");
+        // Clear the selection so Apply covers the whole file.
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.0) || true);
+        let tab_idx = harness.state().active_tab.unwrap();
+        harness.state_mut().tabs[tab_idx].selection = None;
+
+        assert!(harness.state_mut().test_denoise_apply(), "apply not queued");
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        let probe = 10_000..len / 2 - 10_000;
+        let drop_db = 20.0
+            * (rms(&after[0][probe.clone()]) / rms(&before[0][probe.clone()]).max(1e-12)).log10();
+        assert!(drop_db < -8.0, "noise floor only dropped {drop_db} dB");
+        // Undo restores the noisy original.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -161,6 +161,7 @@ impl WavesPreviewer {
             Some(ToolKind::Speed) => "Previewing Speed...".to_string(),
             Some(ToolKind::SpectralWarp) => "Previewing Spectral Warp...".to_string(),
             Some(ToolKind::SpectralBrush) => "Previewing Spectral Brush...".to_string(),
+            Some(ToolKind::DeNoise) => "Previewing De-noise...".to_string(),
             _ => "Previewing...".to_string(),
         })
     }

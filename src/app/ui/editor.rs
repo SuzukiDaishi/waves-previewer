@@ -2840,6 +2840,9 @@ impl crate::app::WavesPreviewer {
         let mut pending_spectral_brush_apply = false;
         let mut pending_declick_scan = false;
         let mut pending_declick_apply: Option<(f32, Option<(usize, usize)>)> = None;
+        let mut pending_denoise_learn = false;
+        let mut pending_denoise_preview = false;
+        let mut pending_denoise_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -7282,6 +7285,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::InsertSilence => "Insert Silence",
                                 ToolKind::Pencil => "Pencil",
                                 ToolKind::DeClick => "De-click",
+                                ToolKind::DeNoise => "De-noise",
                                 // Spectrogram-view tools; never selectable in
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
@@ -7325,6 +7329,7 @@ impl crate::app::WavesPreviewer {
                                     );
                                     ui.selectable_value(&mut tool, ToolKind::Pencil, "Pencil");
                                     ui.selectable_value(&mut tool, ToolKind::DeClick, "De-click");
+                                    ui.selectable_value(&mut tool, ToolKind::DeNoise, "De-noise");
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -10333,6 +10338,122 @@ impl crate::app::WavesPreviewer {
                                         }
                                     });
                                 }
+                                ToolKind::DeNoise => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Profile-based noise reduction: select a noise-only region, learn its profile, then reduce it everywhere (or in a selection).",
+                                            )
+                                            .weak(),
+                                        );
+                                        let ready = Self::editor_denoise_ready(tab);
+                                        match &tab.noise_profile {
+                                            Some(p) if ready => {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "Profile: learned from {:.2}-{:.2} s",
+                                                        p.learned_from_ms.0 / 1000.0,
+                                                        p.learned_from_ms.1 / 1000.0
+                                                    ))
+                                                    .weak(),
+                                                );
+                                            }
+                                            Some(_) => {
+                                                ui.label(
+                                                    RichText::new(
+                                                        "Profile is stale (sample rate changed) — learn again",
+                                                    )
+                                                    .color(egui::Color32::from_rgb(235, 200, 90)),
+                                                );
+                                            }
+                                            None => {
+                                                ui.label(
+                                                    RichText::new(
+                                                        "No profile yet — select noise-only audio, then Learn",
+                                                    )
+                                                    .weak(),
+                                                );
+                                            }
+                                        }
+                                        let sel_ok = Self::editor_selected_range(tab).is_some();
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    sel_ok && !tab.loading,
+                                                    egui::Button::new("Learn from Selection"),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_denoise_learn = true;
+                                            }
+                                            if tab.noise_profile.is_some()
+                                                && ui.button("Forget").clicked()
+                                            {
+                                                tab.noise_profile = None;
+                                                need_restore_preview = true;
+                                            }
+                                        });
+                                        let mut red = tab.tool_state.denoise_reduction_db;
+                                        let mut strength = tab.tool_state.denoise_strength;
+                                        if !red.is_finite() { red = 12.0; }
+                                        if !strength.is_finite() { strength = 2.0; }
+                                        ui.label("Reduction (max attenuation)");
+                                        let r1 = ui.add(
+                                            egui::Slider::new(&mut red, 0.0..=40.0)
+                                                .suffix(" dB")
+                                                .fixed_decimals(0),
+                                        );
+                                        ui.label("Strength (over-subtraction)");
+                                        let r2 = ui.add(
+                                            egui::Slider::new(&mut strength, 1.0..=4.0)
+                                                .fixed_decimals(1),
+                                        );
+                                        if r1.changed() || r2.changed() {
+                                            tab.tool_state = ToolState {
+                                                denoise_reduction_db: red,
+                                                denoise_strength: strength,
+                                                ..tab.tool_state
+                                            };
+                                        }
+                                        if sel_ok {
+                                            ui.label(
+                                                RichText::new("Target: selection (edges crossfaded)")
+                                                    .weak(),
+                                            );
+                                        } else {
+                                            ui.label(RichText::new("Target: whole file").weak());
+                                        }
+                                        if overlay_busy || apply_busy {
+                                            ui.add(egui::Spinner::new());
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    ready && preview_button_enabled,
+                                                    egui::Button::new("Preview"),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_denoise_preview = true;
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    ready && !apply_busy,
+                                                    egui::Button::new("Apply"),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_denoise_apply = true;
+                                            }
+                                            if ui.button("Cancel").clicked() {
+                                                need_restore_preview = true;
+                                            }
+                                        });
+                                    });
+                                }
                             }
                         }
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
@@ -10948,6 +11069,15 @@ impl crate::app::WavesPreviewer {
                         sens,
                         range,
                     );
+                }
+                if pending_denoise_learn {
+                    self.editor_denoise_learn_profile(tab_idx);
+                }
+                if pending_denoise_preview {
+                    self.spawn_denoise_preview_for_tab(tab_idx);
+                }
+                if pending_denoise_apply {
+                    self.spawn_denoise_apply_for_tab(tab_idx);
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();

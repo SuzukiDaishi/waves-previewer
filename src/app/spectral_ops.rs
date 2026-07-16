@@ -511,6 +511,98 @@ pub(crate) fn warp_channel_with_points(
     out
 }
 
+/// Learn a per-bin average noise magnitude from `[s, e)` of one channel.
+/// Returns one magnitude per STFT bin (the profile for this channel).
+pub(crate) fn learn_noise_profile_channel(ch: &[f32], s: usize, e: usize) -> Vec<f32> {
+    let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+    let n = ch.len();
+    let e = e.min(n);
+    if s >= e {
+        return vec![0.0f32; bins];
+    }
+    let mut acc = vec![0.0f64; bins];
+    let mut count = 0usize;
+    let _ = stft_process_frames(&ch[s..e], |_t, spec| {
+        for (bin, a) in acc.iter_mut().enumerate() {
+            *a += spec[bin.min(spec.len() - 1)].norm() as f64;
+        }
+        count += 1;
+    });
+    if count == 0 {
+        return vec![0.0f32; bins];
+    }
+    acc.iter().map(|a| (*a / count as f64) as f32).collect()
+}
+
+/// Profile-based spectral subtraction de-noise for one channel.
+/// Per bin: `g = clamp(1 - strength * (N/|X|)^2, floor, 1)` with
+/// `floor = 10^(-reduction_db/20)` (the maximum attenuation), then an
+/// asymmetric one-pole across frames (slow release, fast attack) to tame
+/// musical noise. `range = None` processes the whole channel; `Some`
+/// processes only that region (plus STFT margins) with crossfaded edges,
+/// leaving the rest bit-identical.
+pub(crate) fn denoise_channel(
+    ch: &[f32],
+    profile: &[f32],
+    reduction_db: f32,
+    strength: f32,
+    range: Option<(usize, usize)>,
+) -> Vec<f32> {
+    let n = ch.len();
+    let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+    if n == 0 || profile.len() != bins || profile.iter().all(|&m| m <= 0.0) {
+        return ch.to_vec();
+    }
+    let floor = 10f32.powf(-reduction_db.clamp(0.0, 80.0) / 20.0);
+    let strength = strength.clamp(1.0, 4.0);
+    let (seg_s, seg_e) = match range {
+        Some((s, e)) => {
+            let e = e.min(n);
+            if s >= e {
+                return ch.to_vec();
+            }
+            (
+                s.saturating_sub(SPECTRAL_FFT_SIZE * 2),
+                (e + SPECTRAL_FFT_SIZE * 2).min(n),
+            )
+        }
+        None => (0, n),
+    };
+
+    let mut g_prev = vec![1.0f32; bins];
+    let processed = stft_process_frames(&ch[seg_s..seg_e], |_t, spec| {
+        for bin in 0..bins.min(spec.len()) {
+            let x = spec[bin].norm();
+            let ratio = if x > 1e-12 { profile[bin] / x } else { 1.0 };
+            let g_raw = (1.0 - strength * ratio * ratio).clamp(floor, 1.0);
+            // Asymmetric smoothing: gains fall (more suppression) quickly,
+            // recover slowly — flickering bins are what reads as
+            // "musical noise".
+            let a = if g_raw > g_prev[bin] { 0.6 } else { 0.25 };
+            let g = g_prev[bin] * a + g_raw * (1.0 - a);
+            g_prev[bin] = g;
+            spec[bin] *= g.clamp(floor, 1.0);
+        }
+    });
+
+    let mut out = ch.to_vec();
+    match range {
+        None => out.copy_from_slice(&processed),
+        Some((s, e)) => {
+            let e = e.min(n);
+            let sel_len = e - s;
+            // Same edge treatment as the other region-scoped spectral
+            // edits: raised-cosine into the untouched audio.
+            let fade_n = (SPECTRAL_FFT_SIZE / 2).min(sel_len / 2).max(1);
+            for i in 0..sel_len {
+                let w = selection_edge_weight(i, sel_len, fade_n);
+                out[s + i] = ch[s + i] * (1.0 - w) + processed[(s - seg_s) + i] * w;
+            }
+        }
+    }
+    out
+}
+
 /// Frames of spectral context averaged on each side of a healed region.
 const HEAL_CONTEXT_FRAMES: usize = 4;
 /// Selections longer than this are refused by the Heal button (the whole
@@ -928,6 +1020,227 @@ impl crate::app::WavesPreviewer {
             tab_idx,
             undo,
         });
+    }
+
+    /// Learn a noise profile from the current selection (synchronous; the
+    /// selection is capped at 60 s which the STFT sweeps in well under a
+    /// frame's budget for typical files).
+    pub(super) fn editor_denoise_learn_profile(&mut self, tab_idx: usize) {
+        const LEARN_MAX_SECS: f32 = 60.0;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading {
+            return;
+        }
+        let Some((s, mut e)) = Self::editor_valid_selection(tab) else {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                "De-noise: select a noise-only region first, then Learn",
+            );
+            return;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let max_len = (LEARN_MAX_SECS * sr as f32) as usize;
+        if e - s > max_len {
+            e = s + max_len;
+        }
+        let mag_per_channel: Vec<Vec<f32>> = tab
+            .ch_samples
+            .iter()
+            .map(|ch| learn_noise_profile_channel(ch, s, e))
+            .collect();
+        let profile = crate::app::types::NoiseProfile {
+            fft_size: SPECTRAL_FFT_SIZE,
+            sample_rate: sr,
+            mag_per_channel,
+            learned_from_ms: (
+                s as f32 * 1000.0 / sr as f32,
+                e as f32 * 1000.0 / sr as f32,
+            ),
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.noise_profile = Some(profile);
+        }
+        self.push_toast(
+            crate::app::types::ToastSeverity::Info,
+            "De-noise: profile learned from selection",
+        );
+    }
+
+    /// True when the tab has a noise profile usable against its current
+    /// buffer (same FFT layout and sample rate).
+    pub(super) fn editor_denoise_ready(tab: &crate::app::types::EditorTab) -> bool {
+        tab.noise_profile
+            .as_ref()
+            .map(|p| {
+                p.fft_size == SPECTRAL_FFT_SIZE
+                    && p.sample_rate == tab.buffer_sample_rate.max(1)
+                    && !p.mag_per_channel.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn denoise_processed_channels(
+        channels: &[Vec<f32>],
+        profile: &crate::app::types::NoiseProfile,
+        reduction_db: f32,
+        strength: f32,
+        range: Option<(usize, usize)>,
+    ) -> Vec<Vec<f32>> {
+        channels
+            .iter()
+            .enumerate()
+            .map(|(ci, ch)| {
+                let mags = profile
+                    .mag_per_channel
+                    .get(ci)
+                    .or_else(|| profile.mag_per_channel.first());
+                match mags {
+                    Some(mags) => denoise_channel(ch, mags, reduction_db, strength, range),
+                    None => ch.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Render the de-noise into a non-destructive preview on a worker
+    /// thread (same channels as the warp/brush previews).
+    pub(super) fn spawn_denoise_preview_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || !Self::editor_denoise_ready(tab) {
+            return;
+        }
+        let path = tab.path.clone();
+        let channels = tab.ch_samples.clone();
+        let samples_len = tab.samples_len;
+        let profile = tab.noise_profile.clone().unwrap();
+        let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
+        let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
+        let range = Self::editor_valid_selection(tab);
+
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = Some(crate::app::types::ToolKind::DeNoise);
+        }
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
+        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
+        let preview_gen = self.heavy_preview_gen_counter;
+        self.heavy_preview_expected_gen = preview_gen;
+        self.heavy_preview_expected_path = Some(path.clone());
+        self.heavy_preview_expected_tool = Some(crate::app::types::ToolKind::DeNoise);
+        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
+        let overlay_gen = self.overlay_gen_counter;
+        self.overlay_expected_gen = overlay_gen;
+        self.overlay_expected_path = Some(path.clone());
+        self.overlay_expected_tool = Some(crate::app::types::ToolKind::DeNoise);
+
+        let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
+        let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
+        std::thread::spawn(move || {
+            let processed =
+                Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
+            let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
+            let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
+            let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
+                processed,
+                crate::app::types::ToolKind::DeNoise,
+                timeline_len,
+            );
+            let _ = overlay_tx.send((
+                path.clone(),
+                crate::app::types::ToolKind::DeNoise,
+                overlay,
+                overlay_gen,
+                true,
+            ));
+            if !mono.is_empty() {
+                let _ = preview_tx.send((
+                    path,
+                    crate::app::types::ToolKind::DeNoise,
+                    mono,
+                    preview_gen,
+                ));
+            }
+        });
+        self.heavy_preview_rx = Some(preview_rx);
+        self.heavy_overlay_rx = Some(overlay_rx);
+    }
+
+    /// Destructively apply the de-noise on a worker thread through the
+    /// shared apply pipeline (busy overlay + undo). The learned profile is
+    /// kept so the user can iterate.
+    pub(super) fn spawn_denoise_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || !Self::editor_denoise_ready(tab) {
+            return;
+        }
+        let undo = Some(Self::capture_undo_state(tab));
+        let channels = tab.ch_samples.clone();
+        let profile = tab.noise_profile.clone().unwrap();
+        let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
+        let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
+        let range = Self::editor_valid_selection(tab);
+        self.editor_apply_state = None;
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
+        std::thread::spawn(move || {
+            let out =
+                Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(crate::app::types::EditorApplyResult {
+                tab_idx,
+                samples: mono,
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Applying De-noise...".to_string(),
+            rx,
+            tab_idx,
+            undo,
+        });
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_denoise_learn(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_denoise_learn_profile(tab_idx);
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.noise_profile.is_some())
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_denoise_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_denoise_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
     }
 
     /// Heal (inpaint) the current selection from its spectral context on a
@@ -1476,6 +1789,105 @@ mod tests {
         let many: Vec<_> = (0..20).map(|_| brush_stamp(len / 2, 1_000.0, 40.0)).collect();
         let out_many = brush_channel_with_stamps(&sig, sr, &many);
         assert!(out_many.iter().all(|v| v.is_finite()));
+    }
+
+    /// Deterministic LCG noise in [-1, 1].
+    fn lcg_noise(len: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed.max(1);
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn denoise_reduces_noise_keeps_tone() {
+        let sr = 48_000u32;
+        let len = 96_000usize; // 2 s
+        let noise_amp = 10f32.powf(-30.0 / 20.0);
+        let tone_amp = 10f32.powf(-12.0 / 20.0);
+        let noise: Vec<f32> = lcg_noise(len, 7).iter().map(|v| v * noise_amp).collect();
+        // First half: noise only. Second half: noise + tone.
+        let mut sig = noise.clone();
+        for i in len / 2..len {
+            sig[i] += (2.0 * core::f32::consts::PI * 1_000.0 * i as f32 / sr as f32).sin()
+                * tone_amp;
+        }
+        // Learn on the noise-only first half.
+        let profile = learn_noise_profile_channel(&sig, 4_800, len / 2 - 4_800);
+        let out = denoise_channel(&sig, &profile, 20.0, 2.0, None);
+        assert_eq!(out.len(), sig.len());
+        // Noise-only region drops by at least 12 dB.
+        let probe_noise = 10_000..len / 2 - 10_000;
+        let before_rms = rms(&sig[probe_noise.clone()]);
+        let after_rms = rms(&out[probe_noise.clone()]);
+        let drop_db = 20.0 * (after_rms / before_rms.max(1e-12)).log10();
+        assert!(drop_db < -12.0, "noise only dropped {drop_db} dB");
+        // The tone survives within ~1 dB.
+        let probe_tone = len / 2 + 10_000..len - 10_000;
+        let tone_before = goertzel(&sig[probe_tone.clone()], sr, 1_000.0);
+        let tone_after = goertzel(&out[probe_tone.clone()], sr, 1_000.0);
+        let tone_db = 20.0 * (tone_after / tone_before.max(1e-12)).log10();
+        assert!(tone_db.abs() < 1.0, "tone changed by {tone_db} dB");
+    }
+
+    #[test]
+    fn denoise_reduction_floor_is_respected() {
+        let sr = 48_000u32;
+        let _ = sr;
+        let len = 96_000usize;
+        let noise: Vec<f32> = lcg_noise(len, 11)
+            .iter()
+            .map(|v| v * 10f32.powf(-30.0 / 20.0))
+            .collect();
+        let profile = learn_noise_profile_channel(&noise, 4_800, len - 4_800);
+        // A 12 dB floor caps the attenuation: expect roughly 8..14 dB.
+        let out = denoise_channel(&noise, &profile, 12.0, 2.0, None);
+        let probe = 10_000..len - 10_000;
+        let drop_db =
+            20.0 * (rms(&out[probe.clone()]) / rms(&noise[probe.clone()]).max(1e-12)).log10();
+        assert!(
+            drop_db < -8.0 && drop_db > -14.0,
+            "12 dB floor not respected: dropped {drop_db} dB"
+        );
+    }
+
+    #[test]
+    fn denoise_bad_profile_is_identity() {
+        let sig = sine(1_000.0, 48_000, 24_000);
+        // Wrong bin count -> untouched.
+        let out = denoise_channel(&sig, &[0.1f32; 64], 20.0, 2.0, None);
+        assert_eq!(out, sig);
+        // Empty (all-zero) profile -> untouched.
+        let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+        let out = denoise_channel(&sig, &vec![0.0f32; bins], 20.0, 2.0, None);
+        assert_eq!(out, sig);
+    }
+
+    #[test]
+    fn denoise_range_leaves_outside_bit_identical() {
+        let len = 96_000usize;
+        let noise: Vec<f32> = lcg_noise(len, 23)
+            .iter()
+            .map(|v| v * 10f32.powf(-30.0 / 20.0))
+            .collect();
+        let profile = learn_noise_profile_channel(&noise, 4_800, len / 2);
+        let (s, e) = (len / 2, len / 2 + 19_200);
+        let out = denoise_channel(&noise, &profile, 20.0, 2.0, Some((s, e)));
+        let seg_s = s - SPECTRAL_FFT_SIZE * 2;
+        let seg_e = e + SPECTRAL_FFT_SIZE * 2;
+        assert_eq!(&out[..s], &noise[..s], "audio before the range changed");
+        assert_eq!(&out[e..], &noise[e..], "audio after the range changed");
+        let _ = (seg_s, seg_e);
+        // Inside the range the noise actually drops.
+        let probe = s + 4_800..e - 4_800;
+        let drop_db =
+            20.0 * (rms(&out[probe.clone()]) / rms(&noise[probe.clone()]).max(1e-12)).log10();
+        assert!(drop_db < -8.0, "in-range noise only dropped {drop_db} dB");
     }
 
     #[test]
