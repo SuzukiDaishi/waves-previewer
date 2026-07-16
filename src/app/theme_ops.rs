@@ -539,6 +539,9 @@ impl WavesPreviewer {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     self.export_cfg.codec.ogg_quality = v.clamp(-0.2, 1.0);
                 }
+            } else if let Some(rest) = line.strip_prefix("export_dither=") {
+                self.export_cfg.codec.dither_16bit =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("recent_session=") {
                 let raw = rest.trim().trim_matches('"');
                 if !raw.is_empty() {
@@ -770,6 +773,7 @@ export_srt={}\n\
 export_mp3_kbps={}\n\
 export_aac_kbps={}\n\
 export_ogg_quality={:.2}\n\
+export_dither={}\n\
 zoo_enabled={}\n\
 zoo_walk_enabled={}\n\
 zoo_voice_enabled={}\n\
@@ -839,6 +843,7 @@ zoo_flip_manual={}\n",
             self.export_cfg.codec.mp3_bitrate_kbps,
             self.export_cfg.codec.aac_bitrate_kbps,
             self.export_cfg.codec.ogg_quality,
+            if self.export_cfg.codec.dither_16bit { "1" } else { "0" },
             zoo_enabled,
             zoo_walk_enabled,
             zoo_voice_enabled,

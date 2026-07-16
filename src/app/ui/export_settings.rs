@@ -160,6 +160,18 @@ impl crate::app::WavesPreviewer {
                                         .small(),
                                 );
                             });
+                            if ui
+                                .checkbox(
+                                    &mut self.export_cfg.codec.dither_16bit,
+                                    "TPDF dither on 16-bit export",
+                                )
+                                .on_hover_text(
+                                    "Adds triangular dither when quantizing to 16-bit integer                                      PCM (WAV/AIFF/FLAC). Decorrelates quantization error at                                      the cost of a very low noise floor.",
+                                )
+                                .changed()
+                            {
+                                codec_changed = true;
+                            }
                             if codec_changed {
                                 self.save_prefs();
                             }
