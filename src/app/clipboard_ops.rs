@@ -564,6 +564,18 @@ impl super::WavesPreviewer {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
         let consumed_cut =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X));
+        let consumed_paste_mix = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::V,
+            )
+        });
+        let consumed_paste_xf = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                egui::Key::V,
+            )
+        });
         let consumed_paste =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
         let edge_c = ctrl && down_c && !self.editor_clip_c_was_down;
@@ -572,12 +584,30 @@ impl super::WavesPreviewer {
         self.editor_clip_c_was_down = ctrl && down_c;
         self.editor_clip_x_was_down = ctrl && down_x;
         self.editor_clip_v_was_down = ctrl && down_v;
+        // Modifier held at trigger time picks the paste mode (Shift = mix,
+        // Alt = crossfade insert) for the event/edge paths, where the chord
+        // itself is not visible.
+        let mods = ctx.input(|i| i.modifiers);
+        let modifier_mode = if mods.shift {
+            super::types::PasteMode::Mix
+        } else if mods.alt {
+            super::types::PasteMode::CrossfadeInsert
+        } else {
+            super::types::PasteMode::Insert
+        };
         if event_cut || consumed_cut || edge_x {
             self.editor_cut_selection_to_audio_clipboard(tab_idx);
         } else if event_copy || consumed_copy || edge_c {
             self.editor_copy_selection_to_audio_clipboard(tab_idx, true);
+        } else if consumed_paste_mix {
+            self.editor_paste_from_audio_clipboard(tab_idx, super::types::PasteMode::Mix);
+        } else if consumed_paste_xf {
+            self.editor_paste_from_audio_clipboard(
+                tab_idx,
+                super::types::PasteMode::CrossfadeInsert,
+            );
         } else if event_paste || consumed_paste || edge_v {
-            self.editor_paste_insert_from_audio_clipboard(tab_idx);
+            self.editor_paste_from_audio_clipboard(tab_idx, modifier_mode);
         }
     }
 

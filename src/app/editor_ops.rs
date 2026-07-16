@@ -620,20 +620,26 @@ impl crate::app::WavesPreviewer {
     /// The clip is resampled to the tab's buffer rate when needed and its
     /// channel layout is adapted (repeat modulo) to the tab's channel count.
     pub(super) fn editor_paste_insert_from_audio_clipboard(&mut self, tab_idx: usize) -> bool {
-        let Some(clip) = self.editor_audio_clipboard.clone() else {
-            self.push_toast(
-                super::types::ToastSeverity::Info,
-                "Audio clipboard is empty (Ctrl+C/X in the editor copies audio)",
-            );
-            return false;
+        self.editor_paste_from_audio_clipboard(tab_idx, super::types::PasteMode::Insert)
+    }
+
+    /// Prepare the clipboard contents for pasting into `tab_idx`: resample to
+    /// the buffer rate, adapt the channel layout, trim to rectangular.
+    fn editor_prepared_clipboard_channels(&mut self, tab_idx: usize) -> Option<Vec<Vec<f32>>> {
+        let clip = match self.editor_audio_clipboard.clone() {
+            Some(clip) => clip,
+            None => {
+                self.push_toast(
+                    super::types::ToastSeverity::Info,
+                    "Audio clipboard is empty (Ctrl+C/X in the editor copies audio)",
+                );
+                return None;
+            }
         };
         let (target_sr, target_ch) = {
-            let Some(tab) = self.tabs.get(tab_idx) else {
-                return false;
-            };
+            let tab = self.tabs.get(tab_idx)?;
             (tab.buffer_sample_rate.max(1), tab.ch_samples.len().max(1))
         };
-        let pos = self.editor_insert_position(tab_idx);
         let mut channels = clip.channels;
         if clip.sample_rate != target_sr {
             channels = crate::wave::resample_channels_quality(
@@ -644,7 +650,7 @@ impl crate::app::WavesPreviewer {
             );
         }
         if channels.is_empty() {
-            return false;
+            return None;
         }
         if channels.len() != target_ch {
             channels = (0..target_ch)
@@ -652,27 +658,145 @@ impl crate::app::WavesPreviewer {
                 .collect();
         }
         // Resamplers can differ by a sample or two across channels; trim to
-        // the shortest so the insert stays rectangular.
+        // the shortest so the paste stays rectangular.
         let min_len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
         if min_len == 0 {
-            return false;
+            return None;
         }
         for ch in channels.iter_mut() {
             ch.truncate(min_len);
         }
-        if self.editor_insert_channels_at(tab_idx, pos, channels) {
-            let sr = target_sr;
+        Some(channels)
+    }
+
+    /// Paste the audio clipboard at the selection start / playhead using the
+    /// given mode: Insert (splice in, markers shift), Mix (sum into the
+    /// existing audio, length unchanged), or CrossfadeInsert (insert with
+    /// equal-power crossfaded joins).
+    pub(super) fn editor_paste_from_audio_clipboard(
+        &mut self,
+        tab_idx: usize,
+        mode: super::types::PasteMode,
+    ) -> bool {
+        let Some(channels) = self.editor_prepared_clipboard_channels(tab_idx) else {
+            return false;
+        };
+        let paste_len = channels.first().map(|c| c.len()).unwrap_or(0);
+        let pos = self.editor_insert_position(tab_idx);
+        let sr = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.buffer_sample_rate.max(1))
+            .unwrap_or(1);
+        let ok = match mode {
+            super::types::PasteMode::Insert => {
+                self.editor_insert_channels_at(tab_idx, pos, channels)
+            }
+            super::types::PasteMode::Mix => self.editor_mix_channels_at(tab_idx, pos, &channels),
+            super::types::PasteMode::CrossfadeInsert => {
+                let xfade = crate::wave::splice_xfade_samples(sr, paste_len, paste_len).min(2048);
+                self.editor_insert_channels_at_with_xfade(tab_idx, pos, channels, xfade)
+            }
+        };
+        if ok {
+            let verb = match mode {
+                super::types::PasteMode::Insert => "Pasted",
+                super::types::PasteMode::Mix => "Mix-pasted",
+                super::types::PasteMode::CrossfadeInsert => "Crossfade-pasted",
+            };
             self.push_toast(
                 super::types::ToastSeverity::Info,
                 format!(
-                    "Pasted {:.2} s of audio (Ctrl+Z to undo)",
-                    min_len as f64 / f64::from(sr)
+                    "{verb} {:.2} s of audio (Ctrl+Z to undo)",
+                    paste_len as f64 / f64::from(sr)
                 ),
             );
-            true
-        } else {
-            false
         }
+        ok
+    }
+
+    /// Sum `mix` into the existing audio starting at `pos` (length unchanged;
+    /// samples past the end of the buffer are dropped). No marker shifts.
+    pub(super) fn editor_mix_channels_at(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        mix: &[Vec<f32>],
+    ) -> bool {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let mix_len = mix.first().map(|c| c.len()).unwrap_or(0);
+            if mix_len == 0 || mix.len() != tab.ch_samples.len() || pos >= tab.samples_len {
+                return false;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            for (ch, add) in tab.ch_samples.iter_mut().zip(mix.iter()) {
+                let end = (pos + add.len()).min(ch.len());
+                for (dst, src) in ch[pos..end].iter_mut().zip(add.iter()) {
+                    *dst += *src;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        true
+    }
+
+    /// Insert with equal-power crossfaded joins: the first/last `xfade`
+    /// samples of the inserted material blend against the audio that used to
+    /// sit at the insert point (start joins with the preceding samples'
+    /// continuation, end joins into the following samples).
+    pub(super) fn editor_insert_channels_at_with_xfade(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        mut insert: Vec<Vec<f32>>,
+        xfade: usize,
+    ) -> bool {
+        if xfade == 0 {
+            return self.editor_insert_channels_at(tab_idx, pos, insert);
+        }
+        // Blend the insert edges against the neighbouring original audio
+        // BEFORE splicing: the start of the clip fades in over the tail of
+        // what precedes `pos`, the end fades out into what follows `pos`.
+        {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            let ins_len = insert.first().map(|c| c.len()).unwrap_or(0);
+            if ins_len == 0 || insert.len() != tab.ch_samples.len() {
+                return false;
+            }
+            let pos = pos.min(tab.samples_len);
+            let xf = xfade.min(ins_len / 2);
+            for (ci, ins) in insert.iter_mut().enumerate() {
+                let orig = &tab.ch_samples[ci];
+                // Fade-in against the samples immediately before pos.
+                for k in 0..xf {
+                    let t = (k as f32 + 0.5) / xf as f32;
+                    let (win, wout) = ((t * std::f32::consts::FRAC_PI_2).sin(), (t * std::f32::consts::FRAC_PI_2).cos());
+                    let prev = if pos >= xf - k {
+                        orig.get(pos + k - xf).copied().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    ins[k] = ins[k] * win + prev * wout;
+                }
+                // Fade-out into the samples at/after pos.
+                for k in 0..xf {
+                    let t = (k as f32 + 0.5) / xf as f32;
+                    let (wout, win) = ((t * std::f32::consts::FRAC_PI_2).cos(), (t * std::f32::consts::FRAC_PI_2).sin());
+                    let next = orig.get(pos + k).copied().unwrap_or(0.0);
+                    let idx = ins_len - xf + k;
+                    ins[idx] = ins[idx] * wout + next * win;
+                }
+            }
+        }
+        self.editor_insert_channels_at(tab_idx, pos, insert)
     }
 
     /// Mean of a sample slice in f64 (stable for long buffers).
@@ -2168,6 +2292,14 @@ impl crate::app::WavesPreviewer {
             return false;
         };
         self.editor_cut_selection_to_audio_clipboard(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_paste_mode(&mut self, mode: super::types::PasteMode) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_paste_from_audio_clipboard(tab_idx, mode)
     }
 
     #[cfg(feature = "kittest")]

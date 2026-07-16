@@ -353,8 +353,8 @@ pub const KEYMAP: &[KeyBinding] = &[
         action: Action::EditorAudioClipboard,
         context: KeyContext::Editor,
         chord: None,
-        keys_label: "Ctrl+C / Ctrl+X / Ctrl+V",
-        desc: "Copy / cut the selection, paste-insert audio at the playhead",
+        keys_label: "Ctrl+C / X / V (+Shift/Alt)",
+        desc: "Copy / cut / paste-insert audio; Shift+V mixes, Alt+V crossfades",
         dispatch: Dispatch::Manual,
     },
     KeyBinding {

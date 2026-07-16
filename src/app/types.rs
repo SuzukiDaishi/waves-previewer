@@ -782,6 +782,13 @@ pub struct InspectionReportState {
     pub cancelled: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteMode {
+    Insert,
+    Mix,
+    CrossfadeInsert,
+}
+
 /// In-app audio clipboard for editor cut/copy/paste-insert (sample data at
 /// the source tab's buffer rate; adapted on paste).
 #[derive(Clone, Debug)]

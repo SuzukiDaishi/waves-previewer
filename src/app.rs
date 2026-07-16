@@ -103,7 +103,7 @@ use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
-    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
+    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode, RateMode,
     StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
     ViewMode, WorkspaceView,
 };

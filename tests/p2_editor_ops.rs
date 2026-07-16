@@ -271,6 +271,89 @@ mod p2_editor_ops {
     }
 
     #[test]
+    fn mix_paste_sums_without_changing_length() {
+        use neowaves::app::PasteMode;
+        let (mut harness, dir) = open_editor_tab("mix_paste", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        // Copy the first quarter, then mix-paste it at the middle.
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.25));
+        harness.run_steps(1);
+        let copied = harness.state_mut().test_editor_copy_selection();
+        assert!(copied > 0);
+        {
+            let state = harness.state_mut();
+            state.tabs[tab_idx].selection = None;
+        }
+        harness.state_mut().audio.seek_to_sample(len / 2);
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_editor_paste_mode(PasteMode::Mix));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len, "mix paste keeps the length");
+        let pos = len / 2;
+        for ch in 0..after.len() {
+            let k = copied / 2;
+            let expect = before[ch][pos + k] + before[ch][k];
+            assert!(
+                (after[ch][pos + k] - expect).abs() < 1e-6,
+                "mixed sample = sum"
+            );
+            // Outside the mixed span: unchanged.
+            assert_eq!(after[ch][pos - 1], before[ch][pos - 1]);
+        }
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crossfade_paste_inserts_with_blended_joins() {
+        use neowaves::app::PasteMode;
+        let (mut harness, dir) = open_editor_tab("xf_paste", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.25));
+        harness.run_steps(1);
+        let copied = harness.state_mut().test_editor_copy_selection();
+        assert!(copied > 0);
+        {
+            let state = harness.state_mut();
+            state.tabs[tab_idx].selection = None;
+        }
+        harness.state_mut().audio.seek_to_sample(len / 2);
+        harness.run_steps(1);
+        assert!(harness
+            .state_mut()
+            .test_editor_paste_mode(PasteMode::CrossfadeInsert));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len + copied, "insert length like plain insert");
+        let pos = len / 2;
+        // The middle of the pasted span is the untouched clip content.
+        let mid = copied / 2;
+        assert!((after[0][pos + mid] - before[0][mid]).abs() < 1e-6);
+        // Audio before/after the insert span is untouched.
+        assert_eq!(after[0][pos - 1], before[0][pos - 1]);
+        assert_eq!(after[0][pos + copied], before[0][pos]);
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(tab_samples(&harness)[0].len(), len);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invert_polarity_partial_range_leaves_rest_untouched() {
         let (mut harness, dir) = open_editor_tab("invert_part", &synth_stereo(48_000, 0.5));
         let before = tab_samples(&harness);
