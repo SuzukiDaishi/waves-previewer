@@ -980,6 +980,10 @@ pub struct PluginFxDraft {
     pub last_error: Option<String>,
     pub last_backend_note: Option<String>,
     pub last_backend_log: Option<String>,
+    /// A/B compare: the inactive slot's (params, state_blob).
+    pub ab_alt: Option<(Vec<PluginParamUiState>, Option<Vec<u8>>)>,
+    /// Which slot the current draft represents (false = A, true = B).
+    pub ab_active_b: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2938,6 +2942,10 @@ pub struct EffectGraphPluginNodeRuntimeState {
     pub last_error: Option<String>,
     pub last_backend_note: Option<String>,
     pub last_backend_log: Option<String>,
+    /// A/B compare: the inactive slot's (params, state_blob_b64).
+    pub ab_alt: Option<(Vec<EffectGraphPluginParamState>, Option<String>)>,
+    /// Which slot the current config represents (false = A, true = B).
+    pub ab_active_b: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

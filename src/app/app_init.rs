@@ -257,6 +257,7 @@ impl WavesPreviewer {
             list_preview_cache_order: VecDeque::new(),
             plugin_search_paths: Self::default_plugin_search_paths(),
             plugin_search_path_input: String::new(),
+            plugin_preset_name_input: String::new(),
             plugin_catalog: Vec::new(),
             plugin_scan_state: None,
             plugin_scan_error: None,

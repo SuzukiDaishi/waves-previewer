@@ -2866,6 +2866,7 @@ impl crate::app::WavesPreviewer {
         let plugin_catalog = self.plugin_catalog.clone();
         let plugin_search_paths = self.plugin_search_paths.clone();
         let mut plugin_search_path_input = self.plugin_search_path_input.clone();
+        let mut plugin_preset_name_input = self.plugin_preset_name_input.clone();
         let plugin_scan_busy = self.plugin_scan_state.is_some();
         let plugin_scan_error = self.plugin_scan_error.clone();
         let plugin_probe_busy = self
@@ -9913,6 +9914,158 @@ impl crate::app::WavesPreviewer {
                                                     .weak(),
                                             );
                                         });
+                                        if let Some(plugin_key) = draft.plugin_key.clone() {
+                                            let mut load_preset: Option<PathBuf> = None;
+                                            let mut delete_preset: Option<PathBuf> = None;
+                                            ui.horizontal_wrapped(|ui| {
+                                                egui::ComboBox::from_id_salt((
+                                                    "plugin_fx_preset",
+                                                    tab_idx,
+                                                ))
+                                                .selected_text("Load preset...")
+                                                .show_ui(ui, |ui| {
+                                                    let presets =
+                                                        Self::list_plugin_presets_for_key(&plugin_key);
+                                                    if presets.is_empty() {
+                                                        ui.label(
+                                                            RichText::new("(No presets saved)")
+                                                                .weak(),
+                                                        );
+                                                    }
+                                                    for (name, path) in presets {
+                                                        ui.horizontal(|ui| {
+                                                            if ui
+                                                                .selectable_label(false, &name)
+                                                                .clicked()
+                                                            {
+                                                                load_preset = Some(path.clone());
+                                                            }
+                                                            if ui.small_button("Delete").clicked() {
+                                                                delete_preset = Some(path.clone());
+                                                            }
+                                                        });
+                                                    }
+                                                });
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut plugin_preset_name_input,
+                                                    )
+                                                    .hint_text("Preset name")
+                                                    .desired_width(120.0),
+                                                );
+                                                let can_save = !plugin_preset_name_input
+                                                    .trim()
+                                                    .is_empty()
+                                                    && !draft.params.is_empty();
+                                                if ui
+                                                    .add_enabled(
+                                                        can_save,
+                                                        egui::Button::new("Save Preset"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    use base64::Engine as _;
+                                                    let params =
+                                                        crate::app::plugin_preset_ops::preset_params_from_ui(&draft.params);
+                                                    let blob_b64 = draft.state_blob.as_ref().map(|b| {
+                                                        base64::engine::general_purpose::STANDARD_NO_PAD.encode(b)
+                                                    });
+                                                    match Self::save_plugin_preset_for_key(
+                                                        &plugin_key,
+                                                        plugin_preset_name_input.trim(),
+                                                        params,
+                                                        blob_b64,
+                                                    ) {
+                                                        Ok(_) => {
+                                                            plugin_preset_name_input.clear();
+                                                            draft.last_error = None;
+                                                        }
+                                                        Err(err) => draft.last_error = Some(err),
+                                                    }
+                                                }
+                                            });
+                                            if let Some(path) = load_preset {
+                                                use base64::Engine as _;
+                                                match crate::app::plugin_preset_ops::load_plugin_preset_from(&path)
+                                                {
+                                                    Ok(preset) => {
+                                                        draft.params =
+                                                            crate::app::plugin_preset_ops::preset_params_to_ui(&preset.params);
+                                                        draft.state_blob = preset
+                                                            .state_blob_b64
+                                                            .as_ref()
+                                                            .and_then(|raw| {
+                                                                base64::engine::general_purpose::STANDARD_NO_PAD
+                                                                    .decode(raw.as_bytes())
+                                                                    .ok()
+                                                            });
+                                                        draft.last_error = None;
+                                                        stop_playback = true;
+                                                        need_restore_preview = true;
+                                                    }
+                                                    Err(err) => draft.last_error = Some(err),
+                                                }
+                                            }
+                                            if let Some(path) = delete_preset {
+                                                if let Err(err) =
+                                                    crate::app::plugin_preset_ops::delete_plugin_preset_file(&path)
+                                                {
+                                                    draft.last_error = Some(err);
+                                                }
+                                            }
+                                            ui.horizontal_wrapped(|ui| {
+                                                if draft.ab_alt.is_none() {
+                                                    if ui
+                                                        .button("Store B")
+                                                        .on_hover_text(
+                                                            "Copy the current settings into slot B, tweak, then A/B Swap to compare",
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        draft.ab_alt = Some((
+                                                            draft.params.clone(),
+                                                            draft.state_blob.clone(),
+                                                        ));
+                                                        draft.ab_active_b = false;
+                                                    }
+                                                } else {
+                                                    if ui.button("A/B Swap").clicked() {
+                                                        if let Some((alt_params, alt_blob)) =
+                                                            draft.ab_alt.take()
+                                                        {
+                                                            let cur = (
+                                                                std::mem::replace(
+                                                                    &mut draft.params,
+                                                                    alt_params,
+                                                                ),
+                                                                std::mem::replace(
+                                                                    &mut draft.state_blob,
+                                                                    alt_blob,
+                                                                ),
+                                                            );
+                                                            draft.ab_alt = Some(cur);
+                                                            draft.ab_active_b =
+                                                                !draft.ab_active_b;
+                                                            stop_playback = true;
+                                                            need_restore_preview = true;
+                                                        }
+                                                    }
+                                                    ui.label(
+                                                        RichText::new(if draft.ab_active_b {
+                                                            "Active: B"
+                                                        } else {
+                                                            "Active: A"
+                                                        })
+                                                        .small()
+                                                        .weak(),
+                                                    );
+                                                    if ui.small_button("Clear A/B").clicked() {
+                                                        draft.ab_alt = None;
+                                                        draft.ab_active_b = false;
+                                                    }
+                                                }
+                                            });
+                                        }
                                         if !draft.gui_capabilities.supports_native_gui {
                                             ui.label(
                                                 RichText::new("Native GUI unsupported for current plugin/backend")
@@ -11225,6 +11378,7 @@ impl crate::app::WavesPreviewer {
             }
         } // end editor split
         self.plugin_search_path_input = plugin_search_path_input;
+        self.plugin_preset_name_input = plugin_preset_name_input;
         if touch_spectro_cache {
             self.touch_spectro_cache(&spec_path);
         }

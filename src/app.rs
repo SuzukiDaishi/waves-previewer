@@ -66,6 +66,7 @@ mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
 mod plugin_ops;
+pub mod plugin_preset_ops;
 mod preview;
 mod preview_ops;
 mod project;
@@ -710,6 +711,7 @@ pub struct WavesPreviewer {
     list_preview_cache_order: VecDeque<PathBuf>,
     plugin_search_paths: Vec<PathBuf>,
     plugin_search_path_input: String,
+    plugin_preset_name_input: String,
     plugin_catalog: Vec<PluginCatalogEntry>,
     plugin_scan_state: Option<PluginScanState>,
     plugin_scan_error: Option<String>,
