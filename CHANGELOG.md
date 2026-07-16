@@ -4,6 +4,10 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Batch QA (P2 batch)
+- **Inspect Files (QA)**: batch inspection over the selection or the whole list — effective true-peak ceiling, integrated-loudness window, leading/trailing silence thresholds, and loop-marker validity (bounds checking that the readers never did). Runs on up to four low-priority worker threads with topbar progress + cancel; results open in a severity-filtered window (click a row to select the file, Save CSV...). Same checks are exposed as `--cli batch inspect` with json/csv/md/txt reports.
+- **Normalize Loudness (GUI)**: batch loudness normalize to a target LUFS (default -14) for the selection or whole list. Measures via the async metadata pool, then routes each file's gain delta through the unified gain framework — pending list gain (one undo action for the whole batch) or a destructive edit for files open in editor tabs. Non-destructive: no audio files are written; clip-risk files are counted and reported in the completion toast.
+
 ### Waveform Editing Basics (P2 batch)
 - New editor tools: **Invert Polarity** (flip sample polarity over the selection or whole file) and **DC Offset** removal (per-channel mean subtraction with a live measured-DC readout), both with preview, undo, session restore, and CLI apply support.
 - **Insert Silence** tool inserts N ms of zeros at the selection start (or the playhead); markers, loop regions, selections, and fade ranges after the insert point shift right. Built on a shared insert infrastructure (`editor_insert_channels_at`).

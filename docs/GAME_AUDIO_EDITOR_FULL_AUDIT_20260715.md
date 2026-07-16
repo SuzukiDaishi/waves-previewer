@@ -320,6 +320,7 @@
 
 > **2026-07-16 P2 進捗**(本ブランチの後続コミットで対応):
 > - ✅ 13(大半): 位相反転 / DC除去 / 無音挿入 / エディタ内 paste-insert(Ctrl+C/X/V のアプリ内オーディオクリップボード) / 16bit TPDF ディザを実装。**ミックスペースト・クロスフェードペースト・ペンシルツール・チャンネル個別編集は未実装**
+> - ✅ 15: バッチ loudnorm の GUI 導線(List > Normalize Loudness、非破壊・一括Undo)+ゲーム向け一括検査(GUI: Inspect Files (QA) / CLI: `batch inspect`、CSV/JSON レポート)を実装
 
 ### P2 — 代替ツールとしての本丸
 13. エディタ内 paste-insert / 無音挿入 / DC除去 / 位相反転 / ディザ…§2.2
