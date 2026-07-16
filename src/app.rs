@@ -43,6 +43,7 @@ mod gain_ops;
 mod helpers;
 mod hf_cache;
 mod input_ops;
+pub mod inspection;
 pub mod keymap;
 #[cfg(feature = "kittest")]
 mod kittest_ops;
