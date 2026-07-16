@@ -2842,6 +2842,7 @@ impl crate::app::WavesPreviewer {
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
         let mut do_spectral_mute = false;
+        let mut do_spectral_heal = false;
         let mut do_cutjoin: Option<(usize, usize)> = None;
         let mut do_delete_multi: Option<Vec<(usize, usize)>> = None;
         let mut do_auto_trim: Option<usize> = None;
@@ -7183,6 +7184,18 @@ impl crate::app::WavesPreviewer {
                             {
                                 do_spectral_mute = true;
                             }
+                            if ui
+                                .add_enabled(
+                                    sel_ok && !apply_busy,
+                                    egui::Button::new("Heal Selection"),
+                                )
+                                .on_hover_text(
+                                    "Rebuild the selection from the audio around it (RX-style inpaint); with a frequency range set, only that band is rebuilt",
+                                )
+                                .clicked()
+                            {
+                                do_spectral_heal = true;
+                            }
                         });
                         if sel_ok {
                             // Two independent axes for the spectral mute fade
@@ -11146,6 +11159,9 @@ impl crate::app::WavesPreviewer {
         }
         if do_spectral_mute {
             self.editor_apply_spectral_mute_selection(tab_idx);
+        }
+        if do_spectral_heal {
+            self.spawn_spectral_heal_apply_for_tab(tab_idx);
         }
         if do_play_selection {
             self.editor_play_selection(tab_idx);

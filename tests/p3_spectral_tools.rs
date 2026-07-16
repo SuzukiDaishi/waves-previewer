@@ -155,4 +155,54 @@ mod p3_spectral_tools {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn spectral_heal_rebuilds_dropout_and_undoes() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("heal");
+        let src = dir.join("tone.wav");
+        // Tone with a 50 ms hole punched in the middle.
+        let mut chans = synth_sine(sr, 2.0, 1_000.0);
+        let len = chans[0].len();
+        let hole = len / 2..len / 2 + (sr as f32 * 0.05) as usize;
+        for v in &mut chans[0][hole.clone()] {
+            *v = 0.0;
+        }
+        neowaves::wave::export_channels_audio(&chans, sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let hole_rms = rms(&before[0][hole.clone()]);
+        assert!(hole_rms < 1e-3, "fixture hole not silent: {hole_rms}");
+
+        // Select just around the hole and heal it.
+        let sel_s = (hole.start - 256) as f32 / len as f32;
+        let sel_e = (hole.end + 256) as f32 / len as f32;
+        assert!(harness.state_mut().test_set_selection_frac(sel_s, sel_e));
+        assert!(harness.state_mut().test_spectral_heal_apply());
+        wait_for_apply_done(&mut harness);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len, "heal must not change length");
+        let healed_rms = rms(&after[0][hole.clone()]);
+        assert!(
+            healed_rms > 0.2,
+            "hole not rebuilt from context: rms {healed_rms}"
+        );
+        // Audio far outside the selection is untouched.
+        let far = 4_000..8_000;
+        assert_eq!(before[0][far.clone()], after[0][far.clone()]);
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].dirty);
+
+        // Undo restores the damaged original bit-exactly.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -511,6 +511,152 @@ pub(crate) fn warp_channel_with_points(
     out
 }
 
+/// Frames of spectral context averaged on each side of a healed region.
+const HEAL_CONTEXT_FRAMES: usize = 4;
+/// Selections longer than this are refused by the Heal button (the whole
+/// region is STFT-buffered in memory twice).
+pub(crate) const HEAL_MAX_SELECTION_SECS: f32 = 120.0;
+
+/// RX-style inpaint of `[s, e)` from its spectral context: per-bin
+/// magnitudes interpolate linearly in time between the averages of
+/// [`HEAL_CONTEXT_FRAMES`] frames on each side, and phase advances from
+/// the left context's measured per-bin phase velocity so steady tones
+/// bridge the gap coherently. With `band = Some((lo, hi))` only that band
+/// is replaced (raised-cosine edges of `freq_fade_hz`); the time edges
+/// crossfade over `time_fade_ms`. Samples outside `[s, e)` are returned
+/// bit-identical. Degenerate or context-free selections return the input.
+pub(crate) fn heal_channel_range(
+    ch: &[f32],
+    sr: u32,
+    s: usize,
+    e: usize,
+    band: Option<(f32, f32)>,
+    freq_fade_hz: f32,
+    time_fade_ms: f32,
+) -> Vec<f32> {
+    use realfft::num_complex::Complex;
+    let n = ch.len();
+    let e = e.min(n);
+    if s >= e || n == 0 {
+        return ch.to_vec();
+    }
+    let win = SPECTRAL_FFT_SIZE;
+    let hop = SPECTRAL_HOP_SIZE;
+    let bins = win / 2 + 1;
+    let ctx_span = (HEAL_CONTEXT_FRAMES + 2) * win;
+    let seg_s = s.saturating_sub(ctx_span);
+    let seg_e = (e + ctx_span).min(n);
+    let seg = &ch[seg_s..seg_e];
+
+    // Pass 1: collect every analysis frame's spectrum.
+    let mut frames: Vec<Vec<Complex<f32>>> = Vec::new();
+    let _ = stft_process_frames(seg, |_t, spec| frames.push(spec.to_vec()));
+    if frames.is_empty() {
+        return ch.to_vec();
+    }
+
+    // Frame k's center sits at k*hop in segment coordinates. Interior
+    // frames are the ones whose centers fall inside the selection.
+    let sel_s = (s - seg_s) as f32;
+    let sel_e = (e - seg_s) as f32;
+    let first_in = ((sel_s / hop as f32).ceil() as usize).min(frames.len());
+    let last_ex = ((sel_e / hop as f32).ceil() as usize).min(frames.len());
+    if first_in >= last_ex {
+        return ch.to_vec();
+    }
+    let left_s = first_in.saturating_sub(HEAL_CONTEXT_FRAMES);
+    let right_e = (last_ex + HEAL_CONTEXT_FRAMES).min(frames.len());
+    let has_left = left_s < first_in;
+    let has_right = last_ex < right_e;
+    if !has_left && !has_right {
+        return ch.to_vec();
+    }
+
+    let avg_mag = |range: core::ops::Range<usize>| -> Vec<f32> {
+        let count = range.len().max(1) as f32;
+        let mut mag = vec![0.0f32; bins];
+        for k in range {
+            for (bin, m) in mag.iter_mut().enumerate() {
+                *m += frames[k][bin].norm();
+            }
+        }
+        mag.iter_mut().for_each(|m| *m /= count);
+        mag
+    };
+    let left_mag = if has_left {
+        avg_mag(left_s..first_in)
+    } else {
+        avg_mag(last_ex..right_e)
+    };
+    let right_mag = if has_right {
+        avg_mag(last_ex..right_e)
+    } else {
+        left_mag.clone()
+    };
+
+    // Phase seed and per-frame advance from the last two left-context
+    // frames (falling back to each bin's natural advance of
+    // 2*pi*bin*hop/win when there is no usable left context).
+    let phase_ref = if has_left { first_in - 1 } else { last_ex };
+    let mut phase0 = vec![0.0f32; bins];
+    let mut dphi = vec![0.0f32; bins];
+    for bin in 0..bins {
+        phase0[bin] = frames[phase_ref][bin].arg();
+        let natural = 2.0 * core::f32::consts::PI * bin as f32 * hop as f32 / win as f32;
+        dphi[bin] = if has_left && phase_ref > 0 {
+            let prev = frames[phase_ref - 1][bin];
+            let cur = frames[phase_ref][bin];
+            if prev.norm() > 1e-9 && cur.norm() > 1e-9 {
+                (cur * prev.conj()).arg()
+            } else {
+                natural
+            }
+        } else {
+            natural
+        };
+    }
+
+    let wband: Vec<f32> = match band {
+        Some((lo, hi)) => band_bin_gains(win, sr, lo, hi, freq_fade_hz.max(1.0), true),
+        None => vec![1.0f32; bins],
+    };
+
+    // Pass 2: resynthesize with the interior frames rebuilt.
+    let denom = (last_ex - first_in).max(1) as f32;
+    let mut k = 0usize;
+    let healed = stft_process_frames(seg, |_t, spec| {
+        let idx = k;
+        k += 1;
+        if idx < first_in || idx >= last_ex {
+            return;
+        }
+        let u = (idx - first_in) as f32 / denom;
+        let steps = (idx - phase_ref) as f32;
+        for bin in 0..bins.min(spec.len()) {
+            let w = wband[bin];
+            if w <= 0.0 {
+                continue;
+            }
+            let mag = left_mag[bin] * (1.0 - u) + right_mag[bin] * u;
+            let ph = phase0[bin] + dphi[bin] * steps;
+            let (sin, cos) = ph.sin_cos();
+            let repaired = Complex::new(mag * cos, mag * sin);
+            spec[bin] = spec[bin] * (1.0 - w) + repaired * w;
+        }
+    });
+
+    // Write back only inside the selection, with click-free time edges.
+    let mut out = ch.to_vec();
+    let sel_len = e - s;
+    let fade_n = ((time_fade_ms.max(3.0) / 1000.0) * sr.max(1) as f32).round() as usize;
+    let fade_n = fade_n.min(sel_len / 2);
+    for i in 0..sel_len {
+        let w = selection_edge_weight(i, sel_len, fade_n);
+        out[s + i] = ch[s + i] * (1.0 - w) + healed[(s - seg_s) + i] * w;
+    }
+    out
+}
+
 impl crate::app::WavesPreviewer {
     /// Ordered primary selection `[start, end)` in display samples, only
     /// when it is valid against the current buffer.
@@ -782,6 +928,80 @@ impl crate::app::WavesPreviewer {
             tab_idx,
             undo,
         });
+    }
+
+    /// Heal (inpaint) the current selection from its spectral context on a
+    /// worker thread through the shared apply pipeline (busy overlay +
+    /// undo). With a frequency band selected only that band is rebuilt.
+    pub(super) fn spawn_spectral_heal_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let freq_fade_hz = self.spectral_edit_freq_fade_hz.max(0.0);
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading {
+            return;
+        }
+        let Some((s, e)) = Self::editor_valid_selection(tab) else {
+            return;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        if (e - s) as f32 / sr as f32 > HEAL_MAX_SELECTION_SECS {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!(
+                    "Heal: selection is longer than {HEAL_MAX_SELECTION_SECS:.0} s — select a shorter range"
+                ),
+            );
+            return;
+        }
+        let band = tab.freq_selection;
+        let undo = Some(Self::capture_undo_state(tab));
+        let channels = tab.ch_samples.clone();
+        self.editor_apply_state = None;
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
+        std::thread::spawn(move || {
+            let out: Vec<Vec<f32>> = channels
+                .iter()
+                .map(|ch| heal_channel_range(ch, sr, s, e, band, freq_fade_hz, time_fade_ms))
+                .collect();
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(crate::app::types::EditorApplyResult {
+                tab_idx,
+                samples: mono,
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Healing selection...".to_string(),
+            rx,
+            tab_idx,
+            undo,
+        });
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_heal_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_spectral_heal_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
     }
 
     #[cfg(feature = "kittest")]
@@ -1256,6 +1476,107 @@ mod tests {
         let many: Vec<_> = (0..20).map(|_| brush_stamp(len / 2, 1_000.0, 40.0)).collect();
         let out_many = brush_channel_with_stamps(&sig, sr, &many);
         assert!(out_many.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn heal_degenerate_selection_is_identity() {
+        let sr = 48_000u32;
+        let sig = sine(1_000.0, sr, 24_000);
+        let out = heal_channel_range(&sig, sr, 12_000, 12_000, None, 100.0, 5.0);
+        assert_eq!(out, sig);
+        // Selection shorter than one hop: no interior frame, identity.
+        let out = heal_channel_range(&sig, sr, 12_000, 12_100, None, 100.0, 5.0);
+        assert_eq!(out, sig);
+    }
+
+    #[test]
+    fn heal_bridges_zeroed_dropout_with_the_tone() {
+        let sr = 48_000u32;
+        let len = 96_000usize; // 2 s
+        let clean = sine(1_000.0, sr, len);
+        let mut damaged = clean.clone();
+        // 50 ms dropout in the middle.
+        let s = len / 2;
+        let e = s + (sr as f32 * 0.05) as usize;
+        for v in &mut damaged[s..e] {
+            *v = 0.0;
+        }
+        // Heal a selection just around the dropout.
+        let sel_s = s.saturating_sub(256);
+        let sel_e = e + 256;
+        let out = heal_channel_range(&damaged, sr, sel_s, sel_e, None, 100.0, 5.0);
+        assert_eq!(out.len(), damaged.len());
+        // Outside the selection: bit-identical.
+        assert_eq!(&out[..sel_s], &damaged[..sel_s]);
+        assert_eq!(&out[sel_e..], &damaged[sel_e..]);
+        // Inside the dropout the 1 kHz tone is rebuilt to a solid fraction
+        // of the clean amplitude.
+        let healed_mag = goertzel(&out[s..e], sr, 1_000.0);
+        let clean_mag = goertzel(&clean[s..e], sr, 1_000.0);
+        assert!(
+            (healed_mag - clean_mag).abs() < clean_mag * 0.25,
+            "tone not rebuilt: healed {healed_mag} vs clean {clean_mag}"
+        );
+        let damaged_mag = goertzel(&damaged[s..e], sr, 1_000.0);
+        assert!(healed_mag > damaged_mag * 2.0, "heal changed nothing");
+    }
+
+    #[test]
+    fn heal_removes_impulses_toward_the_tone() {
+        let sr = 48_000u32;
+        let len = 96_000usize;
+        let clean = sine(500.0, sr, len);
+        let mut damaged = clean.clone();
+        let s = len / 2;
+        let e = s + 4_800; // 100 ms
+        // Scatter hard clicks through the region.
+        let mut i = s + 37;
+        while i < e {
+            damaged[i] = 1.0;
+            i += 331;
+        }
+        let out = heal_channel_range(&damaged, sr, s, e, None, 100.0, 5.0);
+        // Interior (away from the edge fades) is close to the clean sine.
+        let interior = s + 480..e - 480;
+        let err: Vec<f32> = out[interior.clone()]
+            .iter()
+            .zip(&clean[interior])
+            .map(|(o, c)| o - c)
+            .collect();
+        assert!(
+            rms(&err) < 0.05,
+            "healed interior deviates from clean tone: rms {}",
+            rms(&err)
+        );
+    }
+
+    #[test]
+    fn heal_band_limited_keeps_out_of_band_content() {
+        let sr = 48_000u32;
+        let len = 96_000usize;
+        let low = sine(440.0, sr, len);
+        let high = sine(2_000.0, sr, len);
+        let mixed: Vec<f32> = low.iter().zip(&high).map(|(a, b)| a + b).collect();
+        let s = len / 2;
+        let e = s + 4_800;
+        // Heal only 1.5-2.5 kHz over a clean signal: 440 Hz must ride
+        // through untouched, 2 kHz is rebuilt from context (~same tone).
+        let out = heal_channel_range(&mixed, sr, s, e, Some((1_500.0, 2_500.0)), 100.0, 5.0);
+        let probe = s + 480..e - 480;
+        let low_out = goertzel(&out[probe.clone()], sr, 440.0);
+        let low_src = goertzel(&mixed[probe.clone()], sr, 440.0);
+        assert!(
+            (low_out - low_src).abs() < low_src * 0.05,
+            "440 Hz changed by band-limited heal: {low_out} vs {low_src}"
+        );
+        let high_out = goertzel(&out[probe.clone()], sr, 2_000.0);
+        let high_src = goertzel(&mixed[probe.clone()], sr, 2_000.0);
+        assert!(
+            (high_out - high_src).abs() < high_src * 0.3,
+            "2 kHz not rebuilt to context level: {high_out} vs {high_src}"
+        );
+        assert_eq!(&out[..s], &mixed[..s]);
+        assert_eq!(&out[e..], &mixed[e..]);
     }
 
     #[test]
