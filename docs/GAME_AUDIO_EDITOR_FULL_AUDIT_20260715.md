@@ -322,6 +322,12 @@
 > - ✅ 13(大半): 位相反転 / DC除去 / 無音挿入 / エディタ内 paste-insert(Ctrl+C/X/V のアプリ内オーディオクリップボード) / 16bit TPDF ディザを実装。**ミックスペースト・クロスフェードペースト・ペンシルツール・チャンネル個別編集は未実装**
 > - ✅ 15: バッチ loudnorm の GUI 導線(List > Normalize Loudness、非破壊・一括Undo)+ゲーム向け一括検査(GUI: Inspect Files (QA) / CLI: `batch inspect`、CSV/JSON レポート)を実装
 
+> **2026-07-16 P2 完遂(Stage A)進捗**(本ブランチの後続コミットで対応):
+> - ✅ 13(完遂): ミックスペースト(Ctrl+Shift+V) / クロスフェードペースト(Ctrl+Alt+V) / ペンシルツール(高ズーム時のサンプル直接描画) / チャンネル個別編集(Custom チャンネルビューが範囲編集のマスクになる)を実装
+> - ✅ 14: スペクトル編集第2弾 — ブラシ減衰(Spectral Brush) / Heal(コンテキスト補間インペイント) / De-click(MAD 適応検出+エルミート修復、Scan マーカー付き) / De-noise(プロファイル学習型スペクトル減算)を実装。共通 STFT エンジンを `stft_process_frames` に一般化
+> - ✅ 16: プラグインプリセット(JSON、プラグイン毎)+A/B 比較(Effect Graph ノード / Plugin FX 両対応)、Plugin Manager ウィンドウ(Tools メニュー、検索パス prefs 永続化)、Auto preview(300ms デバウンス・再生位置維持スワップの先行レンダ差し替え型)を実装。**選択範囲限定の部分レンダリング高速化は見送り(KNOWN_ISSUES 記載)**
+> - ✅ 17: マルチバリエーション試聴(List > Audition Selection、ラウンドロビン / ランダム、自然終了で自動前進、topbar に進捗+Cancel)を実装
+
 ### P2 — 代替ツールとしての本丸
 13. エディタ内 paste-insert / 無音挿入 / DC除去 / 位相反転 / ディザ…§2.2
 14. スペクトル編集第2弾: ブラシ減衰 → Heal/inpaint → De-click → De-noise(プロファイル学習)…§2.3

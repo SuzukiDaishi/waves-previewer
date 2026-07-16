@@ -4,6 +4,27 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Spectral Repair & Restoration (Stage A)
+- **Spectral Brush** (Spec/Log views, next to Spectral Warp): drag on the spectrogram to paint content out RX-eraser-style. Stamps attenuate magnitude with Gaussian falloff in time and frequency (Strength 3-80 dB, Radius ms/Hz baked per stamp), stack additively in dB (clamped at 80 dB), render a preview on release, and Apply through the async pipeline with undo. Only the influenced region is processed; audio outside the stroke stays bit-identical.
+- **Heal Selection** (beside the spectral Mute button): rebuilds the selected time range (optionally band-limited by a frequency selection) from the surrounding audio — per-bin magnitudes interpolate across the gap between the context averages and phase advances at the measured per-bin velocity, so steady tones bridge dropouts coherently. Selections over 120 s are refused with a toast.
+- **De-click tool**: second-difference residual detection with per-window MAD-adaptive threshold (sensitivity slider), Hermite-bridge repair. Scan marks the detected spans in red on the waveform (invalidated by any edit or sensitivity change); Apply repairs whole file or selection with undo. Also available via CLI `apply`.
+- **De-noise tool**: learn a per-channel noise profile from a noise-only selection, then reduce it via power spectral subtraction (Reduction = max attenuation floor, Strength = over-subtraction) with asymmetric gain smoothing against musical noise. Preview/Apply through the shared worker pipelines; selection-scoped applies crossfade their edges.
+- Shared STFT engine refactor: `stft_process_frames` (reflect-padded Hann WOLA, 2048/512) now backs the band gain, brush, heal, and noise-profile paths.
+
+### Waveform Editing Completion (Stage A)
+- **Mix paste** (`Ctrl+Shift+V`) sums the clipboard into the buffer without changing length; **crossfade-insert paste** (`Ctrl+Alt+V`) splices the clip in with equal-power joins at both seams.
+- **Pencil tool**: at high zoom (> 2 px per sample) drag on the waveform to draw sample values directly (linear interpolation between drag points, lane-targeted, one undo step per stroke).
+- **Channel-scoped edits**: with a Custom channel view active, gain / normalize / fade / mute / noise gate / EQ / compressor / DC removal / polarity invert apply only to the visible channels (normalize measures its peak within them). Light previews follow the same mask and the inspector shows "Applies to: ch N". File-level list gain deliberately ignores the mask.
+- `EditorTab` construction deduplicated into `EditorTab::new_base` (one place to default new fields).
+
+### Plugins (Stage A)
+- **Presets & A/B**: save/load/delete named parameter presets (JSON per plugin under the NeoWaves config dir, state blob included) from both the effect-graph plugin node and the editor's Plugin FX tool; an A/B slot stores a second parameter set and swaps on demand.
+- **Plugin Manager window** (Tools menu): catalog overview, rescan with status/error display, and search-path management persisted to prefs.
+- **Auto preview**: a Plugin FX toggle re-renders the preview ~300 ms after any parameter change (sliders, Enable/Bypass, presets, A/B, native-GUI edits) with a position-preserving buffer swap, so tweaking parameters feels continuous.
+
+### List (Stage A)
+- **Multi-variation audition**: with 2+ rows selected, List > Audition Selection plays them in round-robin or random order (never the same file twice in a row), advancing on each natural playback end. Stop playback, select another row, or press Cancel on the topbar "Audition n/m" item to end it.
+
 ### Batch QA (P2 batch)
 - **Inspect Files (QA)**: batch inspection over the selection or the whole list — effective true-peak ceiling, integrated-loudness window, leading/trailing silence thresholds, and loop-marker validity (bounds checking that the readers never did). Runs on up to four low-priority worker threads with topbar progress + cancel; results open in a severity-filtered window (click a row to select the file, Save CSV...). Same checks are exposed as `--cli batch inspect` with json/csv/md/txt reports.
 - **Normalize Loudness (GUI)**: batch loudness normalize to a target LUFS (default -14) for the selection or whole list. Measures via the async metadata pool, then routes each file's gain delta through the unified gain framework — pending list gain (one undo action for the whole batch) or a destructive edit for files open in editor tabs. Non-destructive: no audio files are written; clip-risk files are counted and reported in the completion toast.
