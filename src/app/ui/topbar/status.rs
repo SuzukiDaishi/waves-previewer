@@ -71,7 +71,7 @@ impl WavesPreviewer {
         if self.playback_session.is_playing {
             ui.label(
                 RichText::new("Playing")
-                    .color(Color32::from_rgb(120, 220, 140))
+                    .color(self.palette().playing_text)
                     .strong(),
             );
         }
@@ -586,10 +586,11 @@ impl WavesPreviewer {
         }
 
         let painter = ui.painter_at(rect);
+        let palette = self.palette();
         let text_col = if response.hovered() {
-            Color32::from_rgb(220, 226, 232)
+            palette.slider_label
         } else {
-            Color32::from_rgb(174, 180, 188)
+            palette.slider_label_weak
         };
         let body_font = egui::TextStyle::Body.resolve(ui.style());
         let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -600,19 +601,19 @@ impl WavesPreviewer {
             body_font.clone(),
             text_col,
         );
-        painter.rect_filled(track_rect, 3.0, Color32::from_rgb(24, 27, 31));
+        painter.rect_filled(track_rect, 3.0, palette.slider_track);
         let t = ((self.volume_db + 80.0) / 86.0).clamp(0.0, 1.0);
         let fill_rect = egui::Rect::from_min_max(
             track_rect.min,
             egui::pos2(track_rect.left() + track_rect.width() * t, track_rect.bottom()),
         );
-        painter.rect_filled(fill_rect, 3.0, Color32::from_rgb(88, 196, 118));
+        painter.rect_filled(fill_rect, 3.0, palette.slider_fill);
         let stroke_col = if response.has_focus() {
-            Color32::from_rgb(130, 190, 235)
+            palette.slider_value_text
         } else if response.hovered() {
-            Color32::from_rgb(120, 150, 165)
+            palette.slider_value_text_weak
         } else {
-            Color32::from_rgb(70, 76, 84)
+            palette.slider_knob_stroke
         };
         painter.rect_stroke(
             track_rect,
@@ -624,12 +625,12 @@ impl WavesPreviewer {
         painter.circle_filled(
             egui::pos2(knob_x, track_rect.center().y),
             5.0,
-            Color32::from_rgb(142, 224, 160),
+            palette.meter_text,
         );
         painter.circle_stroke(
             egui::pos2(knob_x, track_rect.center().y),
             5.0,
-            egui::Stroke::new(1.0, Color32::from_rgb(38, 52, 42)),
+            egui::Stroke::new(1.0, palette.meter_text_outline),
         );
         painter.text(
             egui::pos2(rect.right(), rect.center().y),
@@ -653,8 +654,9 @@ impl WavesPreviewer {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::empty());
         self.topbar_output_meter_rect = Some(rect);
         let painter = ui.painter_at(rect);
+        let palette = self.palette();
         let track_rect = rect.shrink(1.0);
-        painter.rect_filled(track_rect, 2.0, Color32::from_rgb(18, 18, 22));
+        painter.rect_filled(track_rect, 2.0, palette.meter_track);
         let norm_of = |db: f32| ((db + 60.0) / 60.0).clamp(0.0, 1.0);
         let ch_count = self.meter_ch_db.len();
         if ch_count >= 2 {
@@ -674,7 +676,7 @@ impl WavesPreviewer {
                             egui::vec2(sub.width() * n, sub.height()),
                         ),
                         1.0,
-                        Color32::from_rgb(100, 220, 120),
+                        palette.meter_fill,
                     );
                 }
                 if let Some(&hold_db) = self.meter_ch_hold_db.get(i) {
@@ -683,7 +685,7 @@ impl WavesPreviewer {
                         let x = sub.left() + sub.width() * hn;
                         painter.line_segment(
                             [egui::pos2(x, sub.top()), egui::pos2(x, sub.bottom())],
-                            egui::Stroke::new(1.0, Color32::from_rgb(255, 196, 72)),
+                            egui::Stroke::new(1.0, palette.meter_peak_tick),
                         );
                     }
                 }
@@ -695,7 +697,7 @@ impl WavesPreviewer {
                     track_rect.min,
                     egui::vec2(track_rect.width() * norm, track_rect.height()),
                 );
-                painter.rect_filled(fill, 2.0, Color32::from_rgb(100, 220, 120));
+                painter.rect_filled(fill, 2.0, palette.meter_fill);
             }
         }
         painter.rect_stroke(

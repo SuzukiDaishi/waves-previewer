@@ -50,6 +50,18 @@ impl super::WavesPreviewer {
         self.show_plugin_manager = open;
     }
 
+    pub fn test_set_theme_light(&mut self, light: bool) {
+        self.theme_mode = if light {
+            crate::app::types::ThemeMode::Light
+        } else {
+            crate::app::types::ThemeMode::Dark
+        };
+    }
+
+    pub fn test_theme_is_light(&self) -> bool {
+        self.theme_mode == crate::app::types::ThemeMode::Light
+    }
+
     pub fn test_plugin_manager_open(&self) -> bool {
         self.show_plugin_manager
     }

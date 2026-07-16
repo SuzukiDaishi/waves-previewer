@@ -159,15 +159,16 @@ impl crate::app::WavesPreviewer {
         if let Some((start_frac, end_frac)) = overlay.loop_frac {
             let start_x = wave_rect.left() + start_frac.clamp(0.0, 1.0) * wave_rect.width();
             let end_x = wave_rect.left() + end_frac.clamp(0.0, 1.0) * wave_rect.width();
+            let palette = self.palette();
             let band_fill = if overlay.dirty {
-                Color32::from_rgba_unmultiplied(70, 170, 235, 40)
+                palette.selection_fill
             } else {
-                Color32::from_rgba_unmultiplied(70, 170, 235, 24)
+                palette.selection_fill_weak
             };
             let band_line = if overlay.dirty {
-                Color32::from_rgba_unmultiplied(110, 205, 255, 180)
+                palette.selection_stroke
             } else {
-                Color32::from_rgba_unmultiplied(110, 205, 255, 128)
+                palette.selection_stroke_weak
             };
             if start_x != end_x {
                 ui.painter().rect_filled(
@@ -197,9 +198,9 @@ impl crate::app::WavesPreviewer {
         let marker_fracs =
             Self::coalesce_list_wave_marker_fracs(&overlay.marker_fracs, wave_rect.width());
         let marker_color = if overlay.dirty {
-            Color32::from_rgba_unmultiplied(255, 210, 100, 220)
+            self.palette().attention_fill
         } else {
-            Color32::from_rgba_unmultiplied(255, 210, 100, 180)
+            self.palette().attention_fill_weak
         };
         for frac in marker_fracs {
             let x = wave_rect.left() + frac.clamp(0.0, 1.0) * wave_rect.width();
@@ -404,7 +405,7 @@ impl crate::app::WavesPreviewer {
                                 if is_dirty {
                                     ui.label(
                                         RichText::new("\u{25CF}")
-                                            .color(Color32::from_rgb(255, 180, 60))
+                                            .color(self.palette().warning_text)
                                             .size(text_height * 1.05),
                                     );
                                 }
@@ -1284,7 +1285,7 @@ impl crate::app::WavesPreviewer {
                                         egui::Align2::LEFT_CENTER,
                                         text,
                                         font,
-                                        egui::Color32::from_rgb(220, 90, 90),
+                                        self.palette().error_text,
                                     );
                                 }
                                 let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);

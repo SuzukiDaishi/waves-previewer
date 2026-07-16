@@ -94,6 +94,11 @@ impl WavesPreviewer {
         self.debug_log("settings reset to defaults".to_string());
     }
 
+    /// Theme-aware palette for the hand-painted widgets.
+    pub(super) fn palette(&self) -> crate::app::render::colors::Palette {
+        crate::app::render::colors::Palette::for_theme(self.theme_mode)
+    }
+
     fn theme_visuals(theme: ThemeMode) -> Visuals {
         let mut visuals = match theme {
             ThemeMode::Dark => Visuals::dark(),
