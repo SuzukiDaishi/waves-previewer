@@ -239,6 +239,10 @@ impl WavesPreviewer {
                 }
                 ui.close();
             }
+            if ui.button("Plugin Manager...").clicked() {
+                self.show_plugin_manager = true;
+                ui.close();
+            }
             ui.separator();
             if ui.button("Settings...").clicked() {
                 self.show_export_settings = true;

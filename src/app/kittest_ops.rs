@@ -46,6 +46,14 @@ impl super::WavesPreviewer {
         self.show_shortcuts_window
     }
 
+    pub fn test_set_plugin_manager_open(&mut self, open: bool) {
+        self.show_plugin_manager = open;
+    }
+
+    pub fn test_plugin_manager_open(&self) -> bool {
+        self.show_plugin_manager
+    }
+
     pub fn test_audio_is_streaming_wav(&self, path: &Path) -> bool {
         self.audio.is_streaming_wav_path(path)
     }

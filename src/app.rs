@@ -712,6 +712,7 @@ pub struct WavesPreviewer {
     plugin_search_paths: Vec<PathBuf>,
     plugin_search_path_input: String,
     plugin_preset_name_input: String,
+    show_plugin_manager: bool,
     plugin_catalog: Vec<PluginCatalogEntry>,
     plugin_scan_state: Option<PluginScanState>,
     plugin_scan_error: Option<String>,
