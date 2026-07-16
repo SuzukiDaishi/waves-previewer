@@ -2216,6 +2216,13 @@ impl super::WavesPreviewer {
         self.rename_file_path(&path, new_name).is_ok()
     }
 
+    pub fn test_editor_undo(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.undo_in_tab(tab_idx)
+    }
+
     pub fn test_list_undo(&mut self) -> bool {
         self.list_undo()
     }

@@ -2830,6 +2830,7 @@ impl crate::app::WavesPreviewer {
         let mut do_eq: Option<((usize, usize), crate::wave::ThreeBandEqParams)> = None;
         let mut do_compressor: Option<((usize, usize), crate::wave::CompressorParams)> = None;
         let mut do_reverse: Option<(usize, usize)> = None;
+        let mut do_invert: Option<(usize, usize)> = None;
         let mut pending_spectral_warp_preview = false;
         let mut pending_spectral_warp_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
@@ -7041,6 +7042,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::MusicAnalyze => "Music Analyze",
                                 ToolKind::PluginFx => "Plugin FX",
                                 ToolKind::Reverse => "Reverse",
+                                ToolKind::InvertPolarity => "Invert Polarity",
                                 // Spectrogram-view tool; never selectable in
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
@@ -7070,6 +7072,11 @@ impl crate::app::WavesPreviewer {
                                     );
                                     ui.selectable_value(&mut tool, ToolKind::PluginFx, "Plugin FX");
                                     ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
+                                    ui.selectable_value(
+                                        &mut tool,
+                                        ToolKind::InvertPolarity,
+                                        "Invert Polarity",
+                                    );
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -9808,6 +9815,57 @@ impl crate::app::WavesPreviewer {
                                         if ui.button("Cancel").clicked() { need_restore_preview = true; }
                                     });
                                 }
+                                ToolKind::InvertPolarity => {
+                                    if let Some(reason) = preview_disabled_reason {
+                                        ui.label(RichText::new(reason).weak());
+                                    }
+                                    let sel_range = Self::editor_selected_range(tab);
+                                    if let Some((rs, re)) = sel_range {
+                                        ui.label(RichText::new(format!("Target: selection {rs}..{re}")).weak());
+                                    } else {
+                                        ui.label(RichText::new("Target: whole file (select a range to invert only that part)").weak());
+                                    }
+                                    ui.label(
+                                        RichText::new(
+                                            "Flips the waveform polarity (multiply by -1).                                              Useful for phase-cancellation checks and layering.",
+                                        )
+                                        .weak(),
+                                    );
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .add_enabled(preview_button_enabled, egui::Button::new("Preview"))
+                                            .clicked()
+                                        {
+                                            if preview_ok {
+                                                let mut overlay: Vec<Vec<f32>> = tab.ch_samples.clone();
+                                                let (s, e) = sel_range.unwrap_or((0, tab.samples_len));
+                                                for ch in overlay.iter_mut() {
+                                                    let end = e.min(ch.len());
+                                                    for v in &mut ch[s.min(end)..end] {
+                                                        *v = -*v;
+                                                    }
+                                                }
+                                                let timeline_len = overlay.first().map(|c| c.len()).unwrap_or(tab.samples_len);
+                                                tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                                                    overlay.clone(),
+                                                    ToolKind::InvertPolarity,
+                                                    timeline_len,
+                                                ));
+                                                pending_preview = Some((ToolKind::InvertPolarity, overlay));
+                                                stop_playback = true;
+                                                tab.preview_audio_tool = Some(ToolKind::InvertPolarity);
+                                            } else {
+                                                request_preview_refresh = true;
+                                            }
+                                        }
+                                        if ui.button("Apply").clicked() {
+                                            do_invert = Some(sel_range.unwrap_or((0, tab.samples_len)));
+                                            tab.preview_audio_tool = None;
+                                            tab.preview_overlay = None;
+                                        }
+                                        if ui.button("Cancel").clicked() { need_restore_preview = true; }
+                                    });
+                                }
                             }
                         }
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
@@ -10649,6 +10707,9 @@ impl crate::app::WavesPreviewer {
         }
         if let Some((s, e)) = do_reverse {
             self.editor_apply_reverse_range(tab_idx, (s, e));
+        }
+        if let Some((s, e)) = do_invert {
+            self.editor_apply_invert_polarity_range(tab_idx, (s, e));
         }
         if let Some((_, _)) = do_cutjoin {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

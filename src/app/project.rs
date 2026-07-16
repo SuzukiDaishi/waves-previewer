@@ -1128,6 +1128,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "Normalize" => ToolKind::Normalize,
         "Loudness" => ToolKind::Loudness,
         "Reverse" => ToolKind::Reverse,
+        "InvertPolarity" => ToolKind::InvertPolarity,
         "PluginFx" => ToolKind::PluginFx,
         _ => ToolKind::LoopEdit,
     }

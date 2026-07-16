@@ -97,6 +97,7 @@ impl WavesPreviewer {
                 | ToolKind::Normalize
                 | ToolKind::Loudness
                 | ToolKind::Reverse
+                | ToolKind::InvertPolarity
         )
     }
 
@@ -947,6 +948,31 @@ impl WavesPreviewer {
                     ));
                 }
                 self.set_preview_channels(tab_idx, ToolKind::Reverse, playback);
+            }
+            ToolKind::InvertPolarity => {
+                // Negation is O(n) with no analysis, so the light path is fine
+                // even for long files (one buffer clone, same as the apply).
+                let mut overlay = ch_samples.clone();
+                let (s, e) = sel_range.unwrap_or((0, samples_len));
+                for ch in overlay.iter_mut() {
+                    let end = e.min(ch.len());
+                    for v in &mut ch[s.min(end)..end] {
+                        *v = -*v;
+                    }
+                }
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
+                    return;
+                }
+                let playback = overlay.clone();
+                let timeline_len = overlay.first().map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                        overlay,
+                        ToolKind::InvertPolarity,
+                        timeline_len,
+                    ));
+                }
+                self.set_preview_channels(tab_idx, ToolKind::InvertPolarity, playback);
             }
             _ => {}
         }

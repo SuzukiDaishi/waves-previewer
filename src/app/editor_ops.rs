@@ -441,6 +441,35 @@ impl crate::app::WavesPreviewer {
         self.audio.set_loop_crossfade(0, 0);
     }
 
+    /// Flip waveform polarity over `range` (sample-exact, no smoothing —
+    /// use zero-cross snap for click-free boundaries on partial ranges).
+    pub(super) fn editor_apply_invert_polarity_range(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+    ) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            for ch in tab.ch_samples.iter_mut() {
+                let end = e.min(ch.len());
+                for v in &mut ch[s.min(end)..end] {
+                    *v = -*v;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     pub(super) fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (_channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
@@ -1827,6 +1856,21 @@ impl crate::app::WavesPreviewer {
             return false;
         };
         self.editor_apply_trim_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_invert_polarity_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_invert_polarity_range(tab_idx, range);
         true
     }
 
