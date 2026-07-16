@@ -218,6 +218,59 @@ mod p2_editor_ops {
     }
 
     #[test]
+    fn editor_copy_cut_paste_insert_roundtrip() {
+        let (mut harness, dir) = open_editor_tab("clipboard", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        // Copy the middle quarter.
+        assert!(harness.state_mut().test_set_selection_frac(0.25, 0.5));
+        harness.run_steps(1);
+        let copied = harness.state_mut().test_editor_copy_selection();
+        assert!(copied > 0);
+        assert_eq!(harness.state().test_editor_audio_clipboard_len(), copied);
+        // Copy does not modify the buffer.
+        assert_eq!(tab_samples(&harness)[0].len(), len);
+
+        // Paste-insert at the end (clear selection, seek to the end).
+        {
+            let state = harness.state_mut();
+            state.tabs[tab_idx].selection = None;
+            state.tabs[tab_idx].extra_selections.clear();
+        }
+        harness.state_mut().audio.seek_to_sample(len);
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_editor_paste_insert());
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len + copied);
+        // The pasted tail equals the copied region.
+        let s = len / 4;
+        for ch in 0..after.len() {
+            for k in 0..copied {
+                assert_eq!(after[ch][len + k], before[ch][s + k]);
+            }
+        }
+
+        // Undo removes the paste.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(tab_samples(&harness)[0].len(), len);
+
+        // Cut removes the selection and fills the clipboard.
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.25));
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_editor_cut_selection());
+        harness.run_steps(2);
+        let after_cut = tab_samples(&harness);
+        assert_eq!(after_cut[0].len(), len - len / 4);
+        assert!(harness.state().test_editor_audio_clipboard_len() > 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invert_polarity_partial_range_leaves_rest_untouched() {
         let (mut harness, dir) = open_editor_tab("invert_part", &synth_stereo(48_000, 0.5));
         let before = tab_samples(&harness);

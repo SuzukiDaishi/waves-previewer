@@ -517,9 +517,77 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Editor-workspace audio clipboard: Ctrl+C copies the selection,
+    /// Ctrl+X cuts it, Ctrl+V paste-inserts at the selection start /
+    /// playhead. Mirrors the list handler's triple trigger (Event::Copy/
+    /// Cut/Paste, consume_key, and key-down edge) because egui-winit turns
+    /// the chords into events on some platforms.
+    fn handle_editor_audio_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
+        let Some(tab_idx) = self.active_tab else {
+            return;
+        };
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let down_c = ctx.input(|i| i.key_down(egui::Key::C));
+        let down_x = ctx.input(|i| i.key_down(egui::Key::X));
+        let down_v = ctx.input(|i| i.key_down(egui::Key::V));
+        let mut event_copy = false;
+        let mut event_cut = false;
+        let mut event_paste = false;
+        ctx.input_mut(|i| {
+            let mut idx = 0;
+            while idx < i.events.len() {
+                match &i.events[idx] {
+                    egui::Event::Copy => {
+                        event_copy = true;
+                        i.events.remove(idx);
+                        continue;
+                    }
+                    egui::Event::Cut => {
+                        event_cut = true;
+                        i.events.remove(idx);
+                        continue;
+                    }
+                    egui::Event::Paste(_) => {
+                        event_paste = true;
+                        i.events.remove(idx);
+                        continue;
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+        });
+        let consumed_copy =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
+        let consumed_cut =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X));
+        let consumed_paste =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+        let edge_c = ctrl && down_c && !self.editor_clip_c_was_down;
+        let edge_x = ctrl && down_x && !self.editor_clip_x_was_down;
+        let edge_v = ctrl && down_v && !self.editor_clip_v_was_down;
+        self.editor_clip_c_was_down = ctrl && down_c;
+        self.editor_clip_x_was_down = ctrl && down_x;
+        self.editor_clip_v_was_down = ctrl && down_v;
+        if event_cut || consumed_cut || edge_x {
+            self.editor_cut_selection_to_audio_clipboard(tab_idx);
+        } else if event_copy || consumed_copy || edge_c {
+            self.editor_copy_selection_to_audio_clipboard(tab_idx, true);
+        } else if event_paste || consumed_paste || edge_v {
+            self.editor_paste_insert_from_audio_clipboard(tab_idx);
+        }
+    }
+
     pub(super) fn handle_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
         if self.is_effect_graph_workspace_active() {
             self.handle_effect_graph_clipboard_hotkeys(ctx);
+            return;
+        }
+        if self.is_editor_workspace_active() {
+            self.handle_editor_audio_clipboard_hotkeys(ctx);
             return;
         }
         if !self.is_list_workspace_active() {

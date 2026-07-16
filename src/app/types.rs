@@ -736,6 +736,14 @@ impl Default for MusicAnalysisDraft {
     }
 }
 
+/// In-app audio clipboard for editor cut/copy/paste-insert (sample data at
+/// the source tab's buffer rate; adapted on paste).
+#[derive(Clone, Debug)]
+pub struct EditorAudioClip {
+    pub channels: Vec<Vec<f32>>,
+    pub sample_rate: u32,
+}
+
 #[derive(Clone, Copy)]
 pub struct ToolState {
     pub fade_in_ms: f32,

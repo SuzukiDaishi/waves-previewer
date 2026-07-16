@@ -546,6 +546,135 @@ impl crate::app::WavesPreviewer {
             .min(tab.samples_len)
     }
 
+    /// Copy the selected range into the in-app audio clipboard. Returns the
+    /// copied length in samples (0 = nothing copied).
+    pub(super) fn editor_copy_selection_to_audio_clipboard(
+        &mut self,
+        tab_idx: usize,
+        notify: bool,
+    ) -> usize {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return 0;
+        };
+        let Some((s, e)) = Self::editor_selected_range(tab) else {
+            if notify {
+                self.push_toast(
+                    super::types::ToastSeverity::Info,
+                    "Select a range to copy audio",
+                );
+            }
+            return 0;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let channels: Vec<Vec<f32>> = tab
+            .ch_samples
+            .iter()
+            .map(|ch| {
+                let end = e.min(ch.len());
+                let start = s.min(end);
+                ch[start..end].to_vec()
+            })
+            .collect();
+        let len = channels.first().map(|c| c.len()).unwrap_or(0);
+        if len == 0 {
+            return 0;
+        }
+        self.editor_audio_clipboard = Some(super::types::EditorAudioClip {
+            channels,
+            sample_rate: sr,
+        });
+        if notify {
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                format!("Copied {:.2} s of audio", len as f64 / f64::from(sr)),
+            );
+        }
+        len
+    }
+
+    /// Cut = copy selection to the audio clipboard, then delete+join it.
+    pub(super) fn editor_cut_selection_to_audio_clipboard(&mut self, tab_idx: usize) -> bool {
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| Self::editor_selected_range(tab));
+        let Some((s, e)) = range else {
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                "Select a range to cut audio",
+            );
+            return false;
+        };
+        if self.editor_copy_selection_to_audio_clipboard(tab_idx, false) == 0 {
+            return false;
+        }
+        self.editor_delete_range_and_join(tab_idx, (s, e));
+        self.push_toast(
+            super::types::ToastSeverity::Info,
+            "Cut selection (Ctrl+Z to undo)",
+        );
+        true
+    }
+
+    /// Paste-insert the audio clipboard at the selection start / playhead.
+    /// The clip is resampled to the tab's buffer rate when needed and its
+    /// channel layout is adapted (repeat modulo) to the tab's channel count.
+    pub(super) fn editor_paste_insert_from_audio_clipboard(&mut self, tab_idx: usize) -> bool {
+        let Some(clip) = self.editor_audio_clipboard.clone() else {
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                "Audio clipboard is empty (Ctrl+C/X in the editor copies audio)",
+            );
+            return false;
+        };
+        let (target_sr, target_ch) = {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            (tab.buffer_sample_rate.max(1), tab.ch_samples.len().max(1))
+        };
+        let pos = self.editor_insert_position(tab_idx);
+        let mut channels = clip.channels;
+        if clip.sample_rate != target_sr {
+            channels = crate::wave::resample_channels_quality(
+                &channels,
+                clip.sample_rate,
+                target_sr,
+                crate::wave::ResampleQuality::Best,
+            );
+        }
+        if channels.is_empty() {
+            return false;
+        }
+        if channels.len() != target_ch {
+            channels = (0..target_ch)
+                .map(|i| channels[i % channels.len()].clone())
+                .collect();
+        }
+        // Resamplers can differ by a sample or two across channels; trim to
+        // the shortest so the insert stays rectangular.
+        let min_len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
+        if min_len == 0 {
+            return false;
+        }
+        for ch in channels.iter_mut() {
+            ch.truncate(min_len);
+        }
+        if self.editor_insert_channels_at(tab_idx, pos, channels) {
+            let sr = target_sr;
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                format!(
+                    "Pasted {:.2} s of audio (Ctrl+Z to undo)",
+                    min_len as f64 / f64::from(sr)
+                ),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Mean of a sample slice in f64 (stable for long buffers).
     pub(super) fn dc_mean_over(samples: &[f32]) -> f32 {
         if samples.is_empty() {
@@ -2023,6 +2152,39 @@ impl crate::app::WavesPreviewer {
         };
         self.editor_apply_invert_polarity_range(tab_idx, range);
         true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_copy_selection(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.editor_copy_selection_to_audio_clipboard(tab_idx, true)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_cut_selection(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_cut_selection_to_audio_clipboard(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_paste_insert(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_paste_insert_from_audio_clipboard(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_audio_clipboard_len(&self) -> usize {
+        self.editor_audio_clipboard
+            .as_ref()
+            .and_then(|c| c.channels.first())
+            .map(|c| c.len())
+            .unwrap_or(0)
     }
 
     #[cfg(feature = "kittest")]

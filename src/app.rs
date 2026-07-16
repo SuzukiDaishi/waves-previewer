@@ -615,6 +615,10 @@ pub struct WavesPreviewer {
     /// until the project is saved (sidecar audio persists them) and they're removed
     pub recording_temp_files: Vec<PathBuf>,
     clipboard_c_was_down: bool,
+    editor_audio_clipboard: Option<EditorAudioClip>,
+    editor_clip_c_was_down: bool,
+    editor_clip_x_was_down: bool,
+    editor_clip_v_was_down: bool,
     clipboard_v_was_down: bool,
     undo_z_was_down: bool,
     // list undo/redo

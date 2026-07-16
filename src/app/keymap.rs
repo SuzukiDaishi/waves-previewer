@@ -51,6 +51,7 @@ pub enum Action {
     EditorVirtualTrim,
     EditorDigitSeek,
     EditorArrowKeys,
+    EditorAudioClipboard,
     EditorSeekStart,
     EditorSeekEnd,
     EditorZoomToSelection,
@@ -346,6 +347,14 @@ pub const KEYMAP: &[KeyBinding] = &[
         chord: None,
         keys_label: "1..9, 0",
         desc: "Seek across the file (1 = start, ..., 0 = end)",
+        dispatch: Dispatch::Manual,
+    },
+    KeyBinding {
+        action: Action::EditorAudioClipboard,
+        context: KeyContext::Editor,
+        chord: None,
+        keys_label: "Ctrl+C / Ctrl+X / Ctrl+V",
+        desc: "Copy / cut the selection, paste-insert audio at the playhead",
         dispatch: Dispatch::Manual,
     },
     KeyBinding {
