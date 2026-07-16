@@ -4,6 +4,16 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Usability (P1 batch)
+- New Help menu with a read-only Keyboard Shortcuts window, generated from a central keymap table (`src/app/keymap.rs`); simple shortcut dispatch now goes through the table so a future rebinding UI only needs to swap the lookup.
+- Destructive editor keys `C` (delete+join) and `T` (trim) show an info toast pointing at Ctrl+Z after they fire.
+- Editor: `Home`/`End` seek to start/end, `Z` zooms to the selection, `Esc` discards a pending tool preview.
+- Editor: per-channel playback mute/solo (M/S menu next to the channel view toggles). Monitoring only - the masks resolve to channel selection inside the callback's fold-down mapping, are excluded from undo/dirty/save, and never apply to list playback.
+- Topbar output meter shows per-output-channel RMS bars with peak-hold ticks while the callback reports multichannel levels (falls back to the old single bar otherwise).
+- List: optional "Single click auditions" setting (default on = current behavior). When off, a single click only selects; Space, keyboard navigation, and Auto Play still audition. Double-click still opens the editor.
+- List: inline rename via `F2` (or the context menu) with Enter to commit and Esc to cancel; errors surface as toasts. The modal rename stays for batch use.
+- List: column widths persist across sessions (saved when a resize drag ends; window-squeeze relayouts are never saved). Column reorder and per-project widths remain out of scope.
+
 ### Data Safety
 - Windows file overwrite now uses `ReplaceFileW` (atomic swap), removing the crash window where the destination could be left missing during the park-and-rename fallback (which remains as last resort).
 - Gain / Normalize / Loudness applies no longer hard-clip the editing buffer to +/-1.0; editing buffers keep full float headroom (boost then cut round-trips losslessly). Clipping only happens at export/quantize and playback output. An info toast reports when an edit leaves peaks above 0 dBFS.
