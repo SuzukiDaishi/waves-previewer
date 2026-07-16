@@ -98,6 +98,7 @@ impl WavesPreviewer {
                 | ToolKind::Loudness
                 | ToolKind::Reverse
                 | ToolKind::InvertPolarity
+                | ToolKind::DcOffset
         )
     }
 
@@ -973,6 +974,26 @@ impl WavesPreviewer {
                     ));
                 }
                 self.set_preview_channels(tab_idx, ToolKind::InvertPolarity, playback);
+            }
+            ToolKind::DcOffset => {
+                let mut overlay = ch_samples.clone();
+                let (s, e) = sel_range.unwrap_or((0, samples_len));
+                for ch in overlay.iter_mut() {
+                    Self::dc_remove_range(ch, s, e);
+                }
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
+                    return;
+                }
+                let playback = overlay.clone();
+                let timeline_len = overlay.first().map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                        overlay,
+                        ToolKind::DcOffset,
+                        timeline_len,
+                    ));
+                }
+                self.set_preview_channels(tab_idx, ToolKind::DcOffset, playback);
             }
             _ => {}
         }

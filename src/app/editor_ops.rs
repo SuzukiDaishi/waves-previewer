@@ -441,6 +441,52 @@ impl crate::app::WavesPreviewer {
         self.audio.set_loop_crossfade(0, 0);
     }
 
+    /// Mean of a sample slice in f64 (stable for long buffers).
+    pub(super) fn dc_mean_over(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = samples.iter().map(|&v| f64::from(v)).sum();
+        (sum / samples.len() as f64) as f32
+    }
+
+    /// Subtract the mean of `ch[s..e]` from that range in place.
+    pub(super) fn dc_remove_range(ch: &mut [f32], s: usize, e: usize) {
+        let end = e.min(ch.len());
+        let start = s.min(end);
+        if start >= end {
+            return;
+        }
+        let mean = Self::dc_mean_over(&ch[start..end]);
+        if mean == 0.0 {
+            return;
+        }
+        for v in &mut ch[start..end] {
+            *v -= mean;
+        }
+    }
+
+    /// Remove per-channel DC bias over `range` (subtract the range mean).
+    pub(super) fn editor_apply_remove_dc_range(&mut self, tab_idx: usize, range: (usize, usize)) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state(tab);
+            for ch in tab.ch_samples.iter_mut() {
+                Self::dc_remove_range(ch, s, e);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     /// Flip waveform polarity over `range` (sample-exact, no smoothing —
     /// use zero-cross snap for click-free boundaries on partial ranges).
     pub(super) fn editor_apply_invert_polarity_range(
@@ -1871,6 +1917,21 @@ impl crate::app::WavesPreviewer {
             return false;
         };
         self.editor_apply_invert_polarity_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_remove_dc_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_remove_dc_range(tab_idx, range);
         true
     }
 

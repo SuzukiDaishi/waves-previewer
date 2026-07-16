@@ -625,6 +625,7 @@ pub enum ToolKind {
     Loudness,
     Reverse,
     InvertPolarity,
+    DcOffset,
     NoiseGate,
     Eq,
     Compressor,

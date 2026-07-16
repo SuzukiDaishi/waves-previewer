@@ -353,6 +353,10 @@ impl CliWorkspace {
                 self.app
                     .editor_apply_invert_polarity_range(tab_idx, (0, len));
             }
+            ToolKind::DcOffset => {
+                let len = self.tab_len(tab_idx)?;
+                self.app.editor_apply_remove_dc_range(tab_idx, (0, len));
+            }
             ToolKind::SpectralWarp => {
                 anyhow::bail!("SpectralWarp is interactive-only (warp points live in the editor)")
             }

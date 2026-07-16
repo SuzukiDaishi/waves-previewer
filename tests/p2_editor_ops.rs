@@ -132,6 +132,42 @@ mod p2_editor_ops {
     }
 
     #[test]
+    fn dc_offset_removal_zeroes_mean_and_undoes() {
+        // Sine + constant bias per channel.
+        let mut chans = synth_stereo(48_000, 0.5);
+        for v in chans[0].iter_mut() {
+            *v += 0.15;
+        }
+        for v in chans[1].iter_mut() {
+            *v -= 0.08;
+        }
+        let (mut harness, dir) = open_editor_tab("dc", &chans);
+        let before = tab_samples(&harness);
+
+        assert!(harness.state_mut().test_apply_remove_dc_frac(0.0, 1.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        for ch in after.iter() {
+            let mean: f64 = ch.iter().map(|&v| f64::from(v)).sum::<f64>() / ch.len() as f64;
+            assert!(
+                mean.abs() < 1.0e-4,
+                "mean after DC removal should be ~0, got {mean}"
+            );
+        }
+        // The AC content is preserved: after + mean == before.
+        let mean0: f64 =
+            before[0].iter().map(|&v| f64::from(v)).sum::<f64>() / before[0].len() as f64;
+        let k = before[0].len() / 3;
+        assert!((f64::from(after[0][k]) + mean0 - f64::from(before[0][k])).abs() < 1.0e-4);
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invert_polarity_partial_range_leaves_rest_untouched() {
         let (mut harness, dir) = open_editor_tab("invert_part", &synth_stereo(48_000, 0.5));
         let before = tab_samples(&harness);
