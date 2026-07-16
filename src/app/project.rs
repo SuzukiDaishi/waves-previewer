@@ -1100,6 +1100,7 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         compressor_attack_ms: t.compressor_attack_ms,
         compressor_release_ms: t.compressor_release_ms,
         compressor_makeup_db: t.compressor_makeup_db,
+        insert_silence_ms: 1000.0,
     }
 }
 
@@ -1130,6 +1131,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "Reverse" => ToolKind::Reverse,
         "InvertPolarity" => ToolKind::InvertPolarity,
         "DcOffset" => ToolKind::DcOffset,
+        "InsertSilence" => ToolKind::InsertSilence,
         "PluginFx" => ToolKind::PluginFx,
         _ => ToolKind::LoopEdit,
     }

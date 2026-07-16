@@ -626,6 +626,7 @@ pub enum ToolKind {
     Reverse,
     InvertPolarity,
     DcOffset,
+    InsertSilence,
     NoiseGate,
     Eq,
     Compressor,
@@ -763,6 +764,7 @@ pub struct ToolState {
     pub compressor_attack_ms: f32,
     pub compressor_release_ms: f32,
     pub compressor_makeup_db: f32,
+    pub insert_silence_ms: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]

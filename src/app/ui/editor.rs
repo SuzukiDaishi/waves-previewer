@@ -2832,6 +2832,7 @@ impl crate::app::WavesPreviewer {
         let mut do_reverse: Option<(usize, usize)> = None;
         let mut do_invert: Option<(usize, usize)> = None;
         let mut do_dc_offset: Option<(usize, usize)> = None;
+        let mut do_insert_silence: Option<f32> = None;
         let mut pending_spectral_warp_preview = false;
         let mut pending_spectral_warp_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
@@ -7045,6 +7046,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Reverse => "Reverse",
                                 ToolKind::InvertPolarity => "Invert Polarity",
                                 ToolKind::DcOffset => "DC Offset",
+                                ToolKind::InsertSilence => "Insert Silence",
                                 // Spectrogram-view tool; never selectable in
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
@@ -7080,6 +7082,11 @@ impl crate::app::WavesPreviewer {
                                         "Invert Polarity",
                                     );
                                     ui.selectable_value(&mut tool, ToolKind::DcOffset, "DC Offset");
+                                    ui.selectable_value(
+                                        &mut tool,
+                                        ToolKind::InsertSilence,
+                                        "Insert Silence",
+                                    );
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -9938,6 +9945,32 @@ impl crate::app::WavesPreviewer {
                                         if ui.button("Cancel").clicked() { need_restore_preview = true; }
                                     });
                                 }
+                                ToolKind::InsertSilence => {
+                                    ui.label(
+                                        RichText::new(
+                                            "Inserts silence at the selection start (when a                                              selection exists) or at the playhead. Markers and                                              loops after the insert point shift right.",
+                                        )
+                                        .weak(),
+                                    );
+                                    let target_label = if Self::editor_selected_range(tab).is_some() {
+                                        "Insert at: selection start"
+                                    } else {
+                                        "Insert at: playhead"
+                                    };
+                                    ui.label(RichText::new(target_label).weak());
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label("Duration");
+                                        ui.add(
+                                            egui::DragValue::new(&mut tab.tool_state.insert_silence_ms)
+                                                .range(1.0..=600_000.0)
+                                                .speed(10.0)
+                                                .suffix(" ms"),
+                                        );
+                                        if ui.button("Apply").clicked() {
+                                            do_insert_silence = Some(tab.tool_state.insert_silence_ms);
+                                        }
+                                    });
+                                }
                             }
                         }
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
@@ -10785,6 +10818,15 @@ impl crate::app::WavesPreviewer {
         }
         if let Some((s, e)) = do_dc_offset {
             self.editor_apply_remove_dc_range(tab_idx, (s, e));
+        }
+        if let Some(ms) = do_insert_silence {
+            let pos = self.editor_insert_position(tab_idx);
+            if self.editor_insert_silence_at(tab_idx, pos, ms) {
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Info,
+                    format!("Inserted {ms:.0} ms of silence (Ctrl+Z to undo)"),
+                );
+            }
         }
         if let Some((_, _)) = do_cutjoin {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {

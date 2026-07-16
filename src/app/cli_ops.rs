@@ -2972,6 +2972,7 @@ fn resolve_editor_state_for_input(input: &Path) -> Result<EditorTargetState> {
             compressor_attack_ms: 10.0,
             compressor_release_ms: 150.0,
             compressor_makeup_db: 0.0,
+            insert_silence_ms: 1000.0,
         },
         dirty: false,
         markers_dirty: false,

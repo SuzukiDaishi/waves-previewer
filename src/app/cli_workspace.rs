@@ -357,6 +357,18 @@ impl CliWorkspace {
                 let len = self.tab_len(tab_idx)?;
                 self.app.editor_apply_remove_dc_range(tab_idx, (0, len));
             }
+            ToolKind::InsertSilence => {
+                let (pos, ms) = {
+                    let tab = self.app.tabs.get(tab_idx).context("missing target tab")?;
+                    let pos = WavesPreviewer::editor_selected_range(tab)
+                        .map(|(s, _)| s)
+                        .unwrap_or(tab.samples_len);
+                    (pos, tab.tool_state.insert_silence_ms)
+                };
+                if !self.app.editor_insert_silence_at(tab_idx, pos, ms) {
+                    anyhow::bail!("insert silence failed (zero duration?)");
+                }
+            }
             ToolKind::SpectralWarp => {
                 anyhow::bail!("SpectralWarp is interactive-only (warp points live in the editor)")
             }

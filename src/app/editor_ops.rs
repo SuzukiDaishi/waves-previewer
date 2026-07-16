@@ -441,6 +441,111 @@ impl crate::app::WavesPreviewer {
         self.audio.set_loop_crossfade(0, 0);
     }
 
+    /// Insert `insert` (one Vec per channel, equal lengths, matching the
+    /// tab's channel count) at buffer position `pos`. Markers, loop regions,
+    /// selections, and fade ranges at or after `pos` shift right by the
+    /// inserted length so existing annotations keep pointing at the same
+    /// audio. Returns false if the shape doesn't match.
+    pub(super) fn editor_insert_channels_at(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        insert: Vec<Vec<f32>>,
+    ) -> bool {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let ins_len = insert.first().map(|c| c.len()).unwrap_or(0);
+            if ins_len == 0
+                || insert.len() != tab.ch_samples.len()
+                || insert.iter().any(|c| c.len() != ins_len)
+            {
+                return false;
+            }
+            let pos = pos.min(tab.samples_len);
+            let undo_state = Self::capture_undo_state(tab);
+            for (ch, ins) in tab.ch_samples.iter_mut().zip(insert.iter()) {
+                ch.splice(pos..pos, ins.iter().copied());
+            }
+            tab.samples_len += ins_len;
+            let shift_markers = |markers: &mut Vec<crate::markers::MarkerEntry>| {
+                for mk in markers.iter_mut() {
+                    if mk.sample >= pos {
+                        mk.sample += ins_len;
+                    }
+                }
+            };
+            shift_markers(&mut tab.markers);
+            shift_markers(&mut tab.markers_committed);
+            shift_markers(&mut tab.markers_applied);
+            let shift_range = |range: &mut Option<(usize, usize)>| {
+                if let Some((a, b)) = range.as_mut() {
+                    if *a >= pos {
+                        *a += ins_len;
+                    }
+                    if *b >= pos {
+                        *b += ins_len;
+                    }
+                }
+            };
+            shift_range(&mut tab.selection);
+            shift_range(&mut tab.ab_loop);
+            shift_range(&mut tab.loop_region);
+            shift_range(&mut tab.loop_region_applied);
+            shift_range(&mut tab.loop_region_committed);
+            shift_range(&mut tab.loop_markers_saved);
+            shift_range(&mut tab.trim_range);
+            shift_range(&mut tab.fade_in_range);
+            shift_range(&mut tab.fade_out_range);
+            for (a, b) in tab.extra_selections.iter_mut() {
+                if *a >= pos {
+                    *a += ins_len;
+                }
+                if *b >= pos {
+                    *b += ins_len;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        true
+    }
+
+    /// Insert `ms` of silence at `pos` (buffer samples).
+    pub(super) fn editor_insert_silence_at(&mut self, tab_idx: usize, pos: usize, ms: f32) -> bool {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let n = ((f64::from(ms.max(0.0)) / 1000.0) * f64::from(sr)).round() as usize;
+        if n == 0 {
+            return false;
+        }
+        let channels = tab.ch_samples.len().max(1);
+        self.editor_insert_channels_at(tab_idx, pos, vec![vec![0.0f32; n]; channels])
+    }
+
+    /// Silence-insert target: selection start when a selection exists,
+    /// otherwise the current playhead position.
+    pub(super) fn editor_insert_position(&self, tab_idx: usize) -> usize {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return 0;
+        };
+        if let Some((s, _)) = Self::editor_selected_range(tab) {
+            return s;
+        }
+        let play_pos = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.map_audio_to_display_sample(tab, play_pos)
+            .min(tab.samples_len)
+    }
+
     /// Mean of a sample slice in f64 (stable for long buffers).
     pub(super) fn dc_mean_over(samples: &[f32]) -> f32 {
         if samples.is_empty() {
@@ -1918,6 +2023,18 @@ impl crate::app::WavesPreviewer {
         };
         self.editor_apply_invert_polarity_range(tab_idx, range);
         true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_insert_silence_at_frac(&mut self, frac: f32, ms: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let pos = ((tab.samples_len as f32) * frac.clamp(0.0, 1.0)).round() as usize;
+        self.editor_insert_silence_at(tab_idx, pos, ms)
     }
 
     #[cfg(feature = "kittest")]

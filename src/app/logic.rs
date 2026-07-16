@@ -1557,6 +1557,7 @@ impl super::WavesPreviewer {
             compressor_attack_ms: 10.0,
             compressor_release_ms: 150.0,
             compressor_makeup_db: 0.0,
+            insert_silence_ms: 1000.0,
         };
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;

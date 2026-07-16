@@ -168,6 +168,56 @@ mod p2_editor_ops {
     }
 
     #[test]
+    fn insert_silence_shifts_markers_and_undoes() {
+        let (mut harness, dir) = open_editor_tab("ins_silence", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len_before = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        // Place a marker after the insert point and one before.
+        {
+            let state = harness.state_mut();
+            let tab = &mut state.tabs[tab_idx];
+            tab.markers.push(neowaves::markers::MarkerEntry {
+                sample: len_before / 4,
+                label: "before".into(),
+            });
+            tab.markers.push(neowaves::markers::MarkerEntry {
+                sample: (len_before * 3) / 4,
+                label: "after".into(),
+            });
+        }
+
+        // Insert 100 ms of silence at the middle.
+        assert!(harness.state_mut().test_insert_silence_at_frac(0.5, 100.0));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        let ins_len = (48_000f64 * 0.1).round() as usize;
+        assert_eq!(after[0].len(), len_before + ins_len);
+        let pos = len_before / 2;
+        // Inserted region is silent; audio around it is preserved.
+        assert!(after[0][pos..pos + ins_len].iter().all(|&v| v == 0.0));
+        assert_eq!(after[0][pos - 1], before[0][pos - 1]);
+        assert_eq!(after[0][pos + ins_len], before[0][pos]);
+
+        // Marker before the insert point stays; the one after shifts right.
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            assert_eq!(tab.markers[0].sample, len_before / 4);
+            assert_eq!(tab.markers[1].sample, (len_before * 3) / 4 + ins_len);
+            assert!(tab.dirty);
+        }
+
+        // Undo restores length and samples.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invert_polarity_partial_range_leaves_rest_untouched() {
         let (mut harness, dir) = open_editor_tab("invert_part", &synth_stereo(48_000, 0.5));
         let before = tab_samples(&harness);
