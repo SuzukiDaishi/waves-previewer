@@ -354,6 +354,42 @@ mod p2_editor_ops {
     }
 
     #[test]
+    fn pencil_stroke_writes_linear_segment_and_undoes() {
+        let (mut harness, dir) = open_editor_tab("pencil", &synth_stereo(48_000, 0.2));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+
+        assert!(harness
+            .state_mut()
+            .test_pencil_stroke(0.25, 0.5, 0.5, -0.5));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        let a = (len as f32 * 0.25) as usize;
+        let b = (len as f32 * 0.5) as usize;
+        for ch in 0..after.len() {
+            // Endpoints hit the drawn values; midpoint is the linear blend.
+            assert!((after[ch][a] - 0.5).abs() < 1e-6, "start value");
+            assert!((after[ch][b] + 0.5).abs() < 1e-6, "end value");
+            let mid = (a + b) / 2;
+            let t = (mid - a) as f32 / (b - a) as f32;
+            let expect = 0.5 + (-0.5 - 0.5) * t;
+            assert!((after[ch][mid] - expect).abs() < 2e-3, "midpoint linear");
+            // Outside the stroke: untouched.
+            assert_eq!(after[ch][a - 1], before[ch][a - 1]);
+            assert_eq!(after[ch][b + 1], before[ch][b + 1]);
+        }
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].dirty);
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invert_polarity_partial_range_leaves_rest_untouched() {
         let (mut harness, dir) = open_editor_tab("invert_part", &synth_stereo(48_000, 0.5));
         let before = tab_samples(&harness);

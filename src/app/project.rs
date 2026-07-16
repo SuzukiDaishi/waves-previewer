@@ -1132,6 +1132,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "InvertPolarity" => ToolKind::InvertPolarity,
         "DcOffset" => ToolKind::DcOffset,
         "InsertSilence" => ToolKind::InsertSilence,
+        "Pencil" => ToolKind::Pencil,
         "PluginFx" => ToolKind::PluginFx,
         _ => ToolKind::LoopEdit,
     }

@@ -627,6 +627,7 @@ pub enum ToolKind {
     InvertPolarity,
     DcOffset,
     InsertSilence,
+    Pencil,
     NoiseGate,
     Eq,
     Compressor,
@@ -1254,6 +1255,11 @@ pub struct EditorTab {
     pub loop_enabled: bool,
     pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
+    // Pencil-stroke transient state: undo snapshot captured at stroke start,
+    // last drawn point for interpolation, and the stroke's target channels.
+    pub pencil_undo: Option<Box<EditorUndoState>>,
+    pub pencil_last_point: Option<(usize, f32)>,
+    pub pencil_stroke_channels: Vec<usize>,
     // Monitoring-only channel mute/solo (indexed by source channel). Not part
     // of the edit state: excluded from undo/dirty and never saved.
     pub ch_muted: Vec<bool>,
@@ -1391,6 +1397,9 @@ impl EditorTab {
             loop_enabled: false,
             loading: true,
             ch_samples: Vec::new(),
+            pencil_undo: None,
+            pencil_last_point: None,
+            pencil_stroke_channels: Vec::new(),
             ch_muted: Vec::new(),
             ch_solo: Vec::new(),
             ch_samples_arc: std::sync::Arc::new(Vec::new()),

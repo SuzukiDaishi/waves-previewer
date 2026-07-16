@@ -2834,6 +2834,7 @@ impl crate::app::WavesPreviewer {
         let mut do_dc_offset: Option<(usize, usize)> = None;
         let mut do_insert_silence: Option<f32> = None;
         let mut pending_spectral_warp_preview = false;
+        let mut pending_pencil_commit = false;
         let mut pending_spectral_warp_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
@@ -4486,6 +4487,75 @@ impl crate::app::WavesPreviewer {
                         tab.preview_audio_tool = Some(ToolKind::Gain);
                         gesture_refresh_preview = true;
                     }
+                }
+            }
+            // Pencil: draw samples directly on the waveform at high zoom.
+            let pencil_editing =
+                wave_view_gestures && matches!(tab.active_tool, ToolKind::Pencil);
+            if pencil_editing {
+                tool_gesture_active = true;
+                suppress_seek = true;
+                if resp.hovered() {
+                    hover_cursor = Some(egui::CursorIcon::Crosshair);
+                }
+                let visible = tab.channel_view.visible_indices(tab.ch_samples.len());
+                let use_mixdown = tab.channel_view.mode
+                    == crate::app::types::ChannelViewMode::Mixdown
+                    || visible.len() <= 1;
+                let lane_count = if use_mixdown { 1 } else { visible.len().max(1) };
+                let lane_h = (rect.height() / lane_count as f32).max(1.0);
+                let zoomed_in_enough = tab.samples_per_px <= 0.5;
+                let started = resp.drag_started_by(egui::PointerButton::Primary)
+                    || resp.clicked_by(egui::PointerButton::Primary);
+                if started && zoomed_in_enough && tab.pencil_undo.is_none() {
+                    tab.pencil_undo = Some(Box::new(Self::capture_undo_state(tab)));
+                    tab.pencil_last_point = None;
+                    tab.pencil_stroke_channels = if use_mixdown {
+                        (0..tab.ch_samples.len()).collect()
+                    } else if let Some(pos) = resp.interact_pointer_pos() {
+                        let lane_idx = (((pos.y - rect.top()) / lane_h).floor() as usize)
+                            .min(lane_count.saturating_sub(1));
+                        vec![visible[lane_idx]]
+                    } else {
+                        (0..tab.ch_samples.len()).collect()
+                    };
+                }
+                if tab.pencil_undo.is_some()
+                    && (started || resp.dragged_by(egui::PointerButton::Primary))
+                {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let sample =
+                            geom.x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                        // Amplitude reads from the stroke's home lane so the
+                        // value stays consistent while the pointer wanders.
+                        let lane_idx = if use_mixdown {
+                            0
+                        } else {
+                            tab.pencil_stroke_channels
+                                .first()
+                                .and_then(|ch| visible.iter().position(|v| v == ch))
+                                .unwrap_or(0)
+                        };
+                        let lane_rect = egui::Rect::from_min_size(
+                            egui::pos2(wave_left, rect.top() + lane_h * lane_idx as f32),
+                            egui::vec2(wave_w, lane_h),
+                        );
+                        let amp = crate::app::render::overlay::waveform_amp_from_y(
+                            lane_rect,
+                            tab.vertical_zoom,
+                            tab.vertical_view_center,
+                            pos.y,
+                        );
+                        let from = tab.pencil_last_point.unwrap_or((sample, amp));
+                        let channels = tab.pencil_stroke_channels.clone();
+                        Self::editor_pencil_write_segment(tab, &channels, from, (sample, amp));
+                        tab.pencil_last_point = Some((sample, amp));
+                        Self::invalidate_editor_viewport_cache(tab);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                if ui.input(|i| i.pointer.primary_released()) && tab.pencil_undo.is_some() {
+                    pending_pencil_commit = true;
                 }
             }
             // PitchShift: draggable horizontal pitch line (up = higher).
@@ -7047,6 +7117,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::InvertPolarity => "Invert Polarity",
                                 ToolKind::DcOffset => "DC Offset",
                                 ToolKind::InsertSilence => "Insert Silence",
+                                ToolKind::Pencil => "Pencil",
                                 // Spectrogram-view tool; never selectable in
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
@@ -7087,6 +7158,7 @@ impl crate::app::WavesPreviewer {
                                         ToolKind::InsertSilence,
                                         "Insert Silence",
                                     );
+                                    ui.selectable_value(&mut tool, ToolKind::Pencil, "Pencil");
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -9971,6 +10043,31 @@ impl crate::app::WavesPreviewer {
                                         }
                                     });
                                 }
+                                ToolKind::Pencil => {
+                                    ui.label(
+                                        RichText::new(
+                                            "Draw sample values directly on the waveform                                              (click repair's last resort). Each stroke is one                                              undo step.",
+                                        )
+                                        .weak(),
+                                    );
+                                    if tab.samples_per_px > 0.5 {
+                                        ui.label(
+                                            RichText::new(
+                                                "Zoom in further to draw (needs > 2 px per sample).",
+                                            )
+                                            .color(egui::Color32::from_rgb(235, 200, 90)),
+                                        );
+                                    } else {
+                                        ui.label(RichText::new("Ready: drag on the waveform to draw.").weak());
+                                    }
+                                    ui.label(
+                                        RichText::new(
+                                            "Targets the lane under the pointer (all channels in Mix view).",
+                                        )
+                                        .weak()
+                                        .small(),
+                                    );
+                                }
                             }
                         }
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
@@ -10435,6 +10532,9 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_spectral_warp_preview {
                     self.spawn_spectral_warp_preview_for_tab(tab_idx);
+                }
+                if pending_pencil_commit {
+                    self.editor_pencil_commit(tab_idx);
                 }
                 if pending_spectral_warp_apply {
                     self.spawn_spectral_warp_apply_for_tab(tab_idx);

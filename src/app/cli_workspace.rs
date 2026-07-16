@@ -372,6 +372,9 @@ impl CliWorkspace {
             ToolKind::SpectralWarp => {
                 anyhow::bail!("SpectralWarp is interactive-only (warp points live in the editor)")
             }
+            ToolKind::Pencil => {
+                anyhow::bail!("Pencil is interactive-only (draw on the waveform in the editor)")
+            }
             ToolKind::NoiseGate => {
                 let st = self
                     .app

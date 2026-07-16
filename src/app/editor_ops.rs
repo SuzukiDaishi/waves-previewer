@@ -799,6 +799,85 @@ impl crate::app::WavesPreviewer {
         self.editor_insert_channels_at(tab_idx, pos, insert)
     }
 
+    /// Write a linearly interpolated pencil segment into the target channels.
+    pub(crate) fn editor_pencil_write_segment(
+        tab: &mut super::types::EditorTab,
+        channels: &[usize],
+        from: (usize, f32),
+        to: (usize, f32),
+    ) {
+        let len = tab.samples_len;
+        if len == 0 {
+            return;
+        }
+        let (a, av, b, bv) = if from.0 <= to.0 {
+            (from.0, from.1, to.0, to.1)
+        } else {
+            (to.0, to.1, from.0, from.1)
+        };
+        let a = a.min(len - 1);
+        let b = b.min(len - 1);
+        let n = b - a;
+        for &ci in channels {
+            let Some(ch) = tab.ch_samples.get_mut(ci) else {
+                continue;
+            };
+            for i in a..=b {
+                let t = if n == 0 {
+                    1.0
+                } else {
+                    (i - a) as f32 / n as f32
+                };
+                let v = av + (bv - av) * t;
+                if let Some(s) = ch.get_mut(i) {
+                    // Keep float headroom, but bound runaway values.
+                    *s = v.clamp(-4.0, 4.0);
+                }
+            }
+        }
+    }
+
+    /// Finish a pencil stroke: push the undo state captured at stroke start
+    /// and run the shared destructive-apply pipeline.
+    pub(super) fn editor_pencil_commit(&mut self, tab_idx: usize) {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let Some(undo) = tab.pencil_undo.take() else {
+                return;
+            };
+            tab.pencil_last_point = None;
+            tab.pencil_stroke_channels.clear();
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            *undo
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_stroke(&mut self, from_frac: f32, amp0: f32, to_frac: f32, amp1: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            if tab.samples_len == 0 {
+                return false;
+            }
+            let a = ((tab.samples_len as f32) * from_frac.clamp(0.0, 1.0)) as usize;
+            let b = ((tab.samples_len as f32) * to_frac.clamp(0.0, 1.0)) as usize;
+            tab.pencil_undo = Some(Box::new(Self::capture_undo_state(tab)));
+            let channels: Vec<usize> = (0..tab.ch_samples.len()).collect();
+            Self::editor_pencil_write_segment(tab, &channels, (a, amp0), (b, amp1));
+        }
+        self.editor_pencil_commit(tab_idx);
+        true
+    }
+
     /// Mean of a sample slice in f64 (stable for long buffers).
     pub(super) fn dc_mean_over(samples: &[f32]) -> f32 {
         if samples.is_empty() {
