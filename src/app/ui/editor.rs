@@ -2836,6 +2836,8 @@ impl crate::app::WavesPreviewer {
         let mut pending_spectral_warp_preview = false;
         let mut pending_pencil_commit = false;
         let mut pending_spectral_warp_apply = false;
+        let mut pending_spectral_brush_preview = false;
+        let mut pending_spectral_brush_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -4371,6 +4373,12 @@ impl crate::app::WavesPreviewer {
             let spectral_warp_editing = matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
                 && tab.spectral_warp_edit
                 && display_samples_len > 0;
+            // Spectral brush painting owns the pointer the same way (the
+            // inspector keeps warp and brush editing mutually exclusive).
+            let spectral_brush_editing = matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
+                && tab.spectral_brush_edit
+                && !spectral_warp_editing
+                && display_samples_len > 0;
             let canvas_h = rect.height().max(1.0);
             const GAIN_ENV_DB_RANGE: f32 = 24.0;
             const PITCH_SEMI_RANGE: f32 = 12.0;
@@ -4378,7 +4386,8 @@ impl crate::app::WavesPreviewer {
             let y_to_frac = |y: f32| (1.0 - (y - rect.top()) / canvas_h).clamp(0.0, 1.0);
             // A flag any gesture sets while it owns the primary button; the
             // seek / range-select handlers below bail out when set.
-            let mut tool_gesture_active = gain_env_editing || spectral_warp_editing;
+            let mut tool_gesture_active =
+                gain_env_editing || spectral_warp_editing || spectral_brush_editing;
             // Requests deferred to after UI borrows (same pattern as inspector).
             let mut gesture_refresh_preview = false;
             let mut gesture_restore_preview = false;
@@ -5009,6 +5018,68 @@ impl crate::app::WavesPreviewer {
                         || tab.preview_overlay.is_some()
                     {
                         need_restore_preview = true;
+                    }
+                }
+            }
+            // ---- Spectral Brush input (Spec/Log views): while enabled it
+            // owns the pointer — dragging paints attenuation stamps along the
+            // stroke; the preview renders on release.
+            if spectral_brush_editing {
+                suppress_seek = true;
+                if resp.hovered() {
+                    hover_cursor = Some(egui::CursorIcon::Crosshair);
+                }
+                let painting = resp.drag_started_by(egui::PointerButton::Primary)
+                    || resp.dragged_by(egui::PointerButton::Primary);
+                if painting {
+                    let pos = if resp.drag_started_by(egui::PointerButton::Primary) {
+                        ui.input(|i| i.pointer.press_origin())
+                            .or_else(|| resp.interact_pointer_pos())
+                    } else {
+                        resp.interact_pointer_pos()
+                    };
+                    if let Some(pos) = pos {
+                        let sample =
+                            geom.x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                        let lane = spec_lane_at_y(pos.y);
+                        let hz = spec_y_to_freq(pos.y, lane).max(0.0);
+                        let st = tab.tool_state;
+                        let sigma_t_ms = st.brush_time_radius_ms.max(1.0);
+                        let sigma_f_hz = st.brush_freq_radius_hz.max(1.0);
+                        // Decimate the stroke: a new stamp closer than half a
+                        // sigma (time AND frequency) to the previous one adds
+                        // nothing audible, only processing cost.
+                        let sigma_t_samples =
+                            (sigma_t_ms / 1000.0) * tab.buffer_sample_rate.max(1) as f32;
+                        let accept = tab
+                            .spectral_brush_last
+                            .map(|(ls, lf)| {
+                                let dt = (sample as f32 - ls as f32).abs();
+                                let df = (hz - lf).abs();
+                                dt >= sigma_t_samples * 0.5 || df >= sigma_f_hz * 0.5
+                            })
+                            .unwrap_or(true);
+                        if accept {
+                            tab.spectral_brush_stamps.push(
+                                crate::app::types::SpectralBrushStamp {
+                                    sample,
+                                    freq_hz: hz,
+                                    cut_db: st.brush_cut_db.max(0.0),
+                                    time_sigma_ms: sigma_t_ms,
+                                    freq_sigma_hz: sigma_f_hz,
+                                },
+                            );
+                            tab.spectral_brush_last = Some((sample, hz));
+                        }
+                    }
+                }
+                if ui.input(|i| i.pointer.primary_released())
+                    && tab.spectral_brush_last.take().is_some()
+                {
+                    stop_playback = true;
+                    if Self::editor_spectral_brush_ready(tab) {
+                        // Render + audition the stroke right away.
+                        pending_spectral_brush_preview = true;
                     }
                 }
             }
@@ -6636,6 +6707,54 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            // ---- Spectral Brush stamps (Spec/Log views): translucent discs
+            // marking painted attenuation, deeper cuts drawn more opaque.
+            if matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
+                && display_samples_len > 0
+                && !tab.spectral_brush_stamps.is_empty()
+            {
+                let spec_freq_to_y = |hz: f32, lane: usize| -> f32 {
+                    let frac = Self::editor_spec_freq_to_frac(
+                        view_mode,
+                        hz,
+                        spec_axis_max_freq,
+                        spec_mel_scale,
+                    );
+                    let frac_local = ((frac - spec_vis_min)
+                        / (spec_vis_max - spec_vis_min).max(1e-6))
+                    .clamp(0.0, 1.0);
+                    let lane_top = rect.top() + lane_h.max(1.0) * lane as f32;
+                    lane_top + (1.0 - frac_local) * lane_h.max(1.0)
+                };
+                for lane in 0..lane_count {
+                    for s in tab.spectral_brush_stamps.iter() {
+                        let x = geom.sample_center_x(s.sample.min(display_samples_len));
+                        if x < wave_left - 20.0 || x > wave_left + wave_w + 20.0 {
+                            continue;
+                        }
+                        let y = spec_freq_to_y(s.freq_hz, lane);
+                        // Radius from the frequency sigma so the disc roughly
+                        // matches the brush's audible footprint.
+                        let y_edge = spec_freq_to_y(s.freq_hz + s.freq_sigma_hz, lane);
+                        let r = (y - y_edge).abs().clamp(3.0, 60.0);
+                        let alpha = (40.0 + (s.cut_db / 80.0) * 120.0).clamp(40.0, 160.0) as u8;
+                        painter.circle_filled(
+                            egui::pos2(x, y),
+                            r,
+                            Color32::from_rgba_unmultiplied(255, 80, 80, alpha / 3),
+                        );
+                        painter.circle_stroke(
+                            egui::pos2(x, y),
+                            r,
+                            egui::Stroke::new(
+                                1.0,
+                                Color32::from_rgba_unmultiplied(255, 110, 110, alpha),
+                            ),
+                        );
+                    }
+                }
+            }
+
             if let Some(amp_rect) = amplitude_nav_rect {
                 if let Some((next_zoom, next_center)) =
                     Self::draw_editor_amplitude_navigator(ui, amp_rect, tab)
@@ -7118,9 +7237,10 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::DcOffset => "DC Offset",
                                 ToolKind::InsertSilence => "Insert Silence",
                                 ToolKind::Pencil => "Pencil",
-                                // Spectrogram-view tool; never selectable in
+                                // Spectrogram-view tools; never selectable in
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
+                                ToolKind::SpectralBrush => "Spectral Brush",
                             };
                             egui::ComboBox::new(("tool_selector", tab_idx), "Tool")
                                 .selected_text(tool_label(tool))
@@ -7228,9 +7348,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             match tab.active_tool {
-                                // Spectral Warp lives in the Spec/Log view's
-                                // inspector; it is never active here.
-                                ToolKind::SpectralWarp => {}
+                                // Spectral Warp/Brush live in the Spec/Log
+                                // view's inspector; never active here.
+                                ToolKind::SpectralWarp | ToolKind::SpectralBrush => {}
                                 // Seek/Select removed: seeking is always available on the canvas
                                 ToolKind::LoopEdit => {
                                     // compact spacing for inspector controls
@@ -10132,6 +10252,12 @@ impl crate::app::WavesPreviewer {
                                     );
                                     if edit_resp.changed() {
                                         tab.spectral_warp_drag = None;
+                                        if tab.spectral_warp_edit {
+                                            // Warp and brush gestures both own
+                                            // the pointer — one at a time.
+                                            tab.spectral_brush_edit = false;
+                                            tab.spectral_brush_last = None;
+                                        }
                                     }
                                     if tab.spectral_warp_edit {
                                         ui.label(
@@ -10213,6 +10339,128 @@ impl crate::app::WavesPreviewer {
                                             .clicked()
                                         {
                                             pending_spectral_warp_apply = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            need_restore_preview = true;
+                                        }
+                                    });
+                                });
+                                ui.separator();
+                                Self::inspector_section(ui, "Spectral Brush");
+                                ui.scope(|ui| {
+                                    let s = ui.style_mut();
+                                    s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                    s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                    let edit_resp = ui.checkbox(
+                                        &mut tab.spectral_brush_edit,
+                                        "Paint attenuation on spectrogram",
+                                    );
+                                    if edit_resp.changed() {
+                                        tab.spectral_brush_last = None;
+                                        if tab.spectral_brush_edit {
+                                            tab.spectral_warp_edit = false;
+                                            tab.spectral_warp_drag = None;
+                                        }
+                                    }
+                                    if tab.spectral_brush_edit {
+                                        ui.label(
+                                            RichText::new(
+                                                "Drag on the spectrogram to paint the content out (RX-style eraser). Strokes stack; Preview renders on release.",
+                                            )
+                                            .weak(),
+                                        );
+                                    }
+                                    ui.horizontal(|ui| {
+                                        ui.label("Strength");
+                                        let mut cut_db = tab.tool_state.brush_cut_db;
+                                        if !cut_db.is_finite() || cut_db <= 0.0 { cut_db = 24.0; }
+                                        let rc = ui
+                                            .add(
+                                                egui::DragValue::new(&mut cut_db)
+                                                    .range(3.0..=80.0)
+                                                    .speed(1.0)
+                                                    .suffix(" dB"),
+                                            )
+                                            .on_hover_text("Attenuation at the center of each stamp");
+                                        if rc.changed() {
+                                            tab.tool_state = ToolState {
+                                                brush_cut_db: cut_db,
+                                                ..tab.tool_state
+                                            };
+                                        }
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Radius");
+                                        let mut t_ms = tab.tool_state.brush_time_radius_ms;
+                                        let mut f_hz = tab.tool_state.brush_freq_radius_hz;
+                                        if !t_ms.is_finite() || t_ms <= 0.0 { t_ms = 60.0; }
+                                        if !f_hz.is_finite() || f_hz <= 0.0 { f_hz = 200.0; }
+                                        let rt = ui
+                                            .add(
+                                                egui::DragValue::new(&mut t_ms)
+                                                    .range(5.0..=1000.0)
+                                                    .speed(5.0)
+                                                    .suffix(" ms"),
+                                            )
+                                            .on_hover_text("Time falloff of each stamp (Gaussian sigma)");
+                                        let rf = ui
+                                            .add(
+                                                egui::DragValue::new(&mut f_hz)
+                                                    .range(20.0..=4000.0)
+                                                    .speed(10.0)
+                                                    .suffix(" Hz"),
+                                            )
+                                            .on_hover_text("Frequency falloff of each stamp (Gaussian sigma)");
+                                        if rt.changed() || rf.changed() {
+                                            tab.tool_state = ToolState {
+                                                brush_time_radius_ms: t_ms,
+                                                brush_freq_radius_hz: f_hz,
+                                                ..tab.tool_state
+                                            };
+                                        }
+                                    });
+                                    let brush_ready = Self::editor_spectral_brush_ready(tab)
+                                        && !tab.loading;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} stamp(s)",
+                                                tab.spectral_brush_stamps.len()
+                                            ))
+                                            .weak(),
+                                        );
+                                        if !tab.spectral_brush_stamps.is_empty()
+                                            && ui.button("Clear stamps").clicked()
+                                        {
+                                            tab.spectral_brush_stamps.clear();
+                                            tab.spectral_brush_last = None;
+                                            need_restore_preview = true;
+                                        }
+                                    });
+                                    if overlay_busy || apply_busy {
+                                        ui.add(egui::Spinner::new());
+                                    }
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui
+                                            .add_enabled(
+                                                brush_ready && preview_button_enabled,
+                                                egui::Button::new("Preview"),
+                                            )
+                                            .on_hover_text(
+                                                "Render the brush cut and audition it (green overlay needs \"Waveform overlay\")",
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_spectral_brush_preview = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                brush_ready && !apply_busy,
+                                                egui::Button::new("Apply"),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_spectral_brush_apply = true;
                                         }
                                         if ui.button("Cancel").clicked() {
                                             need_restore_preview = true;
@@ -10559,6 +10807,12 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_spectral_warp_apply {
                     self.spawn_spectral_warp_apply_for_tab(tab_idx);
+                }
+                if pending_spectral_brush_preview {
+                    self.spawn_spectral_brush_preview_for_tab(tab_idx);
+                }
+                if pending_spectral_brush_apply {
+                    self.spawn_spectral_brush_apply_for_tab(tab_idx);
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();

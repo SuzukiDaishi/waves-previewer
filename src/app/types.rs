@@ -634,6 +634,7 @@ pub enum ToolKind {
     MusicAnalyze,
     PluginFx,
     SpectralWarp,
+    SpectralBrush,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -812,6 +813,9 @@ impl ToolState {
             speed_rate: 1.0,
             warp_time_radius_ms: 150.0,
             warp_freq_radius_hz: 300.0,
+            brush_cut_db: 24.0,
+            brush_time_radius_ms: 60.0,
+            brush_freq_radius_hz: 200.0,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -845,6 +849,9 @@ pub struct ToolState {
     pub speed_rate: f32,
     pub warp_time_radius_ms: f32,
     pub warp_freq_radius_hz: f32,
+    pub brush_cut_db: f32,
+    pub brush_time_radius_ms: f32,
+    pub brush_freq_radius_hz: f32,
     pub loop_repeat: u32,
     pub noise_gate_threshold_db: f32,
     pub noise_gate_attack_ms: f32,
@@ -1372,6 +1379,10 @@ pub struct EditorTab {
     pub spectral_warp_edit: bool, // canvas warp editing enabled (owns the pointer)
     pub spectral_warp_points: Vec<SpectralWarpPoint>, // accumulated warp strokes
     pub spectral_warp_drag: Option<usize>, // index of the point being dragged
+    // --- Spectral brush (paint attenuation on Spec/Log views, transient) ---
+    pub spectral_brush_edit: bool, // canvas brush painting enabled (owns the pointer)
+    pub spectral_brush_stamps: Vec<SpectralBrushStamp>, // accumulated brush stamps
+    pub spectral_brush_last: Option<(usize, f32)>, // last stamp (sample, hz) this stroke
 }
 
 /// One spectral-warp control point: spectrogram content around
@@ -1382,6 +1393,19 @@ pub struct SpectralWarpPoint {
     pub sample: usize,
     pub freq_hz: f32,
     pub delta_hz: f32,
+}
+
+/// One spectral-brush stamp: spectrogram content around
+/// (`sample`, `freq_hz`) is attenuated by `cut_db` with Gaussian falloff.
+/// The radii are baked in at stamp time so strokes painted with different
+/// brush sizes coexist.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralBrushStamp {
+    pub sample: usize,
+    pub freq_hz: f32,
+    pub cut_db: f32,
+    pub time_sigma_ms: f32,
+    pub freq_sigma_hz: f32,
 }
 
 impl EditorTab {
@@ -1494,6 +1518,9 @@ impl EditorTab {
             spectral_warp_edit: false,
             spectral_warp_points: Vec::new(),
             spectral_warp_drag: None,
+            spectral_brush_edit: false,
+            spectral_brush_stamps: Vec::new(),
+            spectral_brush_last: None,
         }
     }
 
