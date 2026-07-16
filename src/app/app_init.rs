@@ -193,6 +193,7 @@ impl WavesPreviewer {
             inspection_report: None,
             show_inspection_dialog: false,
             show_inspection_window: false,
+            inspection_window_filter_idx: 0,
             inspection_cfg: Default::default(),
             editor_clip_c_was_down: false,
             editor_clip_x_was_down: false,

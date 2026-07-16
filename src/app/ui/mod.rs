@@ -4,6 +4,7 @@ pub(super) mod editor;
 pub(super) mod effect_graph;
 pub(super) mod export_settings;
 pub(super) mod external;
+pub(super) mod inspection;
 pub(super) mod list;
 pub(super) mod recording;
 pub(super) mod shortcuts;

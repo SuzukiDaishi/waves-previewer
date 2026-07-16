@@ -622,6 +622,7 @@ pub struct WavesPreviewer {
     inspection_report: Option<InspectionReportState>,
     show_inspection_dialog: bool,
     show_inspection_window: bool,
+    inspection_window_filter_idx: u8,
     inspection_cfg: crate::app::inspection::InspectionConfig,
     editor_clip_c_was_down: bool,
     editor_clip_x_was_down: bool,

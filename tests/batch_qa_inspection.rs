@@ -162,6 +162,41 @@ mod batch_qa_inspection {
     }
 
     #[test]
+    fn inspection_window_csv_and_click_to_select() {
+        let dir = make_temp_dir("window");
+        write_fixtures(&dir);
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness, 4);
+
+        run_inspection(&mut harness, qa_cfg());
+        assert!(harness.state().test_show_inspection_window());
+        harness.run_steps(2);
+
+        // CSV export includes every row and mentions the bad loop.
+        let csv_path = dir.join("report.csv");
+        assert!(harness.state_mut().test_save_inspection_csv(&csv_path));
+        let body = std::fs::read_to_string(&csv_path).expect("read report");
+        let lines: Vec<&str> = body.lines().collect();
+        assert!(lines[0].starts_with("severity,file,folder,path"));
+        assert_eq!(lines.len(), 1 + 4, "header + 4 rows: {body}");
+        assert!(body.contains("bad_loop.wav"));
+        assert!(body.to_lowercase().contains("loop"));
+
+        // Clicking row 0 (errors sort first) selects that file in the list.
+        let before = harness.state().selected;
+        assert!(harness.state_mut().test_inspection_click_row(0));
+        harness.run_steps(1);
+        let selected = harness.state().selected.expect("selection set");
+        let sel_path = harness.state().test_visible_list_paths()[selected].clone();
+        assert!(
+            sel_path.ends_with("bad_loop.wav"),
+            "row 0 is the error row; selected {sel_path:?} (before {before:?})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn inspection_cancel_produces_partial_report() {
         let dir = make_temp_dir("cancel");
         write_fixtures(&dir);

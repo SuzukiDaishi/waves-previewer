@@ -150,6 +150,36 @@ impl super::WavesPreviewer {
             .cloned()
     }
 
+    pub fn test_show_inspection_window(&self) -> bool {
+        self.show_inspection_window
+    }
+
+    pub fn test_inspection_click_row(&mut self, idx: usize) -> bool {
+        let Some(path) = self
+            .inspection_report
+            .as_ref()
+            .and_then(|r| r.rows.get(idx))
+            .map(|r| std::path::PathBuf::from(&r.path))
+        else {
+            return false;
+        };
+        let Some(row_idx) = self.row_for_path(&path) else {
+            return false;
+        };
+        self.update_selection_on_click(row_idx, egui::Modifiers::NONE);
+        self.selected = Some(row_idx);
+        self.scroll_to_selected = true;
+        true
+    }
+
+    pub fn test_save_inspection_csv(&mut self, path: &Path) -> bool {
+        let Some(report) = self.inspection_report.as_ref() else {
+            return false;
+        };
+        crate::app::inspection::write_batch_inspection_report(path, &report.rows, &report.cfg)
+            .is_ok()
+    }
+
     pub fn test_cancel_inspection_run(&mut self) {
         self.cancel_inspection_run();
     }

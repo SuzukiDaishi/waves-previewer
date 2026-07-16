@@ -539,6 +539,7 @@ impl WavesPreviewer {
         self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);
+        self.ui_inspection_window(ctx);
         self.ui_list_art_window(ctx);
         self.ui_tool_palette_window(ctx);
         self.ui_tool_confirm_dialog(ctx);
