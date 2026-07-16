@@ -99,6 +99,11 @@ const BATCH_LOUDNESS_APPLY_AFTER_HELP: &str = r#"Examples:
   neowaves --cli batch loudness apply --session .\work.nwsess --query _BGM --target-lufs -24
   neowaves --cli batch loudness apply --session .\work.nwsess --query-id <id> --target-lufs -24"#;
 
+const BATCH_INSPECT_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli batch inspect --session .\work.nwsess --query _SE
+  neowaves --cli batch inspect --session .\work.nwsess --target-lufs -16 --lufs-tolerance 2 --report .\qa.csv
+  neowaves --cli batch inspect --session .\work.nwsess --no-silence --require-loop --report .\loops.json"#;
+
 const BATCH_EXPORT_AFTER_HELP: &str = r#"Examples:
   neowaves --cli batch export --session .\work.nwsess --query _BGM --overwrite
   neowaves --cli batch export --session .\work.nwsess --query-id <id> --output-dir .\out --report .\export.md"#;
@@ -1537,6 +1542,7 @@ pub enum BatchCommand {
     #[command(subcommand)]
     Loudness(BatchLoudnessCommand),
     Export(BatchExportArgs),
+    Inspect(BatchInspectArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1567,6 +1573,39 @@ pub struct BatchLoudnessApplyArgs {
     pub filter: CliQueryFilterArgs,
     #[arg(long = "target-lufs", allow_hyphen_values = true)]
     pub target_lufs: f32,
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(after_help = BATCH_INSPECT_AFTER_HELP)]
+pub struct BatchInspectArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    #[arg(long = "target-lufs", default_value_t = -14.0, allow_hyphen_values = true)]
+    pub target_lufs: f32,
+    #[arg(long = "lufs-tolerance", default_value_t = 1.0)]
+    pub lufs_tolerance: f32,
+    #[arg(long = "tp-ceiling-db", default_value_t = -1.0, allow_hyphen_values = true)]
+    pub tp_ceiling_db: f32,
+    #[arg(long = "silence-threshold-dbfs", default_value_t = -60.0, allow_hyphen_values = true)]
+    pub silence_threshold_dbfs: f32,
+    #[arg(long = "max-leading-silence-ms", default_value_t = 100.0)]
+    pub max_leading_silence_ms: f32,
+    #[arg(long = "max-trailing-silence-ms", default_value_t = 1000.0)]
+    pub max_trailing_silence_ms: f32,
+    #[arg(long = "no-loudness", action = ArgAction::SetTrue)]
+    pub no_loudness: bool,
+    #[arg(long = "no-true-peak", action = ArgAction::SetTrue)]
+    pub no_true_peak: bool,
+    #[arg(long = "no-silence", action = ArgAction::SetTrue)]
+    pub no_silence: bool,
+    #[arg(long = "no-loop", action = ArgAction::SetTrue)]
+    pub no_loop: bool,
+    #[arg(long = "require-loop", action = ArgAction::SetTrue)]
+    pub require_loop: bool,
     #[arg(long, value_name = "PATH")]
     pub report: Option<PathBuf>,
 }

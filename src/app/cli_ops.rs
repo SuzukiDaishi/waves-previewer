@@ -258,6 +258,7 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
             "batch.loudness.apply"
         }
         CliCommand::Batch(BatchCommand::Export(_)) => "batch.export",
+        CliCommand::Batch(BatchCommand::Inspect(_)) => "batch.inspect",
         CliCommand::List(ListCommand::Render(_)) => "list.render",
         CliCommand::Editor(EditorCommand::Inspect(_)) => "editor.inspect",
         CliCommand::Editor(EditorCommand::View(EditorViewCommand::Get(_))) => "editor.view.get",
@@ -480,6 +481,7 @@ fn dispatch_batch(command: BatchCommand) -> Result<CliCommandOutput> {
         BatchCommand::Loudness(BatchLoudnessCommand::Plan(args)) => batch_loudness_plan(args),
         BatchCommand::Loudness(BatchLoudnessCommand::Apply(args)) => batch_loudness_apply(args),
         BatchCommand::Export(args) => batch_export(args),
+        BatchCommand::Inspect(args) => batch_inspect(args),
     }
 }
 
@@ -1005,6 +1007,72 @@ fn list_render(args: ListRenderArgs) -> Result<CliCommandOutput> {
             "width": width,
             "height": height,
             "source": render_source_json_for_list(&args.source)?,
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn batch_inspect(args: crate::cli::BatchInspectArgs) -> Result<CliCommandOutput> {
+    use crate::app::inspection::{CachedAudioFacts, InspectionConfig, IssueSeverity};
+    let session = load_session(&args.session)?;
+    let filter = resolve_query_filter(&args.filter)?;
+    let entries = matched_session_entries(&session, &filter)?;
+    let cfg = InspectionConfig {
+        check_true_peak: !args.no_true_peak,
+        tp_ceiling_db: args.tp_ceiling_db,
+        check_loudness: !args.no_loudness,
+        target_lufs: args.target_lufs,
+        lufs_tolerance_lu: args.lufs_tolerance.max(0.0),
+        check_silence: !args.no_silence,
+        silence_threshold_dbfs: args.silence_threshold_dbfs,
+        max_leading_silence_ms: args.max_leading_silence_ms.max(0.0),
+        max_trailing_silence_ms: args.max_trailing_silence_ms.max(0.0),
+        check_loop: !args.no_loop,
+        require_loop: args.require_loop,
+    };
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut rows: Vec<crate::app::inspection::InspectionRow> = entries
+        .iter()
+        .map(|entry| {
+            crate::app::inspection::inspect_file(
+                &entry.path,
+                entry.pending_gain_db,
+                &CachedAudioFacts::default(),
+                &cfg,
+                &cancel,
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.path.cmp(&b.path)));
+    if let Some(report) = args.report.as_deref() {
+        crate::app::inspection::write_batch_inspection_report(report, &rows, &cfg)
+            .map_err(|e| anyhow::anyhow!("write inspection report: {e}"))?;
+    }
+    let errors = rows
+        .iter()
+        .filter(|r| r.severity == Some(IssueSeverity::Error))
+        .count();
+    let warnings = rows
+        .iter()
+        .filter(|r| r.severity == Some(IssueSeverity::Warning))
+        .count();
+    let passed = rows.len() - errors - warnings;
+    Ok(CliCommandOutput {
+        result: json!({
+            "query_id": filter.query_id,
+            "config": {
+                "target_lufs": cfg.target_lufs,
+                "lufs_tolerance_lu": cfg.lufs_tolerance_lu,
+                "tp_ceiling_db": cfg.tp_ceiling_db,
+                "silence_threshold_dbfs": cfg.silence_threshold_dbfs,
+                "max_leading_silence_ms": cfg.max_leading_silence_ms,
+                "max_trailing_silence_ms": cfg.max_trailing_silence_ms,
+                "require_loop": cfg.require_loop,
+            },
+            "counts": { "error": errors, "warning": warnings, "pass": passed },
+            "matched_paths": rows.iter().map(|row| row.path.clone()).collect::<Vec<_>>(),
+            "rows": rows,
+            "report_path": args.report.as_deref().map(absolute_string).transpose()?,
         }),
         warnings: Vec::new(),
     })
