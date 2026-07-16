@@ -222,6 +222,16 @@ impl WavesPreviewer {
                 self.open_loudnorm_dialog();
                 ui.close();
             }
+            if ui
+                .button("Find Duplicates...")
+                .on_hover_text(
+                    "Scan the selection (or the whole list) for exact duplicates and perceptually similar files",
+                )
+                .clicked()
+            {
+                self.start_duplicate_scan();
+                ui.close();
+            }
             ui.separator();
             let multi = self.selected_paths().len() >= 2;
             if ui

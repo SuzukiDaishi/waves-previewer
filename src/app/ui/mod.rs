@@ -1,5 +1,6 @@
 pub(super) mod debug;
 pub(super) mod dsp_widgets;
+pub(super) mod duplicates;
 pub(super) mod editor;
 pub(super) mod effect_graph;
 pub(super) mod export_settings;

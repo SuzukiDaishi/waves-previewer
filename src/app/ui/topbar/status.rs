@@ -30,6 +30,7 @@ enum TopbarActivityCancel {
     Transcript,
     Music,
     VariationAudition,
+    DuplicateScan,
     EditorAnalysis,
 }
 
@@ -310,6 +311,14 @@ impl WavesPreviewer {
                 cancel: Some(TopbarActivityCancel::Inspection),
             });
         }
+        if let Some(state) = &self.duplicate_scan_state {
+            items.push(TopbarActivityItem {
+                label: format!("Duplicates: {}/{}", state.done, state.total.max(1)),
+                progress: Some((state.done as f32 / state.total.max(1) as f32).clamp(0.0, 1.0)),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::DuplicateScan),
+            });
+        }
         if let Some(state) = &self.variation_audition {
             let mode = match state.mode {
                 crate::app::types::VariationAuditionMode::RoundRobin => "RR",
@@ -461,6 +470,7 @@ impl WavesPreviewer {
                 self.cancel_variation_audition();
                 self.audio.stop();
             }
+            TopbarActivityCancel::DuplicateScan => self.cancel_duplicate_scan(),
             TopbarActivityCancel::EditorAnalysis => self.cancel_all_editor_analyses(),
         }
     }

@@ -33,8 +33,10 @@ mod dialogs;
 mod editor_decode_ops;
 mod editor_features;
 mod editor_ops;
+mod duplicate_ops;
 mod editor_viewport;
 mod effect_graph_ops;
+pub mod fingerprint;
 mod export_ops;
 mod external;
 mod external_load_jobs;
@@ -707,6 +709,9 @@ pub struct WavesPreviewer {
     list_play_pending: bool,
     variation_audition: Option<types::VariationAuditionState>,
     variation_audition_advancing: bool,
+    duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
+    duplicate_report: Option<duplicate_ops::DuplicateReportState>,
+    show_duplicates_window: bool,
     list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,
