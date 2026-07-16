@@ -35,6 +35,7 @@ mod editor_features;
 mod editor_ops;
 mod duplicate_ops;
 mod editor_viewport;
+pub mod engine_export;
 mod effect_graph_ops;
 pub mod fingerprint;
 mod export_ops;
@@ -712,6 +713,8 @@ pub struct WavesPreviewer {
     duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
     duplicate_report: Option<duplicate_ops::DuplicateReportState>,
     show_duplicates_window: bool,
+    show_engine_export_dialog: bool,
+    engine_export_profile: engine_export::EngineProfile,
     list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,

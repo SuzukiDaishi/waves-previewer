@@ -1543,6 +1543,21 @@ pub enum BatchCommand {
     Loudness(BatchLoudnessCommand),
     Export(BatchExportArgs),
     Inspect(BatchInspectArgs),
+    #[command(name = "engine-export")]
+    EngineExport(BatchEngineExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BatchEngineExportArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[command(flatten)]
+    pub filter: CliQueryFilterArgs,
+    /// Target engine profile: unity | wwise | fmod.
+    #[arg(long, value_name = "ENGINE")]
+    pub engine: String,
+    #[arg(long, value_name = "PATH")]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]

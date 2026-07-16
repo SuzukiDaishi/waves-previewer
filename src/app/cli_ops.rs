@@ -259,6 +259,7 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         }
         CliCommand::Batch(BatchCommand::Export(_)) => "batch.export",
         CliCommand::Batch(BatchCommand::Inspect(_)) => "batch.inspect",
+        CliCommand::Batch(BatchCommand::EngineExport(_)) => "batch.engine_export",
         CliCommand::List(ListCommand::Render(_)) => "list.render",
         CliCommand::Editor(EditorCommand::Inspect(_)) => "editor.inspect",
         CliCommand::Editor(EditorCommand::View(EditorViewCommand::Get(_))) => "editor.view.get",
@@ -482,7 +483,42 @@ fn dispatch_batch(command: BatchCommand) -> Result<CliCommandOutput> {
         BatchCommand::Loudness(BatchLoudnessCommand::Apply(args)) => batch_loudness_apply(args),
         BatchCommand::Export(args) => batch_export(args),
         BatchCommand::Inspect(args) => batch_inspect(args),
+        BatchCommand::EngineExport(args) => batch_engine_export(args),
     }
+}
+
+fn batch_engine_export(args: crate::cli::BatchEngineExportArgs) -> Result<CliCommandOutput> {
+    use crate::app::engine_export::{collect_entry, render_engine_export, EngineProfile};
+    let profile = EngineProfile::from_cli_name(&args.engine)
+        .ok_or_else(|| anyhow::anyhow!("unknown engine \"{}\" (unity|wwise|fmod)", args.engine))?;
+    let session = load_session(&args.session)?;
+    let filter = resolve_query_filter(&args.filter)?;
+    let entries = matched_session_entries(&session, &filter)?;
+    let mut rows = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for entry in &entries {
+        match collect_entry(&entry.path, None) {
+            Ok(row) => rows.push(row),
+            Err(err) => skipped.push(format!("{}: {err}", entry.path.display())),
+        }
+    }
+    if rows.is_empty() {
+        anyhow::bail!("no readable audio files matched the query");
+    }
+    std::fs::write(&args.output, render_engine_export(profile, &rows))?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "query_id": filter.query_id,
+            "engine": args.engine.to_ascii_lowercase(),
+            "output": args.output.display().to_string(),
+            "entries": rows.len(),
+            "skipped": skipped,
+        }),
+        warnings: skipped
+            .iter()
+            .map(|s| format!("skipped {s}"))
+            .collect(),
+    })
 }
 
 fn dispatch_editor(command: EditorCommand) -> Result<CliCommandOutput> {

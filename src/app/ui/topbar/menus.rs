@@ -232,6 +232,16 @@ impl WavesPreviewer {
                 self.start_duplicate_scan();
                 ui.close();
             }
+            if ui
+                .button("Export Engine Metadata...")
+                .on_hover_text(
+                    "Write a Wwise/FMOD/Unity metadata table (loops, rates, lengths, LUFS) for the selection or list",
+                )
+                .clicked()
+            {
+                self.show_engine_export_dialog = true;
+                ui.close();
+            }
             ui.separator();
             let multi = self.selected_paths().len() >= 2;
             if ui

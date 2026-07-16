@@ -255,6 +255,8 @@ impl WavesPreviewer {
             duplicate_scan_state: None,
             duplicate_report: None,
             show_duplicates_window: false,
+            show_engine_export_dialog: false,
+            engine_export_profile: crate::app::engine_export::EngineProfile::Unity,
             list_preview_prefetch_tx: None,
             list_preview_prefetch_rx: None,
             list_preview_prefetch_inflight: HashSet::new(),
