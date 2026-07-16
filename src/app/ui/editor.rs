@@ -11142,6 +11142,39 @@ impl crate::app::WavesPreviewer {
                                             .color(Color32::from_rgb(255, 176, 64)),
                                     );
                                 }
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Formant");
+                                    let mut ratio = tab.world_formant_ratio;
+                                    if !ratio.is_finite() || ratio <= 0.0 {
+                                        ratio = 1.0;
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut ratio, 0.5..=2.0)
+                                                .logarithmic(true)
+                                                .fixed_decimals(2)
+                                                .suffix("x"),
+                                        )
+                                        .on_hover_text(
+                                            "Warp the spectral envelope along frequency at resynthesis (>1 raises formants without changing pitch)",
+                                        )
+                                        .changed()
+                                    {
+                                        tab.world_formant_ratio = ratio;
+                                    }
+                                    if ui.small_button("Reset").clicked() {
+                                        tab.world_formant_ratio = 1.0;
+                                    }
+                                });
+                                if (tab.world_formant_ratio - 1.0).abs() >= 1e-3 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Formant x{:.2} applies on Resynthesize",
+                                            tab.world_formant_ratio
+                                        ))
+                                        .color(Color32::from_rgb(255, 176, 64)),
+                                    );
+                                }
                                 let can_resynth = data.frames > 0
                                     && data.aperiodicity.len() == data.frames * data.bins;
                                 let resynth = ui

@@ -1410,6 +1410,7 @@ pub struct EditorTab {
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
     pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
     pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
+    pub world_formant_ratio: f32, // WORLD resynthesis: spectral-envelope warp (1.0 = off)
     // --- Gain automation curve (DAW-style breakpoint envelope, transient) ---
     pub gain_env_enabled: bool, // Gain tool: edit the curve on the waveform canvas
     pub gain_env_points: Vec<(usize, f32)>, // (sample, dB) breakpoints, kept sorted by sample
@@ -1580,6 +1581,7 @@ impl EditorTab {
             mini_meter: crate::app::types::MiniMeterState::default(),
             world_f0_draft: None,
             world_f0_focus: false,
+            world_formant_ratio: 1.0,
             gain_env_enabled: false,
             gain_env_points: Vec::new(),
             gain_env_drag: None,

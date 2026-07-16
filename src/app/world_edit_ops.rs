@@ -101,6 +101,38 @@ impl super::WavesPreviewer {
         draft.last_drag_frame = None;
     }
 
+    /// Warp each frame's spectral envelope along the frequency axis by
+    /// `ratio` (formant shift: >1 moves formants up, <1 down). Backward
+    /// mapping with linear interpolation and edge clamping; `env_db` is
+    /// `frames * bins` row-major and the output has the same shape.
+    pub(super) fn world_env_warp(
+        env_db: &[f32],
+        frames: usize,
+        bins: usize,
+        ratio: f32,
+    ) -> Vec<f32> {
+        if frames == 0 || bins == 0 || env_db.len() != frames * bins {
+            return env_db.to_vec();
+        }
+        let ratio = ratio.clamp(0.25, 4.0);
+        if (ratio - 1.0).abs() < 1e-3 {
+            return env_db.to_vec();
+        }
+        let mut out = vec![0.0f32; env_db.len()];
+        for f in 0..frames {
+            let row = &env_db[f * bins..(f + 1) * bins];
+            let dst = &mut out[f * bins..(f + 1) * bins];
+            for (b, d) in dst.iter_mut().enumerate() {
+                let src = (b as f32 / ratio).clamp(0.0, (bins - 1) as f32);
+                let i0 = src.floor() as usize;
+                let i1 = (i0 + 1).min(bins - 1);
+                let t = src - i0 as f32;
+                *d = row[i0] * (1.0 - t) + row[i1] * t;
+            }
+        }
+        out
+    }
+
     /// Kick a background WORLD resynthesis of the tab audio using the
     /// edited F0 draft (or the analyzed curve when no draft exists). The
     /// job feeds the shared editor-apply pipeline, which handles undo,
@@ -152,6 +184,12 @@ impl super::WavesPreviewer {
             source_channels = tab.ch_samples_arc.clone();
             undo = Some(Self::capture_undo_state(tab));
         }
+        let formant_ratio = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.world_formant_ratio.clamp(0.25, 4.0))
+            .unwrap_or(1.0);
+        let formant_active = (formant_ratio - 1.0).abs() >= 1e-3;
         let f0_method = self.world_f0_method;
         let Some(cache) = self.editor_feature_cache.get(&key).cloned() else {
             return;
@@ -165,6 +203,8 @@ impl super::WavesPreviewer {
         // follows the apply yields a fresh curve to edit.
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.world_f0_draft = None;
+            // The warp bakes into the new baseline audio.
+            tab.world_formant_ratio = 1.0;
         }
         // The display analysis stretches its frame period on long clips to
         // bound the heatmap size, but synthesizing from a coarse grid audibly
@@ -197,9 +237,14 @@ impl super::WavesPreviewer {
                     fine.frames,
                     fine_step,
                 );
+                let env = if formant_active {
+                    Self::world_env_warp(&fine.envelope_db, fine.frames, fine.bins, formant_ratio)
+                } else {
+                    fine.envelope_db.clone()
+                };
                 crate::app::render::world_features::synthesize_world(
                     &fine_f0,
-                    &fine.envelope_db,
+                    &env,
                     &fine.aperiodicity,
                     fine.bins,
                     fine.fft_size,
@@ -208,9 +253,14 @@ impl super::WavesPreviewer {
                     out_len,
                 )
             } else {
+                let env = if formant_active {
+                    Self::world_env_warp(&data.env_db, data.frames, data.bins, formant_ratio)
+                } else {
+                    data.env_db.clone()
+                };
                 crate::app::render::world_features::synthesize_world(
                     &f0,
-                    &data.env_db,
+                    &env,
                     &data.aperiodicity,
                     data.bins,
                     data.fft_size,
@@ -235,10 +285,14 @@ impl super::WavesPreviewer {
             });
         });
         self.editor_apply_state = Some(EditorApplyState {
-            msg: if fine_reanalysis {
-                "Resynthesizing with WORLD (re-analyzing at 5 ms for quality)".to_string()
-            } else {
-                "Resynthesizing with WORLD (edited F0)".to_string()
+            msg: match (fine_reanalysis, formant_active) {
+                (true, _) => {
+                    "Resynthesizing with WORLD (re-analyzing at 5 ms for quality)".to_string()
+                }
+                (false, true) => {
+                    format!("Resynthesizing with WORLD (formant x{formant_ratio:.2})")
+                }
+                (false, false) => "Resynthesizing with WORLD (edited F0)".to_string(),
             },
             rx,
             tab_idx,
@@ -321,6 +375,97 @@ impl super::WavesPreviewer {
         }
         draft.last_drag_frame = Some((frame, freq));
         draft.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod env_warp_tests {
+    use crate::app::WavesPreviewer;
+
+    #[test]
+    fn ratio_one_is_identity_and_shape_is_preserved() {
+        let frames = 3usize;
+        let bins = 64usize;
+        let env: Vec<f32> = (0..frames * bins).map(|i| (i % bins) as f32 * 0.5).collect();
+        let out = WavesPreviewer::world_env_warp(&env, frames, bins, 1.0);
+        assert_eq!(out, env);
+        let out = WavesPreviewer::world_env_warp(&env, frames, bins, 1.5);
+        assert_eq!(out.len(), env.len(), "warp must not change the shape");
+    }
+
+    #[test]
+    fn formant_bump_moves_by_the_ratio() {
+        let frames = 1usize;
+        let bins = 128usize;
+        // A single bump at bin 20 over a -60 dB floor.
+        let mut env = vec![-60.0f32; bins];
+        for (i, v) in env.iter_mut().enumerate() {
+            let d = i as f32 - 20.0;
+            *v = -60.0 + 40.0 * (-0.5 * (d / 2.0) * (d / 2.0)).exp();
+        }
+        let up = WavesPreviewer::world_env_warp(&env, frames, bins, 2.0);
+        let peak_up = up
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+        assert!(
+            (peak_up as i32 - 40).abs() <= 1,
+            "x2 warp should move the bump from bin 20 to ~40, got {peak_up}"
+        );
+        let down = WavesPreviewer::world_env_warp(&env, frames, bins, 0.5);
+        let peak_down = down
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+        assert!(
+            (peak_down as i32 - 10).abs() <= 1,
+            "x0.5 warp should move the bump from bin 20 to ~10, got {peak_down}"
+        );
+    }
+
+    #[test]
+    fn degenerate_inputs_pass_through() {
+        assert!(WavesPreviewer::world_env_warp(&[], 0, 0, 2.0).is_empty());
+        // Mismatched shape returns the input untouched.
+        let env = vec![1.0f32; 10];
+        assert_eq!(WavesPreviewer::world_env_warp(&env, 3, 4, 2.0), env);
+    }
+
+    #[test]
+    fn warped_envelope_still_synthesizes_same_length() {
+        let sr = 48_000u32;
+        let len = (sr / 4) as usize;
+        let source: Vec<f32> = (0..len)
+            .map(|i| (i as f32 / sr as f32 * 220.0 * std::f32::consts::TAU).sin() * 0.4)
+            .collect();
+        let a = crate::app::render::world_features::analyze_world_with_options(
+            &source,
+            sr,
+            5.0,
+            crate::app::render::world_features::WorldF0Estimator::Dio,
+            None,
+        );
+        if a.frames == 0 {
+            return; // analysis unavailable in this build; nothing to check
+        }
+        let env = WavesPreviewer::world_env_warp(&a.envelope_db, a.frames, a.bins, 1.3);
+        let out = crate::app::render::world_features::synthesize_world(
+            &a.f0,
+            &env,
+            &a.aperiodicity,
+            a.bins,
+            a.fft_size,
+            sr,
+            5.0,
+            len,
+        );
+        assert_eq!(out.len(), len, "resynthesis length must match the request");
+        assert!(out.iter().all(|v| v.is_finite()));
+        assert!(out.iter().any(|v| v.abs() > 1e-3), "resynthesis is silent");
     }
 }
 
