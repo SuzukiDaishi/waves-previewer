@@ -736,6 +736,33 @@ impl Default for MusicAnalysisDraft {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LoudnormPhase {
+    Measure,
+    Apply,
+}
+
+/// State machine for the GUI batch loudness normalize (measure via the meta
+/// pool, then frame-budgeted apply through the unified gain framework).
+pub struct BatchLoudnormState {
+    pub targets: Vec<PathBuf>,
+    pub target_lufs: f32,
+    pub phase: LoudnormPhase,
+    pub pending: std::collections::HashSet<PathBuf>,
+    pub queue: Vec<PathBuf>,
+    pub apply_index: usize,
+    pub before: ListSelectionSnapshot,
+    pub before_items: Vec<ListUndoItem>,
+    pub cancel_requested: bool,
+    pub updated: usize,
+    pub tab_edited: usize,
+    pub skipped: usize,
+    pub clip_risk: usize,
+    pub failed: usize,
+    #[allow(dead_code)]
+    pub started_at: std::time::Instant,
+}
+
 /// Streaming state for an in-progress batch inspection run.
 pub struct InspectionRunState {
     pub total: usize,

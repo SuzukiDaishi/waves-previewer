@@ -569,6 +569,10 @@ impl WavesPreviewer {
                         _ => {}
                     }
                 }
+            } else if let Some(rest) = line.strip_prefix("loudnorm_target=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    self.loudnorm_dialog_target = v.clamp(-36.0, 0.0);
+                }
             } else if let Some(rest) = line.strip_prefix("export_dither=") {
                 self.export_cfg.codec.dither_16bit =
                     matches!(rest.trim(), "1" | "true" | "yes" | "on");
@@ -790,6 +794,7 @@ auto_play_list_nav={}\n\
 list_click_audition={}\n\
 list_col_widths={}\n\
 inspect_cfg={}\n\
+loudnorm_target={:.2}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -855,6 +860,7 @@ zoo_flip_manual={}\n",
             list_click_audition,
             list_col_widths,
             inspect_cfg,
+            self.loudnorm_dialog_target,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,

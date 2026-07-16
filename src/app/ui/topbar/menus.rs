@@ -218,6 +218,10 @@ impl WavesPreviewer {
                 self.open_inspection_dialog();
                 ui.close();
             }
+            if ui.button("Normalize Loudness...").clicked() {
+                self.open_loudnorm_dialog();
+                ui.close();
+            }
         });
     }
 

@@ -44,6 +44,7 @@ mod helpers;
 mod hf_cache;
 mod input_ops;
 mod inspect_ops;
+mod loudnorm_batch_ops;
 pub mod inspection;
 pub mod keymap;
 #[cfg(feature = "kittest")]
@@ -623,6 +624,9 @@ pub struct WavesPreviewer {
     show_inspection_dialog: bool,
     show_inspection_window: bool,
     inspection_window_filter_idx: u8,
+    batch_loudnorm_state: Option<BatchLoudnormState>,
+    show_loudnorm_dialog: bool,
+    loudnorm_dialog_target: f32,
     inspection_cfg: crate::app::inspection::InspectionConfig,
     editor_clip_c_was_down: bool,
     editor_clip_x_was_down: bool,

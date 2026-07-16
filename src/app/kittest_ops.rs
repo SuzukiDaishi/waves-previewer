@@ -184,6 +184,29 @@ impl super::WavesPreviewer {
         self.cancel_inspection_run();
     }
 
+    pub fn test_begin_batch_loudnorm(&mut self, paths: Vec<std::path::PathBuf>, target: f32) {
+        self.begin_batch_loudnorm(paths, target);
+    }
+
+    pub fn test_batch_loudnorm_active(&self) -> bool {
+        self.batch_loudnorm_state.is_some()
+    }
+
+    /// (updated, tab_edited, skipped, clip_risk, failed) of the running batch.
+    pub fn test_batch_loudnorm_counts(&self) -> Option<(usize, usize, usize, usize, usize)> {
+        self.batch_loudnorm_state
+            .as_ref()
+            .map(|s| (s.updated, s.tab_edited, s.skipped, s.clip_risk, s.failed))
+    }
+
+    pub fn test_pending_gain_db(&self, path: &Path) -> f32 {
+        self.pending_gain_db_for_path(path)
+    }
+
+    pub fn test_list_undo_once(&mut self) -> bool {
+        self.test_list_undo()
+    }
+
     pub fn test_engine_channel_masks(&self) -> (u64, u64) {
         self.audio.channel_masks()
     }

@@ -247,6 +247,13 @@ impl WavesPreviewer {
             self.open_inspection_dialog();
             ui.close();
         }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Normalize Loudness..."))
+            .clicked()
+        {
+            self.open_loudnorm_dialog();
+            ui.close();
+        }
     }
 
     pub(super) fn attach_row_context_menu(

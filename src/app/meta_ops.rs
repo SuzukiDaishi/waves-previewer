@@ -396,6 +396,7 @@ impl super::WavesPreviewer {
                         meta_sort_dirty = true;
                     }
                     self.update_csv_export_progress_for_path(&p);
+                    self.update_loudnorm_progress_for_path(&p);
                 }
                 meta::MetaUpdate::Full(p, m) => {
                     self.meta_inflight.remove(&p);
@@ -403,6 +404,7 @@ impl super::WavesPreviewer {
                         meta_sort_dirty = true;
                     }
                     self.update_csv_export_progress_for_path(&p);
+                    self.update_loudnorm_progress_for_path(&p);
                 }
                 meta::MetaUpdate::Transcript(p, t) => {
                     self.transcript_inflight.remove(&p);

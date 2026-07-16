@@ -26,6 +26,7 @@ enum TopbarActivityCancel {
     PluginProcess,
     BulkResample,
     Inspection,
+    BatchLoudnorm,
     Transcript,
     Music,
     EditorAnalysis,
@@ -278,6 +279,28 @@ impl WavesPreviewer {
                 cancel: Some(TopbarActivityCancel::BulkResample),
             });
         }
+        if let Some(state) = &self.batch_loudnorm_state {
+            let total = state.targets.len().max(1);
+            let (label, pct) = match state.phase {
+                crate::app::types::LoudnormPhase::Measure => {
+                    let done = total - state.pending.len().min(total);
+                    (
+                        format!("Loudness measure: {}/{}", done, total),
+                        done as f32 / total as f32,
+                    )
+                }
+                crate::app::types::LoudnormPhase::Apply => (
+                    format!("Loudness apply: {}/{}", state.apply_index, total),
+                    state.apply_index as f32 / total as f32,
+                ),
+            };
+            items.push(TopbarActivityItem {
+                label,
+                progress: Some(pct.clamp(0.0, 1.0)),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::BatchLoudnorm),
+            });
+        }
         if let Some(state) = &self.inspection_run_state {
             items.push(TopbarActivityItem {
                 label: format!("Inspecting: {}/{}", state.done, state.total.max(1)),
@@ -411,6 +434,9 @@ impl WavesPreviewer {
             }
             TopbarActivityCancel::Inspection => {
                 self.cancel_inspection_run();
+            }
+            TopbarActivityCancel::BatchLoudnorm => {
+                self.cancel_batch_loudnorm();
             }
             TopbarActivityCancel::Transcript => self.cancel_transcript_ai_run(),
             TopbarActivityCancel::Music => self.cancel_music_analysis_run(),

@@ -176,6 +176,10 @@ impl WavesPreviewer {
         if self.bulk_resample_state.is_some() {
             ctx.request_repaint();
         }
+        self.tick_batch_loudnorm();
+        if self.batch_loudnorm_state.is_some() {
+            ctx.request_repaint();
+        }
         self.apply_spectrogram_updates(ctx);
         self.apply_feature_analysis_updates(ctx);
         self.apply_editor_viewport_render_updates(ctx);
@@ -536,6 +540,7 @@ impl WavesPreviewer {
         self.ui_export_settings_window(ctx);
         self.ui_shortcuts_window(ctx);
         self.ui_inspection_dialog(ctx);
+        self.ui_loudnorm_dialog(ctx);
         self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);
