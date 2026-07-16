@@ -234,6 +234,32 @@ impl WavesPreviewer {
         }
     }
 
+    /// [`Self::set_preview_channels`] without the stop: the buffer is
+    /// swapped in place and the playhead position (and playing state)
+    /// survive — used by the Plugin FX auto preview.
+    pub(super) fn set_preview_channels_keep_pos(
+        &mut self,
+        tab_idx: usize,
+        tool: ToolKind,
+        channels: Vec<Vec<f32>>,
+    ) {
+        // Preview renders are already at the output rate on both sides of
+        // the swap, so the time position maps 1:1.
+        let sr = self.audio.shared.out_sample_rate.max(1);
+        self.audio
+            .set_samples_channels_keep_time_pos(channels, sr, sr);
+        self.playback_mark_buffer_source(
+            super::PlaybackSourceKind::ToolPreview,
+            self.audio.shared.out_sample_rate.max(1),
+        );
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = Some(tool);
+        }
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
+    }
+
     fn build_overview_bins_from_channels(channels: &[Vec<f32>]) -> Vec<Vec<(f32, f32)>> {
         let bins = crate::app::render::waveform_pyramid::DEFAULT_LOADING_OVERVIEW_BINS;
         channels

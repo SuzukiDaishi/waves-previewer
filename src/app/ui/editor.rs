@@ -9738,6 +9738,7 @@ impl crate::app::WavesPreviewer {
                                                     .color(egui::Color32::LIGHT_RED),
                                             );
                                         }
+                                        let mut plugin_params_dirty = false;
                                         let draft = &mut tab.plugin_fx_draft;
                                         let mut selected_changed = false;
                                         let selected_text = draft
@@ -9899,8 +9900,20 @@ impl crate::app::WavesPreviewer {
                                             pending_plugin_gui_close = true;
                                         }
                                         ui.horizontal_wrapped(|ui| {
-                                            ui.checkbox(&mut draft.enabled, "Enable");
-                                            ui.checkbox(&mut draft.bypass, "Bypass");
+                                            if ui.checkbox(&mut draft.enabled, "Enable").changed() {
+                                                plugin_params_dirty = true;
+                                            }
+                                            if ui.checkbox(&mut draft.bypass, "Bypass").changed() {
+                                                plugin_params_dirty = true;
+                                            }
+                                            let auto_resp = ui
+                                                .checkbox(&mut draft.auto_preview, "Auto preview")
+                                                .on_hover_text(
+                                                    "Re-render the preview automatically ~300 ms after parameter changes (keeps the playhead position)",
+                                                );
+                                            if auto_resp.changed() && draft.auto_preview {
+                                                plugin_params_dirty = true;
+                                            }
                                             if let Some(backend) = draft.backend {
                                                 ui.label(
                                                     RichText::new(format!("Backend: {:?}", backend))
@@ -10002,6 +10015,7 @@ impl crate::app::WavesPreviewer {
                                                         draft.last_error = None;
                                                         stop_playback = true;
                                                         need_restore_preview = true;
+                                                        plugin_params_dirty = true;
                                                     }
                                                     Err(err) => draft.last_error = Some(err),
                                                 }
@@ -10048,6 +10062,7 @@ impl crate::app::WavesPreviewer {
                                                                 !draft.ab_active_b;
                                                             stop_playback = true;
                                                             need_restore_preview = true;
+                                                            plugin_params_dirty = true;
                                                         }
                                                     }
                                                     ui.label(
@@ -10122,6 +10137,7 @@ impl crate::app::WavesPreviewer {
                                                             {
                                                                 param.normalized =
                                                                     norm.clamp(0.0, 1.0);
+                                                                plugin_params_dirty = true;
                                                             }
                                                             let actual = param.min
                                                                 + (param.max - param.min)
@@ -10143,6 +10159,7 @@ impl crate::app::WavesPreviewer {
                                                                 param.normalized = param
                                                                     .default_normalized
                                                                     .clamp(0.0, 1.0);
+                                                                plugin_params_dirty = true;
                                                             }
                                                         });
                                                     }
@@ -10189,6 +10206,12 @@ impl crate::app::WavesPreviewer {
                                                 need_restore_preview = true;
                                             }
                                         });
+                                        if plugin_params_dirty
+                                            && tab.plugin_fx_draft.auto_preview
+                                        {
+                                            tab.plugin_fx_param_dirty_at =
+                                                Some(std::time::Instant::now());
+                                        }
                                     });
                                 }
                                 ToolKind::Reverse => {

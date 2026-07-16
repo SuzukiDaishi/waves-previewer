@@ -1047,9 +1047,10 @@ pub fn project_plugin_fx_draft_to_draft(draft: &ProjectPluginFxDraft) -> PluginF
         last_error: draft.last_error.clone(),
         last_backend_note: None,
         last_backend_log: draft.last_backend_log.clone(),
-        // A/B slots are session-transient; projects load with none.
+        // A/B slots and auto-preview are session-transient.
         ab_alt: None,
         ab_active_b: false,
+        auto_preview: false,
     }
 }
 
@@ -1523,6 +1524,7 @@ wave = true
             last_backend_note: None,
             ab_alt: None,
             ab_active_b: false,
+            auto_preview: false,
         };
         let project = project_plugin_fx_draft_from_draft(&src);
         let restored = project_plugin_fx_draft_to_draft(&project);
@@ -1551,6 +1553,7 @@ wave = true
             last_backend_note: None,
             ab_alt: None,
             ab_active_b: false,
+            auto_preview: false,
         };
         let project = project_plugin_fx_draft_from_draft(&src);
         assert_eq!(project.backend.as_deref(), Some("native_clap"));

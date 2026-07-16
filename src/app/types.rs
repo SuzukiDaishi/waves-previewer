@@ -984,6 +984,8 @@ pub struct PluginFxDraft {
     pub ab_alt: Option<(Vec<PluginParamUiState>, Option<Vec<u8>>)>,
     /// Which slot the current draft represents (false = A, true = B).
     pub ab_active_b: bool,
+    /// Re-render the preview automatically (debounced) on param changes.
+    pub auto_preview: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1060,6 +1062,9 @@ pub struct PluginProcessResult {
     pub job_id: u64,
     pub tab_idx: usize,
     pub is_apply: bool,
+    /// Debounced auto-preview render: adopt with a position-preserving
+    /// buffer swap instead of stopping playback.
+    pub is_auto: bool,
     pub channels: Vec<Vec<f32>>,
     pub state_blob: Option<Vec<u8>>,
     pub backend: crate::plugin::PluginHostBackend,
@@ -1085,6 +1090,7 @@ pub struct PluginProcessState {
     pub started_at: Instant,
     pub tab_idx: usize,
     pub is_apply: bool,
+    pub is_auto: bool,
     pub rx: std::sync::mpsc::Receiver<PluginProcessResult>,
     pub undo: Option<EditorUndoState>,
 }
@@ -1399,6 +1405,8 @@ pub struct EditorTab {
     pub declick_scan: Option<DeclickScan>,
     // --- De-noise learned profile (transient; SR-checked on use) ---
     pub noise_profile: Option<NoiseProfile>,
+    // --- Plugin FX auto-preview debounce (transient) ---
+    pub plugin_fx_param_dirty_at: Option<std::time::Instant>,
 }
 
 /// Per-bin average noise magnitudes learned from a selection, used by the
@@ -1561,6 +1569,7 @@ impl EditorTab {
             spectral_brush_last: None,
             declick_scan: None,
             noise_profile: None,
+            plugin_fx_param_dirty_at: None,
         }
     }
 
