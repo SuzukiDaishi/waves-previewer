@@ -213,6 +213,11 @@ impl WavesPreviewer {
                 self.clear_edits_for_paths(&selected);
                 ui.close();
             }
+            ui.separator();
+            if ui.button("Inspect Files (QA)...").clicked() {
+                self.open_inspection_dialog();
+                ui.close();
+            }
         });
     }
 

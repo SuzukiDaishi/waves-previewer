@@ -25,6 +25,7 @@ enum TopbarActivityCancel {
     EditorApply,
     PluginProcess,
     BulkResample,
+    Inspection,
     Transcript,
     Music,
     EditorAnalysis,
@@ -277,6 +278,14 @@ impl WavesPreviewer {
                 cancel: Some(TopbarActivityCancel::BulkResample),
             });
         }
+        if let Some(state) = &self.inspection_run_state {
+            items.push(TopbarActivityItem {
+                label: format!("Inspecting: {}/{}", state.done, state.total.max(1)),
+                progress: Some((state.done as f32 / state.total.max(1) as f32).clamp(0.0, 1.0)),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::Inspection),
+            });
+        }
         if let Some(state) = &self.transcript_ai_state {
             let total = state.total.max(1);
             let done = state.done.min(total);
@@ -399,6 +408,9 @@ impl WavesPreviewer {
                 if let Some(state) = &mut self.bulk_resample_state {
                     state.cancel_requested = true;
                 }
+            }
+            TopbarActivityCancel::Inspection => {
+                self.cancel_inspection_run();
             }
             TopbarActivityCancel::Transcript => self.cancel_transcript_ai_run(),
             TopbarActivityCancel::Music => self.cancel_music_analysis_run(),

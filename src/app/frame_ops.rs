@@ -181,6 +181,9 @@ impl WavesPreviewer {
         self.apply_editor_viewport_render_updates(ctx);
         self.drain_export_results(ctx);
         self.drain_lufs_recalc_results();
+        if self.inspection_run_state.is_some() {
+            self.drain_inspection_results(ctx);
+        }
         self.drain_effect_graph_runner(ctx);
         self.tick_playback_fx_state(ctx);
         self.pump_lufs_recalc_worker();
@@ -532,6 +535,7 @@ impl WavesPreviewer {
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
         self.ui_shortcuts_window(ctx);
+        self.ui_inspection_dialog(ctx);
         self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);

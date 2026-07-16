@@ -736,6 +736,25 @@ impl Default for MusicAnalysisDraft {
     }
 }
 
+/// Streaming state for an in-progress batch inspection run.
+pub struct InspectionRunState {
+    pub total: usize,
+    pub done: usize,
+    pub rx: std::sync::mpsc::Receiver<crate::app::inspection::InspectionRow>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub rows: Vec<crate::app::inspection::InspectionRow>,
+    #[allow(dead_code)]
+    pub started_at: std::time::Instant,
+}
+
+/// Finished inspection results shown in the results window.
+pub struct InspectionReportState {
+    pub rows: Vec<crate::app::inspection::InspectionRow>,
+    pub cfg: crate::app::inspection::InspectionConfig,
+    pub generated_at: std::time::SystemTime,
+    pub cancelled: bool,
+}
+
 /// In-app audio clipboard for editor cut/copy/paste-insert (sample data at
 /// the source tab's buffer rate; adapted on paste).
 #[derive(Clone, Debug)]

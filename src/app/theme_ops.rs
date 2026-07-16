@@ -539,6 +539,36 @@ impl WavesPreviewer {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     self.export_cfg.codec.ogg_quality = v.clamp(-0.2, 1.0);
                 }
+            } else if let Some(rest) = line.strip_prefix("inspect_cfg=") {
+                // key=value pairs separated by commas; unknown keys ignored.
+                for part in rest.split(',') {
+                    let Some((k, v)) = part.split_once(':') else {
+                        continue;
+                    };
+                    let cfg = &mut self.inspection_cfg;
+                    let b = matches!(v.trim(), "1" | "true");
+                    let f = v.trim().parse::<f32>().ok();
+                    match k.trim() {
+                        "tp" => cfg.check_true_peak = b,
+                        "tp_db" => cfg.tp_ceiling_db = f.unwrap_or(cfg.tp_ceiling_db),
+                        "loud" => cfg.check_loudness = b,
+                        "target" => cfg.target_lufs = f.unwrap_or(cfg.target_lufs),
+                        "tol" => cfg.lufs_tolerance_lu = f.unwrap_or(cfg.lufs_tolerance_lu),
+                        "sil" => cfg.check_silence = b,
+                        "sil_db" => {
+                            cfg.silence_threshold_dbfs = f.unwrap_or(cfg.silence_threshold_dbfs)
+                        }
+                        "lead_ms" => {
+                            cfg.max_leading_silence_ms = f.unwrap_or(cfg.max_leading_silence_ms)
+                        }
+                        "trail_ms" => {
+                            cfg.max_trailing_silence_ms = f.unwrap_or(cfg.max_trailing_silence_ms)
+                        }
+                        "loop" => cfg.check_loop = b,
+                        "req_loop" => cfg.require_loop = b,
+                        _ => {}
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("export_dither=") {
                 self.export_cfg.codec.dither_16bit =
                     matches!(rest.trim(), "1" | "true" | "yes" | "on");
@@ -657,6 +687,16 @@ impl WavesPreviewer {
         let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
         let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
         let list_click_audition = if self.list_click_audition { "1" } else { "0" };
+        let inspect_cfg = {
+            let c = &self.inspection_cfg;
+            let b = |v: bool| if v { "1" } else { "0" };
+            format!(
+                "tp:{},tp_db:{:.2},loud:{},target:{:.2},tol:{:.2},sil:{},sil_db:{:.1},lead_ms:{:.1},trail_ms:{:.1},loop:{},req_loop:{}",
+                b(c.check_true_peak), c.tp_ceiling_db, b(c.check_loudness), c.target_lufs,
+                c.lufs_tolerance_lu, b(c.check_silence), c.silence_threshold_dbfs,
+                c.max_leading_silence_ms, c.max_trailing_silence_ms, b(c.check_loop), b(c.require_loop)
+            )
+        };
         let list_col_widths = self
             .list_col_widths
             .iter()
@@ -749,6 +789,7 @@ audio_output_device={}\n\
 auto_play_list_nav={}\n\
 list_click_audition={}\n\
 list_col_widths={}\n\
+inspect_cfg={}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -813,6 +854,7 @@ zoo_flip_manual={}\n",
             auto_play_list_nav,
             list_click_audition,
             list_col_widths,
+            inspect_cfg,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,

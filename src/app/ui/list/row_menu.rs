@@ -240,6 +240,13 @@ impl WavesPreviewer {
             self.open_resample_dialog(selected.clone());
             ui.close();
         }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Inspect Selected (QA)..."))
+            .clicked()
+        {
+            self.open_inspection_dialog();
+            ui.close();
+        }
     }
 
     pub(super) fn attach_row_context_menu(

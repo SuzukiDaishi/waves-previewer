@@ -104,6 +104,56 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_visible_list_paths(&self) -> Vec<std::path::PathBuf> {
+        self.files
+            .iter()
+            .filter_map(|id| self.item_for_id(*id))
+            .map(|item| item.path.clone())
+            .collect()
+    }
+
+    pub fn test_begin_inspection_run(&mut self, paths: Vec<std::path::PathBuf>) {
+        let cfg = self.inspection_cfg;
+        self.begin_inspection_run(paths, cfg);
+    }
+
+    pub fn test_set_inspection_cfg(&mut self, cfg: crate::app::inspection::InspectionConfig) {
+        self.inspection_cfg = cfg;
+    }
+
+    pub fn test_inspection_run_active(&self) -> bool {
+        self.inspection_run_state.is_some()
+    }
+
+    pub fn test_inspection_report_rows(&self) -> usize {
+        self.inspection_report.as_ref().map(|r| r.rows.len()).unwrap_or(0)
+    }
+
+    pub fn test_inspection_report_cancelled(&self) -> Option<bool> {
+        self.inspection_report.as_ref().map(|r| r.cancelled)
+    }
+
+    pub fn test_inspection_row(&self, idx: usize) -> Option<crate::app::inspection::InspectionRow> {
+        self.inspection_report
+            .as_ref()
+            .and_then(|r| r.rows.get(idx))
+            .cloned()
+    }
+
+    pub fn test_inspection_row_for_file(
+        &self,
+        file: &str,
+    ) -> Option<crate::app::inspection::InspectionRow> {
+        self.inspection_report
+            .as_ref()
+            .and_then(|r| r.rows.iter().find(|row| row.file == file))
+            .cloned()
+    }
+
+    pub fn test_cancel_inspection_run(&mut self) {
+        self.cancel_inspection_run();
+    }
+
     pub fn test_engine_channel_masks(&self) -> (u64, u64) {
         self.audio.channel_masks()
     }

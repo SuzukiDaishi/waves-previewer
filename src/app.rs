@@ -43,6 +43,7 @@ mod gain_ops;
 mod helpers;
 mod hf_cache;
 mod input_ops;
+mod inspect_ops;
 pub mod inspection;
 pub mod keymap;
 #[cfg(feature = "kittest")]
@@ -617,6 +618,11 @@ pub struct WavesPreviewer {
     pub recording_temp_files: Vec<PathBuf>,
     clipboard_c_was_down: bool,
     editor_audio_clipboard: Option<EditorAudioClip>,
+    inspection_run_state: Option<InspectionRunState>,
+    inspection_report: Option<InspectionReportState>,
+    show_inspection_dialog: bool,
+    show_inspection_window: bool,
+    inspection_cfg: crate::app::inspection::InspectionConfig,
     editor_clip_c_was_down: bool,
     editor_clip_x_was_down: bool,
     editor_clip_v_was_down: bool,
