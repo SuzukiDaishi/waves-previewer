@@ -1895,6 +1895,11 @@ impl super::WavesPreviewer {
         if row_idx >= self.files.len() {
             return;
         }
+        // A manual row change ends a running variation audition (the
+        // audition's own advances set the guard flag).
+        if self.variation_audition.is_some() && !self.variation_audition_advancing {
+            self.variation_audition = None;
+        }
         self.list_play_pending = false;
         self.selected = Some(row_idx);
         self.scroll_to_selected = auto_scroll;

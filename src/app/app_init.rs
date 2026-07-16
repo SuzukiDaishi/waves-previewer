@@ -250,6 +250,8 @@ impl WavesPreviewer {
             list_preview_partial_ready: false,
             list_preview_pending_path: None,
             list_play_pending: false,
+            variation_audition: None,
+            variation_audition_advancing: false,
             list_preview_prefetch_tx: None,
             list_preview_prefetch_rx: None,
             list_preview_prefetch_inflight: HashSet::new(),

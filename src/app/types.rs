@@ -793,6 +793,30 @@ pub enum PasteMode {
     CrossfadeInsert,
 }
 
+/// Order in which a multi-variation audition walks the selected files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariationAuditionMode {
+    RoundRobin,
+    Random,
+}
+
+/// In-progress multi-variation audition: the selected list rows play one
+/// after another (round-robin or random) until the user stops playback.
+#[derive(Clone, Debug)]
+pub struct VariationAuditionState {
+    pub paths: Vec<std::path::PathBuf>,
+    pub mode: VariationAuditionMode,
+    /// Index into `paths` of the item currently playing.
+    pub cursor: usize,
+    /// Items started so far (for the "Audition 3/8" display).
+    pub played: usize,
+    /// The current item was actually heard playing (guards the async
+    /// load window against being mistaken for a finished playback).
+    pub item_started: bool,
+    /// LCG state for the Random mode.
+    pub rng: u64,
+}
+
 /// In-app audio clipboard for editor cut/copy/paste-insert (sample data at
 /// the source tab's buffer rate; adapted on paste).
 #[derive(Clone, Debug)]

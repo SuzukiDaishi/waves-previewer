@@ -222,6 +222,35 @@ impl WavesPreviewer {
                 self.open_loudnorm_dialog();
                 ui.close();
             }
+            ui.separator();
+            let multi = self.selected_paths().len() >= 2;
+            if ui
+                .add_enabled(
+                    multi,
+                    egui::Button::new("Audition Selection (Round-robin)"),
+                )
+                .on_hover_text(
+                    "Play the selected files one after another in order; stop playback to end",
+                )
+                .clicked()
+            {
+                self.start_variation_audition(
+                    crate::app::types::VariationAuditionMode::RoundRobin,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(multi, egui::Button::new("Audition Selection (Random)"))
+                .on_hover_text(
+                    "Play the selected files in random order (never the same file twice in a row)",
+                )
+                .clicked()
+            {
+                self.start_variation_audition(
+                    crate::app::types::VariationAuditionMode::Random,
+                );
+                ui.close();
+            }
         });
     }
 

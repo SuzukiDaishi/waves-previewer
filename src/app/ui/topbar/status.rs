@@ -29,6 +29,7 @@ enum TopbarActivityCancel {
     BatchLoudnorm,
     Transcript,
     Music,
+    VariationAudition,
     EditorAnalysis,
 }
 
@@ -309,6 +310,22 @@ impl WavesPreviewer {
                 cancel: Some(TopbarActivityCancel::Inspection),
             });
         }
+        if let Some(state) = &self.variation_audition {
+            let mode = match state.mode {
+                crate::app::types::VariationAuditionMode::RoundRobin => "RR",
+                crate::app::types::VariationAuditionMode::Random => "Rnd",
+            };
+            items.push(TopbarActivityItem {
+                label: format!(
+                    "Audition {}/{} ({mode})",
+                    state.cursor + 1,
+                    state.paths.len()
+                ),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::VariationAudition),
+            });
+        }
         if let Some(state) = &self.transcript_ai_state {
             let total = state.total.max(1);
             let done = state.done.min(total);
@@ -440,6 +457,10 @@ impl WavesPreviewer {
             }
             TopbarActivityCancel::Transcript => self.cancel_transcript_ai_run(),
             TopbarActivityCancel::Music => self.cancel_music_analysis_run(),
+            TopbarActivityCancel::VariationAudition => {
+                self.cancel_variation_audition();
+                self.audio.stop();
+            }
             TopbarActivityCancel::EditorAnalysis => self.cancel_all_editor_analyses(),
         }
     }

@@ -19,6 +19,7 @@ type HeavyOverlayMessage = (
 
 mod app_init;
 mod audio_ops;
+mod audition_ops;
 mod auto_trim;
 mod auto_trim_ops;
 mod capture;
@@ -704,6 +705,8 @@ pub struct WavesPreviewer {
     list_preview_partial_ready: bool,
     list_preview_pending_path: Option<PathBuf>,
     list_play_pending: bool,
+    variation_audition: Option<types::VariationAuditionState>,
+    variation_audition_advancing: bool,
     list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,

@@ -164,6 +164,7 @@ impl WavesPreviewer {
         self.tick_virtual_trim_state(ctx);
         self.drain_plugin_jobs(ctx);
         self.poll_plugin_auto_preview(ctx);
+        self.poll_variation_audition(ctx);
         self.drain_transcript_model_download_results(ctx);
         self.drain_transcript_ai_results(ctx);
         self.drain_music_model_download_results(ctx);
