@@ -126,6 +126,8 @@ impl crate::app::WavesPreviewer {
         tab.preview_offset_samples = None;
         tab.pending_loop_unwrap = None;
         tab.dragging_marker = None;
+        // Scan markers describe the pre-edit buffer.
+        tab.declick_scan = None;
         Self::editor_clear_selection_anchor(tab);
     }
 
@@ -936,6 +938,78 @@ impl crate::app::WavesPreviewer {
             .map(|(i, _)| (i + 1).to_string())
             .collect();
         Some(format!("ch {}", chans.join(", ")))
+    }
+
+    /// Run the de-click detector over the active selection (or the whole
+    /// file) and store the spans for the red marker overlay. Synchronous:
+    /// the detector is O(n) with a small constant, fine for UI-thread use.
+    pub(super) fn editor_declick_scan(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return;
+        }
+        let sens = tab.tool_state.declick_sensitivity.clamp(0.0, 1.0);
+        let range = Self::editor_selected_range(tab);
+        let sr = tab.buffer_sample_rate.max(1);
+        let cfg = crate::app::declick::DeclickConfig {
+            sensitivity: sens,
+            ..Default::default()
+        };
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for ch in &tab.ch_samples {
+            spans.extend(crate::app::declick::detect_clicks(ch, sr, &cfg, range));
+        }
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in spans {
+            match merged.last_mut() {
+                Some((_, pe)) if s <= *pe => *pe = (*pe).max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        tab.declick_scan = Some(crate::app::types::DeclickScan {
+            sensitivity: sens,
+            spans: merged,
+            range,
+        });
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declick_scan(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.editor_declick_scan(tab_idx);
+        self.tabs
+            .get(tab_idx)
+            .and_then(|t| t.declick_scan.as_ref())
+            .map(|s| s.spans.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declick_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let sens = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.tool_state.declick_sensitivity)
+            .unwrap_or(0.5);
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(Self::editor_selected_range);
+        self.spawn_editor_apply_for_tab_range(
+            tab_idx,
+            crate::app::types::ToolKind::DeClick,
+            sens,
+            range,
+        );
+        self.editor_apply_state.is_some()
     }
 
     /// Remove per-channel DC bias over `range` (subtract the range mean).
@@ -2228,6 +2302,7 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = None;
         self.audio.stop();
         let ch = tab.ch_samples.clone();
+        let buffer_sr = tab.buffer_sample_rate.max(1);
         let sr = self.audio.shared.out_sample_rate;
         let (tx, rx) = mpsc::channel::<EditorApplyResult>();
         std::thread::spawn(move || {
@@ -2238,6 +2313,17 @@ impl crate::app::WavesPreviewer {
                     for chan in ch.iter() {
                         let processed =
                             Self::process_tool_segment_spliced(chan, tool, param, sr, range);
+                        out.push(processed);
+                    }
+                }
+                ToolKind::DeClick => {
+                    let cfg = crate::app::declick::DeclickConfig {
+                        sensitivity: param.clamp(0.0, 1.0),
+                        ..Default::default()
+                    };
+                    for chan in ch.iter() {
+                        let (processed, _count) =
+                            crate::app::declick::declick_channel(chan, buffer_sr, &cfg, range);
                         out.push(processed);
                     }
                 }
@@ -2308,6 +2394,7 @@ impl crate::app::WavesPreviewer {
             ToolKind::TimeStretch => "Applying TimeStretch...".to_string(),
             ToolKind::Speed => "Applying Speed...".to_string(),
             ToolKind::Loudness => "Applying Loudness Normalize...".to_string(),
+            ToolKind::DeClick => "Removing clicks...".to_string(),
             _ => "Applying...".to_string(),
         };
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
@@ -2342,6 +2429,7 @@ impl crate::app::WavesPreviewer {
                     }
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
+                    tab.declick_scan = None;
                     tab.ch_samples = applied_channels;
                     // Adopt the worker-built mirror + waveform cache instead
                     // of re-cloning and re-scanning the buffers here.

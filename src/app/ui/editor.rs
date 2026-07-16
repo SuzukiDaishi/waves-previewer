@@ -2838,6 +2838,8 @@ impl crate::app::WavesPreviewer {
         let mut pending_spectral_warp_apply = false;
         let mut pending_spectral_brush_preview = false;
         let mut pending_spectral_brush_apply = false;
+        let mut pending_declick_scan = false;
+        let mut pending_declick_apply: Option<(f32, Option<(usize, usize)>)> = None;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -6632,6 +6634,35 @@ impl crate::app::WavesPreviewer {
                 }
             }
 
+            // ---- De-click scan markers (Waveform view): red bands over the
+            // detected click spans until the buffer or sensitivity changes.
+            if view_mode == ViewMode::Waveform && display_samples_len > 0 {
+                if let Some(scan) = &tab.declick_scan {
+                    let fill = Color32::from_rgba_unmultiplied(255, 70, 70, 46);
+                    let edge = Color32::from_rgba_unmultiplied(255, 90, 90, 150);
+                    for &(s, e) in &scan.spans {
+                        let x0 = geom.sample_center_x(s.min(display_samples_len));
+                        let x1 = geom.sample_center_x(e.min(display_samples_len));
+                        if x1 < wave_left - 4.0 || x0 > wave_left + wave_w + 4.0 {
+                            continue;
+                        }
+                        let x1 = x1.max(x0 + 2.0);
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(x0, rect.top()),
+                                egui::pos2(x1, rect.bottom()),
+                            ),
+                            0.0,
+                            fill,
+                        );
+                        painter.line_segment(
+                            [egui::pos2(x0, rect.top()), egui::pos2(x0, rect.bottom())],
+                            egui::Stroke::new(1.0, edge),
+                        );
+                    }
+                }
+            }
+
             // ---- Spectral Warp arrows (Spec/Log views) ----
             if matches!(view_mode, ViewMode::Spectrogram | ViewMode::Log)
                 && display_samples_len > 0
@@ -7250,6 +7281,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::DcOffset => "DC Offset",
                                 ToolKind::InsertSilence => "Insert Silence",
                                 ToolKind::Pencil => "Pencil",
+                                ToolKind::DeClick => "De-click",
                                 // Spectrogram-view tools; never selectable in
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
@@ -7292,6 +7324,7 @@ impl crate::app::WavesPreviewer {
                                         "Insert Silence",
                                     );
                                     ui.selectable_value(&mut tool, ToolKind::Pencil, "Pencil");
+                                    ui.selectable_value(&mut tool, ToolKind::DeClick, "De-click");
                                 });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
@@ -10222,6 +10255,84 @@ impl crate::app::WavesPreviewer {
                                         .small(),
                                     );
                                 }
+                                ToolKind::DeClick => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Detect and repair clicks/pops. Scan marks the hits in red on the waveform; Apply repairs them (one undo step).",
+                                            )
+                                            .weak(),
+                                        );
+                                        let sel_range = Self::editor_selected_range(tab);
+                                        if sel_range.is_some() {
+                                            ui.label(RichText::new("Target: selection").weak());
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Target: whole file (select a range to limit)",
+                                                )
+                                                .weak(),
+                                            );
+                                        }
+                                        let mut sens = tab.tool_state.declick_sensitivity;
+                                        if !sens.is_finite() { sens = 0.5; }
+                                        ui.label("Sensitivity");
+                                        let sens_resp = ui.add(
+                                            egui::Slider::new(&mut sens, 0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        );
+                                        if sens_resp.changed() {
+                                            tab.tool_state = ToolState {
+                                                declick_sensitivity: sens,
+                                                ..tab.tool_state
+                                            };
+                                            // Scan results are per-sensitivity.
+                                            tab.declick_scan = None;
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    !apply_busy && !tab.loading,
+                                                    egui::Button::new("Scan"),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_declick_scan = true;
+                                            }
+                                            if let Some(scan) = &tab.declick_scan {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} click(s) found",
+                                                        scan.spans.len()
+                                                    ))
+                                                    .weak(),
+                                                );
+                                                if ui.button("Clear").clicked() {
+                                                    tab.declick_scan = None;
+                                                }
+                                            }
+                                        });
+                                        if apply_busy {
+                                            ui.add(egui::Spinner::new());
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !apply_busy && !tab.loading,
+                                                egui::Button::new("Apply"),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_declick_apply = Some((
+                                                tab.tool_state.declick_sensitivity,
+                                                sel_range,
+                                            ));
+                                            tab.declick_scan = None;
+                                        }
+                                    });
+                                }
                             }
                         }
                         ViewMode::Spectrogram | ViewMode::Log | ViewMode::Mel => {
@@ -10826,6 +10937,17 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_spectral_brush_apply {
                     self.spawn_spectral_brush_apply_for_tab(tab_idx);
+                }
+                if pending_declick_scan {
+                    self.editor_declick_scan(tab_idx);
+                }
+                if let Some((sens, range)) = pending_declick_apply {
+                    self.spawn_editor_apply_for_tab_range(
+                        tab_idx,
+                        ToolKind::DeClick,
+                        sens,
+                        range,
+                    );
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();

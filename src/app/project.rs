@@ -1084,10 +1084,11 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         } else {
             300.0
         },
-        // Brush params are session-transient; projects load the defaults.
+        // Brush/de-click params are session-transient; projects load defaults.
         brush_cut_db: 24.0,
         brush_time_radius_ms: 60.0,
         brush_freq_radius_hz: 200.0,
+        declick_sensitivity: 0.5,
         loop_repeat: t.loop_repeat.max(2),
         noise_gate_threshold_db: t.noise_gate_threshold_db,
         noise_gate_attack_ms: t.noise_gate_attack_ms,
@@ -1137,6 +1138,8 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "DcOffset" => ToolKind::DcOffset,
         "InsertSilence" => ToolKind::InsertSilence,
         "Pencil" => ToolKind::Pencil,
+        "DeClick" => ToolKind::DeClick,
+        "SpectralBrush" => ToolKind::SpectralBrush,
         "PluginFx" => ToolKind::PluginFx,
         _ => ToolKind::LoopEdit,
     }

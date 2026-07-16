@@ -205,4 +205,60 @@ mod p3_spectral_tools {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn declick_scan_and_apply_repairs_clicks() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("declick");
+        let src = dir.join("clicky.wav");
+        let mut chans = synth_sine(sr, 1.0, 440.0);
+        let clicks = [10_000usize, 20_000, 30_000];
+        for &pos in &clicks {
+            chans[0][pos] = 1.0;
+        }
+        neowaves::wave::export_channels_audio(&chans, sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // Scan finds the injected clicks and stores marker spans.
+        let found = harness.state_mut().test_declick_scan();
+        assert!(found >= clicks.len(), "scan found only {found} clicks");
+        let tab_idx = harness.state().active_tab.unwrap();
+        {
+            let scan = harness.state().tabs[tab_idx]
+                .declick_scan
+                .as_ref()
+                .expect("scan stored");
+            for &pos in &clicks {
+                assert!(
+                    scan.spans.iter().any(|&(s, e)| pos >= s && pos < e),
+                    "click at {pos} missing from scan spans"
+                );
+            }
+        }
+
+        // Apply repairs them through the async pipeline (undoable).
+        assert!(harness.state_mut().test_declick_apply());
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        for &pos in &clicks {
+            assert!(
+                after[0][pos].abs() < 0.6,
+                "click at {pos} not repaired: {}",
+                after[0][pos]
+            );
+        }
+        // Apply invalidates the scan markers.
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].declick_scan.is_none());
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

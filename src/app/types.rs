@@ -628,6 +628,7 @@ pub enum ToolKind {
     DcOffset,
     InsertSilence,
     Pencil,
+    DeClick,
     NoiseGate,
     Eq,
     Compressor,
@@ -816,6 +817,7 @@ impl ToolState {
             brush_cut_db: 24.0,
             brush_time_radius_ms: 60.0,
             brush_freq_radius_hz: 200.0,
+            declick_sensitivity: 0.5,
             loop_repeat: 2,
             noise_gate_threshold_db: -40.0,
             noise_gate_attack_ms: 2.0,
@@ -852,6 +854,7 @@ pub struct ToolState {
     pub brush_cut_db: f32,
     pub brush_time_radius_ms: f32,
     pub brush_freq_radius_hz: f32,
+    pub declick_sensitivity: f32,
     pub loop_repeat: u32,
     pub noise_gate_threshold_db: f32,
     pub noise_gate_attack_ms: f32,
@@ -1383,6 +1386,18 @@ pub struct EditorTab {
     pub spectral_brush_edit: bool, // canvas brush painting enabled (owns the pointer)
     pub spectral_brush_stamps: Vec<SpectralBrushStamp>, // accumulated brush stamps
     pub spectral_brush_last: Option<(usize, f32)>, // last stamp (sample, hz) this stroke
+    // --- De-click scan result (transient; invalidated by edits) ---
+    pub declick_scan: Option<DeclickScan>,
+}
+
+/// Result of a de-click Scan pass, drawn as red span markers on the
+/// waveform until the buffer or the sensitivity changes.
+#[derive(Clone, Debug)]
+pub struct DeclickScan {
+    pub sensitivity: f32,
+    pub spans: Vec<(usize, usize)>,
+    /// Range the scan covered (whole file when `None` at scan time).
+    pub range: Option<(usize, usize)>,
 }
 
 /// One spectral-warp control point: spectrogram content around
@@ -1521,6 +1536,7 @@ impl EditorTab {
             spectral_brush_edit: false,
             spectral_brush_stamps: Vec::new(),
             spectral_brush_last: None,
+            declick_scan: None,
         }
     }
 

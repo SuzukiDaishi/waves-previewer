@@ -380,6 +380,17 @@ impl CliWorkspace {
             ToolKind::Pencil => {
                 anyhow::bail!("Pencil is interactive-only (draw on the waveform in the editor)")
             }
+            ToolKind::DeClick => {
+                let sens = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state.declick_sensitivity)
+                    .unwrap_or(0.5);
+                self.app
+                    .spawn_editor_apply_for_tab_range(tab_idx, ToolKind::DeClick, sens, None);
+                self.wait_for_apply()?;
+            }
             ToolKind::NoiseGate => {
                 let st = self
                     .app
