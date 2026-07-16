@@ -1606,6 +1606,9 @@ pub struct BatchInspectArgs {
     pub no_loop: bool,
     #[arg(long = "require-loop", action = ArgAction::SetTrue)]
     pub require_loop: bool,
+    /// Regex the file stem must match (enables the naming-rule check).
+    #[arg(long = "naming-pattern", value_name = "REGEX")]
+    pub naming_pattern: Option<String>,
     #[arg(long, value_name = "PATH")]
     pub report: Option<PathBuf>,
 }

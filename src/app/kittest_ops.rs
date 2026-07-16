@@ -121,7 +121,7 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_begin_inspection_run(&mut self, paths: Vec<std::path::PathBuf>) {
-        let cfg = self.inspection_cfg;
+        let cfg = self.inspection_cfg.clone();
         self.begin_inspection_run(paths, cfg);
     }
 

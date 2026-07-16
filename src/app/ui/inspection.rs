@@ -43,7 +43,7 @@ impl crate::app::WavesPreviewer {
                         .iter()
                         .filter(|r| r.severity == Some(IssueSeverity::Warning))
                         .count();
-                    (errors, warnings, report.cancelled, report.cfg)
+                    (errors, warnings, report.cancelled, report.cfg.clone())
                 };
                 let passed = report_len - errors - warnings;
                 ui.horizontal_wrapped(|ui| {

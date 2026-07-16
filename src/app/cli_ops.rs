@@ -1029,6 +1029,8 @@ fn batch_inspect(args: crate::cli::BatchInspectArgs) -> Result<CliCommandOutput>
         max_trailing_silence_ms: args.max_trailing_silence_ms.max(0.0),
         check_loop: !args.no_loop,
         require_loop: args.require_loop,
+        check_naming: args.naming_pattern.is_some(),
+        naming_pattern: args.naming_pattern.clone().unwrap_or_default(),
     };
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut rows: Vec<crate::app::inspection::InspectionRow> = entries

@@ -125,6 +125,26 @@ impl WavesPreviewer {
                         ui.checkbox(&mut cfg.require_loop, "Require loop markers");
                     });
                 });
+                ui.checkbox(&mut cfg.check_naming, "Naming rule (regex on file stem)");
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        cfg.check_naming,
+                        egui::TextEdit::singleline(&mut cfg.naming_pattern)
+                            .hint_text("^(se|bgm|vo)_[a-z0-9_]+$")
+                            .desired_width(260.0),
+                    );
+                });
+                if cfg.check_naming {
+                    match regex::Regex::new(cfg.naming_pattern.trim()) {
+                        Ok(_) => {}
+                        Err(_) => {
+                            ui.label(
+                                egui::RichText::new("Pattern does not compile — rows will report a config error")
+                                    .color(egui::Color32::from_rgb(235, 200, 90)),
+                            );
+                        }
+                    }
+                }
                 if cfg.check_silence {
                     ui.label(
                         egui::RichText::new(
@@ -150,7 +170,7 @@ impl WavesPreviewer {
             self.show_inspection_dialog = false;
             self.save_prefs();
             let targets = self.inspection_target_paths();
-            let cfg = self.inspection_cfg;
+            let cfg = self.inspection_cfg.clone();
             self.begin_inspection_run(targets, cfg);
         } else if !open {
             self.show_inspection_dialog = false;
@@ -191,6 +211,7 @@ impl WavesPreviewer {
             let queue = Arc::clone(&queue);
             let tx = tx.clone();
             let cancel = Arc::clone(&cancel);
+            let cfg = cfg.clone();
             std::thread::spawn(move || {
                 crate::app::threading::lower_current_thread_priority();
                 loop {
@@ -277,7 +298,7 @@ impl WavesPreviewer {
             self.push_toast(severity, msg);
             self.inspection_report = Some(InspectionReportState {
                 rows,
-                cfg: self.inspection_cfg,
+                cfg: self.inspection_cfg.clone(),
                 generated_at: std::time::SystemTime::now(),
                 cancelled,
             });

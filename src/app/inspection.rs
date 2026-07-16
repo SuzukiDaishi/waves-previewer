@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InspectionConfig {
     pub check_true_peak: bool,
     /// Effective true peak (or sample peak fallback) above this warns.
@@ -27,6 +27,10 @@ pub struct InspectionConfig {
     pub check_loop: bool,
     /// When set, a file without loop markers is flagged.
     pub require_loop: bool,
+    /// Flag file stems that do not match `naming_pattern`.
+    pub check_naming: bool,
+    /// Regex the file stem (name without extension) must match.
+    pub naming_pattern: String,
 }
 
 impl Default for InspectionConfig {
@@ -43,6 +47,8 @@ impl Default for InspectionConfig {
             max_trailing_silence_ms: 1000.0,
             check_loop: true,
             require_loop: false,
+            check_naming: false,
+            naming_pattern: "^(se|bgm|vo|amb|ui)_[a-z0-9_]+$".to_string(),
         }
     }
 }
@@ -63,6 +69,7 @@ pub enum InspectionIssueKind {
     TrailingSilence,
     LoopInvalid,
     LoopMissing,
+    NamingRule,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -259,6 +266,35 @@ fn row_severity(issues: &[InspectionIssue]) -> Option<IssueSeverity> {
     issues.iter().map(|i| i.severity).max()
 }
 
+/// Naming-rule check on a file stem. `None` when disabled, the pattern is
+/// empty, or the stem matches; a Warning on mismatch; an Error when the
+/// pattern itself does not compile (so a typo in the rule is visible on
+/// every row instead of silently passing everything).
+pub fn check_naming_issue(cfg: &InspectionConfig, file_stem: &str) -> Option<InspectionIssue> {
+    if !cfg.check_naming {
+        return None;
+    }
+    let pattern = cfg.naming_pattern.trim();
+    if pattern.is_empty() {
+        return None;
+    }
+    match regex::Regex::new(pattern) {
+        Ok(re) => (!re.is_match(file_stem)).then(|| InspectionIssue {
+            kind: InspectionIssueKind::NamingRule,
+            severity: IssueSeverity::Warning,
+            message: format!("name \"{file_stem}\" does not match pattern {pattern}"),
+        }),
+        Err(err) => {
+            let first_line = err.to_string().lines().last().unwrap_or("").to_string();
+            Some(InspectionIssue {
+                kind: InspectionIssueKind::NamingRule,
+                severity: IssueSeverity::Error,
+                message: format!("invalid naming pattern: {first_line}"),
+            })
+        }
+    }
+}
+
 /// Inspect one file. Decodes only when an enabled check needs data the
 /// cached facts don't provide (silence always needs a decode).
 pub fn inspect_file(
@@ -344,7 +380,7 @@ pub fn inspect_file(
         .filter(|v| v.is_finite())
         .map(|v| v + pending_gain_db);
 
-    let issues = evaluate_checks(
+    let mut issues = evaluate_checks(
         cfg,
         effective_lufs,
         effective_tp_db,
@@ -354,6 +390,10 @@ pub fn inspect_file(
         loop_status,
         decode_error.as_deref(),
     );
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    if let Some(issue) = check_naming_issue(cfg, stem) {
+        issues.push(issue);
+    }
     let severity = row_severity(&issues);
 
     InspectionRow {
@@ -591,6 +631,30 @@ mod tests {
         assert!(missing
             .iter()
             .any(|i| i.kind == InspectionIssueKind::LoopMissing));
+    }
+
+    #[test]
+    fn naming_rule_matches_violates_and_reports_bad_pattern() {
+        let mut cfg = InspectionConfig::default();
+        // Disabled: never flags.
+        assert!(check_naming_issue(&cfg, "whatever").is_none());
+        cfg.check_naming = true;
+        cfg.naming_pattern = r"^(se|bgm|vo)_[a-z0-9_]+$".to_string();
+        assert!(check_naming_issue(&cfg, "se_footstep_01").is_none());
+        assert!(check_naming_issue(&cfg, "vo_hero_hit").is_none());
+        let bad = check_naming_issue(&cfg, "Footstep 01").expect("violation");
+        assert_eq!(bad.kind, InspectionIssueKind::NamingRule);
+        assert_eq!(bad.severity, IssueSeverity::Warning);
+        // Unanchored patterns still work as regex search semantics.
+        cfg.naming_pattern = "footstep".to_string();
+        assert!(check_naming_issue(&cfg, "se_footstep_01").is_none());
+        // Invalid regex surfaces as an Error issue instead of passing.
+        cfg.naming_pattern = "([unclosed".to_string();
+        let err = check_naming_issue(&cfg, "anything").expect("config error");
+        assert_eq!(err.severity, IssueSeverity::Error);
+        // Empty pattern is treated as "no rule".
+        cfg.naming_pattern = "  ".to_string();
+        assert!(check_naming_issue(&cfg, "anything").is_none());
     }
 
     #[test]

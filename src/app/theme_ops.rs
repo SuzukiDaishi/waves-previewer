@@ -566,9 +566,14 @@ impl WavesPreviewer {
                         }
                         "loop" => cfg.check_loop = b,
                         "req_loop" => cfg.require_loop = b,
+                        "naming" => cfg.check_naming = b,
                         _ => {}
                     }
                 }
+            } else if let Some(rest) = line.strip_prefix("inspect_naming=") {
+                // Own key: the regex may contain commas/colons that would
+                // break the inspect_cfg key:value list.
+                self.inspection_cfg.naming_pattern = rest.trim().to_string();
             } else if let Some(rest) = line.strip_prefix("loudnorm_target=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     self.loudnorm_dialog_target = v.clamp(-36.0, 0.0);
@@ -695,12 +700,14 @@ impl WavesPreviewer {
             let c = &self.inspection_cfg;
             let b = |v: bool| if v { "1" } else { "0" };
             format!(
-                "tp:{},tp_db:{:.2},loud:{},target:{:.2},tol:{:.2},sil:{},sil_db:{:.1},lead_ms:{:.1},trail_ms:{:.1},loop:{},req_loop:{}",
+                "tp:{},tp_db:{:.2},loud:{},target:{:.2},tol:{:.2},sil:{},sil_db:{:.1},lead_ms:{:.1},trail_ms:{:.1},loop:{},req_loop:{},naming:{}",
                 b(c.check_true_peak), c.tp_ceiling_db, b(c.check_loudness), c.target_lufs,
                 c.lufs_tolerance_lu, b(c.check_silence), c.silence_threshold_dbfs,
-                c.max_leading_silence_ms, c.max_trailing_silence_ms, b(c.check_loop), b(c.require_loop)
+                c.max_leading_silence_ms, c.max_trailing_silence_ms, b(c.check_loop), b(c.require_loop),
+                b(c.check_naming)
             )
         };
+        let inspect_naming = self.inspection_cfg.naming_pattern.clone();
         let list_col_widths = self
             .list_col_widths
             .iter()
@@ -794,6 +801,7 @@ auto_play_list_nav={}\n\
 list_click_audition={}\n\
 list_col_widths={}\n\
 inspect_cfg={}\n\
+inspect_naming={}\n\
 loudnorm_target={:.2}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
@@ -860,6 +868,7 @@ zoo_flip_manual={}\n",
             list_click_audition,
             list_col_widths,
             inspect_cfg,
+            inspect_naming,
             self.loudnorm_dialog_target,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,

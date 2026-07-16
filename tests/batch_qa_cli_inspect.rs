@@ -131,5 +131,48 @@ fn cli_batch_inspect_reports_expected_severities() {
     assert_eq!(out["result"]["counts"]["error"], 1);
     assert_eq!(out["result"]["counts"]["warning"], 0);
 
+    // Naming rule: every fixture stem violates a strict prefix pattern.
+    let out = run_cli(&[
+        "batch",
+        "inspect",
+        "--session",
+        session.to_str().unwrap(),
+        "--no-loudness",
+        "--no-true-peak",
+        "--no-silence",
+        "--no-loop",
+        "--naming-pattern",
+        "^(se|bgm)_[a-z0-9_]+$",
+    ]);
+    assert_eq!(out["result"]["counts"]["warning"], 3, "{}", out["result"]);
+    // A pattern the stems match produces no findings.
+    let out = run_cli(&[
+        "batch",
+        "inspect",
+        "--session",
+        session.to_str().unwrap(),
+        "--no-loudness",
+        "--no-true-peak",
+        "--no-silence",
+        "--no-loop",
+        "--naming-pattern",
+        "^[a-z_]+$",
+    ]);
+    assert_eq!(out["result"]["counts"]["warning"], 0, "{}", out["result"]);
+    // An invalid pattern is a config error on every row.
+    let out = run_cli(&[
+        "batch",
+        "inspect",
+        "--session",
+        session.to_str().unwrap(),
+        "--no-loudness",
+        "--no-true-peak",
+        "--no-silence",
+        "--no-loop",
+        "--naming-pattern",
+        "([unclosed",
+    ]);
+    assert_eq!(out["result"]["counts"]["error"], 3, "{}", out["result"]);
+
     let _ = std::fs::remove_dir_all(&dir);
 }
