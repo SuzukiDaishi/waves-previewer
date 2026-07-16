@@ -675,6 +675,9 @@ impl WavesPreviewer {
         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
         let out_sample_rate = self.audio.shared.out_sample_rate.max(1);
         let decode_failed = self.is_decode_failed_path(&tab.path);
+        // Custom channel view scopes destructive range edits; light previews
+        // apply the same mask so what you hear matches what Apply does.
+        let ch_mask = Self::editor_channel_mask(tab);
         let _ = tab;
 
         match tool {
@@ -730,7 +733,10 @@ impl WavesPreviewer {
                     return;
                 }
                 if n_in > 0 {
-                    for ch in overlay.iter_mut() {
+                    for (ci, ch) in overlay.iter_mut().enumerate() {
+                        if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                            continue;
+                        }
                         let nn = n_in.min(ch.len());
                         for i in 0..nn {
                             let t = i as f32 / nn.max(1) as f32;
@@ -740,7 +746,10 @@ impl WavesPreviewer {
                     }
                 }
                 if n_out > 0 {
-                    for ch in overlay.iter_mut() {
+                    for (ci, ch) in overlay.iter_mut().enumerate() {
+                        if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                            continue;
+                        }
                         let len = ch.len();
                         let nn = n_out.min(len);
                         for i in 0..nn {
@@ -797,7 +806,10 @@ impl WavesPreviewer {
                     }
                 } else {
                     let g = db_to_amp(gain_db);
-                    for ch in overlay.iter_mut() {
+                    for (ci, ch) in overlay.iter_mut().enumerate() {
+                        if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                            continue;
+                        }
                         for v in ch.iter_mut() {
                             *v *= g;
                         }
@@ -834,10 +846,13 @@ impl WavesPreviewer {
                     );
                     return;
                 }
-                // Peak across all channels (matches the destructive apply),
-                // then one uniform gain so the stereo balance is preserved.
+                // Peak across the edited channels (matches the destructive
+                // apply), then one uniform gain so balance is preserved.
                 let mut peak = 0.0f32;
-                for ch in &ch_samples {
+                for (ci, ch) in ch_samples.iter().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
                     for &v in ch.iter() {
                         peak = peak.max(v.abs());
                     }
@@ -847,7 +862,10 @@ impl WavesPreviewer {
                 }
                 let g = db_to_amp(normalize_db) / peak.max(1e-12);
                 let mut overlay = ch_samples.clone();
-                for ch in overlay.iter_mut() {
+                for (ci, ch) in overlay.iter_mut().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
                     for v in ch.iter_mut() {
                         *v *= g;
                     }
@@ -955,7 +973,10 @@ impl WavesPreviewer {
                 // even for long files (one buffer clone, same as the apply).
                 let mut overlay = ch_samples.clone();
                 let (s, e) = sel_range.unwrap_or((0, samples_len));
-                for ch in overlay.iter_mut() {
+                for (ci, ch) in overlay.iter_mut().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
                     let end = e.min(ch.len());
                     for v in &mut ch[s.min(end)..end] {
                         *v = -*v;
@@ -978,7 +999,10 @@ impl WavesPreviewer {
             ToolKind::DcOffset => {
                 let mut overlay = ch_samples.clone();
                 let (s, e) = sel_range.unwrap_or((0, samples_len));
-                for ch in overlay.iter_mut() {
+                for (ci, ch) in overlay.iter_mut().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
                     Self::dc_remove_range(ch, s, e);
                 }
                 if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {

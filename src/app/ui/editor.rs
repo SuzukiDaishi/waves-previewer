@@ -7206,6 +7206,27 @@ impl crate::app::WavesPreviewer {
                                 tab.active_tool = tool;
                             }
                             Self::inspector_section(ui, tool_label(tab.active_tool));
+                            // Custom channel view scopes destructive range
+                            // edits to the visible channels — surface that.
+                            if matches!(
+                                tab.active_tool,
+                                ToolKind::Fade
+                                    | ToolKind::Gain
+                                    | ToolKind::Normalize
+                                    | ToolKind::InvertPolarity
+                                    | ToolKind::DcOffset
+                                    | ToolKind::NoiseGate
+                                    | ToolKind::Eq
+                                    | ToolKind::Compressor
+                            ) {
+                                if let Some(label) = Self::editor_channel_mask_label(tab) {
+                                    ui.label(
+                                        RichText::new(format!("Applies to: {label}"))
+                                            .weak()
+                                            .small(),
+                                    );
+                                }
+                            }
                             match tab.active_tool {
                                 // Spectral Warp lives in the Spec/Log view's
                                 // inspector; it is never active here.

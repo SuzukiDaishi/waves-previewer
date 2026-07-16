@@ -69,7 +69,14 @@ impl WavesPreviewer {
                 .map(|tab| tab.samples_len)
                 .unwrap_or(0);
             if len > 0 {
-                self.editor_apply_gain_range(tab_idx, (0, len), delta_db.clamp(-24.0, 24.0));
+                // File-level gain: force all channels even when the tab's
+                // channel view is scoped to a subset.
+                self.editor_apply_gain_range_opts(
+                    tab_idx,
+                    (0, len),
+                    delta_db.clamp(-24.0, 24.0),
+                    false,
+                );
                 self.schedule_lufs_for_path(path.to_path_buf());
                 return true;
             }

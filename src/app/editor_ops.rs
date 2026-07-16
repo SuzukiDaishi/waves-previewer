@@ -903,6 +903,41 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    /// Channels a destructive range edit applies to. A Custom channel view
+    /// scopes edits to its visible channels; Mixdown/All (or a Custom view
+    /// covering every channel) edits all of them, returned as `None`.
+    pub(super) fn editor_channel_mask(tab: &crate::app::types::EditorTab) -> Option<Vec<bool>> {
+        if !matches!(
+            tab.channel_view.mode,
+            crate::app::types::ChannelViewMode::Custom
+        ) {
+            return None;
+        }
+        let total = tab.ch_samples.len();
+        let vis = tab.channel_view.visible_indices(total);
+        if vis.is_empty() || vis.len() >= total {
+            return None;
+        }
+        let mut mask = vec![false; total];
+        for i in vis {
+            mask[i] = true;
+        }
+        Some(mask)
+    }
+
+    /// Inspector caption for the current edit scope ("ch 1, 3"), or `None`
+    /// when edits apply to every channel.
+    pub(super) fn editor_channel_mask_label(tab: &crate::app::types::EditorTab) -> Option<String> {
+        let mask = Self::editor_channel_mask(tab)?;
+        let chans: Vec<String> = mask
+            .iter()
+            .enumerate()
+            .filter(|(_, &on)| on)
+            .map(|(i, _)| (i + 1).to_string())
+            .collect();
+        Some(format!("ch {}", chans.join(", ")))
+    }
+
     /// Remove per-channel DC bias over `range` (subtract the range mean).
     pub(super) fn editor_apply_remove_dc_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (_channels, undo_state) = {
@@ -914,7 +949,11 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state(tab);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 Self::dc_remove_range(ch, s, e);
             }
             tab.dirty = true;
@@ -940,7 +979,11 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state(tab);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let end = e.min(ch.len());
                 for v in &mut ch[s.min(end)..end] {
                     *v = -*v;
@@ -1587,6 +1630,18 @@ impl crate::app::WavesPreviewer {
         range: (usize, usize),
         gain_db: f32,
     ) {
+        self.editor_apply_gain_range_opts(tab_idx, range, gain_db, true);
+    }
+
+    /// `respect_channel_view=false` forces all channels regardless of the
+    /// tab's channel view — used by file-level gain (unified list gain).
+    pub(super) fn editor_apply_gain_range_opts(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+        gain_db: f32,
+        respect_channel_view: bool,
+    ) {
         let (_channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
@@ -1597,8 +1652,16 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             let g = crate::app::helpers::db_to_amp(gain_db);
+            let mask = if respect_channel_view {
+                Self::editor_channel_mask(tab)
+            } else {
+                None
+            };
             // Editing buffers keep float headroom; no clamp here.
-            for ch in tab.ch_samples.iter_mut() {
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in s..e {
                     ch[i] *= g;
                 }
@@ -1625,8 +1688,14 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
+            // Peak across the edited channels only, so a channel-scoped
+            // normalize hits the target on the channels it changes.
+            let mask = Self::editor_channel_mask(tab);
             let mut peak = 0.0f32;
-            for ch in &tab.ch_samples {
+            for (ci, ch) in tab.ch_samples.iter().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for &v in &ch[s..e] {
                     peak = peak.max(v.abs());
                 }
@@ -1637,7 +1706,10 @@ impl crate::app::WavesPreviewer {
             let undo_state = Self::capture_undo_state(tab);
             let g = crate::app::helpers::db_to_amp(target_db) / peak.max(1e-12);
             // Editing buffers keep float headroom; no clamp here.
-            for ch in tab.ch_samples.iter_mut() {
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in s..e {
                     ch[i] *= g;
                 }
@@ -1673,7 +1745,11 @@ impl crate::app::WavesPreviewer {
                 attack_ms,
                 release_ms,
             };
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let processed = crate::wave::process_noise_gate_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
@@ -1700,7 +1776,11 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             let sample_rate = tab.buffer_sample_rate.max(1);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let processed = crate::wave::process_three_band_eq_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
@@ -1727,7 +1807,11 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             let sample_rate = tab.buffer_sample_rate.max(1);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let processed = crate::wave::process_compressor_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
@@ -1748,7 +1832,11 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state(tab);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in s..e {
                     ch[i] = 0.0;
                 }
@@ -1780,7 +1868,11 @@ impl crate::app::WavesPreviewer {
             let sr = self.audio.shared.out_sample_rate.max(1) as f32;
             let nin = ((in_ms / 1000.0) * sr) as usize;
             let nout = ((out_ms / 1000.0) * sr) as usize;
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in 0..nin.min(e - s) {
                     let t = i as f32 / nin.max(1) as f32;
                     let w = Self::fade_weight(crate::app::types::FadeShape::SCurve, t);

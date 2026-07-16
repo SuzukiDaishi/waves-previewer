@@ -413,4 +413,45 @@ mod p2_editor_ops {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn channel_scoped_gain_and_normalize_respect_custom_view() {
+        let (mut harness, dir) = open_editor_tab("chmask", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+
+        // Custom channel view on ch0: gain must leave ch1 bit-exact.
+        assert!(harness.state_mut().test_set_channel_view_custom(vec![0]));
+        assert!(harness.state_mut().test_apply_gain(0.0, 1.0, 6.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        let g = 10f32.powf(6.0 / 20.0);
+        for (b, a) in before[0].iter().zip(after[0].iter()) {
+            assert!((a - b * g).abs() < 1e-4, "ch0 gained by +6 dB");
+        }
+        assert_eq!(before[1], after[1], "ch1 untouched by masked gain");
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        // Masked normalize peaks against the scoped channel only: ch1's
+        // own peak (0.25 sine) sets the gain, not ch0's louder 0.30.
+        assert!(harness.state_mut().test_set_channel_view_custom(vec![1]));
+        assert!(harness.state_mut().test_apply_normalize(0.0, 1.0, -6.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        assert_eq!(before[0], after[0], "ch0 untouched by masked normalize");
+        let peak1 = before[1].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let expect_g = 10f32.powf(-6.0 / 20.0) / peak1;
+        for (b, a) in before[1].iter().zip(after[1].iter()) {
+            assert!((a - b * expect_g).abs() < 1e-4, "ch1 normalized to its own peak");
+        }
+        let peak_after = after[1].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            (peak_after - 10f32.powf(-6.0 / 20.0)).abs() < 1e-3,
+            "masked channel hits the -6 dB target"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
