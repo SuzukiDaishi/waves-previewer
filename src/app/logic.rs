@@ -1530,35 +1530,7 @@ impl super::WavesPreviewer {
         tab.selection_anchor_sample = None;
         tab.right_drag_mode = None;
         tab.active_tool = crate::app::types::ToolKind::LoopEdit;
-        tab.tool_state = crate::app::types::ToolState {
-            fade_in_ms: 0.0,
-            fade_out_ms: 0.0,
-            gain_db: 0.0,
-            normalize_target_db: -6.0,
-            loudness_target_lufs: -14.0,
-            pitch_semitones: 0.0,
-            stretch_rate: 1.0,
-            speed_rate: 1.0,
-            warp_time_radius_ms: 150.0,
-            warp_freq_radius_hz: 300.0,
-            loop_repeat: 2,
-            noise_gate_threshold_db: -40.0,
-            noise_gate_attack_ms: 2.0,
-            noise_gate_release_ms: 100.0,
-            eq_low_shelf_freq_hz: 120.0,
-            eq_low_shelf_gain_db: 0.0,
-            eq_mid_freq_hz: 1000.0,
-            eq_mid_gain_db: 0.0,
-            eq_mid_q: 1.0,
-            eq_high_shelf_freq_hz: 8000.0,
-            eq_high_shelf_gain_db: 0.0,
-            compressor_threshold_db: -18.0,
-            compressor_ratio: 3.0,
-            compressor_attack_ms: 10.0,
-            compressor_release_ms: 150.0,
-            compressor_makeup_db: 0.0,
-            insert_silence_ms: 1000.0,
-        };
+        tab.tool_state = crate::app::types::ToolState::default_values();
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
         tab.preview_audio_tool = None;

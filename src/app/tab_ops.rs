@@ -49,109 +49,41 @@ impl super::WavesPreviewer {
                 let cached_samples_len = cached.samples_len;
                 let cached_channels = cached.ch_samples;
                 let cached_loading_overview = cached.waveform_minmax;
-                self.tabs.push(EditorTab {
-                    path: path.to_path_buf(),
-                    display_name: name,
-                    waveform_minmax: Vec::new(),
-                    waveform_pyramid: None,
-                    loop_enabled: false,
-                    loading: true,
-                    ch_samples: Vec::new(),
-                    ch_muted: Vec::new(),
-                    ch_solo: Vec::new(),
-                    ch_samples_arc: std::sync::Arc::new(Vec::new()),
-                    buffer_sample_rate: cached_sr,
-                    samples_len: 0,
-                    samples_len_visual: cached_samples_len,
-                    loading_waveform_minmax: cached_loading_overview,
-                    view_offset: 0,
-                    view_offset_exact: 0.0,
-                    samples_per_px: 0.0,
-                    vertical_zoom: 1.0,
-                    vertical_view_center: 0.0,
-                    last_wave_w: 0.0,
-                    last_amplitude_nav_rect: None,
-                    last_amplitude_viewport_rect: None,
-                    last_amplitude_nav_click_at: 0.0,
-                    last_amplitude_nav_click_pos: None,
-                    viewport_source_generation: 1,
-                    viewport_render_requested_generation: 0,
-                    viewport_render_requested_key: None,
-                    viewport_render_pending_fine_at: None,
-                    viewport_render_inflight_coarse_generation: None,
-                    viewport_render_inflight_fine_generation: None,
-                    viewport_render_coarse: None,
-                    viewport_render_fine: None,
-                    viewport_render_last: None,
-                    dirty: cached.dirty,
-                    ops: Vec::new(),
-                    selection: None,
-                    extra_selections: vec![],
-                    freq_selection: None,
-                    freq_selection_drag: None,
-                    markers: cached.markers,
-                    markers_committed: cached.markers_committed,
-                    markers_saved: cached.markers_saved,
-                    markers_applied: cached.markers_applied,
-                    markers_dirty: cached.markers_dirty,
-                    ab_loop: None,
-                    loop_region: cached.loop_region,
-                    loop_region_committed: cached.loop_region_committed,
-                    loop_region_applied: cached.loop_region_applied,
-                    loop_markers_saved: cached.loop_markers_saved,
-                    loop_markers_dirty: cached.loop_markers_dirty,
-                    trim_range: cached.trim_range,
-                    loop_xfade_samples: cached.loop_xfade_samples,
-                    loop_xfade_shape: cached.loop_xfade_shape,
-                    fade_in_range: cached.fade_in_range,
-                    fade_out_range: cached.fade_out_range,
-                    fade_in_shape: cached.fade_in_shape,
-                    fade_out_shape: cached.fade_out_shape,
-                    primary_view: crate::app::types::EditorPrimaryView::Wave,
-                    spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
-                    other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
-                    show_waveform_overlay: cached.show_waveform_overlay,
-                    channel_view: ChannelView::mixdown(),
-                    bpm_enabled: cached.bpm_enabled,
-                    bpm_value: cached.bpm_value,
-                    bpm_user_set: cached.bpm_user_set,
-                    bpm_offset_sec: cached.bpm_offset_sec,
-                    time_sig_numerator: cached.time_sig_numerator,
-                    time_sig_denominator: cached.time_sig_denominator,
-                    seek_hold: None,
-                    snap_zero_cross: cached.snap_zero_cross,
-                    selection_anchor_sample: None,
-                    right_drag_mode: None,
-                    active_tool: cached.active_tool,
-                    tool_state: cached.tool_state,
-                    loop_mode: cached.loop_mode,
-                    dragging_marker: None,
-                    preview_audio_tool: None,
-                    active_tool_last: None,
-                    preview_offset_samples: None,
-                    preview_overlay: None,
-                    music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
-                    plugin_fx_draft: cached.plugin_fx_draft,
-                    pending_loop_unwrap: None,
-                    undo_stack: Vec::new(),
-                    undo_bytes: 0,
-                    redo_stack: Vec::new(),
-                    redo_bytes: 0,
-                    auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
-                    auto_trim_state: None,
-                    loop_detect_state: None,
-                    mini_meter: crate::app::types::MiniMeterState::default(),
-                    world_f0_draft: None,
-                    world_f0_focus: false,
-                    gain_env_enabled: false,
-                    gain_env_points: Vec::new(),
-                    gain_env_drag: None,
-                    pitch_drag_active: false,
-                    stretch_drag_target: None,
-                    spectral_warp_edit: false,
-                    spectral_warp_points: Vec::new(),
-                    spectral_warp_drag: None,
-                });
+                let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+                tab.buffer_sample_rate = cached_sr;
+                tab.samples_len_visual = cached_samples_len;
+                tab.loading_waveform_minmax = cached_loading_overview;
+                tab.dirty = cached.dirty;
+                tab.markers = cached.markers;
+                tab.markers_committed = cached.markers_committed;
+                tab.markers_saved = cached.markers_saved;
+                tab.markers_applied = cached.markers_applied;
+                tab.markers_dirty = cached.markers_dirty;
+                tab.loop_region = cached.loop_region;
+                tab.loop_region_committed = cached.loop_region_committed;
+                tab.loop_region_applied = cached.loop_region_applied;
+                tab.loop_markers_saved = cached.loop_markers_saved;
+                tab.loop_markers_dirty = cached.loop_markers_dirty;
+                tab.trim_range = cached.trim_range;
+                tab.loop_xfade_samples = cached.loop_xfade_samples;
+                tab.loop_xfade_shape = cached.loop_xfade_shape;
+                tab.fade_in_range = cached.fade_in_range;
+                tab.fade_out_range = cached.fade_out_range;
+                tab.fade_in_shape = cached.fade_in_shape;
+                tab.fade_out_shape = cached.fade_out_shape;
+                tab.show_waveform_overlay = cached.show_waveform_overlay;
+                tab.bpm_enabled = cached.bpm_enabled;
+                tab.bpm_value = cached.bpm_value;
+                tab.bpm_user_set = cached.bpm_user_set;
+                tab.bpm_offset_sec = cached.bpm_offset_sec;
+                tab.time_sig_numerator = cached.time_sig_numerator;
+                tab.time_sig_denominator = cached.time_sig_denominator;
+                tab.snap_zero_cross = cached.snap_zero_cross;
+                tab.active_tool = cached.active_tool;
+                tab.tool_state = cached.tool_state;
+                tab.loop_mode = cached.loop_mode;
+                tab.plugin_fx_draft = cached.plugin_fx_draft;
+                self.tabs.push(tab);
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
                 self.playing_path = Some(path.to_path_buf());
@@ -190,137 +122,13 @@ impl super::WavesPreviewer {
                 .unwrap_or(0.0);
             let visual_len = audio.len();
             let initial_tool = self.tool_for_new_editor_tab();
-            self.tabs.push(EditorTab {
-                path: path.to_path_buf(),
-                display_name: name,
-                waveform_minmax: Vec::new(),
-                waveform_pyramid: None,
-                loop_enabled: false,
-                loading: true,
-                ch_samples: Vec::new(),
-                ch_muted: Vec::new(),
-                ch_solo: Vec::new(),
-                ch_samples_arc: std::sync::Arc::new(Vec::new()),
-                buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
-                samples_len: 0,
-                samples_len_visual: visual_len,
-                loading_waveform_minmax: Vec::new(),
-                view_offset: 0,
-                view_offset_exact: 0.0,
-                samples_per_px: 0.0,
-                vertical_zoom: 1.0,
-                vertical_view_center: 0.0,
-                last_wave_w: 0.0,
-                last_amplitude_nav_rect: None,
-                last_amplitude_viewport_rect: None,
-                last_amplitude_nav_click_at: 0.0,
-                last_amplitude_nav_click_pos: None,
-                viewport_source_generation: 1,
-                viewport_render_requested_generation: 0,
-                viewport_render_requested_key: None,
-                viewport_render_pending_fine_at: None,
-                viewport_render_inflight_coarse_generation: None,
-                viewport_render_inflight_fine_generation: None,
-                viewport_render_coarse: None,
-                viewport_render_fine: None,
-                viewport_render_last: None,
-                dirty: false,
-                ops: Vec::new(),
-                selection: None,
-                extra_selections: vec![],
-                freq_selection: None,
-                freq_selection_drag: None,
-                markers: Vec::new(),
-                markers_committed: Vec::new(),
-                markers_saved: Vec::new(),
-                markers_applied: Vec::new(),
-                markers_dirty: false,
-                ab_loop: None,
-                loop_region: None,
-                loop_region_committed: None,
-                loop_region_applied: None,
-                loop_markers_saved: None,
-                loop_markers_dirty: false,
-                trim_range: None,
-                loop_xfade_samples: 0,
-                loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
-                fade_in_range: None,
-                fade_out_range: None,
-                fade_in_shape: crate::app::types::FadeShape::SCurve,
-                fade_out_shape: crate::app::types::FadeShape::SCurve,
-                primary_view: crate::app::types::EditorPrimaryView::Wave,
-                spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
-                other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
-                show_waveform_overlay: false,
-                channel_view: ChannelView::mixdown(),
-                bpm_enabled: false,
-                bpm_value: default_bpm,
-                bpm_user_set: false,
-                bpm_offset_sec: 0.0,
-                time_sig_numerator: 4,
-                time_sig_denominator: 4,
-                seek_hold: None,
-                snap_zero_cross: true,
-                selection_anchor_sample: None,
-                right_drag_mode: None,
-                active_tool: initial_tool,
-                tool_state: crate::app::types::ToolState {
-                    fade_in_ms: 0.0,
-                    fade_out_ms: 0.0,
-                    gain_db: 0.0,
-                    normalize_target_db: -6.0,
-                    loudness_target_lufs: -14.0,
-                    pitch_semitones: 0.0,
-                    stretch_rate: 1.0,
-                    speed_rate: 1.0,
-                    warp_time_radius_ms: 150.0,
-                    warp_freq_radius_hz: 300.0,
-                    loop_repeat: 2,
-                    noise_gate_threshold_db: -40.0,
-                    noise_gate_attack_ms: 2.0,
-                    noise_gate_release_ms: 100.0,
-                    eq_low_shelf_freq_hz: 120.0,
-                    eq_low_shelf_gain_db: 0.0,
-                    eq_mid_freq_hz: 1000.0,
-                    eq_mid_gain_db: 0.0,
-                    eq_mid_q: 1.0,
-                    eq_high_shelf_freq_hz: 8000.0,
-                    eq_high_shelf_gain_db: 0.0,
-                    compressor_threshold_db: -18.0,
-                    compressor_ratio: 3.0,
-                    compressor_attack_ms: 10.0,
-                    compressor_release_ms: 150.0,
-                    compressor_makeup_db: 0.0,
-                    insert_silence_ms: 1000.0,
-                },
-                loop_mode: crate::app::types::LoopMode::Off,
-                dragging_marker: None,
-                preview_audio_tool: None,
-                active_tool_last: None,
-                preview_offset_samples: None,
-                preview_overlay: None,
-                music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
-                plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
-                pending_loop_unwrap: None,
-                undo_stack: Vec::new(),
-                undo_bytes: 0,
-                redo_stack: Vec::new(),
-                redo_bytes: 0,
-                auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
-                auto_trim_state: None,
-                loop_detect_state: None,
-                mini_meter: crate::app::types::MiniMeterState::default(),
-                world_f0_draft: None,
-                world_f0_focus: false,
-                gain_env_enabled: false,
-                gain_env_points: Vec::new(),
-                gain_env_drag: None,
-                pitch_drag_active: false,
-                stretch_drag_target: None,
-                spectral_warp_edit: false,
-                spectral_warp_points: Vec::new(),
-                spectral_warp_drag: None,
-            });
+            let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+            tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+            tab.samples_len_visual = visual_len;
+            tab.bpm_value = default_bpm;
+            tab.active_tool = initial_tool;
+            tab.tool_state = crate::app::types::ToolState::default_values();
+            self.tabs.push(tab);
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
@@ -372,109 +180,41 @@ impl super::WavesPreviewer {
             let cached_samples_len = cached.samples_len;
             let cached_channels = cached.ch_samples;
             let cached_loading_overview = cached.waveform_minmax;
-            self.tabs.push(EditorTab {
-                path: path.to_path_buf(),
-                display_name: name,
-                waveform_minmax: Vec::new(),
-                waveform_pyramid: None,
-                loop_enabled: false,
-                loading: true,
-                ch_samples: Vec::new(),
-                ch_muted: Vec::new(),
-                ch_solo: Vec::new(),
-                ch_samples_arc: std::sync::Arc::new(Vec::new()),
-                buffer_sample_rate: cached_sr,
-                samples_len: 0,
-                samples_len_visual: cached_samples_len,
-                loading_waveform_minmax: cached_loading_overview,
-                view_offset: 0,
-                view_offset_exact: 0.0,
-                samples_per_px: 0.0,
-                vertical_zoom: 1.0,
-                vertical_view_center: 0.0,
-                last_wave_w: 0.0,
-                last_amplitude_nav_rect: None,
-                last_amplitude_viewport_rect: None,
-                last_amplitude_nav_click_at: 0.0,
-                last_amplitude_nav_click_pos: None,
-                viewport_source_generation: 1,
-                viewport_render_requested_generation: 0,
-                viewport_render_requested_key: None,
-                viewport_render_pending_fine_at: None,
-                viewport_render_inflight_coarse_generation: None,
-                viewport_render_inflight_fine_generation: None,
-                viewport_render_coarse: None,
-                viewport_render_fine: None,
-                viewport_render_last: None,
-                dirty: cached.dirty,
-                ops: Vec::new(),
-                selection: None,
-                extra_selections: vec![],
-                freq_selection: None,
-                freq_selection_drag: None,
-                markers: cached.markers,
-                markers_committed: cached.markers_committed,
-                markers_saved: cached.markers_saved,
-                markers_applied: cached.markers_applied,
-                markers_dirty: cached.markers_dirty,
-                ab_loop: None,
-                loop_region: cached.loop_region,
-                loop_region_committed: cached.loop_region_committed,
-                loop_region_applied: cached.loop_region_applied,
-                loop_markers_saved: cached.loop_markers_saved,
-                loop_markers_dirty: cached.loop_markers_dirty,
-                trim_range: cached.trim_range,
-                loop_xfade_samples: cached.loop_xfade_samples,
-                loop_xfade_shape: cached.loop_xfade_shape,
-                fade_in_range: cached.fade_in_range,
-                fade_out_range: cached.fade_out_range,
-                fade_in_shape: cached.fade_in_shape,
-                fade_out_shape: cached.fade_out_shape,
-                primary_view: crate::app::types::EditorPrimaryView::Wave,
-                spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
-                other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
-                show_waveform_overlay: cached.show_waveform_overlay,
-                channel_view: ChannelView::mixdown(),
-                bpm_enabled: cached.bpm_enabled,
-                bpm_value: cached.bpm_value,
-                bpm_user_set: cached.bpm_user_set,
-                bpm_offset_sec: cached.bpm_offset_sec,
-                time_sig_numerator: cached.time_sig_numerator,
-                time_sig_denominator: cached.time_sig_denominator,
-                seek_hold: None,
-                snap_zero_cross: cached.snap_zero_cross,
-                selection_anchor_sample: None,
-                right_drag_mode: None,
-                active_tool: cached.active_tool,
-                tool_state: cached.tool_state,
-                loop_mode: cached.loop_mode,
-                dragging_marker: None,
-                preview_audio_tool: None,
-                active_tool_last: None,
-                preview_offset_samples: None,
-                preview_overlay: None,
-                music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
-                plugin_fx_draft: cached.plugin_fx_draft,
-                pending_loop_unwrap: None,
-                undo_stack: Vec::new(),
-                undo_bytes: 0,
-                redo_stack: Vec::new(),
-                redo_bytes: 0,
-                auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
-                auto_trim_state: None,
-                loop_detect_state: None,
-                mini_meter: crate::app::types::MiniMeterState::default(),
-                world_f0_draft: None,
-                world_f0_focus: false,
-                gain_env_enabled: false,
-                gain_env_points: Vec::new(),
-                gain_env_drag: None,
-                pitch_drag_active: false,
-                stretch_drag_target: None,
-                spectral_warp_edit: false,
-                spectral_warp_points: Vec::new(),
-                spectral_warp_drag: None,
-            });
+            let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+            tab.buffer_sample_rate = cached_sr;
+            tab.samples_len_visual = cached_samples_len;
+            tab.loading_waveform_minmax = cached_loading_overview;
+            tab.dirty = cached.dirty;
+            tab.markers = cached.markers;
+            tab.markers_committed = cached.markers_committed;
+            tab.markers_saved = cached.markers_saved;
+            tab.markers_applied = cached.markers_applied;
+            tab.markers_dirty = cached.markers_dirty;
+            tab.loop_region = cached.loop_region;
+            tab.loop_region_committed = cached.loop_region_committed;
+            tab.loop_region_applied = cached.loop_region_applied;
+            tab.loop_markers_saved = cached.loop_markers_saved;
+            tab.loop_markers_dirty = cached.loop_markers_dirty;
+            tab.trim_range = cached.trim_range;
+            tab.loop_xfade_samples = cached.loop_xfade_samples;
+            tab.loop_xfade_shape = cached.loop_xfade_shape;
+            tab.fade_in_range = cached.fade_in_range;
+            tab.fade_out_range = cached.fade_out_range;
+            tab.fade_in_shape = cached.fade_in_shape;
+            tab.fade_out_shape = cached.fade_out_shape;
+            tab.show_waveform_overlay = cached.show_waveform_overlay;
+            tab.bpm_enabled = cached.bpm_enabled;
+            tab.bpm_value = cached.bpm_value;
+            tab.bpm_user_set = cached.bpm_user_set;
+            tab.bpm_offset_sec = cached.bpm_offset_sec;
+            tab.time_sig_numerator = cached.time_sig_numerator;
+            tab.time_sig_denominator = cached.time_sig_denominator;
+            tab.snap_zero_cross = cached.snap_zero_cross;
+            tab.active_tool = cached.active_tool;
+            tab.tool_state = cached.tool_state;
+            tab.loop_mode = cached.loop_mode;
+            tab.plugin_fx_draft = cached.plugin_fx_draft;
+            self.tabs.push(tab);
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);
             self.playing_path = Some(path.to_path_buf());
@@ -512,137 +252,15 @@ impl super::WavesPreviewer {
             Vec::new()
         };
         let initial_tool = self.tool_for_new_editor_tab();
-        self.tabs.push(EditorTab {
-            path: path.to_path_buf(),
-            display_name: name,
-            waveform_minmax: Vec::new(),
-            waveform_pyramid: None,
-            loop_enabled: false,
-            loading,
-            ch_samples: Vec::new(),
-            ch_muted: Vec::new(),
-            ch_solo: Vec::new(),
-            ch_samples_arc: std::sync::Arc::new(Vec::new()),
-            buffer_sample_rate: self.audio.shared.out_sample_rate.max(1),
-            samples_len: 0,
-            samples_len_visual: estimated_visual_frames.unwrap_or(0),
-            loading_waveform_minmax: initial_loading_overview,
-            view_offset: 0,
-            view_offset_exact: 0.0,
-            samples_per_px: 0.0,
-            vertical_zoom: 1.0,
-            vertical_view_center: 0.0,
-            last_wave_w: 0.0,
-            last_amplitude_nav_rect: None,
-            last_amplitude_viewport_rect: None,
-            last_amplitude_nav_click_at: 0.0,
-            last_amplitude_nav_click_pos: None,
-            viewport_source_generation: 1,
-            viewport_render_requested_generation: 0,
-            viewport_render_requested_key: None,
-            viewport_render_pending_fine_at: None,
-            viewport_render_inflight_coarse_generation: None,
-            viewport_render_inflight_fine_generation: None,
-            viewport_render_coarse: None,
-            viewport_render_fine: None,
-            viewport_render_last: None,
-            dirty: false,
-            ops: Vec::new(),
-            selection: None,
-            extra_selections: vec![],
-            freq_selection: None,
-            freq_selection_drag: None,
-            markers: Vec::new(),
-            markers_committed: Vec::new(),
-            markers_saved: Vec::new(),
-            markers_applied: Vec::new(),
-            markers_dirty: false,
-            ab_loop: None,
-            loop_region: None,
-            loop_region_committed: None,
-            loop_region_applied: None,
-            loop_markers_saved: None,
-            loop_markers_dirty: false,
-            trim_range: None,
-            loop_xfade_samples: 0,
-            loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
-            fade_in_range: None,
-            fade_out_range: None,
-            fade_in_shape: crate::app::types::FadeShape::SCurve,
-            fade_out_shape: crate::app::types::FadeShape::SCurve,
-            primary_view: crate::app::types::EditorPrimaryView::Wave,
-            spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
-            other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
-            show_waveform_overlay: false,
-            channel_view: ChannelView::mixdown(),
-            bpm_enabled: false,
-            bpm_value: default_bpm,
-            bpm_user_set: false,
-            bpm_offset_sec: 0.0,
-            time_sig_numerator: 4,
-            time_sig_denominator: 4,
-            seek_hold: None,
-            snap_zero_cross: true,
-            selection_anchor_sample: None,
-            right_drag_mode: None,
-            active_tool: initial_tool,
-            tool_state: crate::app::types::ToolState {
-                fade_in_ms: 0.0,
-                fade_out_ms: 0.0,
-                gain_db: 0.0,
-                normalize_target_db: -6.0,
-                loudness_target_lufs: -14.0,
-                pitch_semitones: 0.0,
-                stretch_rate: 1.0,
-                speed_rate: 1.0,
-                warp_time_radius_ms: 150.0,
-                warp_freq_radius_hz: 300.0,
-                loop_repeat: 2,
-                noise_gate_threshold_db: -40.0,
-                noise_gate_attack_ms: 2.0,
-                noise_gate_release_ms: 100.0,
-                eq_low_shelf_freq_hz: 120.0,
-                eq_low_shelf_gain_db: 0.0,
-                eq_mid_freq_hz: 1000.0,
-                eq_mid_gain_db: 0.0,
-                eq_mid_q: 1.0,
-                eq_high_shelf_freq_hz: 8000.0,
-                eq_high_shelf_gain_db: 0.0,
-                compressor_threshold_db: -18.0,
-                compressor_ratio: 3.0,
-                compressor_attack_ms: 10.0,
-                compressor_release_ms: 150.0,
-                compressor_makeup_db: 0.0,
-                insert_silence_ms: 1000.0,
-            },
-            loop_mode: crate::app::types::LoopMode::Off,
-            dragging_marker: None,
-            preview_audio_tool: None,
-            active_tool_last: None,
-            preview_offset_samples: None,
-            preview_overlay: None,
-            music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
-            plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
-            pending_loop_unwrap: None,
-            undo_stack: Vec::new(),
-            undo_bytes: 0,
-            redo_stack: Vec::new(),
-            redo_bytes: 0,
-            auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
-            auto_trim_state: None,
-            loop_detect_state: None,
-            mini_meter: crate::app::types::MiniMeterState::default(),
-            world_f0_draft: None,
-            world_f0_focus: false,
-            gain_env_enabled: false,
-            gain_env_points: Vec::new(),
-            gain_env_drag: None,
-            pitch_drag_active: false,
-            stretch_drag_target: None,
-            spectral_warp_edit: false,
-            spectral_warp_points: Vec::new(),
-            spectral_warp_drag: None,
-        });
+        let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+        tab.loading = loading;
+        tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
+        tab.samples_len_visual = estimated_visual_frames.unwrap_or(0);
+        tab.loading_waveform_minmax = initial_loading_overview;
+        tab.bpm_value = default_bpm;
+        tab.active_tool = initial_tool;
+        tab.tool_state = crate::app::types::ToolState::default_values();
+        self.tabs.push(tab);
         self.workspace_view = crate::app::types::WorkspaceView::Editor;
         self.active_tab = Some(self.tabs.len() - 1);
         self.playing_path = Some(path.to_path_buf());
