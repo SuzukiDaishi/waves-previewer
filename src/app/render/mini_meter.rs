@@ -196,6 +196,40 @@ pub fn smooth_spectrum_db(smoothed: &mut Vec<f32>, target: &[f32], dt: f32) {
     }
 }
 
+/// Goniometer (Lissajous) points for the stereo vectorscope: normalizes the
+/// window toward ~0.9 full scale (gain capped at 16x), decimates to at most
+/// `max_points`, and maps each frame into mid/side space — x = (L-R)/sqrt2
+/// (side), y = (L+R)/sqrt2 (mid). Mono material therefore collapses onto the
+/// vertical axis and anti-phase material onto the horizontal one. Returns an
+/// empty vec for near-silence.
+pub fn goniometer_points(l: &[f32], r: &[f32], max_points: usize) -> Vec<(f32, f32)> {
+    let n = l.len().min(r.len());
+    if n == 0 || max_points == 0 {
+        return Vec::new();
+    }
+    let peak = l[..n]
+        .iter()
+        .chain(r[..n].iter())
+        .fold(0.0f32, |a, v| a.max(v.abs()));
+    if peak <= 1.0e-4 {
+        return Vec::new();
+    }
+    let gain = (0.9 / peak).min(16.0);
+    let step = (n / max_points).max(1);
+    let mut out = Vec::with_capacity(n / step + 1);
+    let mut i = 0usize;
+    while i < n {
+        let lv = l[i] * gain;
+        let rv = r[i] * gain;
+        out.push((
+            (lv - rv) * std::f32::consts::FRAC_1_SQRT_2,
+            (lv + rv) * std::f32::consts::FRAC_1_SQRT_2,
+        ));
+        i += step;
+    }
+    out
+}
+
 /// Zero-lag correlation of two channels in [-1, 1]. Near-silence maps to
 /// 0 (neutral) rather than an arbitrary sign.
 pub fn stereo_correlation(l: &[f32], r: &[f32]) -> f32 {
@@ -309,6 +343,34 @@ mod tests {
             "release too slow: {}",
             smoothed[0]
         );
+    }
+
+    #[test]
+    fn goniometer_mono_collapses_to_mid_axis() {
+        let l = sine(440.0, 48_000, 0.1, 0.5);
+        let pts = goniometer_points(&l, &l, 480);
+        assert!(!pts.is_empty());
+        assert!(pts.iter().all(|(x, _)| x.abs() < 1e-6), "mono must sit on the vertical axis");
+        assert!(pts.iter().any(|(_, y)| y.abs() > 0.5), "and actually deflect along it");
+    }
+
+    #[test]
+    fn goniometer_antiphase_collapses_to_side_axis() {
+        let l = sine(440.0, 48_000, 0.1, 0.5);
+        let r: Vec<f32> = l.iter().map(|v| -v).collect();
+        let pts = goniometer_points(&l, &r, 480);
+        assert!(!pts.is_empty());
+        assert!(pts.iter().all(|(_, y)| y.abs() < 1e-6), "L = -R must sit on the horizontal axis");
+        assert!(pts.iter().any(|(x, _)| x.abs() > 0.5));
+    }
+
+    #[test]
+    fn goniometer_decimates_and_skips_silence() {
+        let l = sine(100.0, 48_000, 1.0, 0.5);
+        let pts = goniometer_points(&l, &l, 480);
+        assert!(pts.len() <= 481, "decimation cap: {}", pts.len());
+        assert!(goniometer_points(&[0.0; 4800], &[0.0; 4800], 480).is_empty());
+        assert!(goniometer_points(&l, &l, 0).is_empty());
     }
 
     #[test]

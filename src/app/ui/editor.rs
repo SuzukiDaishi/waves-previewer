@@ -1566,28 +1566,16 @@ impl crate::app::WavesPreviewer {
             let take = vector_n.min(end);
             let l_win = &tab.ch_samples[li][end - take..end];
             let r_win = &tab.ch_samples[ri][end - take..end];
-            let peak = l_win
-                .iter()
-                .chain(r_win.iter())
-                .fold(0.0f32, |a, v| a.max(v.abs()));
-            if peak > 1.0e-4 {
-                let gain = (0.9 / peak).min(16.0);
-                let step = (take / 480).max(1);
-                let trace = Color32::from_rgba_unmultiplied(96, 220, 200, 110);
-                let mut last: Option<egui::Pos2> = None;
-                let mut i = 0usize;
-                while i < take {
-                    let l = l_win[i] * gain;
-                    let r = r_win[i] * gain;
-                    let x = (l - r) * std::f32::consts::FRAC_1_SQRT_2;
-                    let y = (l + r) * std::f32::consts::FRAC_1_SQRT_2;
-                    let pt = egui::pos2(center.x + x * radius, center.y - y * radius);
-                    if let Some(prev) = last {
-                        painter.line_segment([prev, pt], Stroke::new(1.0, trace));
-                    }
-                    last = Some(pt);
-                    i += step;
+            let trace = Color32::from_rgba_unmultiplied(96, 220, 200, 110);
+            let mut last: Option<egui::Pos2> = None;
+            for (x, y) in
+                crate::app::render::mini_meter::goniometer_points(l_win, r_win, 480)
+            {
+                let pt = egui::pos2(center.x + x * radius, center.y - y * radius);
+                if let Some(prev) = last {
+                    painter.line_segment([prev, pt], Stroke::new(1.0, trace));
                 }
+                last = Some(pt);
             }
 
             // Correlation bar along the bottom (-1 .. +1).
@@ -1656,6 +1644,15 @@ impl crate::app::WavesPreviewer {
                 "STEREO",
                 label_font.clone(),
                 label_col,
+            );
+            // Numeric correlation next to the pane title (same smoothed value
+            // as the bar below).
+            painter.text(
+                stereo_rect.right_top() + egui::vec2(-4.0, 2.0),
+                egui::Align2::RIGHT_TOP,
+                format!("{corr:+.2}"),
+                label_font.clone(),
+                fill_col,
             );
             if n_ch == 1 {
                 painter.text(
