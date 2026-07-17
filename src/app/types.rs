@@ -641,6 +641,40 @@ pub enum ToolKind {
     SpectralBrush,
 }
 
+impl ToolKind {
+    /// Human-readable tool name (inspector header, undo history labels).
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolKind::LoopEdit => "Loop Edit",
+            ToolKind::Markers => "Markers",
+            ToolKind::Trim => "Trim",
+            ToolKind::Fade => "Fade",
+            ToolKind::Gain => "Gain",
+            ToolKind::Normalize => "Normalize",
+            ToolKind::PitchShift => "Pitch Shift",
+            ToolKind::TimeStretch => "Time Stretch",
+            ToolKind::Speed => "Speed",
+            ToolKind::Loudness => "LoudNorm",
+            ToolKind::NoiseGate => "Noise Gate",
+            ToolKind::Eq => "EQ",
+            ToolKind::Compressor => "Compressor",
+            ToolKind::MusicAnalyze => "Music Analyze",
+            ToolKind::PluginFx => "Plugin FX",
+            ToolKind::Reverse => "Reverse",
+            ToolKind::InvertPolarity => "Invert Polarity",
+            ToolKind::DcOffset => "DC Offset",
+            ToolKind::InsertSilence => "Insert Silence",
+            ToolKind::Pencil => "Pencil",
+            ToolKind::DeClick => "De-click",
+            ToolKind::DeClip => "De-clip",
+            ToolKind::DeHum => "De-hum",
+            ToolKind::DeNoise => "De-noise",
+            ToolKind::SpectralWarp => "Spectral Warp",
+            ToolKind::SpectralBrush => "Spectral Brush",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StemGainsDb {
     pub bass: f32,
@@ -2125,6 +2159,9 @@ pub struct EditorDecodeUiStatus {
 
 #[derive(Clone)]
 pub struct EditorUndoState {
+    /// Operation that follows this snapshot (what Undo would revert);
+    /// shown in the History panel.
+    pub label: String,
     /// Snapshot of the audio buffers. Arc-shared with the tab's worker
     /// mirror when possible so capturing an undo point is copy-free.
     pub ch_samples: Arc<Vec<Vec<f32>>>,

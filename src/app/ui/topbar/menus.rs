@@ -49,6 +49,15 @@ impl WavesPreviewer {
                 self.trigger_undo_redo(true);
                 ui.close();
             }
+            ui.separator();
+            if ui
+                .button("History...")
+                .on_hover_text("Edit history of the active editor tab")
+                .clicked()
+            {
+                self.show_undo_history_window = true;
+                ui.close();
+            }
         });
     }
 

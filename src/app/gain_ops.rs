@@ -107,7 +107,7 @@ impl WavesPreviewer {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "File Gain");
             let gain = crate::app::helpers::db_to_amp(gain_db);
             // Editing buffers keep float headroom; clipping happens only at
             // export/playback boundaries (see notify_if_tab_over_fs).

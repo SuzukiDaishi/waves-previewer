@@ -231,6 +231,50 @@ mod p4_usability {
     }
 
     #[test]
+    fn undo_history_labels_and_multi_step_jumps() {
+        let (mut harness, dir) = harness_with_files("history", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        let len0 = {
+            let idx = harness.state().active_tab.unwrap();
+            harness.state().tabs[idx].samples_len
+        };
+        // Two labeled edits: Trim then Invert Polarity.
+        assert!(harness.state_mut().test_apply_trim_frac(0.1, 0.9));
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_apply_invert_polarity_frac(0.0, 1.0));
+        harness.run_steps(2);
+        let (undo, redo) = harness.state().test_undo_history_labels();
+        assert_eq!(undo, vec!["Trim".to_string(), "Invert Polarity".to_string()]);
+        assert!(redo.is_empty());
+        // Jump two steps back in one click: original buffer restored, both
+        // ops now sit in the redo (future) column with their labels.
+        assert_eq!(harness.state_mut().test_undo_history_jump(false, 2), 2);
+        harness.run_steps(2);
+        let idx = harness.state().active_tab.unwrap();
+        assert_eq!(harness.state().tabs[idx].samples_len, len0);
+        let (undo, redo) = harness.state().test_undo_history_labels();
+        assert!(undo.is_empty());
+        assert_eq!(
+            redo,
+            vec!["Invert Polarity".to_string(), "Trim".to_string()],
+            "redo stack keeps op labels (top = next redo)"
+        );
+        // Redo one step: Trim comes back.
+        assert_eq!(harness.state_mut().test_undo_history_jump(true, 1), 1);
+        harness.run_steps(2);
+        let (undo, _) = harness.state().test_undo_history_labels();
+        assert_eq!(undo, vec!["Trim".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();

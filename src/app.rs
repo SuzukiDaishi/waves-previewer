@@ -783,6 +783,7 @@ pub struct WavesPreviewer {
     show_export_settings: bool,
     show_shortcuts_window: bool,
     show_keymap_window: bool,
+    show_undo_history_window: bool,
     // User chord overrides for Table-dispatched actions (persisted in prefs).
     keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
     // Row currently waiting for a key press in the rebinding window.
@@ -2515,6 +2516,9 @@ impl WavesPreviewer {
             Arc::new(tab.ch_samples.clone())
         };
         EditorUndoState {
+            // Overwritten by capture_undo_state_labeled at sites whose
+            // operation isn't the active tool.
+            label: tab.active_tool.label().to_string(),
             ch_samples,
             samples_len: tab.samples_len,
             samples_len_visual: tab.samples_len_visual,
@@ -2576,6 +2580,12 @@ impl WavesPreviewer {
         if let Some(st) = &state {
             *bytes = bytes.saturating_sub(st.approx_bytes);
         }
+        state
+    }
+
+    fn capture_undo_state_labeled(tab: &EditorTab, label: &str) -> EditorUndoState {
+        let mut state = Self::capture_undo_state(tab);
+        state.label = label.to_string();
         state
     }
 
@@ -2692,7 +2702,8 @@ impl WavesPreviewer {
             let Some(undo_state) = undo_state else {
                 return false;
             };
-            let redo_state = Self::capture_undo_state(tab);
+            // The redo entry represents the operation being undone.
+            let redo_state = Self::capture_undo_state_labeled(tab, &undo_state.label);
             (undo_state, redo_state)
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
@@ -2710,7 +2721,8 @@ impl WavesPreviewer {
             let Some(redo_state) = redo_state else {
                 return false;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            // The undo entry regains the label of the operation being redone.
+            let undo_state = Self::capture_undo_state_labeled(tab, &redo_state.label);
             (redo_state, undo_state)
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {

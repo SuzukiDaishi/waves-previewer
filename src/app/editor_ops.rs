@@ -208,7 +208,7 @@ impl crate::app::WavesPreviewer {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Clear Edit");
             tab.ch_samples = channels;
             tab.buffer_sample_rate = out_sr.max(1);
             Self::editor_clamp_ranges(tab);
@@ -271,7 +271,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Fade In");
             let dur = (e - s).max(1) as f32;
             for ch in tab.ch_samples.iter_mut() {
                 for i in s..e {
@@ -300,7 +300,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Fade Out");
             let dur = (e - s).max(1) as f32;
             for ch in tab.ch_samples.iter_mut() {
                 for i in s..e {
@@ -423,7 +423,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Reverse");
             // Sub-range reverse: smooth the joins with a short crossfade so
             // the transition into/out of the reversed span stays click-free.
             let xf = if s > 0 || e < tab.samples_len {
@@ -466,7 +466,7 @@ impl crate::app::WavesPreviewer {
                 return false;
             }
             let pos = pos.min(tab.samples_len);
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Paste Insert");
             for (ch, ins) in tab.ch_samples.iter_mut().zip(insert.iter()) {
                 ch.splice(pos..pos, ins.iter().copied());
             }
@@ -733,7 +733,7 @@ impl crate::app::WavesPreviewer {
             if mix_len == 0 || mix.len() != tab.ch_samples.len() || pos >= tab.samples_len {
                 return false;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Mix Paste");
             for (ch, add) in tab.ch_samples.iter_mut().zip(mix.iter()) {
                 let end = (pos + add.len()).min(ch.len());
                 for (dst, src) in ch[pos..end].iter_mut().zip(add.iter()) {
@@ -872,7 +872,7 @@ impl crate::app::WavesPreviewer {
             }
             let a = ((tab.samples_len as f32) * from_frac.clamp(0.0, 1.0)) as usize;
             let b = ((tab.samples_len as f32) * to_frac.clamp(0.0, 1.0)) as usize;
-            tab.pencil_undo = Some(Box::new(Self::capture_undo_state(tab)));
+            tab.pencil_undo = Some(Box::new(Self::capture_undo_state_labeled(tab, "Pencil")));
             let channels: Vec<usize> = (0..tab.ch_samples.len()).collect();
             Self::editor_pencil_write_segment(tab, &channels, (a, amp0), (b, amp1));
         }
@@ -1210,7 +1210,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "DC Offset");
             let mask = Self::editor_channel_mask(tab);
             for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
                 if mask.as_ref().is_some_and(|m| !m[ci]) {
@@ -1266,7 +1266,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Invert Polarity");
             let mask = Self::editor_channel_mask(tab);
             let fade = if tab.tool_state.invert_smooth_boundaries {
                 // ~2 ms polarity crossfade at interior boundaries.
@@ -1296,7 +1296,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Trim");
             for ch in tab.ch_samples.iter_mut() {
                 *ch = ch[s..e].to_vec();
             }
@@ -1356,7 +1356,7 @@ impl crate::app::WavesPreviewer {
             if ranges.iter().any(|&(_s, e)| e > tab.samples_len) {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Trim");
             let new_len: usize = ranges.iter().map(|&(s, e)| e - s).sum();
             for ch in tab.ch_samples.iter_mut() {
                 let new_ch: Vec<f32> = ranges
@@ -1427,7 +1427,7 @@ impl crate::app::WavesPreviewer {
             if ranges.iter().any(|&(_s, e)| e > tab.samples_len) {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Delete Range");
             let removed: usize = ranges.iter().map(|&(s, e)| e - s).sum();
             for ch in tab.ch_samples.iter_mut() {
                 let mut new_ch: Vec<f32> = Vec::with_capacity(ch.len().saturating_sub(removed));
@@ -1941,7 +1941,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Gain");
             let g = crate::app::helpers::db_to_amp(gain_db);
             let mask = if respect_channel_view {
                 Self::editor_channel_mask(tab)
@@ -1994,7 +1994,7 @@ impl crate::app::WavesPreviewer {
             if peak <= 0.0 {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Normalize");
             let g = crate::app::helpers::db_to_amp(target_db) / peak.max(1e-12);
             // Editing buffers keep float headroom; no clamp here.
             for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
@@ -2029,7 +2029,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Noise Gate");
             let sample_rate = tab.buffer_sample_rate.max(1);
             let params = crate::wave::NoiseGateParams {
                 threshold_db,
@@ -2065,7 +2065,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "EQ");
             let sample_rate = tab.buffer_sample_rate.max(1);
             let mask = Self::editor_channel_mask(tab);
             for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
@@ -2096,7 +2096,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Compressor");
             let sample_rate = tab.buffer_sample_rate.max(1);
             let mask = Self::editor_channel_mask(tab);
             for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
@@ -2122,7 +2122,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Mute Range");
             let mask = Self::editor_channel_mask(tab);
             for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
                 if mask.as_ref().is_some_and(|m| !m[ci]) {
@@ -2155,7 +2155,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Fade");
             let sr = self.audio.shared.out_sample_rate.max(1) as f32;
             let nin = ((in_ms / 1000.0) * sr) as usize;
             let nout = ((out_ms / 1000.0) * sr) as usize;
@@ -2233,7 +2233,7 @@ impl crate::app::WavesPreviewer {
             if half == 0 {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Loop Crossfade");
             Self::apply_loop_xfade_to_channels(
                 &mut tab.ch_samples,
                 s,
@@ -2347,7 +2347,7 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let shift = loop_len.saturating_mul(repeat_count.saturating_sub(1));
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Loop Unwrap");
             for ch in tab.ch_samples.iter_mut() {
                 let mut out = Vec::with_capacity(ch.len().saturating_add(shift));
                 out.extend_from_slice(&ch[..s]);
@@ -2412,7 +2412,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Delete Range");
             let remove_len = e - s;
             for ch in tab.ch_samples.iter_mut() {
                 ch.drain(s..e);
@@ -2471,7 +2471,7 @@ impl crate::app::WavesPreviewer {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Gain Curve");
             for ch in tab.ch_samples.iter_mut() {
                 crate::wave::apply_gain_envelope_in_place(ch, points, 0.0, true);
             }
@@ -2514,7 +2514,7 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
-        let undo = Some(Self::capture_undo_state(tab));
+        let undo = Some(Self::capture_undo_state_labeled(tab, tool.label()));
         // Single apply slot: the UI disables further applies on the busy tab;
         // races (hotkeys, other tabs) refuse instead of cancelling the job.
         if self.editor_apply_state.is_some() {

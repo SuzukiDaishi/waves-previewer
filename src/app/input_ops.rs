@@ -206,7 +206,7 @@ impl super::WavesPreviewer {
                         let s = pos_now.min(end);
                         let e = end.max(s);
                         if tab.loop_region != Some((s, e)) {
-                            undo_state = Some(Self::capture_undo_state(tab));
+                            undo_state = Some(Self::capture_undo_state_labeled(tab, "Set Loop Start"));
                         }
                         tab.loop_region = Some((s, e));
                         Self::update_loop_markers_dirty(tab);
@@ -233,7 +233,7 @@ impl super::WavesPreviewer {
                         let s = start.min(pos_now);
                         let e = pos_now.max(start);
                         if tab.loop_region != Some((s, e)) {
-                            undo_state = Some(Self::capture_undo_state(tab));
+                            undo_state = Some(Self::capture_undo_state_labeled(tab, "Set Loop End"));
                         }
                         tab.loop_region = Some((s, e));
                         Self::update_loop_markers_dirty(tab);
@@ -530,7 +530,7 @@ impl super::WavesPreviewer {
             if tab.markers.iter().any(|m| m.sample == pos) {
                 return;
             }
-            undo_state = Some(Self::capture_undo_state(tab));
+            undo_state = Some(Self::capture_undo_state_labeled(tab, "Add Marker"));
             let label = Self::next_marker_label(&tab.markers);
             let marker = crate::markers::MarkerEntry { sample: pos, label };
             match tab.markers.binary_search_by_key(&pos, |m| m.sample) {
@@ -551,7 +551,7 @@ impl super::WavesPreviewer {
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             let will_change = tab.loop_region != Some((s, e)) || tab.loop_mode != LoopMode::Marker;
             if will_change {
-                undo_state = Some(Self::capture_undo_state(tab));
+                undo_state = Some(Self::capture_undo_state_labeled(tab, "Set Marker Loop"));
             }
             tab.loop_region = Some((s, e));
             tab.loop_mode = LoopMode::Marker;
@@ -588,7 +588,7 @@ impl super::WavesPreviewer {
                 || tab.loop_mode != LoopMode::Marker
                 || tab.pending_loop_unwrap.is_some();
             if will_change {
-                undo_state = Some(Self::capture_undo_state(tab));
+                undo_state = Some(Self::capture_undo_state_labeled(tab, "Apply Loop"));
             }
             tab.loop_region_committed = Some(current);
             tab.loop_region_applied = Some(current);

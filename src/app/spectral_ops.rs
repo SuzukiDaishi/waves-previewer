@@ -1288,7 +1288,7 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let band = tab.freq_selection;
-        let undo = Some(Self::capture_undo_state(tab));
+        let undo = Some(Self::capture_undo_state_labeled(tab, "Heal Selection"));
         let channels = tab.ch_samples.clone();
         if self.editor_apply_state.is_some() {
             return;
@@ -1394,7 +1394,7 @@ impl crate::app::WavesPreviewer {
             };
             let band = tab.freq_selection;
             let sr = tab.buffer_sample_rate.max(1);
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Spectral Mute");
             let sel_len = e - s;
             let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
             let fade_n = fade_n.min(sel_len / 2);

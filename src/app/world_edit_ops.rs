@@ -182,7 +182,7 @@ impl super::WavesPreviewer {
             frame_period_ms =
                 data.frame_step.max(1) as f64 * 1_000.0 / data.sample_rate.max(1) as f64;
             source_channels = tab.ch_samples_arc.clone();
-            undo = Some(Self::capture_undo_state(tab));
+            undo = Some(Self::capture_undo_state_labeled(tab, "WORLD Resynthesis"));
         }
         let formant_ratio = self
             .tabs
