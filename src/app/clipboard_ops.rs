@@ -595,6 +595,31 @@ impl super::WavesPreviewer {
         } else {
             super::types::PasteMode::Insert
         };
+        // Spec/Log view with a frequency selection: Ctrl+C/V operate on the
+        // spectral-region clipboard instead of the audio clipboard
+        // (Shift+V adds instead of replacing). Cut stays audio-domain.
+        let spectral_target = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| {
+                matches!(
+                    t.leaf_view_mode(),
+                    super::types::ViewMode::Spectrogram | super::types::ViewMode::Log
+                ) && t.freq_selection.is_some()
+            })
+            .unwrap_or(false);
+        if spectral_target {
+            if event_copy || consumed_copy || edge_c {
+                self.editor_spectral_copy(tab_idx);
+            } else if consumed_paste_mix {
+                self.editor_spectral_paste(tab_idx, true);
+            } else if event_paste || consumed_paste || consumed_paste_xf || edge_v {
+                self.editor_spectral_paste(tab_idx, mods.shift);
+            } else if event_cut || consumed_cut || edge_x {
+                self.editor_cut_selection_to_audio_clipboard(tab_idx);
+            }
+            return;
+        }
         if event_cut || consumed_cut || edge_x {
             self.editor_cut_selection_to_audio_clipboard(tab_idx);
         } else if event_copy || consumed_copy || edge_c {

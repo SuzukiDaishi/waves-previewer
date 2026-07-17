@@ -789,6 +789,9 @@ pub struct WavesPreviewer {
     scrub_state: Option<crate::app::types::ScrubState>,
     // UI scratch for the WORLD aperiodicity multiplier slider.
     world_ap_slider: f32,
+    // Spectral-region clipboard (Ctrl+C/V in Spec/Log views with a
+    // frequency selection).
+    spectral_clipboard: Option<crate::app::types::SpectralClip>,
     // User chord overrides for Table-dispatched actions (persisted in prefs).
     keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
     // Row currently waiting for a key press in the rebinding window.

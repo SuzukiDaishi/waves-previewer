@@ -1513,9 +1513,18 @@ pub struct NoiseProfile {
     pub learned_from_ms: (f32, f32),
 }
 
-/// Result of a de-click Scan pass, drawn as red span markers on the
-/// waveform until the buffer or the sensitivity changes.
-#[derive(Clone, Debug)]
+/// Spectral-region clipboard: band-masked STFT frames of a copied
+/// time+frequency selection. Pasteable into the same buffer sample rate
+/// only (frames are hop/FFT-grid specific).
+#[derive(Clone)]
+pub struct SpectralClip {
+    pub sr: u32,
+    pub freq_range: (f32, f32),
+    pub len_samples: usize,
+    /// channel -> frame -> half-spectrum (already band-masked at copy).
+    pub frames: Vec<Vec<Vec<realfft::num_complex::Complex<f32>>>>,
+}
+
 /// Saved transport/loop state while Alt+drag scrubbing; restored on release.
 pub struct ScrubState {
     pub tab_id: u64,
@@ -1525,6 +1534,9 @@ pub struct ScrubState {
     pub prev_loop_end: usize,
 }
 
+/// Result of a de-click Scan pass, drawn as red span markers on the
+/// waveform until the buffer or the sensitivity changes.
+#[derive(Clone, Debug)]
 pub struct DeclickScan {
     pub sensitivity: f32,
     pub spans: Vec<(usize, usize)>,

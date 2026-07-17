@@ -294,6 +294,68 @@ mod p3_spectral_tools {
     }
 
     #[test]
+    fn spectral_copy_paste_moves_band_content() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("speccp");
+        let src = dir.join("halftone.wav");
+        // First half: 1 kHz tone. Second half: silence.
+        let n = sr as usize;
+        let ch: Vec<f32> = (0..n)
+            .map(|i| {
+                if i < n / 2 {
+                    (i as f32 / sr as f32 * 1000.0 * std::f32::consts::TAU).sin() * 0.4
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        neowaves::wave::export_channels_audio(&vec![ch], sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // Copy the 1 kHz band from the tone half.
+        {
+            let idx = harness.state().active_tab.unwrap();
+            let tab = &mut harness.state_mut().tabs[idx];
+            tab.selection = Some((4_000, 20_000));
+            tab.freq_selection = Some((700.0, 1_300.0));
+        }
+        assert!(harness.state_mut().test_spectral_copy());
+        assert_eq!(
+            harness.state().test_spectral_clipboard_len(),
+            Some(16_000)
+        );
+        // Paste into the silent half (selection start = paste anchor).
+        {
+            let idx = harness.state().active_tab.unwrap();
+            let tab = &mut harness.state_mut().tabs[idx];
+            tab.selection = Some((30_000, 46_000));
+        }
+        assert!(harness.state_mut().test_spectral_paste(false));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        let rms = |x: &[f32]| {
+            (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64)
+                .sqrt()
+        };
+        assert!(
+            rms(&after[0][32_000..44_000]) > 0.05,
+            "pasted region should carry the tone: rms={}",
+            rms(&after[0][32_000..44_000])
+        );
+        // Far outside the paste region the audio is untouched.
+        assert_eq!(before[0][..28_000], after[0][..28_000]);
+        // Undo restores silence.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn declick_scan_and_apply_repairs_clicks() {
         let sr = 48_000u32;
         let dir = make_temp_dir("declick");

@@ -2031,3 +2031,180 @@ mod tests {
         }
     }
 }
+
+// ---- Spectral region copy/paste (P5-12) ----------------------------------
+
+impl crate::app::WavesPreviewer {
+    /// Copy the current time+frequency selection as band-masked STFT frames
+    /// into the spectral clipboard. Returns false when there is nothing to
+    /// copy (no time or frequency selection).
+    pub(super) fn editor_spectral_copy(&mut self, tab_idx: usize) -> bool {
+        let freq_fade = self.spectral_edit_freq_fade_hz.max(0.0);
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some((s, e)) = Self::editor_valid_selection(tab) else {
+            return false;
+        };
+        let Some((lo, hi)) = tab.freq_selection else {
+            return false;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let gains = band_bin_gains(SPECTRAL_FFT_SIZE, sr, lo, hi, freq_fade, true);
+        let mut frames_per_ch = Vec::with_capacity(tab.ch_samples.len());
+        for ch in &tab.ch_samples {
+            let end = e.min(ch.len());
+            if end <= s {
+                frames_per_ch.push(Vec::new());
+                continue;
+            }
+            let mut frames: Vec<Vec<realfft::num_complex::Complex<f32>>> = Vec::new();
+            let _ = stft_process_frames(&ch[s..end], |_t, spec| {
+                frames.push(
+                    spec.iter()
+                        .zip(gains.iter())
+                        .map(|(c, g)| c * *g)
+                        .collect(),
+                );
+            });
+            frames_per_ch.push(frames);
+        }
+        self.spectral_clipboard = Some(crate::app::types::SpectralClip {
+            sr,
+            freq_range: (lo, hi),
+            len_samples: e - s,
+            frames: frames_per_ch,
+        });
+        self.push_toast(
+            crate::app::types::ToastSeverity::Info,
+            format!(
+                "Copied spectral region ({:.0}-{:.0} Hz, {:.2}s)",
+                lo,
+                hi,
+                (e - s) as f32 / sr as f32
+            ),
+        );
+        true
+    }
+
+    /// Paste the spectral clipboard at the selection start / playhead
+    /// (snapped to the STFT hop grid). `add` sums the content in; otherwise
+    /// the band content is replaced. Time edges use the spectral-mute time
+    /// fade, frequency edges keep the raised-cosine mask baked at copy.
+    pub(super) fn editor_spectral_paste(&mut self, tab_idx: usize, add: bool) -> bool {
+        let Some(clip) = self.spectral_clipboard.clone() else {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "Spectral clipboard is empty",
+            );
+            return false;
+        };
+        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let freq_fade = self.spectral_edit_freq_fade_hz.max(0.0);
+        let pos = self.editor_insert_position(tab_idx);
+        {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            if tab.loading || tab.samples_len == 0 {
+                return false;
+            }
+            if clip.sr != tab.buffer_sample_rate.max(1) {
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Warning,
+                    format!(
+                        "Spectral paste needs the same sample rate (clip {} Hz, tab {} Hz)",
+                        clip.sr,
+                        tab.buffer_sample_rate.max(1)
+                    ),
+                );
+                return false;
+            }
+        }
+        // Snap to the hop grid so clip frames line up with analysis frames.
+        let p = (pos / SPECTRAL_HOP_SIZE) * SPECTRAL_HOP_SIZE;
+        let (undo_state, changed) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let len = clip.len_samples.min(tab.samples_len.saturating_sub(p));
+            if len == 0 {
+                return false;
+            }
+            let undo_state = Self::capture_undo_state_labeled(
+                tab,
+                if add { "Spectral Paste (Add)" } else { "Spectral Paste" },
+            );
+            let sr = tab.buffer_sample_rate.max(1);
+            let (lo, hi) = clip.freq_range;
+            let gains = band_bin_gains(SPECTRAL_FFT_SIZE, sr, lo, hi, freq_fade, true);
+            let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                let src_frames = match clip.frames.get(ci.min(clip.frames.len().saturating_sub(1)))
+                {
+                    Some(f) if !f.is_empty() => f,
+                    _ => continue,
+                };
+                let end = (p + len).min(ch.len());
+                if end <= p {
+                    continue;
+                }
+                let region_len = end - p;
+                let region: Vec<f32> = ch[p..end].to_vec();
+                let out = stft_process_frames(&region, |t_center, spec| {
+                    let fi = ((t_center.max(0.0) as usize) / SPECTRAL_HOP_SIZE)
+                        .min(src_frames.len() - 1);
+                    let src = &src_frames[fi];
+                    let t_idx = (t_center.max(0.0) as usize).min(region_len - 1);
+                    let w = selection_edge_weight(t_idx, region_len, fade_n);
+                    for (b, c) in spec.iter_mut().enumerate() {
+                        let g = gains.get(b).copied().unwrap_or(0.0) * w;
+                        if g <= 0.0 {
+                            continue;
+                        }
+                        let s = src
+                            .get(b)
+                            .copied()
+                            .unwrap_or(realfft::num_complex::Complex::new(0.0, 0.0));
+                        if add {
+                            *c += s * g;
+                        } else {
+                            *c = *c * (1.0 - g) + s * g;
+                        }
+                    }
+                });
+                if out.len() == region_len {
+                    ch[p..end].copy_from_slice(&out);
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (undo_state, true)
+        };
+        if changed {
+            self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        }
+        changed
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_copy(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_spectral_copy(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_paste(&mut self, add: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_spectral_paste(tab_idx, add)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_clipboard_len(&self) -> Option<usize> {
+        self.spectral_clipboard.as_ref().map(|c| c.len_samples)
+    }
+}
