@@ -785,6 +785,8 @@ pub struct WavesPreviewer {
     show_keymap_window: bool,
     show_undo_history_window: bool,
     show_regions_window: bool,
+    // Alt+drag scrub: saved loop/transport state while active.
+    scrub_state: Option<crate::app::types::ScrubState>,
     // User chord overrides for Table-dispatched actions (persisted in prefs).
     keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
     // Row currently waiting for a key press in the rebinding window.

@@ -1505,6 +1505,15 @@ pub struct NoiseProfile {
 /// Result of a de-click Scan pass, drawn as red span markers on the
 /// waveform until the buffer or the sensitivity changes.
 #[derive(Clone, Debug)]
+/// Saved transport/loop state while Alt+drag scrubbing; restored on release.
+pub struct ScrubState {
+    pub tab_id: u64,
+    pub was_playing: bool,
+    pub prev_loop_enabled: bool,
+    pub prev_loop_start: usize,
+    pub prev_loop_end: usize,
+}
+
 pub struct DeclickScan {
     pub sensitivity: f32,
     pub spans: Vec<(usize, usize)>,

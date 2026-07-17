@@ -1215,6 +1215,98 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state.is_some()
     }
 
+    /// Begin Alt+drag scrubbing: remember the loop atomics and transport
+    /// state so releasing the drag puts everything back.
+    pub(super) fn scrub_begin(&mut self, tab_id: u64) {
+        if self.scrub_state.is_some() {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        let shared = &self.audio.shared;
+        self.scrub_state = Some(crate::app::types::ScrubState {
+            tab_id,
+            was_playing: shared.playing.load(Ordering::Relaxed),
+            prev_loop_enabled: shared.loop_enabled.load(Ordering::Relaxed),
+            prev_loop_start: shared.loop_start.load(Ordering::Relaxed),
+            prev_loop_end: shared.loop_end.load(Ordering::Relaxed),
+        });
+    }
+
+    /// Per-frame scrub tick: loop a ±40 ms window around `center` (audio
+    /// buffer sample space) and keep the engine playing inside it. Only the
+    /// loop atomics are touched — the audio callback is unchanged.
+    pub(super) fn scrub_update(&mut self, center: usize) {
+        if self.scrub_state.is_none() {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        let sr = self.audio.shared.out_sample_rate.max(1);
+        let half = ((sr as f32) * 0.04).round() as usize; // 40 ms
+        let len = self.audio.current_source_len();
+        if len == 0 {
+            return;
+        }
+        let start = center.saturating_sub(half).min(len.saturating_sub(1));
+        let end = (center + half).clamp(start + 1, len);
+        self.audio.set_loop_region(start, end);
+        self.audio.set_loop_enabled(true);
+        let pos = self.audio.shared.play_pos.load(Ordering::Relaxed);
+        if pos < start || pos >= end {
+            self.audio.seek_to_sample(start);
+        }
+        if !self.audio.shared.playing.load(Ordering::Relaxed) {
+            self.audio.play();
+        }
+    }
+
+    /// End scrubbing: restore the pre-scrub loop window/enable and, when
+    /// playback was originally stopped, stop again.
+    pub(super) fn scrub_end(&mut self) {
+        let Some(state) = self.scrub_state.take() else {
+            return;
+        };
+        self.audio
+            .set_loop_region(state.prev_loop_start, state.prev_loop_end);
+        self.audio.set_loop_enabled(state.prev_loop_enabled);
+        if !state.was_playing {
+            self.audio.stop();
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_loop_atomics(&self) -> (usize, usize, bool) {
+        use std::sync::atomic::Ordering;
+        (
+            self.audio.shared.loop_start.load(Ordering::Relaxed),
+            self.audio.shared.loop_end.load(Ordering::Relaxed),
+            self.audio.shared.loop_enabled.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_scrub_begin_update(&mut self, tab_id: u64, center: usize) -> (usize, usize, bool) {
+        use std::sync::atomic::Ordering;
+        self.scrub_begin(tab_id);
+        self.scrub_update(center);
+        (
+            self.audio.shared.loop_start.load(Ordering::Relaxed),
+            self.audio.shared.loop_end.load(Ordering::Relaxed),
+            self.audio.shared.loop_enabled.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_scrub_end(&mut self) -> (usize, usize, bool, bool) {
+        use std::sync::atomic::Ordering;
+        self.scrub_end();
+        (
+            self.audio.shared.loop_start.load(Ordering::Relaxed),
+            self.audio.shared.loop_end.load(Ordering::Relaxed),
+            self.audio.shared.loop_enabled.load(Ordering::Relaxed),
+            self.audio.shared.playing.load(Ordering::Relaxed),
+        )
+    }
+
     /// Remove per-channel DC bias over `range` (subtract the range mean).
     pub(super) fn editor_apply_remove_dc_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (_channels, undo_state) = {

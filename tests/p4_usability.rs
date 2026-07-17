@@ -330,6 +330,40 @@ mod p4_usability {
     }
 
     #[test]
+    fn scrub_sets_loop_window_and_restores_state_on_release() {
+        let (mut harness, dir) = harness_with_files("scrub", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        harness.run_steps(2);
+        let tab_id = harness.state().test_tab_id(0).expect("tab id");
+        let (pre_ls, pre_le, pre_enabled) = harness.state().test_loop_atomics();
+        // Scrub around sample 5000: the loop atomics form a ±40 ms window.
+        let (ls, le, enabled) = harness.state_mut().test_scrub_begin_update(tab_id, 5_000);
+        assert!(enabled, "scrub must enable looping");
+        assert!(ls < 5_000 && le > 5_000, "window must bracket the pointer: {ls}..{le}");
+        assert!(le - ls > 1_000, "window should span ~80 ms: {}", le - ls);
+        // Moving the pointer moves the window.
+        let (ls2, le2, _) = harness.state_mut().test_scrub_begin_update(tab_id, 9_000);
+        assert!(ls2 > ls && le2 > le, "window must follow the pointer");
+        // Release restores the pre-scrub loop state (none) and stops
+        // playback (it wasn't playing before the scrub).
+        let (rs, re, renabled, playing) = harness.state_mut().test_scrub_end();
+        assert_eq!(
+            (rs, re, renabled),
+            (pre_ls, pre_le, pre_enabled),
+            "loop state must restore to the pre-scrub values"
+        );
+        assert!(!playing, "transport must stop again after the scrub");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();

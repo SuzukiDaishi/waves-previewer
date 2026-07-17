@@ -325,6 +325,7 @@ impl WavesPreviewer {
             show_keymap_window: false,
             show_undo_history_window: false,
             show_regions_window: false,
+            scrub_state: None,
             keymap_overrides: std::collections::HashMap::new(),
             keymap_capture: None,
             show_transcription_settings: false,

@@ -2920,6 +2920,9 @@ impl crate::app::WavesPreviewer {
         let mut pending_declip_apply: Option<(f32, Option<(usize, usize)>)> = None;
         let mut pending_dehum_detect = false;
         let mut pending_dehum_apply = false;
+        let mut pending_scrub_begin: Option<u64> = None;
+        let mut pending_scrub_update: Option<usize> = None;
+        let mut pending_scrub_end = false;
         let mut pending_denoise_learn = false;
         let mut pending_denoise_preview = false;
         let mut pending_denoise_apply = false;
@@ -4415,6 +4418,43 @@ impl crate::app::WavesPreviewer {
             }
             // Drag markers for LoopEdit (primary button only)
             let mut suppress_seek = false;
+            // ---- Scrub (Alt + primary drag): loop a ±40 ms window under
+            // the pointer; release restores the previous loop/transport.
+            {
+                let alt_down = ui.input(|i| i.modifiers.alt);
+                let scrubbing_here = self
+                    .scrub_state
+                    .as_ref()
+                    .map(|s| s.tab_id == tab.tab_id)
+                    .unwrap_or(false);
+                if pointer_over_waveform
+                    && alt_down
+                    && !scrubbing_here
+                    && display_samples_len > 0
+                    && resp.drag_started_by(egui::PointerButton::Primary)
+                {
+                    pending_scrub_begin = Some(tab.tab_id);
+                }
+                if scrubbing_here || pending_scrub_begin.is_some() {
+                    suppress_seek = true;
+                    if let Some(pos) = resp
+                        .interact_pointer_pos()
+                        .or_else(|| ui.input(|i| i.pointer.hover_pos()))
+                    {
+                        let samp = geom
+                            .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                        pending_scrub_update = Some(map_display_to_audio(tab, samp));
+                    }
+                    let released = ui
+                        .input(|i| i.pointer.button_released(egui::PointerButton::Primary))
+                        || !ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+                    if scrubbing_here && released {
+                        pending_scrub_end = true;
+                        pending_scrub_update = None;
+                    }
+                    ctx.request_repaint();
+                }
+            }
             // WORLD F0 pencil editing: while enabled it owns the pointer on
             // this canvas (left-drag draws pitch, right-drag erases), so the
             // seek / marker / range-select handlers below are bypassed.
@@ -11630,6 +11670,15 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_dehum_apply {
                     self.spawn_dehum_apply_for_tab(tab_idx);
+                }
+                if let Some(tab_id) = pending_scrub_begin {
+                    self.scrub_begin(tab_id);
+                }
+                if let Some(center) = pending_scrub_update {
+                    self.scrub_update(center);
+                }
+                if pending_scrub_end {
+                    self.scrub_end();
                 }
                 if let Some((sens, range)) = pending_declip_apply {
                     self.spawn_editor_apply_for_tab_range(
