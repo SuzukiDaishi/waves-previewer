@@ -1525,6 +1525,16 @@ pub struct SpectralClip {
     pub frames: Vec<Vec<Vec<realfft::num_complex::Complex<f32>>>>,
 }
 
+/// Transient harmonic-action state (Ctrl+click in a spectral view): the
+/// refined fundamental plus popup parameters. Cleared on apply/cancel.
+#[derive(Clone, Copy)]
+pub struct HarmonicAction {
+    pub tab_id: u64,
+    pub f0: f32,
+    pub harmonics: u32,
+    pub atten_db: f32,
+}
+
 /// Saved transport/loop state while Alt+drag scrubbing; restored on release.
 pub struct ScrubState {
     pub tab_id: u64,

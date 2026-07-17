@@ -328,6 +328,7 @@ impl WavesPreviewer {
             scrub_state: None,
             world_ap_slider: 1.0,
             spectral_clipboard: None,
+            harmonic_action: None,
             keymap_overrides: std::collections::HashMap::new(),
             keymap_capture: None,
             show_transcription_settings: false,

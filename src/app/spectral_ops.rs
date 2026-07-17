@@ -2208,3 +2208,202 @@ impl crate::app::WavesPreviewer {
         self.spectral_clipboard.as_ref().map(|c| c.len_samples)
     }
 }
+
+// ---- Harmonic action (P5-13, transient Ctrl+click helper) ----------------
+
+/// Combined per-bin gain for `n` harmonic bands `[k*f0*(1-tol), k*f0*(1+tol)]`
+/// with `atten_lin` gain inside each band (0.0 = mute) and raised-cosine
+/// edges. Bands multiply, so overlapping bands never over-attenuate below
+/// `atten_lin^overlap`.
+pub(super) fn harmonic_band_gains(
+    fft_size: usize,
+    sr: u32,
+    f0: f32,
+    n: u32,
+    tol: f32,
+    atten_lin: f32,
+) -> Vec<f32> {
+    let bins = fft_size / 2 + 1;
+    let mut gains = vec![1.0f32; bins];
+    let nyquist = sr.max(1) as f32 * 0.5;
+    let hz_per_bin = sr.max(1) as f32 / fft_size as f32;
+    let atten = atten_lin.clamp(0.0, 1.0);
+    for k in 1..=n.max(1) {
+        let center = f0.max(1.0) * k as f32;
+        if center >= nyquist {
+            break;
+        }
+        // The relative tolerance can be narrower than the FFT's bin spacing
+        // for low fundamentals; keep at least ~2 bins of half-width so the
+        // mask has a fully-attenuated core despite the raised-cosine edges
+        // (band_bin_gains enforces >= 1 bin of fade).
+        let half = (center * tol).max(2.0 * hz_per_bin);
+        let lo = (center - half).max(0.0);
+        let hi = (center + half).min(nyquist);
+        let fade = (hi - lo) * 0.25;
+        let inside = band_bin_gains(fft_size, sr, lo, hi, fade, true);
+        for (g, w) in gains.iter_mut().zip(inside.iter()) {
+            *g *= 1.0 - (1.0 - atten) * *w;
+        }
+    }
+    gains
+}
+
+/// Refine a clicked frequency to the nearest spectral peak via parabolic
+/// interpolation of log magnitudes in a Hann-windowed frame centered at
+/// `sample`. Searches ±10% (at least ±3 bins) around the click.
+pub(super) fn refine_peak_frequency(
+    ch: &[f32],
+    sr: u32,
+    sample: usize,
+    clicked_hz: f32,
+) -> Option<f32> {
+    let win = SPECTRAL_FFT_SIZE;
+    if ch.len() < 8 || sr == 0 || !clicked_hz.is_finite() || clicked_hz <= 0.0 {
+        return None;
+    }
+    let start = sample.saturating_sub(win / 2).min(ch.len().saturating_sub(1));
+    let mut frame = vec![0.0f32; win];
+    for (i, v) in frame.iter_mut().enumerate() {
+        let idx = start + i;
+        let s = ch.get(idx).copied().unwrap_or(0.0);
+        let x = i as f32 / win as f32;
+        *v = s * (0.5 - 0.5 * (2.0 * core::f32::consts::PI * x).cos());
+    }
+    let mut planner = RealFftPlanner::<f32>::new();
+    let rfft = planner.plan_fft_forward(win);
+    let mut spec = rfft.make_output_vec();
+    if rfft.process(&mut frame, &mut spec).is_err() {
+        return None;
+    }
+    let hz_per_bin = sr as f32 / win as f32;
+    let clicked_bin = (clicked_hz / hz_per_bin).round() as isize;
+    let radius = ((clicked_hz * 0.10 / hz_per_bin).ceil() as isize).max(3);
+    let lo = (clicked_bin - radius).max(1) as usize;
+    let hi = ((clicked_bin + radius) as usize).min(spec.len().saturating_sub(2));
+    if hi <= lo {
+        return None;
+    }
+    let mag = |b: usize| spec[b].norm().max(1e-12);
+    let mut best = lo;
+    for b in lo..=hi {
+        if mag(b) > mag(best) {
+            best = b;
+        }
+    }
+    // Parabolic interpolation on log magnitudes of the peak and neighbours.
+    let (m0, m1, m2) = (mag(best - 1).ln(), mag(best).ln(), mag(best + 1).ln());
+    let denom = m0 - 2.0 * m1 + m2;
+    let d = if denom.abs() > 1e-9 {
+        (0.5 * (m0 - m2) / denom).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    Some(((best as f32 + d) * hz_per_bin).max(1.0))
+}
+
+impl crate::app::WavesPreviewer {
+    /// Ctrl+click in a spectral view: refine the clicked frequency to the
+    /// nearest peak and open the transient harmonic-action popup.
+    pub(super) fn editor_harmonic_click(&mut self, tab_idx: usize, sample: usize, hz: f32) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let refined = tab
+            .ch_samples
+            .first()
+            .and_then(|ch| refine_peak_frequency(ch, sr, sample, hz))
+            .unwrap_or(hz);
+        self.harmonic_action = Some(crate::app::types::HarmonicAction {
+            tab_id: tab.tab_id,
+            f0: refined,
+            harmonics: 8,
+            atten_db: 24.0,
+        });
+    }
+
+    /// Apply the harmonic-action bands in one multi-band STFT pass over the
+    /// time selection (whole file without one). `atten_db == None` mutes.
+    pub(super) fn editor_apply_harmonic_action(
+        &mut self,
+        tab_idx: usize,
+        atten_db: Option<f32>,
+    ) -> bool {
+        let Some(action) = self.harmonic_action else {
+            return false;
+        };
+        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            if tab.tab_id != action.tab_id || tab.loading || tab.samples_len == 0 {
+                return false;
+            }
+            let (s, e) =
+                Self::editor_valid_selection(tab).unwrap_or((0, tab.samples_len));
+            let sr = tab.buffer_sample_rate.max(1);
+            let undo_state = Self::capture_undo_state_labeled(
+                tab,
+                if atten_db.is_some() {
+                    "Harmonic Attenuate"
+                } else {
+                    "Harmonic Mute"
+                },
+            );
+            let atten_lin = atten_db
+                .map(|d| 10f32.powf(-d.abs() / 20.0))
+                .unwrap_or(0.0);
+            let gains = harmonic_band_gains(
+                SPECTRAL_FFT_SIZE,
+                sr,
+                action.f0,
+                action.harmonics,
+                0.03,
+                atten_lin,
+            );
+            let sel_len = e - s;
+            let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
+            let fade_n = fade_n.min(sel_len / 2);
+            for ch in tab.ch_samples.iter_mut() {
+                let seg_s = s.saturating_sub(SPECTRAL_FFT_SIZE);
+                let seg_e = (e + SPECTRAL_FFT_SIZE).min(ch.len());
+                if seg_e <= seg_s {
+                    continue;
+                }
+                let processed = stft_process_frames(&ch[seg_s..seg_e], |_t, spec| {
+                    for (c, g) in spec.iter_mut().zip(gains.iter()) {
+                        *c *= *g;
+                    }
+                });
+                let filtered = &processed[(s - seg_s)..(s - seg_s + sel_len).min(processed.len())];
+                for i in 0..sel_len.min(filtered.len()) {
+                    let w = selection_edge_weight(i, sel_len, fade_n);
+                    ch[s + i] = ch[s + i] * (1.0 - w) + filtered[i] * w;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.harmonic_action = None;
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_harmonic_click(&mut self, sample: usize, hz: f32) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.editor_harmonic_click(tab_idx, sample, hz);
+        self.harmonic_action.as_ref().map(|a| a.f0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_harmonic_apply(&mut self, atten_db: Option<f32>) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_apply_harmonic_action(tab_idx, atten_db)
+    }
+}

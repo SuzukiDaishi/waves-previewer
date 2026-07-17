@@ -792,6 +792,8 @@ pub struct WavesPreviewer {
     // Spectral-region clipboard (Ctrl+C/V in Spec/Log views with a
     // frequency selection).
     spectral_clipboard: Option<crate::app::types::SpectralClip>,
+    // Transient harmonic action (Ctrl+click in Spec/Log views).
+    harmonic_action: Option<crate::app::types::HarmonicAction>,
     // User chord overrides for Table-dispatched actions (persisted in prefs).
     keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
     // Row currently waiting for a key press in the rebinding window.

@@ -356,6 +356,71 @@ mod p3_spectral_tools {
     }
 
     #[test]
+    fn harmonic_action_refines_f0_and_mutes_harmonic_stack() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("harmonic");
+        let src = dir.join("harmonics.wav");
+        // 440 Hz + two harmonics + an unrelated 2 kHz tone (between harmonic bands).
+        let n = sr as usize;
+        let ch: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.3
+                    + (t * 880.0 * std::f32::consts::TAU).sin() * 0.15
+                    + (t * 1320.0 * std::f32::consts::TAU).sin() * 0.1
+                    + (t * 2000.0 * std::f32::consts::TAU).sin() * 0.2
+            })
+            .collect();
+        neowaves::wave::export_channels_audio(&vec![ch.clone()], sr, &src)
+            .expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // A sloppy click at ~452 Hz refines onto the 440 Hz peak.
+        let f0 = harness
+            .state_mut()
+            .test_harmonic_click(24_000, 452.0)
+            .expect("harmonic action set");
+        assert!((f0 - 440.0).abs() < 5.0, "refined f0 = {f0}, expected ~440");
+        assert!(harness.state_mut().test_harmonic_apply(None));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+
+        let goertzel = |x: &[f32], freq: f32| -> f64 {
+            let w = 2.0 * std::f64::consts::PI * f64::from(freq) / f64::from(sr);
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for &v in x {
+                let s0 = f64::from(v) + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (x.len() as f64 * x.len() as f64)
+        };
+        let db = |p: f64| 10.0 * p.max(1e-30).log10();
+        let mid = 8_000..40_000;
+        for hz in [440.0, 880.0, 1320.0] {
+            let drop = db(goertzel(&before[0][mid.clone()], hz))
+                - db(goertzel(&after[0][mid.clone()], hz));
+            assert!(drop >= 20.0, "{hz} Hz only dropped {drop:.1} dB");
+        }
+        let bystander = db(goertzel(&before[0][mid.clone()], 2000.0))
+            - db(goertzel(&after[0][mid.clone()], 2000.0));
+        assert!(
+            bystander.abs() < 1.0,
+            "2 kHz bystander moved {bystander:.2} dB"
+        );
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn declick_scan_and_apply_repairs_clicks() {
         let sr = 48_000u32;
         let dir = make_temp_dir("declick");

@@ -2920,6 +2920,7 @@ impl crate::app::WavesPreviewer {
         let mut pending_declip_apply: Option<(f32, Option<(usize, usize)>)> = None;
         let mut pending_dehum_detect = false;
         let mut pending_dehum_apply = false;
+        let mut pending_harmonic_click: Option<(usize, f32)> = None;
         let mut pending_scrub_begin: Option<u64> = None;
         let mut pending_scrub_update: Option<usize> = None;
         let mut pending_scrub_end = false;
@@ -5253,6 +5254,17 @@ impl crate::app::WavesPreviewer {
                 let dragging = resp.dragged_by(egui::PointerButton::Primary);
                 let drag_released = resp.drag_stopped_by(egui::PointerButton::Primary);
                 let ctrl_now = ui.input(|i| i.modifiers.ctrl);
+                // Ctrl+click on the spectrogram: harmonic action at the
+                // clicked (time, frequency) point.
+                if spec_freq_view && ctrl_now && resp.clicked_by(egui::PointerButton::Primary) {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let samp = to_range_selection_display_sample(pos.x);
+                        let lane = spec_lane_at_y(pos.y);
+                        let hz = spec_y_to_freq(pos.y, lane).max(20.0);
+                        pending_harmonic_click = Some((samp, hz));
+                        suppress_seek = true;
+                    }
+                }
                 if drag_started {
                     if !ctrl_now {
                         tab.extra_selections.clear();
@@ -6168,6 +6180,58 @@ impl crate::app::WavesPreviewer {
                                 painter.rect_filled(sel_rect, 0.0, fill);
                                 painter.rect_stroke(
                                     sel_rect,
+                                    0.0,
+                                    egui::Stroke::new(1.0, stroke),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Harmonic-action overlay: translucent bands at k*f0 (+/-3%)
+                // across the full width while the popup is open.
+                if spec_freq_view {
+                    if let Some(action) = self
+                        .harmonic_action
+                        .filter(|a| a.tab_id == tab.tab_id)
+                    {
+                        let denom = (spec_vis_max - spec_vis_min).max(f32::EPSILON);
+                        let fill = Color32::from_rgba_unmultiplied(255, 176, 64, 36);
+                        let stroke = Color32::from_rgba_unmultiplied(255, 176, 64, 140);
+                        for k in 1..=action.harmonics.clamp(1, 16) {
+                            let center = action.f0.max(1.0) * k as f32;
+                            let lo_hz = center * 0.97;
+                            let hi_hz = center * 1.03;
+                            let frac_of = |hz: f32| {
+                                ((Self::editor_spec_freq_to_frac(
+                                    view_mode,
+                                    hz,
+                                    spec_axis_max_freq,
+                                    spec_mel_scale,
+                                ) - spec_vis_min)
+                                    / denom)
+                                    .clamp(0.0, 1.0)
+                            };
+                            let frac_lo = frac_of(lo_hz);
+                            let frac_hi = frac_of(hi_hz);
+                            if frac_hi <= 0.0 || frac_lo >= 1.0 {
+                                continue;
+                            }
+                            for lane in 0..lane_count {
+                                let lane_bottom = rect.top() + lane_h * (lane as f32 + 1.0);
+                                let y_top = lane_bottom - frac_hi * lane_h;
+                                let y_bottom = lane_bottom - frac_lo * lane_h;
+                                if y_bottom - y_top < 0.5 {
+                                    continue;
+                                }
+                                let band_rect = egui::Rect::from_min_max(
+                                    egui::pos2(rect.left(), y_top),
+                                    egui::pos2(rect.right(), y_bottom),
+                                );
+                                painter.rect_filled(band_rect, 0.0, fill);
+                                painter.rect_stroke(
+                                    band_rect,
                                     0.0,
                                     egui::Stroke::new(1.0, stroke),
                                     egui::StrokeKind::Inside,
@@ -11764,6 +11828,9 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_dehum_apply {
                     self.spawn_dehum_apply_for_tab(tab_idx);
+                }
+                if let Some((samp, hz)) = pending_harmonic_click {
+                    self.editor_harmonic_click(tab_idx, samp, hz);
                 }
                 if let Some(tab_id) = pending_scrub_begin {
                     self.scrub_begin(tab_id);
