@@ -10434,6 +10434,14 @@ impl crate::app::WavesPreviewer {
                                         )
                                         .weak(),
                                     );
+                                    ui.checkbox(
+                                        &mut tab.tool_state.invert_smooth_boundaries,
+                                        "Smooth boundaries (~2 ms)",
+                                    )
+                                    .on_hover_text(
+                                        "Crossfade the polarity flip at the selection edges so a \
+                                         partial invert doesn't click against untouched audio",
+                                    );
                                     ui.horizontal_wrapped(|ui| {
                                         if ui
                                             .add_enabled(preview_button_enabled, egui::Button::new("Preview"))

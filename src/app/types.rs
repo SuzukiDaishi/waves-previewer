@@ -862,6 +862,7 @@ impl ToolState {
             compressor_release_ms: 150.0,
             compressor_makeup_db: 0.0,
             insert_silence_ms: 1000.0,
+            invert_smooth_boundaries: false,
         }
     }
 }
@@ -901,6 +902,9 @@ pub struct ToolState {
     pub compressor_release_ms: f32,
     pub compressor_makeup_db: f32,
     pub insert_silence_ms: f32,
+    /// Short (~2 ms) polarity crossfade at interior range boundaries so a
+    /// partial invert doesn't step-discontinue against untouched audio.
+    pub invert_smooth_boundaries: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

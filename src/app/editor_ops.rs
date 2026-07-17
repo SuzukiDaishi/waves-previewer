@@ -1039,6 +1039,32 @@ impl crate::app::WavesPreviewer {
 
     /// Flip waveform polarity over `range` (sample-exact, no smoothing —
     /// use zero-cross snap for click-free boundaries on partial ranges).
+    /// Invert `[s, e)` of one channel. With `fade > 0`, interior boundaries
+    /// (not touching the buffer edges) ramp the gain 1 -> -1 over `fade`
+    /// samples so the flip doesn't step-discontinue against untouched audio.
+    pub(crate) fn invert_polarity_channel_range(ch: &mut [f32], s: usize, e: usize, fade: usize) {
+        let e = e.min(ch.len());
+        if e <= s {
+            return;
+        }
+        let len = e - s;
+        let fade = fade.min(len / 2);
+        let fade_at_start = fade > 0 && s > 0;
+        let fade_at_end = fade > 0 && e < ch.len();
+        for i in s..e {
+            let rel = i - s;
+            let from_end = e - 1 - i;
+            let g = if fade_at_start && rel < fade {
+                1.0 - 2.0 * ((rel + 1) as f32 / (fade + 1) as f32)
+            } else if fade_at_end && from_end < fade {
+                1.0 - 2.0 * ((from_end + 1) as f32 / (fade + 1) as f32)
+            } else {
+                -1.0
+            };
+            ch[i] *= g;
+        }
+    }
+
     pub(super) fn editor_apply_invert_polarity_range(
         &mut self,
         tab_idx: usize,
@@ -1054,14 +1080,17 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state(tab);
             let mask = Self::editor_channel_mask(tab);
+            let fade = if tab.tool_state.invert_smooth_boundaries {
+                // ~2 ms polarity crossfade at interior boundaries.
+                ((tab.buffer_sample_rate.max(1) as f32) * 0.002).round() as usize
+            } else {
+                0
+            };
             for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
                 if mask.as_ref().is_some_and(|m| !m[ci]) {
                     continue;
                 }
-                let end = e.min(ch.len());
-                for v in &mut ch[s.min(end)..end] {
-                    *v = -*v;
-                }
+                Self::invert_polarity_channel_range(ch, s, e, fade);
             }
             tab.dirty = true;
             Self::editor_clamp_ranges(tab);
@@ -2945,5 +2974,35 @@ mod clear_edit_tests {
         assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
         assert!(app.undo_in_tab(tab_idx));
         assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
+    }
+
+    #[test]
+    fn invert_polarity_smoothing_ramps_interior_boundaries_only() {
+        // Hard flip (fade = 0): exact negation.
+        let mut ch: Vec<f32> = (0..100).map(|i| (i as f32 * 0.37).sin()).collect();
+        let orig = ch.clone();
+        crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 10, 90, 0);
+        for i in 10..90 {
+            assert_eq!(ch[i], -orig[i]);
+        }
+        assert_eq!(&ch[..10], &orig[..10]);
+        assert_eq!(&ch[90..], &orig[90..]);
+
+        // Smoothed interior range: gain walks from ~+1 to -1 at the start
+        // edge (no sign step against the untouched neighbor) and back at the
+        // end edge; the middle is fully inverted.
+        let mut ch: Vec<f32> = vec![1.0; 100];
+        crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 10, 90, 8);
+        assert!(ch[9] == 1.0 && ch[10] > 0.0, "start edge must stay continuous");
+        assert!(ch[10] > ch[11], "gain must descend across the start fade");
+        for v in &ch[18..82] {
+            assert_eq!(*v, -1.0);
+        }
+        assert!(ch[89] > 0.0 && ch[90] == 1.0, "end edge must stay continuous");
+
+        // Range touching the buffer edges: no fade there (nothing to join).
+        let mut ch: Vec<f32> = vec![1.0; 50];
+        crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 0, 50, 8);
+        assert!(ch.iter().all(|v| *v == -1.0));
     }
 }

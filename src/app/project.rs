@@ -1112,6 +1112,7 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         compressor_release_ms: t.compressor_release_ms,
         compressor_makeup_db: t.compressor_makeup_db,
         insert_silence_ms: 1000.0,
+        invert_smooth_boundaries: false,
     }
 }
 
