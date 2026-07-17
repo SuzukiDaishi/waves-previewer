@@ -521,8 +521,59 @@ impl WavesPreviewer {
                 self.ui_topbar_volume_control(ui, ctx, compact);
                 ui.separator();
                 self.ui_topbar_output_meter(ui, compact);
+                if !compact {
+                    self.ui_topbar_loudness_readout(ui);
+                }
             },
         );
+    }
+
+    /// Realtime BS.1770 readout fed by the metering thread: momentary /
+    /// short-term LUFS and 4x-oversampled true peak. "-" while idle.
+    fn ui_topbar_loudness_readout(&mut self, ui: &mut egui::Ui) {
+        let decode = |v: i32| {
+            (v != crate::audio::METER_VALUE_INVALID).then(|| v as f32 / 100.0)
+        };
+        let m = decode(
+            self.audio
+                .shared
+                .lufs_m_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let s = decode(
+            self.audio
+                .shared
+                .lufs_s_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let tp = decode(
+            self.audio
+                .shared
+                .true_peak_db_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let text = Self::format_loudness_readout(m, s, tp);
+        ui.label(egui::RichText::new(text).monospace().size(10.5).weak())
+            .on_hover_text(
+                "Realtime loudness of what's playing: M = momentary LUFS (400 ms), \
+                 S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled)",
+            );
+        if m.is_some() || s.is_some() || tp.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+        }
+    }
+
+    pub(crate) fn format_loudness_readout(
+        m: Option<f32>,
+        s: Option<f32>,
+        tp: Option<f32>,
+    ) -> String {
+        let fmt = |v: Option<f32>| match v {
+            Some(v) if v <= -99.0 => "-inf".to_string(),
+            Some(v) => format!("{v:+.1}"),
+            None => "-".to_string(),
+        };
+        format!("M {}  S {}  TP {}", fmt(m), fmt(s), fmt(tp))
     }
 
     fn ui_topbar_volume_control(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, compact: bool) {
@@ -718,5 +769,19 @@ impl WavesPreviewer {
             format!("{db:.1} dBFS")
         };
         ui.label(RichText::new(db_label).monospace());
+    }
+}
+
+#[cfg(test)]
+mod loudness_readout_tests {
+    #[test]
+    fn formats_values_and_placeholders() {
+        let f = crate::app::WavesPreviewer::format_loudness_readout;
+        assert_eq!(f(None, None, None), "M -  S -  TP -");
+        assert_eq!(
+            f(Some(-23.06), Some(-22.94), Some(-1.2)),
+            "M -23.1  S -22.9  TP -1.2"
+        );
+        assert_eq!(f(Some(-120.0), None, Some(0.0)), "M -inf  S -  TP +0.0");
     }
 }

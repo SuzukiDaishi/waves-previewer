@@ -50,6 +50,66 @@ impl AudioBuffer {
 
 pub const METER_CH_SLOTS: usize = 8;
 
+/// Ring capacity for the realtime metering tap, in frames (power of two).
+pub const METER_TAP_CAPACITY: usize = 1 << 15;
+/// Sentinel for "no valid reading" in the milli-LUFS / milli-dB atomics.
+pub const METER_VALUE_INVALID: i32 = i32::MIN;
+
+/// Lock-free SPSC tap: the audio callback publishes post-gain L/R frames,
+/// a low-priority meter thread drains them. Overwrite semantics — a slow
+/// reader just loses the oldest frames.
+pub struct MeterTap {
+    buf_l: Box<[std::sync::atomic::AtomicU32]>,
+    buf_r: Box<[std::sync::atomic::AtomicU32]>,
+    write_idx: std::sync::atomic::AtomicUsize,
+}
+
+impl MeterTap {
+    fn new() -> Self {
+        let mk = || {
+            (0..METER_TAP_CAPACITY)
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
+        Self {
+            buf_l: mk(),
+            buf_r: mk(),
+            write_idx: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    pub fn push_frame(&self, l: f32, r: f32) {
+        use std::sync::atomic::Ordering;
+        let idx = self.write_idx.load(Ordering::Relaxed);
+        let slot = idx & (METER_TAP_CAPACITY - 1);
+        self.buf_l[slot].store(l.to_bits(), Ordering::Relaxed);
+        self.buf_r[slot].store(r.to_bits(), Ordering::Relaxed);
+        self.write_idx.store(idx.wrapping_add(1), Ordering::Release);
+    }
+
+    /// Append frames written since `cursor` to the buffers; returns the new
+    /// cursor. When the reader fell more than the capacity behind, only the
+    /// newest `METER_TAP_CAPACITY` frames are returned.
+    pub fn read_since(&self, cursor: usize, out_l: &mut Vec<f32>, out_r: &mut Vec<f32>) -> usize {
+        use std::sync::atomic::Ordering;
+        let end = self.write_idx.load(Ordering::Acquire);
+        let available = end.wrapping_sub(cursor);
+        if available == 0 {
+            return end;
+        }
+        let take = available.min(METER_TAP_CAPACITY);
+        let start = end.wrapping_sub(take);
+        for i in 0..take {
+            let slot = start.wrapping_add(i) & (METER_TAP_CAPACITY - 1);
+            out_l.push(f32::from_bits(self.buf_l[slot].load(Ordering::Relaxed)));
+            out_r.push(f32::from_bits(self.buf_r[slot].load(Ordering::Relaxed)));
+        }
+        end
+    }
+}
+
 pub struct SharedAudio {
     pub samples: ArcSwapOption<AudioBuffer>, // multi-channel samples in [-1, 1]
     streamed_wav: ArcSwapOption<MappedWavSource>,
@@ -81,6 +141,12 @@ pub struct SharedAudio {
     pub ramp_target: AtomicF32,
     pub ramp_step: AtomicF32,
     pub ramp_events: std::sync::atomic::AtomicUsize,
+    // Realtime loudness metering: callback-fed tap ring + thread-published
+    // readings (LUFS x100 / dBTP x100; METER_VALUE_INVALID = no reading).
+    pub meter_tap: MeterTap,
+    pub lufs_m_milli: std::sync::atomic::AtomicI32,
+    pub lufs_s_milli: std::sync::atomic::AtomicI32,
+    pub true_peak_db_milli: std::sync::atomic::AtomicI32,
 }
 
 pub struct AudioEngine {
@@ -424,7 +490,7 @@ impl AudioEngine {
     }
 
     fn new_shared(out_channels: usize, out_sample_rate: u32) -> Arc<SharedAudio> {
-        Arc::new(SharedAudio {
+        let shared = Arc::new(SharedAudio {
             samples: ArcSwapOption::from(None),
             streamed_wav: ArcSwapOption::from(None),
             vol: AtomicF32::new(1.0),
@@ -449,11 +515,95 @@ impl AudioEngine {
             ramp_target: AtomicF32::new(1.0),
             ramp_step: AtomicF32::new(1.0),
             ramp_events: std::sync::atomic::AtomicUsize::new(0),
-        })
+            meter_tap: MeterTap::new(),
+            lufs_m_milli: std::sync::atomic::AtomicI32::new(METER_VALUE_INVALID),
+            lufs_s_milli: std::sync::atomic::AtomicI32::new(METER_VALUE_INVALID),
+            true_peak_db_milli: std::sync::atomic::AtomicI32::new(METER_VALUE_INVALID),
+        });
+        Self::spawn_meter_thread(&shared);
+        shared
     }
 
     pub fn new() -> Result<Self> {
         Self::new_with_output_device_name(None)
+    }
+
+    /// Low-priority metering thread: drains the callback tap ring, runs the
+    /// BS.1770 momentary/short-term meters and the 4x true-peak scan, and
+    /// publishes the readings as atomics. Exits when the SharedAudio drops.
+    fn spawn_meter_thread(shared: &Arc<SharedAudio>) {
+        use std::sync::atomic::Ordering;
+        let weak = Arc::downgrade(shared);
+        let _ = std::thread::Builder::new()
+            .name("neowaves-meter".into())
+            .spawn(move || {
+                let mut cursor = 0usize;
+                let mut loudness: Option<crate::meter::LoudnessMeter> = None;
+                let mut tp_l = crate::meter::TruePeakChannel::new();
+                let mut tp_r = crate::meter::TruePeakChannel::new();
+                let mut tp_recent: std::collections::VecDeque<(std::time::Instant, f32)> =
+                    std::collections::VecDeque::new();
+                let mut last_data = std::time::Instant::now();
+                let mut buf_l: Vec<f32> = Vec::new();
+                let mut buf_r: Vec<f32> = Vec::new();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let Some(shared) = weak.upgrade() else {
+                        break;
+                    };
+                    buf_l.clear();
+                    buf_r.clear();
+                    cursor = shared.meter_tap.read_since(cursor, &mut buf_l, &mut buf_r);
+                    if buf_l.is_empty() {
+                        // Silence/stopped: hold the last reading briefly, then
+                        // invalidate and reset so the next playback starts clean.
+                        if last_data.elapsed() > std::time::Duration::from_millis(500) {
+                            shared.lufs_m_milli.store(METER_VALUE_INVALID, Ordering::Relaxed);
+                            shared.lufs_s_milli.store(METER_VALUE_INVALID, Ordering::Relaxed);
+                            shared
+                                .true_peak_db_milli
+                                .store(METER_VALUE_INVALID, Ordering::Relaxed);
+                            if let Some(m) = loudness.as_mut() {
+                                m.reset();
+                            }
+                            tp_l.reset();
+                            tp_r.reset();
+                            tp_recent.clear();
+                        }
+                        continue;
+                    }
+                    last_data = std::time::Instant::now();
+                    let sr = shared.out_sample_rate.max(1);
+                    let meter = loudness
+                        .get_or_insert_with(|| crate::meter::LoudnessMeter::new(sr));
+                    meter.push(&buf_l, &buf_r);
+                    let chunk_max = tp_l.scan(&buf_l).max(tp_r.scan(&buf_r));
+                    let now = std::time::Instant::now();
+                    tp_recent.push_back((now, chunk_max));
+                    while tp_recent
+                        .front()
+                        .is_some_and(|(t, _)| now.duration_since(*t).as_secs_f32() > 3.0)
+                    {
+                        tp_recent.pop_front();
+                    }
+                    let tp_max = tp_recent.iter().map(|(_, v)| *v).fold(0.0f32, f32::max);
+                    let encode = |v: Option<f32>| {
+                        v.filter(|v| v.is_finite())
+                            .map(|v| (v * 100.0).round() as i32)
+                            .unwrap_or(METER_VALUE_INVALID)
+                    };
+                    shared
+                        .lufs_m_milli
+                        .store(encode(meter.momentary_lufs()), Ordering::Relaxed);
+                    shared
+                        .lufs_s_milli
+                        .store(encode(meter.short_term_lufs()), Ordering::Relaxed);
+                    shared.true_peak_db_milli.store(
+                        encode(Some(crate::meter::true_peak_db(tp_max))),
+                        Ordering::Relaxed,
+                    );
+                }
+            });
     }
 
     fn choose_output_config(
@@ -718,6 +868,7 @@ impl AudioEngine {
                             pos_f =
                                 Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
+                        let mut tap_frame = [0.0f32; 2];
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
                             let sample = if valid_loop && xfade > 0 {
                                 Self::sample_loop_with_xfade(
@@ -749,6 +900,9 @@ impl AudioEngine {
                             };
                             let out = (sample * vol).clamp(-1.0, 1.0);
                             *out_sample = T::from_sample(out);
+                            if out_ch < 2 {
+                                tap_frame[out_ch] = out;
+                            }
                             meter_sum_sq += f64::from(out * out);
                             meter_count = meter_count.saturating_add(1);
                             let slot = out_ch.min(METER_CH_SLOTS - 1);
@@ -756,6 +910,10 @@ impl AudioEngine {
                             ch_peak[slot] = ch_peak[slot].max(out.abs());
                             ch_counts[slot] += 1;
                         }
+                        shared.meter_tap.push_frame(
+                            tap_frame[0],
+                            if channels >= 2 { tap_frame[1] } else { tap_frame[0] },
+                        );
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
                             pos_f =
@@ -840,6 +998,7 @@ impl AudioEngine {
                             pos_f =
                                 Self::wrap_loop_position(pos_f, loop_start, loop_end, xfade_skip);
                         }
+                        let mut tap_frame = [0.0f32; 2];
                         for (out_ch, out_sample) in frame.iter_mut().enumerate() {
                             let sample = if valid_loop && xfade > 0 {
                                 Self::sample_loop_with_xfade(
@@ -871,6 +1030,9 @@ impl AudioEngine {
                             };
                             let out = (sample * vol).clamp(-1.0, 1.0);
                             *out_sample = T::from_sample(out);
+                            if out_ch < 2 {
+                                tap_frame[out_ch] = out;
+                            }
                             meter_sum_sq += f64::from(out * out);
                             meter_count = meter_count.saturating_add(1);
                             let slot = out_ch.min(METER_CH_SLOTS - 1);
@@ -878,6 +1040,10 @@ impl AudioEngine {
                             ch_peak[slot] = ch_peak[slot].max(out.abs());
                             ch_counts[slot] += 1;
                         }
+                        shared.meter_tap.push_frame(
+                            tap_frame[0],
+                            if channels >= 2 { tap_frame[1] } else { tap_frame[0] },
+                        );
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
                             pos_f =
@@ -1934,5 +2100,38 @@ mod tests {
             None,
             "ambiguous legacy short names should not silently pick the wrong device"
         );
+    }
+
+    #[test]
+    fn meter_tap_ring_roundtrips_and_clamps_backlog() {
+        let tap = MeterTap::new();
+        for i in 0..100 {
+            tap.push_frame(i as f32, -(i as f32));
+        }
+        let mut l = Vec::new();
+        let mut r = Vec::new();
+        let cursor = tap.read_since(0, &mut l, &mut r);
+        assert_eq!(cursor, 100);
+        assert_eq!(l.len(), 100);
+        assert_eq!(l[0], 0.0);
+        assert_eq!(l[99], 99.0);
+        assert_eq!(r[99], -99.0);
+        // No new frames: cursor stays put, nothing appended.
+        l.clear();
+        r.clear();
+        assert_eq!(tap.read_since(cursor, &mut l, &mut r), 100);
+        assert!(l.is_empty());
+        // Reader falls a full ring behind: only the newest CAPACITY frames
+        // come back, oldest first.
+        for i in 0..(METER_TAP_CAPACITY + 500) {
+            tap.push_frame(i as f32, 0.0);
+        }
+        l.clear();
+        r.clear();
+        let end = tap.read_since(cursor, &mut l, &mut r);
+        assert_eq!(end, 100 + METER_TAP_CAPACITY + 500);
+        assert_eq!(l.len(), METER_TAP_CAPACITY);
+        assert_eq!(l[0], 500.0, "oldest surviving frame after overwrite");
+        assert_eq!(*l.last().unwrap(), (METER_TAP_CAPACITY + 500 - 1) as f32);
     }
 }
