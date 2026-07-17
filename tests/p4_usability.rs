@@ -175,6 +175,32 @@ mod p4_usability {
     }
 
     #[test]
+    fn tool_toolbar_click_switches_tool() {
+        let (mut harness, dir) = harness_with_files("toolbar", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(neowaves::app::ToolKind::LoopEdit)
+        );
+        // Click the Trim scissors icon in the new toolbar.
+        harness.get_by_label("✂").click();
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_active_tool(),
+            Some(neowaves::app::ToolKind::Trim)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();

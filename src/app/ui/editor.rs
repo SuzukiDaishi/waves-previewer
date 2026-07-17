@@ -7388,46 +7388,93 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::SpectralWarp => "Spectral Warp",
                                 ToolKind::SpectralBrush => "Spectral Brush",
                             };
-                            egui::ComboBox::new(("tool_selector", tab_idx), "Tool")
-                                .selected_text(tool_label(tool))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut tool, ToolKind::LoopEdit, "Loop Edit");
-                                    ui.selectable_value(&mut tool, ToolKind::Markers, "Markers");
-                                    ui.selectable_value(&mut tool, ToolKind::Trim, "Trim");
-                                    ui.selectable_value(&mut tool, ToolKind::Fade, "Fade");
-                                    ui.selectable_value(&mut tool, ToolKind::Gain, "Gain");
-                                    ui.selectable_value(&mut tool, ToolKind::Normalize, "Normalize");
-                                    ui.separator();
-                                    ui.label(RichText::new("More tools").weak());
-                                    ui.selectable_value(&mut tool, ToolKind::PitchShift, "Pitch Shift");
-                                    ui.selectable_value(&mut tool, ToolKind::TimeStretch, "Time Stretch");
-                                    ui.selectable_value(&mut tool, ToolKind::Speed, "Speed");
-                                    ui.selectable_value(&mut tool, ToolKind::Loudness, "LoudNorm");
-                                    ui.selectable_value(&mut tool, ToolKind::NoiseGate, "Noise Gate");
-                                    ui.selectable_value(&mut tool, ToolKind::Eq, "EQ");
-                                    ui.selectable_value(&mut tool, ToolKind::Compressor, "Compressor");
-                                    ui.selectable_value(
-                                        &mut tool,
-                                        ToolKind::MusicAnalyze,
-                                        "Music Analyze",
-                                    );
-                                    ui.selectable_value(&mut tool, ToolKind::PluginFx, "Plugin FX");
-                                    ui.selectable_value(&mut tool, ToolKind::Reverse, "Reverse");
-                                    ui.selectable_value(
-                                        &mut tool,
-                                        ToolKind::InvertPolarity,
-                                        "Invert Polarity",
-                                    );
-                                    ui.selectable_value(&mut tool, ToolKind::DcOffset, "DC Offset");
-                                    ui.selectable_value(
-                                        &mut tool,
-                                        ToolKind::InsertSilence,
-                                        "Insert Silence",
-                                    );
-                                    ui.selectable_value(&mut tool, ToolKind::Pencil, "Pencil");
-                                    ui.selectable_value(&mut tool, ToolKind::DeClick, "De-click");
-                                    ui.selectable_value(&mut tool, ToolKind::DeNoise, "De-noise");
-                                });
+                            // Grouped icon toolbar; wraps in narrow panels so
+                            // every tool stays one click away. Selection still
+                            // funnels through the `tool != active_tool` block
+                            // below (preview-discard semantics unchanged).
+                            let tool_icon = |tool: ToolKind| match tool {
+                                ToolKind::LoopEdit => "🔁",
+                                ToolKind::Markers => "📍",
+                                ToolKind::Trim => "✂",
+                                ToolKind::Fade => "◢",
+                                ToolKind::Gain => "🔊",
+                                ToolKind::Normalize => "⬆",
+                                ToolKind::PitchShift => "♪",
+                                ToolKind::TimeStretch => "⏳",
+                                ToolKind::Speed => "⏩",
+                                ToolKind::Loudness => "🔉",
+                                ToolKind::NoiseGate => "🔇",
+                                ToolKind::Eq => "📊",
+                                ToolKind::Compressor => "⬇",
+                                ToolKind::MusicAnalyze => "♫",
+                                ToolKind::PluginFx => "🔧",
+                                ToolKind::Reverse => "◀",
+                                ToolKind::InvertPolarity => "±",
+                                ToolKind::DcOffset => "≡",
+                                ToolKind::InsertSilence => "∅",
+                                ToolKind::Pencil => "✏",
+                                ToolKind::DeClick => "⚡",
+                                ToolKind::DeNoise => "≈",
+                                ToolKind::SpectralWarp => "🌀",
+                                ToolKind::SpectralBrush => "🖌",
+                            };
+                            const TOOL_GROUPS: [&[ToolKind]; 4] = [
+                                // Navigate / annotate / basic level edits
+                                &[
+                                    ToolKind::LoopEdit,
+                                    ToolKind::Markers,
+                                    ToolKind::Trim,
+                                    ToolKind::Fade,
+                                    ToolKind::Gain,
+                                    ToolKind::Normalize,
+                                ],
+                                // Time / pitch
+                                &[
+                                    ToolKind::PitchShift,
+                                    ToolKind::TimeStretch,
+                                    ToolKind::Speed,
+                                    ToolKind::Loudness,
+                                ],
+                                // Dynamics / spectrum / analysis
+                                &[
+                                    ToolKind::NoiseGate,
+                                    ToolKind::Eq,
+                                    ToolKind::Compressor,
+                                    ToolKind::MusicAnalyze,
+                                    ToolKind::PluginFx,
+                                ],
+                                // Sample surgery / restoration
+                                &[
+                                    ToolKind::Reverse,
+                                    ToolKind::InvertPolarity,
+                                    ToolKind::DcOffset,
+                                    ToolKind::InsertSilence,
+                                    ToolKind::Pencil,
+                                    ToolKind::DeClick,
+                                    ToolKind::DeNoise,
+                                ],
+                            ];
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                                for (group_idx, group) in TOOL_GROUPS.iter().enumerate() {
+                                    if group_idx > 0 {
+                                        ui.separator();
+                                    }
+                                    for &candidate in *group {
+                                        let selected = tool == candidate;
+                                        if ui
+                                            .selectable_label(
+                                                selected,
+                                                RichText::new(tool_icon(candidate)).size(15.0),
+                                            )
+                                            .on_hover_text(tool_label(candidate))
+                                            .clicked()
+                                        {
+                                            tool = candidate;
+                                        }
+                                    }
+                                }
+                            });
                             if tool != tab.active_tool {
                                 tab.active_tool_last = Some(tab.active_tool);
                                 // Leaving Markers/LoopEdit: discard un-applied preview markers/loops
