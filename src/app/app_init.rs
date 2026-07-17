@@ -252,6 +252,7 @@ impl WavesPreviewer {
             list_preview_pending_path: None,
             list_play_pending: false,
             variation_audition: None,
+            mix_audition_state: None,
             variation_audition_advancing: false,
             duplicate_scan_state: None,
             duplicate_report: None,

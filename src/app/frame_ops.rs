@@ -156,6 +156,7 @@ impl WavesPreviewer {
         self.drain_recording_events();
         self.tick_audio_device_watch(frame_started);
         self.drain_editor_apply_jobs(ctx);
+        self.drain_mix_audition(ctx);
         self.poll_resample_fallbacks();
         self.drain_editor_wave_cache_jobs(ctx);
         self.poll_editor_play_selection(ctx);

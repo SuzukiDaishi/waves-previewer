@@ -837,6 +837,13 @@ pub enum VariationAuditionMode {
 }
 
 /// In-progress multi-variation audition: the selected list rows play one
+/// "Play Selected Together": a worker decodes + SR-aligns + mixes the
+/// selection; the drain plays the sum as a one-shot preview buffer.
+pub struct MixAuditionState {
+    pub rx: std::sync::mpsc::Receiver<Result<Vec<Vec<f32>>, String>>,
+    pub count: usize,
+}
+
 /// after another (round-robin or random) until the user stops playback.
 #[derive(Clone, Debug)]
 pub struct VariationAuditionState {

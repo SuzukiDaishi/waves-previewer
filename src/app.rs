@@ -715,6 +715,7 @@ pub struct WavesPreviewer {
     list_play_pending: bool,
     variation_audition: Option<types::VariationAuditionState>,
     variation_audition_advancing: bool,
+    mix_audition_state: Option<types::MixAuditionState>,
     duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
     duplicate_report: Option<duplicate_ops::DuplicateReportState>,
     show_duplicates_window: bool,

@@ -326,6 +326,17 @@ impl WavesPreviewer {
                 );
                 ui.close();
             }
+            if ui
+                .add_enabled(multi, egui::Button::new("Play Selected Together"))
+                .on_hover_text(
+                    "Mix the selected files (up to 16) at equal power (1/\u{221a}n) and \
+                     play the sum once — quick layering check",
+                )
+                .clicked()
+            {
+                self.start_mix_audition();
+                ui.close();
+            }
         });
     }
 
