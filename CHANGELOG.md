@@ -4,6 +4,17 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### DSP & RX Parity (P5)
+- **Noise-shaped dither + 24-bit**: export dither is now a mode (Off / TPDF / TPDF + noise shaping); noise shaping adds per-channel 2nd-order error-feedback (NTF = (1 - z^-1)^2) pushing quantization noise out of the most audible band. A unified Quantizer backs all PCM paths (WAV/AIFF/converter/FLAC two-pass, determinism preserved), and 24-bit exports can opt into dithering. Prefs migrate from the old boolean key.
+- **De-clip tool**: detects flat runs pinned at the clipping rails (peak-relative threshold + corner test that rejects smooth low-frequency crests, square-wave rails rejected by run length) and rebuilds the chopped crests with the de-click Hermite bridge — the repair can rise above the rail (float headroom preserved). Scan overlay + async Apply + CLI support.
+- **De-hum tool**: cascade of narrow RBJ biquad cuts at the mains fundamental and up to 16 harmonics (STFT rejected: 2048-bin resolution is too coarse for 50/60 Hz). Detect sweeps 45-65 Hz with Goertzel probes; Hz/harmonics/Q/depth adjustable; a selection limits the apply via crossfaded splice. CLI supported.
+- **Edit history panel** (Edit > History...): labeled undo/redo entries (operation names from the concrete apply paths), click to jump multiple steps through the existing undo/redo machinery.
+- **Region list** (Edit > Regions...): labeled ranges on the editor tab that ride undo and destructive-edit remapping like markers; add-from-selection, inline rename, click-to-select, sidecar (<file>.regions.json) + .nwsess persistence, CSV export.
+- **Scrub playback**: Alt+drag on the waveform loops a ±40 ms window under the pointer via the existing loop atomics; release restores the previous loop/transport state exactly.
+- **WORLD aperiodicity editing**: per-frame breathiness multiplier draft (Set All / Set Selection / Reset) baked in at Resynthesize, clamped into 0..1 per band; fine 5 ms re-analysis resamples the curve.
+- **Spectral region copy/paste**: with a frequency selection in Spec/Log views, Ctrl+C copies band-masked STFT frames and Ctrl+V replaces (Ctrl+Shift+V adds) the band content at the selection start/playhead, snapped to the hop grid, same-sample-rate only.
+- **Harmonic action**: Ctrl+click a partial in Spec/Log — f0 refines onto the nearest peak, harmonic bands highlight, and one multi-band STFT pass mutes or attenuates the whole stack over the selection.
+
 ### Usability Completion (P4)
 - **Non-blocking heavy applies**: pitch/stretch/speed/loudness, de-click/de-noise, spectral warp/brush/heal, and WORLD resynthesis no longer raise the app-wide modal overlay. Only the target tab is gated (in-tab banner); the list, other tabs, and playback of other sources stay interactive. Progress + Cancel live in the topbar activity slot. Tabs are tracked by a stable id, so closing a tab mid-apply discards the result instead of corrupting whichever tab shifted into its index. One apply runs at a time.
 - **Rebindable shortcuts**: Help > Customize Shortcuts... lets table-dispatched chords be reassigned by clicking a row and pressing the new chord (conflicts across overlapping contexts refused, per-row Reset / Reset All, persisted as `keymap=` prefs lines). The read-only shortcut list shows the effective (overridden) chords.
