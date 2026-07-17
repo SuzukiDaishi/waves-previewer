@@ -69,6 +69,38 @@ mod p4_usability {
     }
 
     #[test]
+    fn edit_menu_undo_state_tracks_editor_edits() {
+        let (mut harness, dir) = harness_with_files("undomenu", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        assert!(
+            !harness.state().test_undo_available(false),
+            "fresh tab must have nothing to undo"
+        );
+        // A destructive edit makes Undo available; triggering the shared
+        // menu/hotkey dispatch restores the buffer and enables Redo.
+        let before_len = {
+            let idx = harness.state().active_tab.unwrap();
+            harness.state().tabs[idx].samples_len
+        };
+        assert!(harness.state_mut().test_apply_trim_frac(0.25, 0.75));
+        harness.run_steps(2);
+        assert!(harness.state().test_undo_available(false));
+        assert!(harness.state_mut().test_trigger_undo_redo(false));
+        harness.run_steps(2);
+        let idx = harness.state().active_tab.unwrap();
+        assert_eq!(harness.state().tabs[idx].samples_len, before_len);
+        assert!(harness.state().test_undo_available(true), "redo available");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();

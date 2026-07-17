@@ -636,6 +636,21 @@ impl super::WavesPreviewer {
         if !(undo || redo) {
             return;
         }
+        let handled = self.trigger_undo_redo(redo);
+        if handled {
+            if self.debug.cfg.enabled && self.debug.input_trace_enabled {
+                let tag = if redo { "redo" } else { "undo" };
+                self.debug_trace_input(format!("{tag} triggered via hotkey"));
+            }
+            ctx.request_repaint();
+        }
+        self.undo_z_was_down = combo_down;
+    }
+
+    /// Scope-aware undo/redo dispatch shared by the Ctrl+Z/Y hotkeys and
+    /// the Edit menu: effect graph when active, then the last-used scope,
+    /// then the active editor tab, then the list, then overwrite-export.
+    pub(super) fn trigger_undo_redo(&mut self, redo: bool) -> bool {
         let mut handled = false;
         let prefer_graph = self.is_effect_graph_workspace_active()
             || self.last_undo_scope == UndoScope::EffectGraph;
@@ -679,13 +694,33 @@ impl super::WavesPreviewer {
         if !handled && !redo {
             handled = self.undo_last_overwrite_export();
         }
-        if handled {
-            if self.debug.cfg.enabled && self.debug.input_trace_enabled {
-                let tag = if redo { "redo" } else { "undo" };
-                self.debug_trace_input(format!("{tag} triggered via hotkey"));
-            }
-            ctx.request_repaint();
-        }
-        self.undo_z_was_down = combo_down;
+        handled
+    }
+
+    /// Whether any undo (or redo) scope currently has something to apply —
+    /// drives the Edit menu enabled state without mutating anything.
+    pub(super) fn undo_redo_available(&self, redo: bool) -> bool {
+        let graph = if redo {
+            !self.effect_graph.redo_stack.is_empty()
+        } else {
+            !self.effect_graph.undo_stack.is_empty()
+        };
+        let editor = self
+            .active_tab
+            .and_then(|idx| self.tabs.get(idx))
+            .map(|tab| {
+                if redo {
+                    !tab.redo_stack.is_empty()
+                } else {
+                    !tab.undo_stack.is_empty()
+                }
+            })
+            .unwrap_or(false);
+        let list = if redo {
+            !self.list_redo_stack.is_empty()
+        } else {
+            !self.list_undo_stack.is_empty()
+        };
+        graph || editor || list
     }
 }

@@ -50,6 +50,14 @@ impl super::WavesPreviewer {
         self.show_plugin_manager = open;
     }
 
+    pub fn test_undo_available(&self, redo: bool) -> bool {
+        self.undo_redo_available(redo)
+    }
+
+    pub fn test_trigger_undo_redo(&mut self, redo: bool) -> bool {
+        self.trigger_undo_redo(redo)
+    }
+
     pub fn test_list_select_all(&mut self) {
         self.list_select_all();
     }

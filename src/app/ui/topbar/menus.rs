@@ -21,10 +21,34 @@ impl WavesPreviewer {
     pub(super) fn ui_topbar_menu_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             self.ui_topbar_file_menu(ui);
+            self.ui_topbar_edit_menu(ui);
             self.ui_topbar_export_menu(ui);
             self.ui_topbar_list_menu(ui);
             self.ui_topbar_tools_menu(ui, ctx);
             self.ui_topbar_help_menu(ui);
+        });
+    }
+
+    fn ui_topbar_edit_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Edit", |ui| {
+            let can_undo = self.undo_redo_available(false);
+            let can_redo = self.undo_redo_available(true);
+            if ui
+                .add_enabled(can_undo, egui::Button::new("Undo"))
+                .on_hover_text("Ctrl+Z")
+                .clicked()
+            {
+                self.trigger_undo_redo(false);
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new("Redo"))
+                .on_hover_text("Ctrl+Y / Ctrl+Shift+Z")
+                .clicked()
+            {
+                self.trigger_undo_redo(true);
+                ui.close();
+            }
         });
     }
 
