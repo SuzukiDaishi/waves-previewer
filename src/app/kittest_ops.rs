@@ -1617,6 +1617,24 @@ impl super::WavesPreviewer {
         self.invert_shift_wheel_pan = enabled;
     }
 
+    pub fn test_keymap_assign(&mut self, action: &str, chord: &str) -> Result<(), String> {
+        let action = crate::app::keymap::Action::from_name(action)
+            .ok_or_else(|| format!("unknown action: {action}"))?;
+        let (mods, key) = crate::app::keymap::parse_chord(chord)
+            .ok_or_else(|| format!("bad chord: {chord}"))?;
+        self.keymap_assign(action, mods, key)
+    }
+
+    pub fn test_keymap_effective(&self, action: &str) -> Option<String> {
+        let action = crate::app::keymap::Action::from_name(action)?;
+        self.keymap_effective_chord(action)
+            .map(|(m, k)| crate::app::keymap::chord_text(m, k))
+    }
+
+    pub fn test_keymap_override_count(&self) -> usize {
+        self.keymap_overrides.len()
+    }
+
     pub fn test_editor_pref_wheel_scrolls(&self) -> bool {
         self.editor_wheel_scrolls
     }

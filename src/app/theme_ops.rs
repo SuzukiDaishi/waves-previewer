@@ -330,6 +330,15 @@ impl WavesPreviewer {
                 self.invert_shift_wheel_pan = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("editor_wheel_mode=") {
                 self.editor_wheel_scrolls = rest.trim().eq_ignore_ascii_case("scroll");
+            } else if let Some(rest) = line.strip_prefix("keymap=") {
+                if let Some((name, chord)) = rest.trim().split_once(':') {
+                    if let (Some(action), Some(parsed)) = (
+                        crate::app::keymap::Action::from_name(name),
+                        crate::app::keymap::parse_chord(chord),
+                    ) {
+                        self.keymap_overrides.insert(action, parsed);
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("editor_horizontal_zoom_anchor=") {
                 self.horizontal_zoom_anchor_mode = match rest.trim().to_ascii_lowercase().as_str() {
                     "playhead" => EditorHorizontalZoomAnchorMode::Playhead,
@@ -951,6 +960,23 @@ zoo_flip_manual={}\n",
             out.push_str(&path_text);
             out.push('\n');
         }
+        // Sorted for a deterministic file (HashMap iteration order isn't).
+        let mut keymap_lines: Vec<String> = self
+            .keymap_overrides
+            .iter()
+            .map(|(action, &(mods, key))| {
+                format!(
+                    "keymap={}:{}",
+                    action.name(),
+                    crate::app::keymap::chord_text(mods, key)
+                )
+            })
+            .collect();
+        keymap_lines.sort();
+        for line in keymap_lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1147,6 +1173,42 @@ mod tests {
         fallback.editor_wheel_scrolls = true;
         fallback.load_prefs_from_path(&prefs);
         assert!(!fallback.editor_wheel_scrolls);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keymap_override_prefs_roundtrip() {
+        use crate::app::keymap::{Action, Mods};
+        let dir = temp_dir("keymap_prefs");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.keymap_overrides
+            .insert(Action::EditorZoomIn, (Mods::Command, egui::Key::Q));
+        app.keymap_overrides
+            .insert(Action::VolumeUp, (Mods::None, egui::Key::F9));
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(
+            loaded.keymap_overrides.get(&Action::EditorZoomIn),
+            Some(&(Mods::Command, egui::Key::Q))
+        );
+        assert_eq!(
+            loaded.keymap_overrides.get(&Action::VolumeUp),
+            Some(&(Mods::None, egui::Key::F9))
+        );
+        assert_eq!(loaded.keymap_overrides.len(), 2);
+
+        // Unknown actions/keys are ignored instead of poisoning the map.
+        std::fs::write(&prefs, "keymap=NoSuchAction:Q\nkeymap=VolumeUp:NoSuchKey\n")
+            .expect("write prefs");
+        let mut bogus =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        bogus.load_prefs_from_path(&prefs);
+        assert!(bogus.keymap_overrides.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

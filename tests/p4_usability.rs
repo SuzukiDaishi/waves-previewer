@@ -119,6 +119,62 @@ mod p4_usability {
     }
 
     #[test]
+    fn keymap_rebind_changes_dispatch_and_rejects_conflicts() {
+        let (mut harness, dir) = harness_with_files("keymap", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        harness.run_steps(3);
+        let spp = |h: &Harness<'static, WavesPreviewer>| {
+            let idx = h.state().active_tab.unwrap();
+            h.state().tabs[idx].samples_per_px
+        };
+        // Baseline: the built-in + chord zooms in.
+        let spp0 = spp(&harness);
+        harness.key_press(egui::Key::Plus);
+        harness.run_steps(3);
+        let spp1 = spp(&harness);
+        assert!(spp1 < spp0, "built-in + should zoom: {spp0} -> {spp1}");
+        // Rebind zoom-in to Q: Q now zooms and the old chord is released.
+        harness
+            .state_mut()
+            .test_keymap_assign("EditorZoomIn", "Q")
+            .expect("rebind to Q");
+        assert_eq!(
+            harness.state().test_keymap_effective("EditorZoomIn").as_deref(),
+            Some("Q")
+        );
+        harness.key_press(egui::Key::Q);
+        harness.run_steps(3);
+        let spp2 = spp(&harness);
+        assert!(spp2 < spp1, "rebound Q should zoom: {spp1} -> {spp2}");
+        harness.key_press(egui::Key::Plus);
+        harness.run_steps(3);
+        assert_eq!(spp(&harness), spp2, "old + chord must no longer zoom");
+        // Conflicts: same context and overlapping Global context both refuse.
+        assert!(harness
+            .state_mut()
+            .test_keymap_assign("EditorZoomOut", "Q")
+            .is_err());
+        assert!(harness
+            .state_mut()
+            .test_keymap_assign("EditorZoomOut", "Space")
+            .is_err());
+        // Re-assigning the built-in default clears the override.
+        harness
+            .state_mut()
+            .test_keymap_assign("EditorZoomIn", "Plus")
+            .expect("restore default");
+        assert_eq!(harness.state().test_keymap_override_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();

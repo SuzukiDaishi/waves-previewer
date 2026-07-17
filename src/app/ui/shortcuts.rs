@@ -1,4 +1,4 @@
-use crate::app::keymap::{KeyContext, KEYMAP};
+use crate::app::keymap::{self, KeyContext, KEYMAP};
 
 impl crate::app::WavesPreviewer {
     /// Read-only keyboard shortcut list, generated from the central KEYMAP.
@@ -25,7 +25,16 @@ impl crate::app::WavesPreviewer {
                         .striped(true)
                         .show(ui, |ui| {
                             for binding in KEYMAP.iter().filter(|b| b.context == context) {
-                                ui.monospace(binding.keys_text());
+                                // Table rows honor user rebinds; manual rows
+                                // keep their static labels.
+                                let keys = if binding.chord.is_some() {
+                                    self.keymap_effective_chord(binding.action)
+                                        .map(|(m, k)| keymap::chord_text(m, k))
+                                        .unwrap_or_else(|| binding.keys_text())
+                                } else {
+                                    binding.keys_text()
+                                };
+                                ui.monospace(keys);
                                 ui.label(binding.desc);
                                 ui.end_row();
                             }

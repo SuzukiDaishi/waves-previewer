@@ -780,6 +780,11 @@ pub struct WavesPreviewer {
     export_cfg: ExportConfig,
     show_export_settings: bool,
     show_shortcuts_window: bool,
+    show_keymap_window: bool,
+    // User chord overrides for Table-dispatched actions (persisted in prefs).
+    keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
+    // Row currently waiting for a key press in the rebinding window.
+    keymap_capture: Option<keymap::Action>,
     show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,

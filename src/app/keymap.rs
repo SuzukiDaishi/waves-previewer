@@ -16,7 +16,7 @@ pub enum KeyContext {
     Editor,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Action {
     // Global
     FocusSearch,
@@ -63,9 +63,11 @@ pub enum Action {
 }
 
 /// Modifier sets used by the table (const-friendly subset of `egui::Modifiers`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// `Shift` never appears in the built-in table but is accepted for rebinds.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Mods {
     None,
+    Shift,
     Command,
     CommandShift,
 }
@@ -74,6 +76,7 @@ impl Mods {
     pub fn to_modifiers(self) -> Modifiers {
         match self {
             Mods::None => Modifiers::NONE,
+            Mods::Shift => Modifiers::SHIFT,
             Mods::Command => Modifiers::COMMAND,
             Mods::CommandShift => Modifiers::COMMAND | Modifiers::SHIFT,
         }
@@ -82,10 +85,61 @@ impl Mods {
     fn prefix(self) -> &'static str {
         match self {
             Mods::None => "",
+            Mods::Shift => "Shift+",
             Mods::Command => "Ctrl+",
             Mods::CommandShift => "Ctrl+Shift+",
         }
     }
+
+    /// Map real input modifiers onto the table subset. Alt/other combos are
+    /// not representable and yield `None`.
+    pub fn from_modifiers(m: Modifiers) -> Option<Mods> {
+        if m.alt {
+            return None;
+        }
+        let command = m.command || m.ctrl || m.mac_cmd;
+        match (command, m.shift) {
+            (false, false) => Some(Mods::None),
+            (false, true) => Some(Mods::Shift),
+            (true, false) => Some(Mods::Command),
+            (true, true) => Some(Mods::CommandShift),
+        }
+    }
+}
+
+impl Action {
+    /// Stable identifier used by the prefs file (`keymap=` lines).
+    pub fn name(self) -> String {
+        format!("{self:?}")
+    }
+
+    /// Inverse of [`Action::name`]; every action appears in KEYMAP exactly
+    /// once, so the table doubles as the registry.
+    pub fn from_name(s: &str) -> Option<Action> {
+        KEYMAP
+            .iter()
+            .map(|b| b.action)
+            .find(|a| format!("{a:?}") == s)
+    }
+}
+
+/// Human/prefs text for a chord ("Ctrl+Shift+Z" style).
+pub fn chord_text(mods: Mods, key: Key) -> String {
+    format!("{}{}", mods.prefix(), key.name())
+}
+
+/// Parse [`chord_text`] output back into a chord.
+pub fn parse_chord(s: &str) -> Option<(Mods, Key)> {
+    let (mods, rest) = if let Some(r) = s.strip_prefix("Ctrl+Shift+") {
+        (Mods::CommandShift, r)
+    } else if let Some(r) = s.strip_prefix("Ctrl+") {
+        (Mods::Command, r)
+    } else if let Some(r) = s.strip_prefix("Shift+") {
+        (Mods::Shift, r)
+    } else {
+        (Mods::None, s)
+    };
+    Key::from_name(rest).map(|k| (mods, k))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -454,6 +508,40 @@ pub fn consume(ctx: &egui::Context, action: Action) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_names_roundtrip_for_every_row() {
+        for b in KEYMAP {
+            let name = b.action.name();
+            assert_eq!(
+                Action::from_name(&name),
+                Some(b.action),
+                "action name should round-trip: {name}"
+            );
+        }
+        assert_eq!(Action::from_name("NoSuchAction"), None);
+    }
+
+    #[test]
+    fn chord_text_roundtrips_for_representative_chords() {
+        let cases = [
+            (Mods::None, Key::Z),
+            (Mods::None, Key::Plus),
+            (Mods::Shift, Key::F5),
+            (Mods::Command, Key::S),
+            (Mods::CommandShift, Key::Z),
+            (Mods::CommandShift, Key::Plus),
+        ];
+        for (mods, key) in cases {
+            let text = chord_text(mods, key);
+            assert_eq!(
+                parse_chord(&text),
+                Some((mods, key)),
+                "chord should round-trip: {text}"
+            );
+        }
+        assert_eq!(parse_chord("Ctrl+NoSuchKey"), None);
+    }
 
     #[test]
     fn keymap_has_no_duplicate_chords_per_context() {

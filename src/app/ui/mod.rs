@@ -9,6 +9,7 @@ pub(super) mod inspection;
 pub(super) mod list;
 pub(super) mod plugin_manager;
 pub(super) mod recording;
+pub(super) mod keymap_settings;
 pub(super) mod shortcuts;
 pub(super) mod tools;
 pub(super) mod topbar;

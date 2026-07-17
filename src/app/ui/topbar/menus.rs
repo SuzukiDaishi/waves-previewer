@@ -58,6 +58,10 @@ impl WavesPreviewer {
                 self.show_shortcuts_window = true;
                 ui.close();
             }
+            if ui.button("Customize Shortcuts...").clicked() {
+                self.show_keymap_window = true;
+                ui.close();
+            }
         });
     }
 
