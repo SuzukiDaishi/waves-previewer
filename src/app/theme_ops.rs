@@ -328,6 +328,8 @@ impl WavesPreviewer {
                 self.invert_wave_zoom_wheel = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("editor_invert_shift_wheel_pan=") {
                 self.invert_shift_wheel_pan = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("editor_wheel_mode=") {
+                self.editor_wheel_scrolls = rest.trim().eq_ignore_ascii_case("scroll");
             } else if let Some(rest) = line.strip_prefix("editor_horizontal_zoom_anchor=") {
                 self.horizontal_zoom_anchor_mode = match rest.trim().to_ascii_lowercase().as_str() {
                     "playhead" => EditorHorizontalZoomAnchorMode::Playhead,
@@ -772,6 +774,11 @@ impl WavesPreviewer {
         } else {
             "0"
         };
+        let editor_wheel_mode = if self.editor_wheel_scrolls {
+            "scroll"
+        } else {
+            "zoom"
+        };
         let horizontal_zoom_anchor = match self.horizontal_zoom_anchor_mode {
             EditorHorizontalZoomAnchorMode::Pointer => "pointer",
             EditorHorizontalZoomAnchorMode::Playhead => "playhead",
@@ -785,6 +792,7 @@ impl WavesPreviewer {
 zero_cross_eps={:.6}\n\
 editor_invert_wave_zoom_wheel={}\n\
 editor_invert_shift_wheel_pan={}\n\
+editor_wheel_mode={}\n\
 editor_horizontal_zoom_anchor={}\n\
 editor_pause_resume_mode={}\n\
 spectro_fft={}\n\
@@ -846,6 +854,7 @@ zoo_flip_manual={}\n",
             self.zero_cross_epsilon,
             invert_wave_zoom_wheel,
             invert_shift_wheel_pan,
+            editor_wheel_mode,
             horizontal_zoom_anchor,
             editor_pause_resume_mode,
             self.spectro_cfg.fft_size,
@@ -1113,6 +1122,31 @@ mod tests {
         assert_eq!(loaded.list_col_widths.get("file").copied(), Some(314.5));
         assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
         assert!(!loaded.list_click_audition);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn editor_wheel_mode_prefs_roundtrip() {
+        let dir = temp_dir("wheel_mode");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        assert!(!app.editor_wheel_scrolls, "default is zoom mode");
+        app.editor_wheel_scrolls = true;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert!(loaded.editor_wheel_scrolls, "scroll mode must round-trip");
+
+        // Unknown values fall back to zoom mode.
+        std::fs::write(&prefs, "editor_wheel_mode=bogus\n").expect("write prefs");
+        let mut fallback =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        fallback.editor_wheel_scrolls = true;
+        fallback.load_prefs_from_path(&prefs);
+        assert!(!fallback.editor_wheel_scrolls);
         let _ = std::fs::remove_dir_all(dir);
     }
 

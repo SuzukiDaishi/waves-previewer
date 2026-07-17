@@ -4415,6 +4415,52 @@ mod kittest_suite {
     }
 
     #[test]
+    fn editor_wheel_scroll_mode_pans_instead_of_zooming() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        for _ in 0..8 {
+            editor_zoom_in_once(&mut harness);
+        }
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let base_view = harness.state().tabs[tab_idx].samples_len / 2;
+        assert!(harness.state_mut().test_set_tab_view_offset(base_view));
+        harness.state_mut().test_set_editor_pref_wheel_scrolls(true);
+        harness.run_steps(1);
+        let spp_before = harness
+            .state()
+            .test_tab_samples_per_px()
+            .expect("samples_per_px before");
+        editor_plain_vertical_wheel_once(&mut harness);
+        let spp_after = harness
+            .state()
+            .test_tab_samples_per_px()
+            .expect("samples_per_px after");
+        assert!(
+            (spp_after - spp_before).abs() < 1e-6,
+            "plain wheel must not zoom in scroll mode: before={spp_before} after={spp_after}"
+        );
+        let view_after = harness
+            .state()
+            .test_tab_view_offset()
+            .expect("view offset after");
+        assert_ne!(
+            view_after, base_view,
+            "plain wheel should pan the view in scroll mode"
+        );
+        // Ctrl/Cmd+wheel still zooms in scroll mode.
+        editor_zoom_in_once(&mut harness);
+        let spp_zoomed = harness
+            .state()
+            .test_tab_samples_per_px()
+            .expect("samples_per_px zoomed");
+        assert!(
+            spp_zoomed < spp_after,
+            "ctrl+wheel should keep zooming in scroll mode: after={spp_after} zoomed={spp_zoomed}"
+        );
+    }
+
+    #[test]
     fn editor_shift_pan_inversion_pref_roundtrip() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);

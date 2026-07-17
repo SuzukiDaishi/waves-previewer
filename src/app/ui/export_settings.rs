@@ -418,6 +418,21 @@ impl crate::app::WavesPreviewer {
                                 self.invert_shift_wheel_pan = invert_shift_pan;
                                 self.save_prefs();
                             }
+                            let mut wheel_scrolls = self.editor_wheel_scrolls;
+                            if ui
+                                .checkbox(
+                                    &mut wheel_scrolls,
+                                    "Wheel scrolls the view (Ctrl+wheel zooms)",
+                                )
+                                .on_hover_text(
+                                    "Off: wheel zooms (current default). On: a plain wheel pans \
+                                     horizontally and zooming needs Ctrl+wheel or a pinch gesture.",
+                                )
+                                .changed()
+                            {
+                                self.editor_wheel_scrolls = wheel_scrolls;
+                                self.save_prefs();
+                            }
                             ui.horizontal_wrapped(|ui| {
                                 ui.label("Zoom Anchor:");
                                 let mut next_anchor = self.horizontal_zoom_anchor_mode;

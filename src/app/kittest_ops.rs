@@ -1617,6 +1617,14 @@ impl super::WavesPreviewer {
         self.invert_shift_wheel_pan = enabled;
     }
 
+    pub fn test_editor_pref_wheel_scrolls(&self) -> bool {
+        self.editor_wheel_scrolls
+    }
+
+    pub fn test_set_editor_pref_wheel_scrolls(&mut self, enabled: bool) {
+        self.editor_wheel_scrolls = enabled;
+    }
+
     pub fn test_editor_pref_horizontal_zoom_anchor(&self) -> &'static str {
         match self.horizontal_zoom_anchor_mode {
             crate::app::types::EditorHorizontalZoomAnchorMode::Pointer => "pointer",

@@ -4224,8 +4224,12 @@ impl crate::app::WavesPreviewer {
                 } else {
                     None
                 };
-                // Zoom: plain wheel (unless Shift is held for pan) or gesture zoom.
-                if (((scroll_y.abs() > 0.0) && !modifiers.shift && !horizontal_wheel_pan)
+                // Zoom: plain wheel (unless Shift is held for pan, or the user
+                // prefers wheel-scrolls mode) or gesture zoom (Ctrl+wheel/pinch).
+                if (((scroll_y.abs() > 0.0)
+                    && !modifiers.shift
+                    && !horizontal_wheel_pan
+                    && !self.editor_wheel_scrolls)
                     || zoom_factor_from_input.is_some())
                     && display_samples_len > 0
                 {
@@ -4269,6 +4273,22 @@ impl crate::app::WavesPreviewer {
                     let next_exact =
                         Self::editor_exact_view_for_anchor(anchor, t, wave_w, tab.samples_per_px);
                     Self::editor_set_view_offset_exact(tab, next_exact, geom2.max_left());
+                }
+                // Wheel-scrolls mode: a plain vertical wheel pans the view
+                // horizontally (wheel up = view left, matching Shift+wheel).
+                if self.editor_wheel_scrolls
+                    && scroll_y.abs() > 0.0
+                    && !modifiers.shift
+                    && !horizontal_wheel_pan
+                    && zoom_factor_from_input.is_none()
+                    && display_samples_len > 0
+                {
+                    let vis = (wave_w * tab.samples_per_px).ceil() as usize;
+                    let max_left = display_samples_len.saturating_sub(vis);
+                    let next_exact =
+                        tab.view_offset_exact + (-scroll_y * tab.samples_per_px) as f64;
+                    Self::editor_set_view_offset_exact(tab, next_exact, max_left);
+                    ctx.request_repaint();
                 }
                 // Pan with trackpad horizontal wheel, or Shift + wheel for mouse wheels.
                 if horizontal_wheel_pan && display_samples_len > 0 {

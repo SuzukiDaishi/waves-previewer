@@ -694,6 +694,8 @@ pub struct WavesPreviewer {
     editor_play_selection_state: Option<(usize, usize)>,
     invert_wave_zoom_wheel: bool,
     invert_shift_wheel_pan: bool,
+    // When on, a plain wheel scrolls the view horizontally and Ctrl+wheel zooms.
+    editor_wheel_scrolls: bool,
     horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode,
     editor_pause_resume_mode: EditorPauseResumeMode,
     // processing mode
