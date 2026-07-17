@@ -379,6 +379,24 @@ impl super::WavesPreviewer {
                     if keymap::consume(ctx, Action::EditorZoomToSelection) {
                         self.editor_zoom_to_selection(tab_idx);
                     }
+                    // `=` shares the physical key with `+` on many layouts, so
+                    // accept it as an unshifted zoom-in fallback.
+                    if keymap::consume(ctx, Action::EditorZoomIn)
+                        || ctx.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Equals)
+                        })
+                    {
+                        self.editor_zoom_step_at_playhead(tab_idx, true);
+                    }
+                    if keymap::consume(ctx, Action::EditorZoomOut) {
+                        self.editor_zoom_step_at_playhead(tab_idx, false);
+                    }
+                    if keymap::consume(ctx, Action::EditorViewPageBack) {
+                        self.editor_view_page(tab_idx, false);
+                    }
+                    if keymap::consume(ctx, Action::EditorViewPageForward) {
+                        self.editor_view_page(tab_idx, true);
+                    }
                     let has_preview = self
                         .tabs
                         .get(tab_idx)

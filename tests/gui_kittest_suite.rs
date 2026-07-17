@@ -4415,6 +4415,61 @@ mod kittest_suite {
     }
 
     #[test]
+    fn editor_zoom_and_page_keys_navigate_view() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let spp_start = harness
+            .state()
+            .test_tab_samples_per_px()
+            .expect("spp start");
+        harness.key_press(Key::Plus);
+        harness.run_steps(3);
+        let spp_in = harness.state().test_tab_samples_per_px().expect("spp in");
+        assert!(
+            spp_in < spp_start,
+            "+ should zoom in: start={spp_start} in={spp_in}"
+        );
+        // `=` shares the physical key with `+` and must act as zoom-in too.
+        harness.key_press(Key::Equals);
+        harness.run_steps(3);
+        let spp_eq = harness
+            .state()
+            .test_tab_samples_per_px()
+            .expect("spp equals");
+        assert!(spp_eq < spp_in, "= should also zoom in: in={spp_in} eq={spp_eq}");
+        harness.key_press(Key::Minus);
+        harness.run_steps(3);
+        let spp_out = harness.state().test_tab_samples_per_px().expect("spp out");
+        assert!(spp_out > spp_eq, "- should zoom out: eq={spp_eq} out={spp_out}");
+        // Page keys shift the view one visible width at a time.
+        for _ in 0..8 {
+            harness.key_press(Key::Plus);
+            harness.run_steps(1);
+        }
+        harness.run_steps(2);
+        assert!(harness.state_mut().test_set_tab_view_offset(0));
+        harness.run_steps(1);
+        harness.key_press(Key::CloseBracket);
+        harness.run_steps(3);
+        let after_fwd = harness
+            .state()
+            .test_tab_view_offset()
+            .expect("view offset forward");
+        assert!(after_fwd > 0, "] should page the view forward");
+        harness.key_press(Key::OpenBracket);
+        harness.run_steps(3);
+        let after_back = harness
+            .state()
+            .test_tab_view_offset()
+            .expect("view offset back");
+        assert!(
+            after_back < after_fwd,
+            "[ should page the view back: fwd={after_fwd} back={after_back}"
+        );
+    }
+
+    #[test]
     fn editor_wheel_scroll_mode_pans_instead_of_zooming() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);

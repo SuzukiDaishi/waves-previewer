@@ -410,6 +410,82 @@ impl crate::app::WavesPreviewer {
         Self::invalidate_editor_viewport_cache(tab);
     }
 
+    /// Keyboard zoom step (+/- keys) using the same 0.9/1.1 factor as the
+    /// wheel, anchored on the playhead so the position under it stays put.
+    pub(in crate::app) fn editor_zoom_step_at_playhead(&mut self, tab_idx: usize, zoom_in: bool) {
+        let pos_audio = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let Some(tab_ro) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let playhead_display = self.map_audio_to_display_sample(tab_ro, pos_audio);
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        let wave_w = tab.last_wave_w;
+        if wave_w <= 0.0 {
+            return;
+        }
+        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
+            tab.samples_len_visual
+        } else {
+            tab.samples_len
+        };
+        if display_samples_len == 0 {
+            return;
+        }
+        let factor = if zoom_in { 0.9 } else { 1.1 };
+        let old_spp = tab.samples_per_px.max(0.0001);
+        // wave_left only offsets both sides of the ratio computation, so an
+        // origin of 0 is fine outside the paint pass.
+        let (anchor, t) = Self::editor_zoom_anchor(
+            EditorHorizontalZoomAnchorMode::Playhead,
+            tab,
+            display_samples_len,
+            0.0,
+            wave_w,
+            None,
+            playhead_display,
+        );
+        let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
+        let max_spp_fit = (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
+        let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
+        tab.samples_per_px = new_spp;
+        let vis = ((wave_w * new_spp).ceil()).max(1.0) as usize;
+        let max_left = display_samples_len.saturating_sub(vis);
+        let next_exact = Self::editor_exact_view_for_anchor(anchor, t, wave_w, new_spp);
+        Self::editor_set_view_offset_exact(tab, next_exact, max_left);
+        Self::invalidate_editor_viewport_cache(tab);
+    }
+
+    /// Shift the view one visible page back/forward ([ / ] keys).
+    pub(in crate::app) fn editor_view_page(&mut self, tab_idx: usize, forward: bool) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        let wave_w = tab.last_wave_w;
+        if wave_w <= 0.0 {
+            return;
+        }
+        let display_samples_len = if tab.loading && tab.samples_len_visual > 0 {
+            tab.samples_len_visual
+        } else {
+            tab.samples_len
+        };
+        if display_samples_len == 0 {
+            return;
+        }
+        let vis = ((wave_w * tab.samples_per_px.max(0.0001)).ceil()).max(1.0) as usize;
+        let max_left = display_samples_len.saturating_sub(vis);
+        let step = if forward { vis as f64 } else { -(vis as f64) };
+        let next_exact = tab.view_offset_exact + step;
+        Self::editor_set_view_offset_exact(tab, next_exact, max_left);
+        Self::invalidate_editor_viewport_cache(tab);
+    }
+
     fn editor_selection_anchor_or(tab: &EditorTab, fallback: usize) -> usize {
         tab.selection_anchor_sample
             .or_else(|| tab.selection.map(|(a, b)| a.min(b)))
