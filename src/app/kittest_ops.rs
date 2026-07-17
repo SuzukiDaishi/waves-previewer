@@ -50,6 +50,18 @@ impl super::WavesPreviewer {
         self.show_plugin_manager = open;
     }
 
+    pub fn test_list_select_all(&mut self) {
+        self.list_select_all();
+    }
+
+    pub fn test_list_clear_selection(&mut self) {
+        self.list_clear_selection();
+    }
+
+    pub fn test_row_secondary_click(&mut self, row_idx: usize) {
+        self.handle_row_secondary_click(row_idx, egui::Modifiers::NONE);
+    }
+
     pub fn test_set_theme_light(&mut self, light: bool) {
         self.theme_mode = if light {
             crate::app::types::ThemeMode::Light

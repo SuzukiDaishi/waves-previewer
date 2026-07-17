@@ -322,6 +322,24 @@ impl WavesPreviewer {
             .collect()
     }
 
+    /// Select every visible row (multi-selection over the filtered list).
+    pub(super) fn list_select_all(&mut self) {
+        self.selected_multi.clear();
+        for row in 0..self.files.len() {
+            self.selected_multi.insert(row);
+        }
+        if self.selected.is_none() && !self.files.is_empty() {
+            self.selected = Some(0);
+        }
+        self.select_anchor = self.selected;
+    }
+
+    /// Drop the multi-selection (the focused row stays).
+    pub(super) fn list_clear_selection(&mut self) {
+        self.selected_multi.clear();
+        self.select_anchor = None;
+    }
+
     pub(super) fn selected_real_paths(&self) -> Vec<PathBuf> {
         self.selected_paths()
             .into_iter()
