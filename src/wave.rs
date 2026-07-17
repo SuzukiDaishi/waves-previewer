@@ -1564,7 +1564,7 @@ pub fn process_pitchshift_offline(
     out_sr: u32,
     semitones: f32,
 ) -> Vec<f32> {
-    let resampled = resample_linear(mono, in_sr, out_sr);
+    let resampled = resample_quality(mono, in_sr, out_sr, ResampleQuality::Good);
     if resampled.is_empty() {
         return Vec::new();
     }
@@ -1597,7 +1597,7 @@ pub fn process_pitchshift_offline(
 // Heavy offline: time-stretch preserving pitch
 pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: f32) -> Vec<f32> {
     let rate = rate.clamp(0.25, 4.0);
-    let resampled = resample_linear(mono, in_sr, out_sr);
+    let resampled = resample_quality(mono, in_sr, out_sr, ResampleQuality::Good);
     if resampled.is_empty() {
         return Vec::new();
     }
@@ -2452,10 +2452,7 @@ fn resample_channels(chans: &[Vec<f32>], in_sr: u32, out_sr: u32) -> Vec<Vec<f32
     if in_sr == out_sr {
         return chans.to_vec();
     }
-    chans
-        .iter()
-        .map(|c| resample_linear(c, in_sr, out_sr))
-        .collect()
+    resample_channels_quality(chans, in_sr, out_sr, ResampleQuality::Good)
 }
 
 fn encode_ogg_vorbis(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
@@ -3197,11 +3194,14 @@ fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
     if in_sr == 48_000 {
         return (chans.to_vec(), in_sr);
     }
-    let mut out = Vec::with_capacity(chans.len());
-    for ch in chans {
-        out.push(resample_linear(ch, in_sr, 48_000));
-    }
-    (out, 48_000)
+    // Fast windowed-sinc: the metadata pool runs this per file, and BS.1770's
+    // K-weighted gating is insensitive to the last dB of stop-band rejection,
+    // but linear interpolation's rolloff/imaging measurably skewed LUFS for
+    // high-sample-rate sources.
+    (
+        resample_channels_quality(chans, in_sr, 48_000, ResampleQuality::Fast),
+        48_000,
+    )
 }
 
 fn block_means_power(power: &[f32], win: usize, hop: usize) -> Vec<f64> {
