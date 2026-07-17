@@ -160,13 +160,49 @@ impl crate::app::WavesPreviewer {
                                         .small(),
                                 );
                             });
+                            ui.horizontal(|ui| {
+                                ui.label("Dither (16-bit export):");
+                                let mode = &mut self.export_cfg.codec.dither_mode;
+                                egui::ComboBox::new("export_dither_mode", "")
+                                    .selected_text(match mode {
+                                        crate::wave::DitherMode::Off => "Off",
+                                        crate::wave::DitherMode::Tpdf => "TPDF",
+                                        crate::wave::DitherMode::TpdfNoiseShaped => {
+                                            "TPDF + noise shaping"
+                                        }
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for (value, label) in [
+                                            (crate::wave::DitherMode::Off, "Off"),
+                                            (crate::wave::DitherMode::Tpdf, "TPDF"),
+                                            (
+                                                crate::wave::DitherMode::TpdfNoiseShaped,
+                                                "TPDF + noise shaping",
+                                            ),
+                                        ] {
+                                            if ui
+                                                .selectable_value(mode, value, label)
+                                                .changed()
+                                            {
+                                                codec_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.label(
+                                RichText::new(
+                                    "TPDF decorrelates 16-bit quantization error; noise shaping                                      additionally pushes the noise out of the most audible band                                      (2nd-order highpass).",
+                                )
+                                .weak()
+                                .small(),
+                            );
                             if ui
                                 .checkbox(
-                                    &mut self.export_cfg.codec.dither_16bit,
-                                    "TPDF dither on 16-bit export",
+                                    &mut self.export_cfg.codec.dither_24bit,
+                                    "Also dither 24-bit exports",
                                 )
                                 .on_hover_text(
-                                    "Adds triangular dither when quantizing to 16-bit integer                                      PCM (WAV/AIFF/FLAC). Decorrelates quantization error at                                      the cost of a very low noise floor.",
+                                    "Apply the same dither mode when quantizing to 24-bit integer                                      PCM. Usually unnecessary: the 24-bit floor is below any                                      analog chain.",
                                 )
                                 .changed()
                             {

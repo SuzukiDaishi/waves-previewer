@@ -595,7 +595,19 @@ impl WavesPreviewer {
                     self.loudnorm_dialog_target = v.clamp(-36.0, 0.0);
                 }
             } else if let Some(rest) = line.strip_prefix("export_dither=") {
-                self.export_cfg.codec.dither_16bit =
+                // Legacy boolean key (pre dither-mode): on -> flat TPDF.
+                self.export_cfg.codec.dither_mode =
+                    if matches!(rest.trim(), "1" | "true" | "yes" | "on") {
+                        crate::wave::DitherMode::Tpdf
+                    } else {
+                        crate::wave::DitherMode::Off
+                    };
+            } else if let Some(rest) = line.strip_prefix("export_dither_mode=") {
+                if let Some(mode) = crate::wave::DitherMode::from_prefs_name(rest) {
+                    self.export_cfg.codec.dither_mode = mode;
+                }
+            } else if let Some(rest) = line.strip_prefix("export_dither_24bit=") {
+                self.export_cfg.codec.dither_24bit =
                     matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("recent_session=") {
                 let raw = rest.trim().trim_matches('"');
@@ -850,6 +862,8 @@ export_mp3_kbps={}\n\
 export_aac_kbps={}\n\
 export_ogg_quality={:.2}\n\
 export_dither={}\n\
+export_dither_mode={}\n\
+export_dither_24bit={}\n\
 zoo_enabled={}\n\
 zoo_walk_enabled={}\n\
 zoo_voice_enabled={}\n\
@@ -923,7 +937,14 @@ zoo_flip_manual={}\n",
             self.export_cfg.codec.mp3_bitrate_kbps,
             self.export_cfg.codec.aac_bitrate_kbps,
             self.export_cfg.codec.ogg_quality,
-            if self.export_cfg.codec.dither_16bit { "1" } else { "0" },
+            // Legacy boolean kept for older builds reading the same prefs.
+            if self.export_cfg.codec.dither_mode != crate::wave::DitherMode::Off {
+                "1"
+            } else {
+                "0"
+            },
+            self.export_cfg.codec.dither_mode.prefs_name(),
+            if self.export_cfg.codec.dither_24bit { "1" } else { "0" },
             zoo_enabled,
             zoo_walk_enabled,
             zoo_voice_enabled,

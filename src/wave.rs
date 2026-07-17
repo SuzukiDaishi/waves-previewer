@@ -110,14 +110,6 @@ impl TpdfDither {
         Self { state: seed | 1 }
     }
 
-    /// Create a generator only when 16-bit dithering is enabled in the
-    /// current codec export options.
-    pub fn for_16bit_export() -> Option<Self> {
-        codec_export_options()
-            .dither_16bit
-            .then(|| Self::new(Self::DEFAULT_SEED))
-    }
-
     #[inline]
     fn next_uniform(&mut self) -> f32 {
         self.state = self
@@ -134,15 +126,105 @@ impl TpdfDither {
     }
 }
 
-/// 16-bit quantization with optional TPDF dither (in LSB units at the
-/// 32768 scale). `None` falls back to plain symmetric rounding.
-#[inline]
-pub fn f32_to_i16_dithered(v: f32, dither: &mut Option<TpdfDither>) -> i16 {
-    match dither {
-        Some(d) => (v * 32768.0 + d.next())
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16,
-        None => f32_to_i16_sym(v),
+/// How float samples are dithered when quantizing to integer PCM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DitherMode {
+    /// Plain rounding (bit-exact, correlated quantization error).
+    Off,
+    /// Flat TPDF dither: +/-1 LSB triangular noise before rounding.
+    Tpdf,
+    /// TPDF dither plus 2nd-order error-feedback noise shaping
+    /// (NTF = (1 - z^-1)^2): pushes quantization noise out of the low band
+    /// where hearing is most sensitive, at the cost of more HF noise.
+    TpdfNoiseShaped,
+}
+
+impl DitherMode {
+    pub fn prefs_name(self) -> &'static str {
+        match self {
+            DitherMode::Off => "off",
+            DitherMode::Tpdf => "tpdf",
+            DitherMode::TpdfNoiseShaped => "tpdf_ns",
+        }
+    }
+
+    pub fn from_prefs_name(s: &str) -> Option<DitherMode> {
+        match s.trim() {
+            "off" => Some(DitherMode::Off),
+            "tpdf" => Some(DitherMode::Tpdf),
+            "tpdf_ns" => Some(DitherMode::TpdfNoiseShaped),
+            _ => None,
+        }
+    }
+}
+
+/// Integer quantizer shared by every PCM export path (WAV/AIFF/FLAC/format
+/// converter). Callers keep their historical scale/clamp conventions by
+/// passing them in; the quantizer adds dither and (optionally) per-channel
+/// 2nd-order error-feedback noise shaping on top. Deterministic for a given
+/// construction, so FLAC's MD5 and encode passes can replay the sequence.
+pub struct Quantizer {
+    scale: f64,
+    min: f64,
+    max: f64,
+    mode: DitherMode,
+    rng: TpdfDither,
+    /// Per-channel (e[n-1], e[n-2]) error history for noise shaping. The
+    /// interleaved writers index this by channel so each channel's error
+    /// filter sees its own past, not its neighbor's.
+    err: Vec<(f64, f64)>,
+}
+
+impl Quantizer {
+    pub fn new(scale: f64, min: f64, max: f64, channels: usize, mode: DitherMode) -> Self {
+        Self {
+            scale,
+            min,
+            max,
+            mode,
+            rng: TpdfDither::new(TpdfDither::DEFAULT_SEED),
+            err: vec![(0.0, 0.0); channels.max(1)],
+        }
+    }
+
+    /// Effective dither mode for an integer export at `bits`, from the
+    /// current codec export options (16-bit uses `dither_mode`; 24-bit only
+    /// dithers when `dither_24bit` is also set; anything wider is Off).
+    pub fn export_mode_for_bits(bits: u32) -> DitherMode {
+        let opts = codec_export_options();
+        if bits <= 16 {
+            opts.dither_mode
+        } else if bits <= 24 && opts.dither_24bit {
+            opts.dither_mode
+        } else {
+            DitherMode::Off
+        }
+    }
+
+    /// Quantize one sample of channel `ch` to an integer code. `v` is in
+    /// [-1, 1] (callers pre-clamp as they historically did).
+    #[inline]
+    pub fn quantize(&mut self, ch: usize, v: f32) -> i32 {
+        let x = f64::from(v) * self.scale;
+        match self.mode {
+            DitherMode::Off => x.round().clamp(self.min, self.max) as i32,
+            DitherMode::Tpdf => (x + f64::from(self.rng.next()))
+                .round()
+                .clamp(self.min, self.max) as i32,
+            DitherMode::TpdfNoiseShaped => {
+                let slot = ch.min(self.err.len() - 1);
+                let (e1, e2) = self.err[slot];
+                // Error feedback for NTF (1 - z^-1)^2: with q = u + e and
+                // u = x - 2 e[n-1] + e[n-2], the output error becomes
+                // e - 2 e[n-1] + e[n-2] (2nd-order highpass).
+                let u = x - 2.0 * e1 + e2;
+                let q = (u + f64::from(self.rng.next()))
+                    .round()
+                    .clamp(self.min, self.max);
+                self.err[slot] = (q - u, e1);
+                q as i32
+            }
+        }
     }
 }
 
@@ -212,10 +294,22 @@ fn write_wav_range_with_depth(
         },
     };
     let mut writer = hound::WavWriter::create(dst, spec)?;
-    let mut dither = if matches!(depth, WavBitDepth::Pcm16) {
-        TpdfDither::for_16bit_export()
-    } else {
-        None
+    let mut quant = match depth {
+        WavBitDepth::Pcm16 => Quantizer::new(
+            32768.0,
+            i16::MIN as f64,
+            i16::MAX as f64,
+            ch as usize,
+            Quantizer::export_mode_for_bits(16),
+        ),
+        WavBitDepth::Pcm24 => Quantizer::new(
+            8_388_607.0,
+            -8_388_607.0,
+            8_388_607.0,
+            ch as usize,
+            Quantizer::export_mode_for_bits(24),
+        ),
+        WavBitDepth::Float32 => Quantizer::new(1.0, -1.0, 1.0, 1, DitherMode::Off),
     };
     for i in s..e {
         for ci in 0..(ch as usize) {
@@ -227,12 +321,10 @@ fn write_wav_range_with_depth(
                 .clamp(-1.0, 1.0);
             match depth {
                 WavBitDepth::Pcm16 => {
-                    writer.write_sample::<i16>(f32_to_i16_dithered(v, &mut dither))?;
+                    writer.write_sample::<i16>(quant.quantize(ci, v) as i16)?;
                 }
                 WavBitDepth::Pcm24 => {
-                    let max_abs = 8_388_607.0f32;
-                    let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
-                    writer.write_sample::<i32>(q)?;
+                    writer.write_sample::<i32>(quant.quantize(ci, v))?;
                 }
                 WavBitDepth::Float32 => {
                     writer.write_sample::<f32>(v)?;
@@ -297,10 +389,22 @@ fn write_aiff_with_depth(
     let sound_len = frames * channels * bytes_per_sample;
 
     let mut sound: Vec<u8> = Vec::with_capacity(sound_len);
-    let mut dither = if matches!(depth, WavBitDepth::Pcm16) {
-        TpdfDither::for_16bit_export()
-    } else {
-        None
+    let mut quant = match depth {
+        WavBitDepth::Pcm16 => Quantizer::new(
+            32768.0,
+            i16::MIN as f64,
+            i16::MAX as f64,
+            channels,
+            Quantizer::export_mode_for_bits(16),
+        ),
+        WavBitDepth::Pcm24 => Quantizer::new(
+            8_388_607.0,
+            -8_388_607.0,
+            8_388_607.0,
+            channels,
+            Quantizer::export_mode_for_bits(24),
+        ),
+        WavBitDepth::Float32 => Quantizer::new(1.0, -1.0, 1.0, 1, DitherMode::Off),
     };
     for i in 0..frames {
         for ci in 0..channels {
@@ -312,12 +416,11 @@ fn write_aiff_with_depth(
                 .clamp(-1.0, 1.0);
             match depth {
                 WavBitDepth::Pcm16 => {
-                    let q = f32_to_i16_dithered(v, &mut dither);
+                    let q = quant.quantize(ci, v) as i16;
                     sound.extend_from_slice(&q.to_be_bytes());
                 }
                 WavBitDepth::Pcm24 => {
-                    let max_abs = 8_388_607.0f32;
-                    let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
+                    let q = quant.quantize(ci, v);
                     sound.extend_from_slice(&q.to_be_bytes()[1..4]);
                 }
                 WavBitDepth::Float32 => {
@@ -2162,19 +2265,17 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
             // Symmetric scaling: -1.0 -> -2^(bits-1), +1.0 clamps to
             // 2^(bits-1) - 1. f64 keeps 32-bit quantization exact.
             let scale = (1u64 << (spec.bits_per_sample - 1)) as f64;
-            let mut dither = if spec.bits_per_sample <= 16 {
-                TpdfDither::for_16bit_export()
-            } else {
-                None
-            };
+            let mut quant = Quantizer::new(
+                scale,
+                -scale,
+                scale - 1.0,
+                spec.channels as usize,
+                Quantizer::export_mode_for_bits(spec.bits_per_sample as u32),
+            );
             for i in 0..frames {
                 for ch in 0..(spec.channels as usize) {
                     let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
-                    let noise = dither.as_mut().map(|d| f64::from(d.next())).unwrap_or(0.0);
-                    let v = (s as f64 * scale + noise)
-                        .round()
-                        .clamp(-scale, scale - 1.0) as i32;
-                    writer.write_sample::<i32>(v)?;
+                    writer.write_sample::<i32>(quant.quantize(ch, s))?;
                 }
             }
         }
@@ -2255,9 +2356,12 @@ pub struct CodecExportOptions {
     pub aac_bitrate_kbps: u32,
     /// Vorbis perceptual quality in [-0.2, 1.0].
     pub ogg_quality: f32,
-    /// TPDF dither when quantizing to 16-bit integer PCM (WAV/AIFF/FLAC/
-    /// export-gain writer). Float and 24-bit paths are never dithered.
-    pub dither_16bit: bool,
+    /// Dither applied when quantizing to 16-bit integer PCM (WAV/AIFF/FLAC/
+    /// export-gain writer). Float paths are never dithered.
+    pub dither_mode: DitherMode,
+    /// Also dither 24-bit integer exports (same mode). Off by default: at
+    /// 24-bit the quantization floor is already below any analog chain.
+    pub dither_24bit: bool,
 }
 
 impl Default for CodecExportOptions {
@@ -2266,7 +2370,8 @@ impl Default for CodecExportOptions {
             mp3_bitrate_kbps: 192,
             aac_bitrate_kbps: 192,
             ogg_quality: 0.5,
-            dither_16bit: true,
+            dither_mode: DitherMode::Tpdf,
+            dither_24bit: false,
         }
     }
 }
@@ -2429,11 +2534,15 @@ fn encode_flac(
     // Both passes below must produce bit-identical samples (the pass-1 MD5 is
     // stored in STREAMINFO), so each pass creates its own generator from the
     // same seed and walks the samples in the same order.
-    let dither_flac = bits_per_sample <= 16 && codec_export_options().dither_16bit;
-    let quantize = |v: f32, dither: &mut Option<TpdfDither>| -> i32 {
-        let v = v.clamp(-1.0, 1.0);
-        let noise = dither.as_mut().map(|d| d.next()).unwrap_or(0.0);
-        (v * max_abs + noise).round().clamp(-max_abs, max_abs) as i32
+    let flac_dither_mode = Quantizer::export_mode_for_bits(bits_per_sample as u32);
+    let make_quantizer = || {
+        Quantizer::new(
+            f64::from(max_abs),
+            f64::from(-max_abs),
+            f64::from(max_abs),
+            channels,
+            flac_dither_mode,
+        )
     };
     let config = flacenc::config::Encoder::default()
         .into_verified()
@@ -2447,10 +2556,10 @@ fn encode_flac(
     // few cheap ops per sample — negligible next to FLAC's LPC/Rice coding —
     // and this keeps peak RAM bounded by one block regardless of clip length.
     let mut md5 = <md5::Md5 as md5::Digest>::new();
-    let mut md5_dither = dither_flac.then(|| TpdfDither::new(TpdfDither::DEFAULT_SEED));
+    let mut md5_quant = make_quantizer();
     for i in 0..frames {
-        for ch in chans {
-            let q = quantize(ch.get(i).copied().unwrap_or(0.0), &mut md5_dither);
+        for (ci, ch) in chans.iter().enumerate() {
+            let q = md5_quant.quantize(ci, ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0));
             md5::Digest::update(&mut md5, &q.to_le_bytes()[0..bytes_per_sample]);
         }
     }
@@ -2472,16 +2581,16 @@ fn encode_flac(
     let mut block_scratch: Vec<i32> = Vec::with_capacity(block_size * channels);
     let mut pos = 0usize;
     let mut frame_number = 0usize;
-    let mut encode_dither = dither_flac.then(|| TpdfDither::new(TpdfDither::DEFAULT_SEED));
+    let mut encode_quant = make_quantizer();
     while pos < frames {
         let this_block = (frames - pos).min(block_size);
         block_scratch.clear();
         for i in pos..pos + this_block {
-            for ch in chans {
-                block_scratch.push(quantize(
-                    ch.get(i).copied().unwrap_or(0.0),
-                    &mut encode_dither,
-                ));
+            for (ci, ch) in chans.iter().enumerate() {
+                block_scratch.push(
+                    encode_quant
+                        .quantize(ci, ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0)),
+                );
             }
         }
         let mut framebuf = flacenc::source::FrameBuf::with_size(channels, this_block)
