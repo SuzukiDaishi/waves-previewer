@@ -1402,6 +1402,9 @@ pub struct EditorTab {
     // Transient drag state for spectral selection: (lane index, anchor Hz)
     pub freq_selection_drag: Option<(usize, f32)>,
     pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
+    /// Labeled [start, end) ranges (buffer sample space). Undo-snapshotted
+    /// and remapped by destructive edits alongside the markers.
+    pub regions: Vec<crate::markers::RegionEntry>,
     pub markers_saved: Vec<MarkerEntry>,   // last saved markers
     pub markers_committed: Vec<MarkerEntry>, // New field
     pub markers_applied: Vec<MarkerEntry>, // last applied markers
@@ -1583,6 +1586,7 @@ impl EditorTab {
             freq_selection: None,
             freq_selection_drag: None,
             markers: Vec::new(),
+            regions: Vec::new(),
             markers_committed: Vec::new(),
             markers_saved: Vec::new(),
             markers_applied: Vec::new(),
@@ -2195,6 +2199,7 @@ pub struct EditorUndoState {
     pub dirty: bool,
     pub approx_bytes: usize,
     pub markers: Vec<MarkerEntry>,
+    pub regions: Vec<crate::markers::RegionEntry>,
     pub markers_committed: Vec<MarkerEntry>,
     pub markers_applied: Vec<MarkerEntry>,
     pub loop_region_applied: Option<(usize, usize)>,
@@ -2215,6 +2220,7 @@ pub struct CachedEdit {
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
     pub markers: Vec<MarkerEntry>,
+    pub regions: Vec<crate::markers::RegionEntry>,
     pub markers_saved: Vec<MarkerEntry>,
     pub markers_committed: Vec<MarkerEntry>,
     pub markers_applied: Vec<MarkerEntry>,

@@ -544,6 +544,7 @@ impl WavesPreviewer {
         self.ui_shortcuts_window(ctx);
         self.ui_keymap_window(ctx);
         self.ui_undo_history_window(ctx);
+        self.ui_regions_window(ctx);
         self.ui_plugin_manager_window(ctx);
         self.ui_duplicates_window(ctx);
         self.ui_engine_export_dialog(ctx);

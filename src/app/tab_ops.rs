@@ -55,6 +55,7 @@ impl super::WavesPreviewer {
                 tab.loading_waveform_minmax = cached_loading_overview;
                 tab.dirty = cached.dirty;
                 tab.markers = cached.markers;
+                tab.regions = cached.regions;
                 tab.markers_committed = cached.markers_committed;
                 tab.markers_saved = cached.markers_saved;
                 tab.markers_applied = cached.markers_applied;
@@ -186,6 +187,7 @@ impl super::WavesPreviewer {
             tab.loading_waveform_minmax = cached_loading_overview;
             tab.dirty = cached.dirty;
             tab.markers = cached.markers;
+            tab.regions = cached.regions;
             tab.markers_committed = cached.markers_committed;
             tab.markers_saved = cached.markers_saved;
             tab.markers_applied = cached.markers_applied;

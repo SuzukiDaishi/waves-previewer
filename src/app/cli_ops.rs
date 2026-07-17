@@ -2793,6 +2793,7 @@ fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<Proj
         selection: None,
         cursor_sample: None,
         markers: Vec::new(),
+        regions: Vec::new(),
         markers_dirty: false,
         loop_markers_dirty: false,
         fade_in_range: None,

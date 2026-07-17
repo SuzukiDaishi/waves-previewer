@@ -8,6 +8,7 @@ use super::external_ops;
 use super::project::{
     describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
+    project_region_to_entry, region_entry_to_project,
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
     project_music_analysis_to_draft, project_plugin_fx_draft_from_draft,
     project_plugin_fx_draft_to_draft, project_spectrogram_from_cfg, project_tab_from_tab,
@@ -721,6 +722,7 @@ impl super::WavesPreviewer {
                 loop_markers_saved: cached.loop_markers_saved.map(|v| [v.0, v.1]),
                 loop_markers_dirty: cached.loop_markers_dirty,
                 markers: cached.markers.iter().map(marker_entry_to_project).collect(),
+                regions: cached.regions.iter().map(region_entry_to_project).collect(),
                 markers_saved: cached
                     .markers_saved
                     .iter()
@@ -1370,6 +1372,11 @@ impl super::WavesPreviewer {
                     loop_markers_saved: edit.loop_markers_saved.map(|v| (v[0], v[1])),
                     loop_markers_dirty: edit.loop_markers_dirty,
                     markers: edit.markers.iter().map(project_marker_to_entry).collect(),
+                    regions: edit
+                        .regions
+                        .iter()
+                        .map(project_region_to_entry)
+                        .collect(),
                     markers_committed: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_applied: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_saved: edit
@@ -1447,6 +1454,7 @@ impl super::WavesPreviewer {
                         loop_markers_saved: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_markers_dirty: tab.loop_markers_dirty,
                         markers: tab.markers.iter().map(project_marker_to_entry).collect(),
+                        regions: tab.regions.iter().map(project_region_to_entry).collect(),
                         markers_committed: tab
                             .markers
                             .iter()

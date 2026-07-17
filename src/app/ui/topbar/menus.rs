@@ -58,6 +58,14 @@ impl WavesPreviewer {
                 self.show_undo_history_window = true;
                 ui.close();
             }
+            if ui
+                .button("Regions...")
+                .on_hover_text("Labeled ranges of the active editor tab")
+                .clicked()
+            {
+                self.show_regions_window = true;
+                ui.close();
+            }
         });
     }
 

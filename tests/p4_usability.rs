@@ -275,6 +275,61 @@ mod p4_usability {
     }
 
     #[test]
+    fn regions_add_remap_on_trim_and_undo() {
+        let (mut harness, dir) = harness_with_files("regions", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        let len = {
+            let idx = harness.state().active_tab.unwrap();
+            harness.state().tabs[idx].samples_len
+        };
+        // Region over the middle half of the file.
+        {
+            let idx = harness.state().active_tab.unwrap();
+            harness.state_mut().tabs[idx].selection = Some((len / 4, 3 * len / 4));
+        }
+        assert!(harness.state_mut().test_add_region_from_selection());
+        assert_eq!(
+            harness.state().test_regions(),
+            vec![(len / 4, 3 * len / 4, "R01".to_string())]
+        );
+        // Trim to the middle 80%: the region shifts left and clamps.
+        let (ts, te) = (len / 10, len * 9 / 10);
+        {
+            let idx = harness.state().active_tab.unwrap();
+            harness.state_mut().tabs[idx].selection = Some((ts, te));
+        }
+        assert!(harness.state_mut().test_apply_trim_frac(0.1, 0.9));
+        harness.run_steps(2);
+        let regions = harness.state().test_regions();
+        assert_eq!(regions.len(), 1);
+        let (rs, re, _) = &regions[0];
+        assert!(
+            (*rs as i64 - (len / 4 - ts) as i64).abs() <= 2,
+            "region start should shift by the trim offset: {rs}"
+        );
+        assert!(*re > *rs);
+        // Undo restores the pre-trim coordinates (and the pre-add state
+        // after a second undo).
+        assert!(harness.state_mut().test_trigger_undo_redo(false));
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_regions(),
+            vec![(len / 4, 3 * len / 4, "R01".to_string())]
+        );
+        assert!(harness.state_mut().test_trigger_undo_redo(false));
+        harness.run_steps(2);
+        assert!(harness.state().test_regions().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();

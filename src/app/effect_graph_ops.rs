@@ -1609,6 +1609,28 @@ fn remap_range(
     }
 }
 
+fn remap_regions(
+    regions: &[crate::markers::RegionEntry],
+    old_len: usize,
+    new_len: usize,
+) -> Vec<crate::markers::RegionEntry> {
+    if old_len == 0 || new_len == 0 {
+        return Vec::new();
+    }
+    let ratio = new_len as f64 / old_len as f64;
+    let mut out: Vec<crate::markers::RegionEntry> = regions
+        .iter()
+        .map(|r| crate::markers::RegionEntry {
+            start: ((r.start as f64) * ratio).round().max(0.0) as usize,
+            end: (((r.end as f64) * ratio).round().max(0.0) as usize).min(new_len),
+            label: r.label.clone(),
+        })
+        .filter(|r| r.end > r.start)
+        .collect();
+    out.sort_by_key(|r| (r.start, r.end));
+    out
+}
+
 fn remap_markers(markers: &[MarkerEntry], old_len: usize, new_len: usize) -> Vec<MarkerEntry> {
     markers
         .iter()
@@ -5064,6 +5086,7 @@ impl WavesPreviewer {
                 loop_markers_saved: tab.loop_markers_saved,
                 loop_markers_dirty: tab.loop_markers_dirty,
                 markers: tab.markers.clone(),
+                regions: tab.regions.clone(),
                 markers_saved: tab.markers_saved.clone(),
                 markers_committed: tab.markers_committed.clone(),
                 markers_applied: tab.markers_applied.clone(),
@@ -5110,6 +5133,7 @@ impl WavesPreviewer {
                 loop_markers_saved: remap_range(existing.loop_markers_saved, old_len, new_len),
                 loop_markers_dirty: existing.loop_markers_dirty,
                 markers: remap_markers(&existing.markers, old_len, new_len),
+                regions: remap_regions(&existing.regions, old_len, new_len),
                 markers_saved: remap_markers(&existing.markers_saved, old_len, new_len),
                 markers_committed: remap_markers(&existing.markers_committed, old_len, new_len),
                 markers_applied: remap_markers(&existing.markers_applied, old_len, new_len),
@@ -5151,6 +5175,7 @@ impl WavesPreviewer {
                 loop_markers_saved: None,
                 loop_markers_dirty: false,
                 markers: Vec::new(),
+                regions: Vec::new(),
                 markers_saved: Vec::new(),
                 markers_committed: Vec::new(),
                 markers_applied: Vec::new(),

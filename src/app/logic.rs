@@ -1112,6 +1112,7 @@ impl super::WavesPreviewer {
                     loop_markers_saved: tab.loop_markers_saved,
                     loop_markers_dirty: tab.loop_markers_dirty,
                     markers: tab.markers.clone(),
+                    regions: tab.regions.clone(),
                     markers_committed: tab.markers_committed.clone(),
                     markers_saved: tab.markers_saved.clone(),
                     markers_applied: tab.markers_applied.clone(),
@@ -1789,6 +1790,20 @@ impl super::WavesPreviewer {
                 tab.markers_saved.clear();
                 tab.markers_applied.clear();
                 tab.markers_dirty = false;
+            }
+        }
+        match crate::markers::read_regions(path, out_sr, file_sr) {
+            Ok(mut regions) => {
+                for r in regions.iter_mut() {
+                    r.end = r.end.min(tab.samples_len);
+                    r.start = r.start.min(r.end);
+                }
+                regions.retain(|r| r.end > r.start);
+                tab.regions = regions;
+            }
+            Err(err) => {
+                eprintln!("read regions failed {}: {err:?}", path.display());
+                tab.regions.clear();
             }
         }
     }

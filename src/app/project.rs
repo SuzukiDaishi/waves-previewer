@@ -121,6 +121,8 @@ pub struct ProjectEdit {
     pub loop_markers_saved: Option<[usize; 2]>,
     pub loop_markers_dirty: bool,
     pub markers: Vec<ProjectMarker>,
+    #[serde(default)]
+    pub regions: Vec<ProjectRegion>,
     pub markers_saved: Vec<ProjectMarker>,
     pub markers_dirty: bool,
     pub trim_range: Option<[usize; 2]>,
@@ -342,6 +344,8 @@ pub struct ProjectTab {
     #[serde(default)]
     pub cursor_sample: Option<usize>,
     pub markers: Vec<ProjectMarker>,
+    #[serde(default)]
+    pub regions: Vec<ProjectRegion>,
     pub markers_dirty: bool,
     pub loop_markers_dirty: bool,
     pub fade_in_range: Option<[usize; 2]>,
@@ -499,6 +503,29 @@ pub struct ProjectChannelView {
 pub struct ProjectMarker {
     pub sample: usize,
     pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectRegion {
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+}
+
+pub fn project_region_to_entry(r: &ProjectRegion) -> crate::markers::RegionEntry {
+    crate::markers::RegionEntry {
+        start: r.start,
+        end: r.end,
+        label: r.label.clone(),
+    }
+}
+
+pub fn region_entry_to_project(r: &crate::markers::RegionEntry) -> ProjectRegion {
+    ProjectRegion {
+        start: r.start,
+        end: r.end,
+        label: r.label.clone(),
+    }
 }
 
 fn component_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
@@ -909,6 +936,7 @@ pub fn project_tab_from_tab(
                 label: m.label.clone(),
             })
             .collect(),
+        regions: tab.regions.iter().map(region_entry_to_project).collect(),
         markers_dirty: tab.markers_dirty,
         loop_markers_dirty: tab.loop_markers_dirty,
         fade_in_range: tab.fade_in_range.map(|(a, b)| [a, b]),

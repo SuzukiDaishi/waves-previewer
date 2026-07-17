@@ -784,6 +784,7 @@ pub struct WavesPreviewer {
     show_shortcuts_window: bool,
     show_keymap_window: bool,
     show_undo_history_window: bool,
+    show_regions_window: bool,
     // User chord overrides for Table-dispatched actions (persisted in prefs).
     keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
     // Row currently waiting for a key press in the rebinding window.
@@ -2549,6 +2550,7 @@ impl WavesPreviewer {
             dirty: tab.dirty,
             approx_bytes,
             markers: tab.markers.clone(),
+            regions: tab.regions.clone(),
             markers_committed: tab.markers_committed.clone(),
             markers_applied: tab.markers_applied.clone(),
             loop_region_applied: tab.loop_region_applied,
@@ -2650,6 +2652,7 @@ impl WavesPreviewer {
             tab.plugin_fx_draft = state.plugin_fx_draft;
             tab.show_waveform_overlay = state.show_waveform_overlay;
             tab.markers = state.markers;
+            tab.regions = state.regions;
             tab.markers_committed = state.markers_committed;
             tab.markers_applied = state.markers_applied;
             tab.loop_region_applied = state.loop_region_applied;

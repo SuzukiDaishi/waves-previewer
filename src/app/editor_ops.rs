@@ -359,6 +359,13 @@ impl crate::app::WavesPreviewer {
                 None
             };
         }
+        // Regions clamp to the buffer; emptied ones disappear (mirrors how
+        // markers/ranges behave after shrinking edits).
+        for r in tab.regions.iter_mut() {
+            r.start = r.start.min(len);
+            r.end = r.end.min(len);
+        }
+        tab.regions.retain(|r| r.end > r.start);
         clamp_range(&mut tab.ab_loop);
         clamp_range(&mut tab.loop_region);
         clamp_range(&mut tab.trim_range);
@@ -481,6 +488,14 @@ impl crate::app::WavesPreviewer {
             shift_markers(&mut tab.markers);
             shift_markers(&mut tab.markers_committed);
             shift_markers(&mut tab.markers_applied);
+            for r in tab.regions.iter_mut() {
+                if r.start >= pos {
+                    r.start += ins_len;
+                }
+                if r.end >= pos {
+                    r.end += ins_len;
+                }
+            }
             let shift_range = |range: &mut Option<(usize, usize)>| {
                 if let Some((a, b)) = range.as_mut() {
                     if *a >= pos {
@@ -1321,6 +1336,19 @@ impl crate::app::WavesPreviewer {
             tab.markers = remap_trim_markers(&tab.markers);
             tab.markers_committed = remap_trim_markers(&tab.markers_committed);
             tab.markers_applied = remap_trim_markers(&tab.markers_applied);
+            tab.regions = tab
+                .regions
+                .iter()
+                .filter_map(|r| {
+                    let rs = r.start.max(s).min(e);
+                    let re = r.end.max(s).min(e);
+                    (re > rs).then(|| crate::markers::RegionEntry {
+                        start: rs - s,
+                        end: re - s,
+                        label: r.label.clone(),
+                    })
+                })
+                .collect();
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
@@ -1392,6 +1420,26 @@ impl crate::app::WavesPreviewer {
             tab.markers = remap_markers(&tab.markers);
             tab.markers_committed = remap_markers(&tab.markers_committed);
             tab.markers_applied = remap_markers(&tab.markers_applied);
+            tab.regions = {
+                let mut out = Vec::new();
+                let mut offset = 0usize;
+                for &(s, e) in &ranges {
+                    for r in &tab.regions {
+                        let rs = r.start.max(s).min(e);
+                        let re = r.end.max(s).min(e);
+                        if re > rs {
+                            out.push(crate::markers::RegionEntry {
+                                start: offset + (rs - s),
+                                end: offset + (re - s),
+                                label: r.label.clone(),
+                            });
+                        }
+                    }
+                    offset += e - s;
+                }
+                out.sort_by_key(|r| (r.start, r.end));
+                out
+            };
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
