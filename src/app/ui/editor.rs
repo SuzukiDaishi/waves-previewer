@@ -11549,6 +11549,100 @@ impl crate::app::WavesPreviewer {
                                         .color(Color32::from_rgb(255, 176, 64)),
                                     );
                                 }
+                                // Aperiodicity (breathiness): per-frame multiplier
+                                // draft baked in at resynthesis (bands clamp 0..1).
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Aperiodicity");
+                                    let mut ap = self.world_ap_slider;
+                                    if !ap.is_finite() || ap < 0.0 {
+                                        ap = 1.0;
+                                    }
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut ap, 0.0..=2.0)
+                                                .fixed_decimals(2)
+                                                .suffix("x"),
+                                        )
+                                        .on_hover_text(
+                                            "Multiplier for the noise (breath) component: 0 = fully voiced/buzzy, >1 = breathier. Set All / Set Selection writes it into the per-frame draft.",
+                                        )
+                                        .changed()
+                                    {
+                                        self.world_ap_slider = ap;
+                                    }
+                                    let frames = data.frames;
+                                    let frame_step = data.frame_step.max(1);
+                                    let mut ensure_draft =
+                                        |tab: &mut EditorTab| {
+                                            let stale = tab
+                                                .world_ap_draft
+                                                .as_ref()
+                                                .map(|d| d.source_frames != frames)
+                                                .unwrap_or(true);
+                                            if stale {
+                                                tab.world_ap_draft =
+                                                    Some(crate::app::types::WorldApDraft {
+                                                        values: vec![1.0; frames],
+                                                        source_frames: frames,
+                                                        dirty: false,
+                                                    });
+                                            }
+                                        };
+                                    if ui.small_button("Set All").clicked() && frames > 0 {
+                                        ensure_draft(tab);
+                                        if let Some(draft) = tab.world_ap_draft.as_mut() {
+                                            for v in draft.values.iter_mut() {
+                                                *v = ap;
+                                            }
+                                            draft.dirty =
+                                                draft.values.iter().any(|v| (*v - 1.0).abs() >= 1e-3);
+                                        }
+                                    }
+                                    let sel_frames = tab.selection.map(|(s, e)| {
+                                        (s / frame_step, (e / frame_step).max(s / frame_step + 1))
+                                    });
+                                    if ui
+                                        .add_enabled(
+                                            sel_frames.is_some() && frames > 0,
+                                            egui::Button::new("Set Selection").small(),
+                                        )
+                                        .clicked()
+                                    {
+                                        if let Some((fs, fe)) = sel_frames {
+                                            ensure_draft(tab);
+                                            if let Some(draft) = tab.world_ap_draft.as_mut() {
+                                                for v in draft
+                                                    .values
+                                                    .iter_mut()
+                                                    .take(fe.min(frames))
+                                                    .skip(fs.min(frames))
+                                                {
+                                                    *v = ap;
+                                                }
+                                                draft.dirty = draft
+                                                    .values
+                                                    .iter()
+                                                    .any(|v| (*v - 1.0).abs() >= 1e-3);
+                                            }
+                                        }
+                                    }
+                                    if ui.small_button("Reset").clicked() {
+                                        tab.world_ap_draft = None;
+                                    }
+                                });
+                                if tab
+                                    .world_ap_draft
+                                    .as_ref()
+                                    .map(|d| d.dirty)
+                                    .unwrap_or(false)
+                                {
+                                    ui.label(
+                                        RichText::new(
+                                            "Aperiodicity edit applies on Resynthesize",
+                                        )
+                                        .color(Color32::from_rgb(255, 176, 64)),
+                                    );
+                                }
                                 let can_resynth = data.frames > 0
                                     && data.aperiodicity.len() == data.frames * data.bins;
                                 let resynth = ui

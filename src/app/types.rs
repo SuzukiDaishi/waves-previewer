@@ -1333,6 +1333,16 @@ pub struct MiniMeterState {
     pub active: bool,           // decay animation still in motion
 }
 
+/// WORLD aperiodicity edit draft: a per-frame multiplier applied to every
+/// band of that frame at resynthesis (result clamped into 0..1). Transient
+/// like the F0 draft; reset after apply / re-analysis.
+#[derive(Clone, Debug, Default)]
+pub struct WorldApDraft {
+    pub values: Vec<f32>,
+    pub source_frames: usize,
+    pub dirty: bool,
+}
+
 /// Per-tab draft for editing the WORLD F0 trajectory before resynthesis.
 /// `values` mirrors `WorldFeatureData::f0_values` (0.0 = unvoiced).
 #[derive(Clone, Debug, Default)]
@@ -1465,6 +1475,7 @@ pub struct EditorTab {
     pub loop_detect_state: Option<LoopDetectState>,
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
     pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
+    pub world_ap_draft: Option<WorldApDraft>, // WORLD aperiodicity draft (transient)
     pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
     pub world_formant_ratio: f32, // WORLD resynthesis: spectral-envelope warp (1.0 = off)
     // --- Gain automation curve (DAW-style breakpoint envelope, transient) ---
@@ -1648,6 +1659,7 @@ impl EditorTab {
             loop_detect_state: None,
             mini_meter: crate::app::types::MiniMeterState::default(),
             world_f0_draft: None,
+            world_ap_draft: None,
             world_f0_focus: false,
             world_formant_ratio: 1.0,
             gain_env_enabled: false,

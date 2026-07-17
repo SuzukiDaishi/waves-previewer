@@ -787,6 +787,8 @@ pub struct WavesPreviewer {
     show_regions_window: bool,
     // Alt+drag scrub: saved loop/transport state while active.
     scrub_state: Option<crate::app::types::ScrubState>,
+    // UI scratch for the WORLD aperiodicity multiplier slider.
+    world_ap_slider: f32,
     // User chord overrides for Table-dispatched actions (persisted in prefs).
     keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
     // Row currently waiting for a key press in the rebinding window.

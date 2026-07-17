@@ -139,12 +139,54 @@ impl super::WavesPreviewer {
     /// the busy overlay + cancel, engine buffer swap, and cache
     /// invalidation; the resynthesized mono is written to every channel
     /// so the tab keeps its channel count.
+    /// Multiply every band of frame `f` by `mult[f]`, clamping into 0..1.
+    pub(super) fn world_ap_apply(
+        aperiodicity: &[f32],
+        frames: usize,
+        bins: usize,
+        mult: &[f32],
+    ) -> Vec<f32> {
+        let mut out = aperiodicity.to_vec();
+        for f in 0..frames.min(mult.len()) {
+            let m = mult[f].max(0.0);
+            for b in 0..bins {
+                let idx = f * bins + b;
+                if let Some(v) = out.get_mut(idx) {
+                    *v = (*v * m).clamp(0.0, 1.0);
+                }
+            }
+        }
+        out
+    }
+
+    /// Linear resample of a per-frame scalar curve onto a new frame count
+    /// (used when resynthesis re-analyzes at the fine 5 ms grid).
+    pub(super) fn resample_scalar_curve(values: &[f32], dst_frames: usize) -> Vec<f32> {
+        if values.is_empty() || dst_frames == 0 {
+            return vec![1.0; dst_frames];
+        }
+        if values.len() == 1 {
+            return vec![values[0]; dst_frames];
+        }
+        (0..dst_frames)
+            .map(|i| {
+                let t = i as f64 / (dst_frames - 1).max(1) as f64
+                    * (values.len() - 1) as f64;
+                let lo = t.floor() as usize;
+                let hi = (lo + 1).min(values.len() - 1);
+                let frac = (t - lo as f64) as f32;
+                values[lo] * (1.0 - frac) + values[hi] * frac
+            })
+            .collect()
+    }
+
     pub(super) fn spawn_world_resynth_for_tab(&mut self, tab_idx: usize) {
         if self.editor_apply_state.is_some() {
             return;
         }
         let key;
         let f0;
+        let ap_mult: Option<Vec<f32>>;
         let out_len;
         let n_ch;
         let frame_period_ms;
@@ -177,6 +219,11 @@ impl super::WavesPreviewer {
                 .filter(|draft| draft.source_frames == data.frames)
                 .map(|draft| draft.values.clone())
                 .unwrap_or_else(|| data.f0_values.clone());
+            ap_mult = tab
+                .world_ap_draft
+                .as_ref()
+                .filter(|draft| draft.dirty && draft.source_frames == data.frames)
+                .map(|draft| draft.values.clone());
             out_len = tab.samples_len.max(1);
             n_ch = tab.ch_samples.len().max(1);
             frame_period_ms =
@@ -215,6 +262,7 @@ impl super::WavesPreviewer {
         // follows the apply yields a fresh curve to edit.
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.world_f0_draft = None;
+            tab.world_ap_draft = None;
             // The warp bakes into the new baseline audio.
             tab.world_formant_ratio = 1.0;
         }
@@ -254,10 +302,17 @@ impl super::WavesPreviewer {
                 } else {
                     fine.envelope_db.clone()
                 };
+                let ap = match &ap_mult {
+                    Some(mult) => {
+                        let fine_mult = Self::resample_scalar_curve(mult, fine.frames);
+                        Self::world_ap_apply(&fine.aperiodicity, fine.frames, fine.bins, &fine_mult)
+                    }
+                    None => fine.aperiodicity.clone(),
+                };
                 crate::app::render::world_features::synthesize_world(
                     &fine_f0,
                     &env,
-                    &fine.aperiodicity,
+                    &ap,
                     fine.bins,
                     fine.fft_size,
                     data.sample_rate,
@@ -270,10 +325,16 @@ impl super::WavesPreviewer {
                 } else {
                     data.env_db.clone()
                 };
+                let ap = match &ap_mult {
+                    Some(mult) => {
+                        Self::world_ap_apply(&data.aperiodicity, data.frames, data.bins, mult)
+                    }
+                    None => data.aperiodicity.clone(),
+                };
                 crate::app::render::world_features::synthesize_world(
                     &f0,
                     &env,
-                    &data.aperiodicity,
+                    &ap,
                     data.bins,
                     data.fft_size,
                     data.sample_rate,
@@ -386,6 +447,39 @@ impl super::WavesPreviewer {
         }
         draft.last_drag_frame = Some((frame, freq));
         draft.dirty = true;
+    }
+}
+
+#[cfg(test)]
+mod ap_edit_tests {
+    use crate::app::WavesPreviewer;
+
+    #[test]
+    fn identity_multiplier_passes_through() {
+        let ap = vec![0.3f32; 4 * 8];
+        let out = WavesPreviewer::world_ap_apply(&ap, 4, 8, &[1.0; 4]);
+        assert_eq!(out, ap);
+    }
+
+    #[test]
+    fn per_frame_multiplier_scales_and_clamps() {
+        let ap = vec![0.6f32; 3 * 4];
+        let out = WavesPreviewer::world_ap_apply(&ap, 3, 4, &[0.0, 0.5, 2.0]);
+        assert!(out[0..4].iter().all(|v| *v == 0.0), "frame 0 zeroed");
+        assert!(out[4..8].iter().all(|v| (*v - 0.3).abs() < 1e-6), "frame 1 halved");
+        assert!(out[8..12].iter().all(|v| *v == 1.0), "frame 2 clamps at 1.0");
+    }
+
+    #[test]
+    fn scalar_curve_resamples_linearly() {
+        let out = WavesPreviewer::resample_scalar_curve(&[0.0, 1.0], 5);
+        assert_eq!(out.len(), 5);
+        assert!((out[0] - 0.0).abs() < 1e-6);
+        assert!((out[2] - 0.5).abs() < 1e-6);
+        assert!((out[4] - 1.0).abs() < 1e-6);
+        // Degenerate inputs stay safe.
+        assert_eq!(WavesPreviewer::resample_scalar_curve(&[], 3), vec![1.0; 3]);
+        assert_eq!(WavesPreviewer::resample_scalar_curve(&[0.7], 3), vec![0.7; 3]);
     }
 }
 
