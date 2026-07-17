@@ -214,11 +214,68 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    /// First-run empty state: no folder open and nothing loaded. Shows a
+    /// centered onboarding panel instead of an empty table. Returns true
+    /// when the panel was rendered (the table is skipped).
+    fn ui_list_empty_state(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.root.is_some() || !self.items.is_empty() {
+            return false;
+        }
+        let mut open_folder = false;
+        let mut open_session: Option<PathBuf> = None;
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.25);
+            ui.heading("NeoWaves");
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "Open a folder of audio files, or drop files / folders anywhere in this window.",
+                )
+                .weak(),
+            );
+            ui.add_space(12.0);
+            if ui.button("Open Folder...").clicked() {
+                open_folder = true;
+            }
+            let recents = self.recent_session_paths_for_menu();
+            if !recents.is_empty() {
+                ui.add_space(16.0);
+                ui.label(egui::RichText::new("Recent sessions").strong());
+                for path in recents.iter().take(5) {
+                    let name = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("session.nwsess");
+                    if ui
+                        .link(name)
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                    {
+                        open_session = Some(path.clone());
+                    }
+                }
+            }
+        });
+        if open_folder {
+            if let Some(dir) = self.pick_folder_dialog() {
+                self.root = Some(dir);
+                self.rescan();
+            }
+        }
+        if let Some(path) = open_session {
+            self.queue_project_open(path);
+        }
+        true
+    }
+
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
             amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
             highlight_text_job_with_regex,
         };
+        if self.ui_list_empty_state(ui) {
+            return;
+        }
         let cols = self.list_columns;
         // Compile the search highlight regex once per frame instead of per row.
         let highlight_re = self.cached_highlight_regex();

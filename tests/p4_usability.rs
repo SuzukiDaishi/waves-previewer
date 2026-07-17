@@ -3,7 +3,7 @@ mod p4_usability {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use egui_kittest::Harness;
+    use egui_kittest::{kittest::Queryable, Harness};
     use neowaves::kittest::harness_with_startup;
     use neowaves::{StartupConfig, WavesPreviewer};
 
@@ -56,6 +56,24 @@ mod p4_usability {
         let mut harness = harness_with_startup(cfg);
         wait_until(&mut harness, "scan", |h| h.state().files.len() >= n);
         (harness, dir)
+    }
+
+    #[test]
+    fn empty_state_panel_shows_without_folder_and_hides_with_files() {
+        // No folder, no items: onboarding panel with the Open Folder button.
+        let mut harness = harness_with_startup(StartupConfig::default());
+        harness.run_steps(3);
+        let _ = harness.get_by_label("Open Folder...");
+        let _ = harness.get_by_label("NeoWaves");
+
+        // With a folder loaded the panel disappears (table renders instead).
+        let (mut harness, dir) = harness_with_files("emptystate", 1);
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label("Open Folder...").is_none(),
+            "onboarding panel must hide once files are loaded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
