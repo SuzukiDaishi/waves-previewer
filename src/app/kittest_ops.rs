@@ -324,6 +324,36 @@ impl super::WavesPreviewer {
         self.editor_apply_state.is_some()
     }
 
+    /// Mirror of the modal busy overlay's block condition.
+    pub fn test_busy_overlay_blocking(&self) -> bool {
+        self.busy_overlay_blocking()
+    }
+
+    /// Close a tab immediately (test-only, no dirty prompt), mimicking the
+    /// index bookkeeping of the interactive close path.
+    pub fn test_force_close_tab(&mut self, tab_idx: usize) -> bool {
+        if tab_idx >= self.tabs.len() {
+            return false;
+        }
+        self.tabs.remove(tab_idx);
+        self.active_tab = match self.active_tab {
+            Some(idx) if idx == tab_idx => {
+                if self.tabs.is_empty() {
+                    None
+                } else {
+                    Some(idx.min(self.tabs.len() - 1))
+                }
+            }
+            Some(idx) if idx > tab_idx => Some(idx - 1),
+            other => other,
+        };
+        true
+    }
+
+    pub fn test_tab_id(&self, tab_idx: usize) -> Option<u64> {
+        self.tabs.get(tab_idx).map(|t| t.tab_id)
+    }
+
     /// WORLD feature analysis result for the active tab, if cached:
     /// (frames, envelope bins, voiced ratio).
     pub fn test_world_features_ready(&self) -> Option<(usize, usize, f32)> {

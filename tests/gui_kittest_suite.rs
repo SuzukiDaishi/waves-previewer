@@ -1478,8 +1478,9 @@ mod kittest_suite {
         wait_for_scan(&mut harness);
         wait_for_tab(&mut harness);
 
-        let tool_nodes: Vec<_> = harness.query_all_by_label("Tool").collect();
-        assert!(!tool_nodes.is_empty(), "Inspector tool row not found");
+        // The tool picker is an icon toolbar; the Loop Edit icon is its anchor.
+        let tool_nodes: Vec<_> = harness.query_all_by_label("🔁").collect();
+        assert!(!tool_nodes.is_empty(), "Inspector tool toolbar not found");
 
         assert!(harness.state_mut().test_set_active_tool(ToolKind::Reverse));
         harness.run_steps(1);
@@ -1545,7 +1546,7 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         harness.run_steps(3);
         let range_before = first_label_rect(&harness, "Range: -");
-        let tool_before = first_label_rect(&harness, "Tool");
+        let tool_before = first_label_rect(&harness, "🔁");
 
         assert!(harness
             .state_mut()
@@ -1559,7 +1560,7 @@ mod kittest_suite {
         );
         assert_rect_nearly_same(
             tool_before,
-            first_label_rect(&harness, "Tool"),
+            first_label_rect(&harness, "🔁"),
             "tool picker",
         );
         harness.state_mut().test_clear_mock_processing();

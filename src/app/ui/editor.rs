@@ -2964,8 +2964,14 @@ impl crate::app::WavesPreviewer {
         let virtual_trim_busy = virtual_trim_status.is_some();
         let overlay_busy =
             self.current_tab_preview_busy(tab_idx) || self.music_preview_state.is_some();
-        let apply_busy =
-            self.editor_apply_state.is_some() || plugin_apply_busy || virtual_trim_busy;
+        // Heavy applies gate only the tab they target; other tabs stay live.
+        let this_tab_id = self.tabs.get(tab_idx).map(|t| t.tab_id);
+        let editor_apply_busy_here = self
+            .editor_apply_state
+            .as_ref()
+            .map(|s| Some(s.tab_id) == this_tab_id)
+            .unwrap_or(false);
+        let apply_busy = editor_apply_busy_here || plugin_apply_busy || virtual_trim_busy;
         let mut pending_overlay_job: Option<(ToolKind, f32, Option<(usize, usize)>)> = None;
         let mut pending_overlay_path: Option<(ToolKind, PathBuf, f32, Option<(usize, usize)>)> =
             None;
@@ -2999,7 +3005,11 @@ impl crate::app::WavesPreviewer {
             .unwrap_or(0.0);
         let apply_msg = if let Some((msg, progress)) = virtual_trim_status.as_ref() {
             Some(format!("{msg} {:.0}%", progress * 100.0))
-        } else if let Some(state) = self.editor_apply_state.as_ref() {
+        } else if let Some(state) = self
+            .editor_apply_state
+            .as_ref()
+            .filter(|s| Some(s.tab_id) == this_tab_id)
+        {
             Some(state.msg.clone())
         } else if plugin_apply_busy {
             Some("Applying Plugin FX...".to_string())
@@ -11694,17 +11704,17 @@ impl crate::app::WavesPreviewer {
         }
         if request_undo {
             self.clear_preview_if_any(tab_idx);
-            self.editor_apply_state = None;
+            self.cancel_editor_apply_for_tab(tab_idx);
             self.undo_in_tab(tab_idx);
         }
         if request_redo {
             self.clear_preview_if_any(tab_idx);
-            self.editor_apply_state = None;
+            self.cancel_editor_apply_for_tab(tab_idx);
             self.redo_in_tab(tab_idx);
         }
         if request_clear_edit {
             self.clear_preview_if_any(tab_idx);
-            self.editor_apply_state = None;
+            self.cancel_editor_apply_for_tab(tab_idx);
             self.clear_edit_in_tab(tab_idx);
         }
         if let Some((s, e)) = do_set_loop_from {

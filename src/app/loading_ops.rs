@@ -161,19 +161,24 @@ impl super::WavesPreviewer {
         }
     }
 
-    pub(super) fn ui_busy_overlay(&mut self, ctx: &egui::Context) {
+    /// Whether the modal input-blocking overlay is up. Editor applies are
+    /// intentionally NOT included: they run per-tab (topbar activity +
+    /// in-tab banner) and must not modal-block the whole app.
+    pub(super) fn busy_overlay_blocking(&self) -> bool {
         let bulk_blocking = self
             .bulk_resample_state
             .as_ref()
             .map(|s| s.started_at.elapsed().as_secs() >= BULK_RESAMPLE_BLOCK_SECS)
             .unwrap_or(false);
-        let block_busy = self.export_state.is_some()
-            || self.editor_apply_state.is_some()
+        self.export_state.is_some()
             || self.csv_export_state.is_some()
             || self.session_save_state.is_some()
             || self.clipboard_prep_state.is_some()
-            || bulk_blocking;
-        if !block_busy {
+            || bulk_blocking
+    }
+
+    pub(super) fn ui_busy_overlay(&mut self, ctx: &egui::Context) {
+        if !self.busy_overlay_blocking() {
             return;
         }
         // Block input and show a modal spinner for operations that must not be interrupted.
@@ -198,8 +203,6 @@ impl super::WavesPreviewer {
                         ui.add(egui::Spinner::new());
                         let msg = if let Some(p) = &self.processing {
                             p.msg.as_str()
-                        } else if let Some(st) = &self.editor_apply_state {
-                            st.msg.as_str()
                         } else if let Some(st) = &self.export_state {
                             st.msg.as_str()
                         } else if let Some(st) = &self.session_save_state {
@@ -214,11 +217,6 @@ impl super::WavesPreviewer {
                             "Working..."
                         };
                         ui.label(RichText::new(msg).strong());
-                        if self.editor_apply_state.is_some() {
-                            if ui.button("Cancel").clicked() {
-                                self.cancel_editor_apply();
-                            }
-                        }
                         if let Some(state) = &mut self.bulk_resample_state {
                             let total = state.targets.len().max(1);
                             let pct = (state.index as f32 / total as f32).clamp(0.0, 1.0);

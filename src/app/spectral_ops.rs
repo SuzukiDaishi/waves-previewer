@@ -858,8 +858,15 @@ impl crate::app::WavesPreviewer {
         let points = tab.spectral_warp_points.clone();
         let time_radius_ms = tab.tool_state.warp_time_radius_ms.max(1.0);
         let freq_radius_hz = tab.tool_state.warp_freq_radius_hz.max(1.0);
-        self.editor_apply_state = None;
-        self.audio.stop();
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.spectral_warp_points.clear();
             tab.spectral_warp_drag = None;
@@ -878,7 +885,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                tab_idx,
                 samples: mono,
                 channels: out,
                 channels_arc,
@@ -891,7 +897,7 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg: "Applying Spectral Warp...".to_string(),
             rx,
-            tab_idx,
+            tab_id: apply_tab_id,
             undo,
         });
     }
@@ -984,8 +990,15 @@ impl crate::app::WavesPreviewer {
         let channels = tab.ch_samples.clone();
         let sr = tab.buffer_sample_rate.max(1);
         let stamps = tab.spectral_brush_stamps.clone();
-        self.editor_apply_state = None;
-        self.audio.stop();
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.spectral_brush_stamps.clear();
             tab.spectral_brush_last = None;
@@ -1004,7 +1017,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                tab_idx,
                 samples: mono,
                 channels: out,
                 channels_arc,
@@ -1017,7 +1029,7 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg: "Applying Spectral Brush...".to_string(),
             rx,
-            tab_idx,
+            tab_id: apply_tab_id,
             undo,
         });
     }
@@ -1188,8 +1200,15 @@ impl crate::app::WavesPreviewer {
         let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
         let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
         let range = Self::editor_valid_selection(tab);
-        self.editor_apply_state = None;
-        self.audio.stop();
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.preview_audio_tool = None;
             tab.preview_overlay = None;
@@ -1204,7 +1223,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                tab_idx,
                 samples: mono,
                 channels: out,
                 channels_arc,
@@ -1217,7 +1235,7 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg: "Applying De-noise...".to_string(),
             rx,
-            tab_idx,
+            tab_id: apply_tab_id,
             undo,
         });
     }
@@ -1272,8 +1290,15 @@ impl crate::app::WavesPreviewer {
         let band = tab.freq_selection;
         let undo = Some(Self::capture_undo_state(tab));
         let channels = tab.ch_samples.clone();
-        self.editor_apply_state = None;
-        self.audio.stop();
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.preview_audio_tool = None;
             tab.preview_overlay = None;
@@ -1290,7 +1315,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                tab_idx,
                 samples: mono,
                 channels: out,
                 channels_arc,
@@ -1303,7 +1327,7 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg: "Healing selection...".to_string(),
             rx,
-            tab_idx,
+            tab_id: apply_tab_id,
             undo,
         });
     }

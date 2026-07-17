@@ -2298,9 +2298,19 @@ impl crate::app::WavesPreviewer {
         }
         let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
         let undo = Some(Self::capture_undo_state(tab));
-        // Cancel any previous apply job
-        self.editor_apply_state = None;
-        self.audio.stop();
+        // Single apply slot: the UI disables further applies on the busy tab;
+        // races (hotkeys, other tabs) refuse instead of cancelling the job.
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let tab_id = tab.tab_id;
+        // Stop playback only when this tab is the audible source; playback of
+        // other tabs / list previews keeps running during the apply.
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         let ch = tab.ch_samples.clone();
         let buffer_sr = tab.buffer_sample_rate.max(1);
         let sr = self.audio.shared.out_sample_rate;
@@ -2379,7 +2389,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(EditorApplyResult {
-                tab_idx,
                 samples: mono,
                 channels: out,
                 channels_arc,
@@ -2400,27 +2409,46 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg,
             rx,
-            tab_idx,
+            tab_id,
             undo,
         });
     }
 
+    /// Cancel the pending heavy apply only when it targets `tab_idx`'s tab.
+    /// Other tabs' jobs keep running (undo/clear in one tab must not kill a
+    /// job started from another).
+    pub(super) fn cancel_editor_apply_for_tab(&mut self, tab_idx: usize) {
+        let matches_tab = self
+            .editor_apply_state
+            .as_ref()
+            .zip(self.tabs.get(tab_idx))
+            .map(|(state, tab)| state.tab_id == tab.tab_id)
+            .unwrap_or(false);
+        if matches_tab {
+            self.editor_apply_state = None;
+        }
+    }
+
     pub(super) fn drain_editor_apply_jobs(&mut self, ctx: &egui::Context) {
-        let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>)> = None;
+        let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>, u64)> = None;
         if let Some(state) = &mut self.editor_apply_state {
             if let Ok(res) = state.rx.try_recv() {
                 let undo = state.undo.take();
-                apply_done = Some((res, undo));
+                let tab_id = state.tab_id;
+                apply_done = Some((res, undo, tab_id));
             }
         }
-        if let Some((mut res, undo)) = apply_done {
+        if let Some((mut res, undo, tab_id)) = apply_done {
+            // Resolve identity -> index at completion time; the tab may have
+            // moved (another tab closed) or be gone entirely.
+            let cur_idx = self.tabs.iter().position(|t| t.tab_id == tab_id);
             let mut spectro_reset_path: Option<PathBuf> = None;
-            if res.tab_idx < self.tabs.len() {
+            if let Some(cur_idx) = cur_idx {
                 let mut applied_channels = std::mem::take(&mut res.channels);
                 if applied_channels.is_empty() && !res.samples.is_empty() {
                     applied_channels = vec![res.samples.clone()];
                 }
-                if let Some(tab) = self.tabs.get_mut(res.tab_idx) {
+                if let Some(tab) = self.tabs.get_mut(cur_idx) {
                     let old_len = tab.samples_len.max(1);
                     let old_view = tab.view_offset;
                     let old_spp = tab.samples_per_px;
@@ -2477,31 +2505,42 @@ impl crate::app::WavesPreviewer {
                 }
                 self.clear_heavy_preview_state();
                 self.clear_heavy_overlay_state();
-                self.audio.stop();
-                if let Some((path, buffer_sr, channels)) = self.tabs.get(res.tab_idx).map(|tab| {
-                    (
-                        tab.path.clone(),
-                        tab.buffer_sample_rate.max(1),
-                        tab.ch_samples.clone(),
-                    )
-                }) {
-                    self.audio.set_samples_channels(channels);
-                    self.playback_mark_buffer_source(
-                        crate::app::PlaybackSourceKind::EditorTab(path),
-                        buffer_sr,
+                // Re-target the audio engine only when this tab is what the
+                // user is hearing (or looking at); playback of another tab or
+                // a list preview must survive the apply untouched.
+                let tab_path = self.tabs.get(cur_idx).map(|t| t.path.clone());
+                let adopt_audio = self.active_tab == Some(cur_idx)
+                    || matches!(
+                        (&self.playback_session.source, &tab_path),
+                        (crate::app::PlaybackSourceKind::EditorTab(p), Some(tp)) if p == tp
                     );
-                    if let Some(tab) = self.tabs.get(res.tab_idx) {
-                        self.apply_loop_mode_for_tab(tab);
+                if adopt_audio {
+                    self.audio.stop();
+                    if let Some((path, buffer_sr, channels)) = self.tabs.get(cur_idx).map(|tab| {
+                        (
+                            tab.path.clone(),
+                            tab.buffer_sample_rate.max(1),
+                            tab.ch_samples.clone(),
+                        )
+                    }) {
+                        self.audio.set_samples_channels(channels);
+                        self.playback_mark_buffer_source(
+                            crate::app::PlaybackSourceKind::EditorTab(path),
+                            buffer_sr,
+                        );
+                        if let Some(tab) = self.tabs.get(cur_idx) {
+                            self.apply_loop_mode_for_tab(tab);
+                        }
+                    } else if !res.samples.is_empty() {
+                        self.audio.set_samples_mono(res.samples);
                     }
-                } else if !res.samples.is_empty() {
-                    self.audio.set_samples_mono(res.samples);
                 }
+                self.notify_if_tab_over_fs(cur_idx);
             }
             if let Some(path) = spectro_reset_path {
                 self.cancel_spectrogram_for_path(&path);
                 self.cancel_feature_analysis_for_path(&path);
             }
-            self.notify_if_tab_over_fs(res.tab_idx);
             self.editor_apply_state = None;
             ctx.request_repaint();
         }

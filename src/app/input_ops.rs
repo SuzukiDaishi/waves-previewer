@@ -717,7 +717,7 @@ impl super::WavesPreviewer {
         if !handled {
             if let Some(tab_idx) = self.active_tab {
                 self.clear_preview_if_any(tab_idx);
-                self.editor_apply_state = None;
+                self.cancel_editor_apply_for_tab(tab_idx);
                 let changed = if redo {
                     self.redo_in_tab(tab_idx)
                 } else {

@@ -1296,6 +1296,9 @@ pub struct WorldF0Draft {
 }
 
 pub struct EditorTab {
+    /// Stable identity across index shifts (tab close/reorder); async jobs
+    /// target tabs by id so a result never lands on the wrong tab.
+    pub tab_id: u64,
     pub path: PathBuf,
     pub display_name: String,
     pub waveform_minmax: Vec<(f32, f32)>,
@@ -1484,7 +1487,9 @@ impl EditorTab {
     /// Sites override only the fields that differ (cached restore vs
     /// fresh load) so new fields need exactly one default here.
     pub fn new_base(path: std::path::PathBuf, display_name: String) -> Self {
+        static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            tab_id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             path: path,
             display_name: display_name,
             waveform_minmax: Vec::new(),
@@ -1977,13 +1982,13 @@ pub struct SessionSaveState {
 pub struct EditorApplyState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<EditorApplyResult>,
-    #[allow(dead_code)]
-    pub tab_idx: usize,
+    /// Target tab identity; resolved back to an index on completion so a
+    /// result is discarded (not misapplied) if the tab was closed meanwhile.
+    pub tab_id: u64,
     pub undo: Option<EditorUndoState>,
 }
 
 pub struct EditorApplyResult {
-    pub tab_idx: usize,
     pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
     /// Arc mirror of `channels`, cloned on the worker so the UI thread

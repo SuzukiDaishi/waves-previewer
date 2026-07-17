@@ -198,7 +198,19 @@ impl super::WavesPreviewer {
             return;
         };
         let job_data = job_data.clone();
-        self.audio.stop();
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let Some((apply_tab_id, apply_tab_path)) =
+            self.tabs.get(tab_idx).map(|t| (t.tab_id, t.path.clone()))
+        else {
+            return;
+        };
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == apply_tab_path)
+        {
+            self.audio.stop();
+        }
         // The applied audio becomes the new baseline; the re-analysis that
         // follows the apply yields a fresh curve to edit.
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
@@ -274,7 +286,6 @@ impl super::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&channels, out_len);
             let channels_arc = std::sync::Arc::new(channels.clone());
             let _ = tx.send(EditorApplyResult {
-                tab_idx,
                 samples: mono,
                 channels,
                 channels_arc,
@@ -295,7 +306,7 @@ impl super::WavesPreviewer {
                 (false, false) => "Resynthesizing with WORLD (edited F0)".to_string(),
             },
             rx,
-            tab_idx,
+            tab_id: apply_tab_id,
             undo,
         });
     }

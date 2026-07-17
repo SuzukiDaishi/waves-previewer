@@ -201,6 +201,36 @@ mod p4_usability {
     }
 
     #[test]
+    fn heavy_apply_does_not_modal_block_and_discards_result_after_tab_close() {
+        let (mut harness, dir) = harness_with_files("nonblock", 1);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_until(&mut harness, "tab ready", |h| {
+            h.state()
+                .active_tab
+                .and_then(|i| h.state().tabs.get(i))
+                .map(|t| t.samples_len > 0)
+                .unwrap_or(false)
+        });
+        harness.run_steps(2);
+        // Kick a heavy async apply; while it runs, the modal busy overlay
+        // must stay down (the apply is per-tab, not app-blocking).
+        assert!(harness.state_mut().test_apply_time_stretch(1.5));
+        assert!(harness.state().test_editor_apply_busy());
+        assert!(
+            !harness.state().test_busy_overlay_blocking(),
+            "editor apply must not raise the modal busy overlay"
+        );
+        // Close the tab before/while the worker finishes: the result must be
+        // discarded (no panic, no resurrection of the tab or its audio).
+        assert!(harness.state_mut().test_force_close_tab(0));
+        wait_until(&mut harness, "apply state drained", |h| {
+            !h.state().test_editor_apply_busy()
+        });
+        assert!(harness.state().tabs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn right_click_inside_multi_selection_preserves_it() {
         let (mut harness, dir) = harness_with_files("rclick", 4);
         harness.state_mut().test_list_select_all();
