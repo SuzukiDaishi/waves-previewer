@@ -30,6 +30,7 @@ mod clipboard_ops;
 mod crash_report_ops;
 mod debug_ops;
 pub mod declick;
+pub mod declip;
 mod dialogs;
 mod editor_decode_ops;
 mod editor_features;

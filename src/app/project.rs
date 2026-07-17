@@ -1113,6 +1113,7 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         compressor_makeup_db: t.compressor_makeup_db,
         insert_silence_ms: 1000.0,
         invert_smooth_boundaries: false,
+        declip_sensitivity: 0.5,
     }
 }
 
@@ -1146,6 +1147,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "InsertSilence" => ToolKind::InsertSilence,
         "Pencil" => ToolKind::Pencil,
         "DeClick" => ToolKind::DeClick,
+        "DeClip" => ToolKind::DeClip,
         "DeNoise" => ToolKind::DeNoise,
         "SpectralBrush" => ToolKind::SpectralBrush,
         "PluginFx" => ToolKind::PluginFx,

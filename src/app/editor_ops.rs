@@ -943,6 +943,41 @@ impl crate::app::WavesPreviewer {
     /// Run the de-click detector over the active selection (or the whole
     /// file) and store the spans for the red marker overlay. Synchronous:
     /// the detector is O(n) with a small constant, fine for UI-thread use.
+    /// Scan for clipped (flat-at-the-rail) runs; results share the de-click
+    /// red-band overlay via `tab.declick_scan`.
+    pub(super) fn editor_declip_scan(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return;
+        }
+        let sens = tab.tool_state.declip_sensitivity.clamp(0.0, 1.0);
+        let range = Self::editor_selected_range(tab);
+        let sr = tab.buffer_sample_rate.max(1);
+        let cfg = crate::app::declip::DeclipConfig {
+            sensitivity: sens,
+            ..Default::default()
+        };
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for ch in &tab.ch_samples {
+            spans.extend(crate::app::declip::detect_clipped(ch, sr, &cfg, range));
+        }
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in spans {
+            match merged.last_mut() {
+                Some((_, pe)) if s <= *pe => *pe = (*pe).max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        tab.declick_scan = Some(crate::app::types::DeclickScan {
+            sensitivity: sens,
+            spans: merged,
+            range,
+        });
+    }
+
     pub(super) fn editor_declick_scan(&mut self, tab_idx: usize) {
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
@@ -1006,6 +1041,42 @@ impl crate::app::WavesPreviewer {
         self.spawn_editor_apply_for_tab_range(
             tab_idx,
             crate::app::types::ToolKind::DeClick,
+            sens,
+            range,
+        );
+        self.editor_apply_state.is_some()
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declip_scan(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.editor_declip_scan(tab_idx);
+        self.tabs
+            .get(tab_idx)
+            .and_then(|t| t.declick_scan.as_ref())
+            .map(|s| s.spans.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declip_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let sens = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.tool_state.declip_sensitivity)
+            .unwrap_or(0.5);
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(Self::editor_selected_range);
+        self.spawn_editor_apply_for_tab_range(
+            tab_idx,
+            crate::app::types::ToolKind::DeClip,
             sens,
             range,
         );
@@ -2366,6 +2437,17 @@ impl crate::app::WavesPreviewer {
                         out.push(processed);
                     }
                 }
+                ToolKind::DeClip => {
+                    let cfg = crate::app::declip::DeclipConfig {
+                        sensitivity: param.clamp(0.0, 1.0),
+                        ..Default::default()
+                    };
+                    for chan in ch.iter() {
+                        let (processed, _count) =
+                            crate::app::declip::declip_channel(chan, buffer_sr, &cfg, range);
+                        out.push(processed);
+                    }
+                }
                 ToolKind::Loudness => {
                     let lufs = crate::wave::lufs_integrated_from_multi(&ch, sr)
                         .unwrap_or(f32::NEG_INFINITY);
@@ -2433,6 +2515,7 @@ impl crate::app::WavesPreviewer {
             ToolKind::Speed => "Applying Speed...".to_string(),
             ToolKind::Loudness => "Applying Loudness Normalize...".to_string(),
             ToolKind::DeClick => "Removing clicks...".to_string(),
+            ToolKind::DeClip => "Repairing clipping...".to_string(),
             _ => "Applying...".to_string(),
         };
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {

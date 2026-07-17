@@ -2916,6 +2916,8 @@ impl crate::app::WavesPreviewer {
         let mut pending_spectral_brush_apply = false;
         let mut pending_declick_scan = false;
         let mut pending_declick_apply: Option<(f32, Option<(usize, usize)>)> = None;
+        let mut pending_declip_scan = false;
+        let mut pending_declip_apply: Option<(f32, Option<(usize, usize)>)> = None;
         let mut pending_denoise_learn = false;
         let mut pending_denoise_preview = false;
         let mut pending_denoise_apply = false;
@@ -7392,6 +7394,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::InsertSilence => "Insert Silence",
                                 ToolKind::Pencil => "Pencil",
                                 ToolKind::DeClick => "De-click",
+                                ToolKind::DeClip => "De-clip",
                                 ToolKind::DeNoise => "De-noise",
                                 // Spectrogram-view tools; never selectable in
                                 // the Waveform tool list.
@@ -7424,6 +7427,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::InsertSilence => "∅",
                                 ToolKind::Pencil => "✏",
                                 ToolKind::DeClick => "⚡",
+                                ToolKind::DeClip => "△",
                                 ToolKind::DeNoise => "≈",
                                 ToolKind::SpectralWarp => "🌀",
                                 ToolKind::SpectralBrush => "🖌",
@@ -7461,6 +7465,7 @@ impl crate::app::WavesPreviewer {
                                     ToolKind::InsertSilence,
                                     ToolKind::Pencil,
                                     ToolKind::DeClick,
+                                    ToolKind::DeClip,
                                     ToolKind::DeNoise,
                                 ],
                             ];
@@ -10675,6 +10680,88 @@ impl crate::app::WavesPreviewer {
                                         }
                                     });
                                 }
+                                ToolKind::DeClip => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Detect flat runs at the clipping rails and rebuild the chopped crests. Scan marks the runs in red; Apply repairs them (one undo step). The repair may exceed the rail - lower the gain afterwards if needed.",
+                                            )
+                                            .weak(),
+                                        );
+                                        let sel_range = Self::editor_selected_range(tab);
+                                        if sel_range.is_some() {
+                                            ui.label(RichText::new("Target: selection").weak());
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Target: whole file (select a range to limit)",
+                                                )
+                                                .weak(),
+                                            );
+                                        }
+                                        let mut sens = tab.tool_state.declip_sensitivity;
+                                        if !sens.is_finite() { sens = 0.5; }
+                                        ui.label("Sensitivity");
+                                        let sens_resp = ui.add(
+                                            egui::Slider::new(&mut sens, 0.0..=1.0)
+                                                .fixed_decimals(2),
+                                        )
+                                        .on_hover_text(
+                                            "Higher catches rails further below the peak (0 = only \
+                                             hard full-scale clipping)",
+                                        );
+                                        if sens_resp.changed() {
+                                            tab.tool_state = ToolState {
+                                                declip_sensitivity: sens,
+                                                ..tab.tool_state
+                                            };
+                                            // Scan results are per-sensitivity.
+                                            tab.declick_scan = None;
+                                        }
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    !apply_busy && !tab.loading,
+                                                    egui::Button::new("Scan"),
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_declip_scan = true;
+                                            }
+                                            if let Some(scan) = &tab.declick_scan {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} clipped run(s) found",
+                                                        scan.spans.len()
+                                                    ))
+                                                    .weak(),
+                                                );
+                                                if ui.button("Clear").clicked() {
+                                                    tab.declick_scan = None;
+                                                }
+                                            }
+                                        });
+                                        if apply_busy {
+                                            ui.add(egui::Spinner::new());
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !apply_busy && !tab.loading,
+                                                egui::Button::new("Apply"),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_declip_apply = Some((
+                                                tab.tool_state.declip_sensitivity,
+                                                sel_range,
+                                            ));
+                                            tab.declick_scan = None;
+                                        }
+                                    });
+                                }
                                 ToolKind::DeNoise => {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut();
@@ -11436,6 +11523,17 @@ impl crate::app::WavesPreviewer {
                     self.spawn_editor_apply_for_tab_range(
                         tab_idx,
                         ToolKind::DeClick,
+                        sens,
+                        range,
+                    );
+                }
+                if pending_declip_scan {
+                    self.editor_declip_scan(tab_idx);
+                }
+                if let Some((sens, range)) = pending_declip_apply {
+                    self.spawn_editor_apply_for_tab_range(
+                        tab_idx,
+                        ToolKind::DeClip,
                         sens,
                         range,
                     );

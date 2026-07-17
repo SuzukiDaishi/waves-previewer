@@ -207,6 +207,43 @@ mod p3_spectral_tools {
     }
 
     #[test]
+    fn declip_scan_and_apply_repairs_clipping() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("declip");
+        let src = dir.join("clipped.wav");
+        // 0.9 sine hard-clipped at 0.7: every crest is a flat rail run.
+        let mut chans = synth_sine(sr, 1.0, 220.0);
+        for v in chans[0].iter_mut() {
+            *v = (*v * 1.8).clamp(-0.7, 0.7);
+        }
+        neowaves::wave::export_channels_audio(&chans, sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let found = harness.state_mut().test_declip_scan();
+        assert!(found > 100, "scan found only {found} clipped runs");
+
+        assert!(harness.state_mut().test_declip_apply());
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        // The rebuilt crests must rise above the rail.
+        let peak_after = after[0].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            peak_after > 0.705,
+            "repair never left the 0.7 rail: {peak_after}"
+        );
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn declick_scan_and_apply_repairs_clicks() {
         let sr = 48_000u32;
         let dir = make_temp_dir("declick");
