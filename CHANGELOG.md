@@ -4,6 +4,17 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Usability Completion (P4)
+- **Non-blocking heavy applies**: pitch/stretch/speed/loudness, de-click/de-noise, spectral warp/brush/heal, and WORLD resynthesis no longer raise the app-wide modal overlay. Only the target tab is gated (in-tab banner); the list, other tabs, and playback of other sources stay interactive. Progress + Cancel live in the topbar activity slot. Tabs are tracked by a stable id, so closing a tab mid-apply discards the result instead of corrupting whichever tab shifted into its index. One apply runs at a time.
+- **Rebindable shortcuts**: Help > Customize Shortcuts... lets table-dispatched chords be reassigned by clicking a row and pressing the new chord (conflicts across overlapping contexts refused, per-row Reset / Reset All, persisted as `keymap=` prefs lines). The read-only shortcut list shows the effective (overridden) chords.
+- **Tool icon toolbar**: the editor's 22-item Tool ComboBox is now a grouped icon toolbar (hover for names, wraps in narrow panels) with the active tool highlighted; selection semantics (preview discard, gesture reset) unchanged.
+- **Editor zoom/nav keys**: `+`/`=` zoom in, `-` zooms out around the playhead; `[`/`]` page the view by one visible width.
+- **Wheel behavior option**: Settings > "Wheel scrolls the view (Ctrl+wheel zooms)" turns a plain vertical wheel into horizontal view scrolling (Ctrl+wheel / pinch still zooms). Default stays zoom-on-wheel.
+- **Edit menu** (File | Edit | Export) with Undo/Redo wired to the same dispatch as `Ctrl+Z`/`Ctrl+Y`, enabled from the editor/list/effect-graph undo stacks.
+- **List context menu**: Open in Editor and Reveal in Folder at the top; Select All / Clear Selection at the bottom. Right-clicking inside a multi-selection keeps it.
+- **Empty-state onboarding**: with no folder and no items, the list shows a centered panel with Open Folder... and up to five recent sessions.
+- **Polarity invert boundary smoothing** (option, default off): ~2 ms polarity crossfade at interior range boundaries so partial inverts don't click; edge-touching ranges and the default path stay bit-exact.
+
 ### Pipeline & QA (Stage B / P3)
 - **Naming-rule check** in batch inspection (GUI dialog + CLI `--naming-pattern`): file stems failing the regex get warnings; an invalid pattern reports a config error on every row. Pattern persists to prefs.
 - **Find Duplicates** (List menu): worker-pool fingerprinting (gain-invariant spectral-shape hashes + exact content hash) clusters exact duplicates and perceptually similar files into a results window with click-to-select and CSV export.

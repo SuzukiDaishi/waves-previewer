@@ -328,6 +328,13 @@
 > - ✅ 16: プラグインプリセット(JSON、プラグイン毎)+A/B 比較(Effect Graph ノード / Plugin FX 両対応)、Plugin Manager ウィンドウ(Tools メニュー、検索パス prefs 永続化)、Auto preview(300ms デバウンス・再生位置維持スワップの先行レンダ差し替え型)を実装。**選択範囲限定の部分レンダリング高速化は見送り(KNOWN_ISSUES 記載)**
 > - ✅ 17: マルチバリエーション試聴(List > Audition Selection、ラウンドロビン / ランダム、自然終了で自動前進、topbar に進捗+Cancel)を実装
 
+> **2026-07-17 P4(操作性完成+残バグ)進捗**(本ブランチの後続コミットで対応):
+> - ✅ 重処理の非ブロッキング化: 重い適用(Pitch/Stretch/Speed/LoudNorm/De-click/De-noise/Spectral 系/WORLD)がアプリ全体をブロックしなくなりました。タブは安定 id で追跡され、適用中のタブクローズは結果破棄になります(同時 1 件、対象タブのみ無効化+タブ内バナー、topbar に進捗+Cancel)
+> - ✅ キーリバインド UI(Help > Customize Shortcuts...、重複拒否・prefs 永続化) / Edit メニュー(Undo/Redo) / エディタのズーム・ナビキー(`+`/`=`/`-`/`[`/`]`) / ホイール動作オプション(scroll モード) / ツールアイコンツールバー(グループ化・折り返し) を実装
+> - ✅ リストコンテキストメニュー拡充(Open in Editor / Reveal in Folder / Select All / Clear Selection、複数選択保持) / 空状態オンボーディングパネル(Open Folder+最近のセッション)
+> - ✅ 位相反転の境界スムージングオプション(~2ms、既定 OFF)。Wave 列行高の 1 フレーム遅延は該当コードパス消滅につき KNOWN_ISSUES を更新、端 1px の ±1 サンプル丸めは据え置き(実害なし)
+> - ⬜ i18n / VST2 は引き続き見送り
+
 > **2026-07-16 P3(Stage B)進捗**(本ブランチの後続コミットで対応):
 > - ✅ 18: エンジン連携エクスポート(Unity JSON / FMOD JSON / Wwise TSV、GUI + CLI `batch engine-export`)を実装(メタデータテーブルのみ、音声変換なし)
 > - ✅ 19(一部): WORLD フォルマント編集(包絡の周波数ワープ、Resynthesize 時適用)を実装。**非周期性編集は未対応**
