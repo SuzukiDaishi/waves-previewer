@@ -402,6 +402,10 @@ impl CliWorkspace {
                     .spawn_editor_apply_for_tab_range(tab_idx, ToolKind::DeClip, sens, None);
                 self.wait_for_apply()?;
             }
+            ToolKind::DeHum => {
+                self.app.spawn_dehum_apply_for_tab(tab_idx);
+                self.wait_for_apply()?;
+            }
             ToolKind::DeNoise => {
                 anyhow::bail!(
                     "DeNoise is interactive-only (the noise profile is learned in the editor)"

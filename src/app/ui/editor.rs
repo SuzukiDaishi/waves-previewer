@@ -2918,6 +2918,8 @@ impl crate::app::WavesPreviewer {
         let mut pending_declick_apply: Option<(f32, Option<(usize, usize)>)> = None;
         let mut pending_declip_scan = false;
         let mut pending_declip_apply: Option<(f32, Option<(usize, usize)>)> = None;
+        let mut pending_dehum_detect = false;
+        let mut pending_dehum_apply = false;
         let mut pending_denoise_learn = false;
         let mut pending_denoise_preview = false;
         let mut pending_denoise_apply = false;
@@ -7395,6 +7397,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Pencil => "Pencil",
                                 ToolKind::DeClick => "De-click",
                                 ToolKind::DeClip => "De-clip",
+                                ToolKind::DeHum => "De-hum",
                                 ToolKind::DeNoise => "De-noise",
                                 // Spectrogram-view tools; never selectable in
                                 // the Waveform tool list.
@@ -7428,6 +7431,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::Pencil => "✏",
                                 ToolKind::DeClick => "⚡",
                                 ToolKind::DeClip => "△",
+                                ToolKind::DeHum => "🔌",
                                 ToolKind::DeNoise => "≈",
                                 ToolKind::SpectralWarp => "🌀",
                                 ToolKind::SpectralBrush => "🖌",
@@ -7466,6 +7470,7 @@ impl crate::app::WavesPreviewer {
                                     ToolKind::Pencil,
                                     ToolKind::DeClick,
                                     ToolKind::DeClip,
+                                    ToolKind::DeHum,
                                     ToolKind::DeNoise,
                                 ],
                             ];
@@ -10762,6 +10767,87 @@ impl crate::app::WavesPreviewer {
                                         }
                                     });
                                 }
+                                ToolKind::DeHum => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Remove mains hum: narrow biquad cuts at the fundamental and its harmonics. Detect sweeps 45-65 Hz for the hum line; a selection limits the apply (crossfaded splice).",
+                                            )
+                                            .weak(),
+                                        );
+                                        let sel_range = Self::editor_selected_range(tab);
+                                        if sel_range.is_some() {
+                                            ui.label(RichText::new("Target: selection").weak());
+                                        } else {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Target: whole file (select a range to limit)",
+                                                )
+                                                .weak(),
+                                            );
+                                        }
+                                        let mut st = tab.tool_state;
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label("Fundamental");
+                                            ui.add(
+                                                egui::DragValue::new(&mut st.dehum_hz)
+                                                    .range(20.0..=400.0)
+                                                    .speed(0.1)
+                                                    .suffix(" Hz"),
+                                            );
+                                            if ui
+                                                .add_enabled(
+                                                    !tab.loading,
+                                                    egui::Button::new("Detect"),
+                                                )
+                                                .on_hover_text(
+                                                    "Sweep 45-65 Hz on this file (selection when \
+                                                     present) for a hum line",
+                                                )
+                                                .clicked()
+                                            {
+                                                pending_dehum_detect = true;
+                                            }
+                                        });
+                                        ui.label("Harmonics");
+                                        let mut harmonics = st.dehum_harmonics.clamp(1, 16);
+                                        if ui
+                                            .add(egui::Slider::new(&mut harmonics, 1..=16))
+                                            .changed()
+                                        {
+                                            st.dehum_harmonics = harmonics;
+                                        }
+                                        ui.label("Notch width (Q)");
+                                        ui.add(
+                                            egui::Slider::new(&mut st.dehum_q, 5.0..=100.0)
+                                                .logarithmic(true)
+                                                .fixed_decimals(0),
+                                        )
+                                        .on_hover_text("Higher Q = narrower notches");
+                                        ui.label("Depth");
+                                        ui.add(
+                                            egui::Slider::new(&mut st.dehum_depth_db, 3.0..=80.0)
+                                                .suffix(" dB")
+                                                .fixed_decimals(0),
+                                        );
+                                        tab.tool_state = st;
+                                        if apply_busy {
+                                            ui.add(egui::Spinner::new());
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                !apply_busy && !tab.loading,
+                                                egui::Button::new("Apply"),
+                                            )
+                                            .clicked()
+                                        {
+                                            pending_dehum_apply = true;
+                                        }
+                                    });
+                                }
                                 ToolKind::DeNoise => {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut();
@@ -11529,6 +11615,21 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_declip_scan {
                     self.editor_declip_scan(tab_idx);
+                }
+                if pending_dehum_detect {
+                    match self.editor_dehum_detect(tab_idx) {
+                        Some(hz) => self.push_toast(
+                            crate::app::types::ToastSeverity::Info,
+                            format!("Hum detected at {hz:.2} Hz"),
+                        ),
+                        None => self.push_toast(
+                            crate::app::types::ToastSeverity::Info,
+                            "No hum line found in 45-65 Hz",
+                        ),
+                    }
+                }
+                if pending_dehum_apply {
+                    self.spawn_dehum_apply_for_tab(tab_idx);
                 }
                 if let Some((sens, range)) = pending_declip_apply {
                     self.spawn_editor_apply_for_tab_range(

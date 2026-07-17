@@ -1114,6 +1114,10 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         insert_silence_ms: 1000.0,
         invert_smooth_boundaries: false,
         declip_sensitivity: 0.5,
+        dehum_hz: 50.0,
+        dehum_harmonics: 8,
+        dehum_q: 30.0,
+        dehum_depth_db: 40.0,
     }
 }
 
@@ -1148,6 +1152,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "Pencil" => ToolKind::Pencil,
         "DeClick" => ToolKind::DeClick,
         "DeClip" => ToolKind::DeClip,
+        "DeHum" => ToolKind::DeHum,
         "DeNoise" => ToolKind::DeNoise,
         "SpectralBrush" => ToolKind::SpectralBrush,
         "PluginFx" => ToolKind::PluginFx,

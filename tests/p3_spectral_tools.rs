@@ -244,6 +244,56 @@ mod p3_spectral_tools {
     }
 
     #[test]
+    fn dehum_detect_and_apply_removes_hum() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("dehum");
+        let src = dir.join("hummy.wav");
+        // 1 kHz content plus a 60 Hz hum line with two harmonics.
+        let n = sr as usize;
+        let ch: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (t * 1000.0 * std::f32::consts::TAU).sin() * 0.3
+                    + (t * 60.0 * std::f32::consts::TAU).sin() * 0.1
+                    + (t * 180.0 * std::f32::consts::TAU).sin() * 0.05
+            })
+            .collect();
+        neowaves::wave::export_channels_audio(&vec![ch], sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let detected = harness
+            .state_mut()
+            .test_dehum_detect()
+            .expect("hum line should be detected");
+        assert!(
+            (detected - 60.0).abs() <= 0.5,
+            "detected {detected} Hz, expected ~60"
+        );
+        assert!(harness.state_mut().test_dehum_apply());
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        // Rough spectral check via RMS drop: hum carried a good share of the
+        // signal's energy, so a >=30 dB cut at 60/180 Hz lowers overall RMS.
+        let rms = |x: &[f32]| {
+            (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64).sqrt()
+        };
+        let settle = sr as usize / 2;
+        assert!(
+            rms(&after[0][settle..]) < rms(&before[0][settle..]) * 0.98,
+            "apply should remove hum energy"
+        );
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn declick_scan_and_apply_repairs_clicks() {
         let sr = 48_000u32;
         let dir = make_temp_dir("declick");

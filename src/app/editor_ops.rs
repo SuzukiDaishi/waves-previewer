@@ -1083,6 +1083,123 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state.is_some()
     }
 
+    /// Async de-hum apply: biquad notch cascade at the configured
+    /// fundamental and harmonics. A selection limits the effect via a
+    /// crossfaded splice (the filter itself runs over the whole channel so
+    /// its settling transient never lands inside the spliced region edges).
+    pub(super) fn spawn_dehum_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return;
+        }
+        let cfg = crate::app::dehum::DehumConfig {
+            base_hz: tab.tool_state.dehum_hz.clamp(20.0, 400.0),
+            harmonics: tab.tool_state.dehum_harmonics.clamp(1, 16),
+            q: tab.tool_state.dehum_q.clamp(5.0, 100.0),
+            depth_db: tab.tool_state.dehum_depth_db.clamp(3.0, 80.0),
+        };
+        let range = Self::editor_selected_range(tab);
+        let undo = Some(Self::capture_undo_state(tab));
+        if self.editor_apply_state.is_some() {
+            return;
+        }
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
+        let channels = tab.ch_samples.clone();
+        let buffer_sr = tab.buffer_sample_rate.max(1);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<EditorApplyResult>();
+        std::thread::spawn(move || {
+            let fade = (buffer_sr / 100).max(16) as usize; // ~10 ms splice
+            let out: Vec<Vec<f32>> = channels
+                .iter()
+                .map(|ch| {
+                    let filtered = crate::app::dehum::dehum_channel(ch, buffer_sr, &cfg);
+                    match range {
+                        Some((s, e)) => crate::app::dehum::splice_processed_range(
+                            ch, &filtered, s, e, fade,
+                        ),
+                        None => filtered,
+                    }
+                })
+                .collect();
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(EditorApplyResult {
+                samples: mono,
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Removing hum...".to_string(),
+            rx,
+            tab_id: apply_tab_id,
+            undo,
+        });
+    }
+
+    /// Detect the hum fundamental on the active tab (selection when present)
+    /// and store it in the tool state. Returns the frequency when found.
+    pub(super) fn editor_dehum_detect(&mut self, tab_idx: usize) -> Option<f32> {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return None;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return None;
+        }
+        let sr = tab.buffer_sample_rate.max(1);
+        let range = Self::editor_selected_range(tab);
+        let found = tab.ch_samples.iter().find_map(|ch| {
+            let slice = match range {
+                Some((s, e)) if e > s && e <= ch.len() => &ch[s..e],
+                _ => &ch[..],
+            };
+            crate::app::dehum::detect_hum_hz(slice, sr)
+        });
+        if let Some(hz) = found {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.tool_state = crate::app::types::ToolState {
+                    dehum_hz: hz,
+                    ..tab.tool_state
+                };
+            }
+        }
+        found
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_dehum_detect(&mut self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.editor_dehum_detect(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_dehum_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_dehum_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
+    }
+
     /// Remove per-channel DC bias over `range` (subtract the range mean).
     pub(super) fn editor_apply_remove_dc_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (_channels, undo_state) = {
