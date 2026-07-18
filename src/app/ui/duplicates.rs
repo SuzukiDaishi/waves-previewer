@@ -38,6 +38,20 @@ impl crate::app::WavesPreviewer {
                         save_csv = true;
                     }
                 });
+                {
+                    let mut allow = self.dup_allow_offset;
+                    if ui
+                        .checkbox(&mut allow, "Match time-shifted copies (next scan)")
+                        .on_hover_text(
+                            "Also match copies with up to ~0.7 s of extra leading/trailing \
+                             content (e.g. silence-padded variants); such pairs need a \
+                             slightly higher similarity to count",
+                        )
+                        .changed()
+                    {
+                        self.dup_allow_offset = allow;
+                    }
+                }
                 ui.separator();
                 if report.groups.is_empty() {
                     ui.label("No duplicate or similar files found.");
@@ -50,11 +64,20 @@ impl crate::app::WavesPreviewer {
                             let title = if group.exact {
                                 format!("Group {} — exact duplicates", gi + 1)
                             } else {
-                                format!(
-                                    "Group {} — similar ({:.0}%)",
-                                    gi + 1,
-                                    group.min_similarity * 100.0
-                                )
+                                if group.max_offset_ms >= 1.0 {
+                                    format!(
+                                        "Group {} — similar ({:.0}%, offset {:.0} ms)",
+                                        gi + 1,
+                                        group.min_similarity * 100.0,
+                                        group.max_offset_ms
+                                    )
+                                } else {
+                                    format!(
+                                        "Group {} — similar ({:.0}%)",
+                                        gi + 1,
+                                        group.min_similarity * 100.0
+                                    )
+                                }
                             };
                             let color = if group.exact {
                                 Color32::from_rgb(255, 140, 120)
@@ -113,14 +136,15 @@ impl crate::app::WavesPreviewer {
         let Some(report) = &self.duplicate_report else {
             anyhow::bail!("no duplicate report");
         };
-        let mut out = String::from("group,kind,min_similarity,path\n");
+        let mut out = String::from("group,kind,min_similarity,max_offset_ms,path\n");
         for (gi, group) in report.groups.iter().enumerate() {
             for p in &group.paths {
                 out.push_str(&format!(
-                    "{},{},{:.3},\"{}\"\n",
+                    "{},{},{:.3},{:.0},\"{}\"\n",
                     gi + 1,
                     if group.exact { "exact" } else { "similar" },
                     group.min_similarity,
+                    group.max_offset_ms,
                     p.display().to_string().replace('"', "\"\""),
                 ));
             }

@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::fingerprint::{cluster_duplicates, FileFingerprint, SIMILARITY_THRESHOLD};
+use super::fingerprint::{
+    cluster_duplicates_with_options, FileFingerprint, MAX_SIMILAR_OFFSET_MS, SIMILARITY_THRESHOLD,
+};
 use super::types::ToastSeverity;
 use super::WavesPreviewer;
 
@@ -25,6 +27,7 @@ pub(super) struct DuplicateScanState {
 
 #[derive(Clone, Debug)]
 pub(super) struct DuplicateReportGroup {
+    pub max_offset_ms: f32,
     pub exact: bool,
     pub min_similarity: f32,
     pub paths: Vec<PathBuf>,
@@ -147,14 +150,20 @@ impl WavesPreviewer {
             }
         }
         let scanned = ok_paths.len();
-        let groups: Vec<DuplicateReportGroup> = cluster_duplicates(&ok_fps, SIMILARITY_THRESHOLD)
-            .into_iter()
-            .map(|g| DuplicateReportGroup {
-                exact: g.exact,
-                min_similarity: g.min_similarity,
-                paths: g.members.iter().map(|&m| ok_paths[m].clone()).collect(),
-            })
-            .collect();
+        let groups: Vec<DuplicateReportGroup> = cluster_duplicates_with_options(
+            &ok_fps,
+            SIMILARITY_THRESHOLD,
+            self.dup_allow_offset,
+            MAX_SIMILAR_OFFSET_MS,
+        )
+        .into_iter()
+        .map(|g| DuplicateReportGroup {
+            exact: g.exact,
+            max_offset_ms: g.max_offset_ms,
+            min_similarity: g.min_similarity,
+            paths: g.members.iter().map(|&m| ok_paths[m].clone()).collect(),
+        })
+        .collect();
         let msg = if cancelled {
             format!("Duplicate scan cancelled ({scanned} scanned)")
         } else if groups.is_empty() {

@@ -726,6 +726,9 @@ pub struct WavesPreviewer {
     duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
     duplicate_report: Option<duplicate_ops::DuplicateReportState>,
     show_duplicates_window: bool,
+    // "Find Duplicates": also match copies shifted in time (silence-padded
+    // variants) up to MAX_SIMILAR_OFFSET_MS, at a slightly raised threshold.
+    dup_allow_offset: bool,
     show_engine_export_dialog: bool,
     engine_export_profile: engine_export::EngineProfile,
     show_bwf_dialog: bool,

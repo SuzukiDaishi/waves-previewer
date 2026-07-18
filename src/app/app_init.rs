@@ -259,6 +259,7 @@ impl WavesPreviewer {
             duplicate_scan_state: None,
             duplicate_report: None,
             show_duplicates_window: false,
+            dup_allow_offset: true,
             show_engine_export_dialog: false,
             engine_export_profile: crate::app::engine_export::EngineProfile::Unity,
             show_bwf_dialog: false,
