@@ -2248,7 +2248,6 @@ pub struct EditorApplyState {
 }
 
 pub struct EditorApplyResult {
-    pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
     /// Arc mirror of `channels`, cloned on the worker so the UI thread
     /// doesn't pay a full-buffer copy on adoption.

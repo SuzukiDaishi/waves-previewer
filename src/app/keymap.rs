@@ -489,6 +489,41 @@ pub const KEYMAP: &[KeyBinding] = &[
     },
 ];
 
+/// Chords owned by manually-dispatched handler families (raw `consume_key`
+/// paths: undo/redo, the audio clipboard, Ctrl+digit tab switching, digit
+/// seek, the `=` zoom alias). They never appear as table chords, so the
+/// rebind overlap check cannot see them — the rebinding UI refuses them via
+/// this list instead.
+pub const RESERVED_CHORDS: &[(Mods, Key)] = &[
+    (Mods::Command, Key::Z),
+    (Mods::Command, Key::Y),
+    (Mods::CommandShift, Key::Z),
+    (Mods::Command, Key::C),
+    (Mods::Command, Key::X),
+    (Mods::Command, Key::V),
+    (Mods::CommandShift, Key::V),
+    (Mods::Command, Key::Num1),
+    (Mods::Command, Key::Num2),
+    (Mods::Command, Key::Num3),
+    (Mods::Command, Key::Num4),
+    (Mods::Command, Key::Num5),
+    (Mods::Command, Key::Num6),
+    (Mods::Command, Key::Num7),
+    (Mods::Command, Key::Num8),
+    (Mods::Command, Key::Num9),
+    (Mods::None, Key::Num0),
+    (Mods::None, Key::Num1),
+    (Mods::None, Key::Num2),
+    (Mods::None, Key::Num3),
+    (Mods::None, Key::Num4),
+    (Mods::None, Key::Num5),
+    (Mods::None, Key::Num6),
+    (Mods::None, Key::Num7),
+    (Mods::None, Key::Num8),
+    (Mods::None, Key::Num9),
+    (Mods::None, Key::Equals),
+];
+
 pub fn binding(action: Action) -> Option<&'static KeyBinding> {
     KEYMAP.iter().find(|b| b.action == action)
 }

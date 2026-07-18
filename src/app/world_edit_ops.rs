@@ -181,7 +181,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn spawn_world_resynth_for_tab(&mut self, tab_idx: usize) {
-        if self.editor_apply_state.is_some() {
+        if self.editor_apply_slot_busy_toast() {
             return;
         }
         let key;
@@ -245,7 +245,7 @@ impl super::WavesPreviewer {
             return;
         };
         let job_data = job_data.clone();
-        if self.editor_apply_state.is_some() {
+        if self.editor_apply_slot_busy_toast() {
             return;
         }
         let Some((apply_tab_id, apply_tab_path)) =
@@ -347,7 +347,6 @@ impl super::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&channels, out_len);
             let channels_arc = std::sync::Arc::new(channels.clone());
             let _ = tx.send(EditorApplyResult {
-                samples: mono,
                 channels,
                 channels_arc,
                 waveform_minmax,

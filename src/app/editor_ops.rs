@@ -955,9 +955,6 @@ impl crate::app::WavesPreviewer {
         Some(format!("ch {}", chans.join(", ")))
     }
 
-    /// Run the de-click detector over the active selection (or the whole
-    /// file) and store the spans for the red marker overlay. Synchronous:
-    /// the detector is O(n) with a small constant, fine for UI-thread use.
     /// Scan for clipped (flat-at-the-rail) runs; results share the de-click
     /// red-band overlay via `tab.declick_scan`.
     pub(super) fn editor_declip_scan(&mut self, tab_idx: usize) {
@@ -993,6 +990,9 @@ impl crate::app::WavesPreviewer {
         });
     }
 
+    /// Run the de-click detector over the active selection (or the whole
+    /// file) and store the spans for the red marker overlay. Synchronous:
+    /// the detector is O(n) with a small constant, fine for UI-thread use.
     pub(super) fn editor_declick_scan(&mut self, tab_idx: usize) {
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
@@ -1104,6 +1104,9 @@ impl crate::app::WavesPreviewer {
     /// its settling transient never lands inside the spliced region edges).
     pub(super) fn spawn_dehum_apply_for_tab(&mut self, tab_idx: usize) {
         use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -1118,9 +1121,6 @@ impl crate::app::WavesPreviewer {
         };
         let range = Self::editor_selected_range(tab);
         let undo = Some(Self::capture_undo_state(tab));
-        if self.editor_apply_state.is_some() {
-            return;
-        }
         let apply_tab_id = tab.tab_id;
         if matches!(&self.playback_session.source,
             crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
@@ -1149,12 +1149,10 @@ impl crate::app::WavesPreviewer {
                 })
                 .collect();
             let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(EditorApplyResult {
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -1240,7 +1238,16 @@ impl crate::app::WavesPreviewer {
             return;
         }
         use std::sync::atomic::Ordering;
-        let sr = self.audio.shared.out_sample_rate.max(1);
+        // Loop atomics index the engine buffer, which keeps the tab's buffer
+        // sample rate (native rate on the resample-fallback path) — the
+        // device rate would shrink/stretch the 40 ms window there.
+        let sr = self
+            .scrub_state
+            .as_ref()
+            .and_then(|scrub| self.tabs.iter().find(|t| t.tab_id == scrub.tab_id))
+            .map(|t| t.buffer_sample_rate)
+            .unwrap_or(self.audio.shared.out_sample_rate)
+            .max(1);
         let half = ((sr as f32) * 0.04).round() as usize; // 40 ms
         let len = self.audio.current_source_len();
         if len == 0 {
@@ -2643,6 +2650,12 @@ impl crate::app::WavesPreviewer {
         range: Option<(usize, usize)>,
     ) {
         use std::sync::mpsc;
+        // Single apply slot: the UI disables further applies on the busy tab;
+        // races (hotkeys, other tabs) refuse with a toast instead of
+        // cancelling the running job.
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -2655,11 +2668,6 @@ impl crate::app::WavesPreviewer {
         }
         let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
         let undo = Some(Self::capture_undo_state_labeled(tab, tool.label()));
-        // Single apply slot: the UI disables further applies on the busy tab;
-        // races (hotkeys, other tabs) refuse instead of cancelling the job.
-        if self.editor_apply_state.is_some() {
-            return;
-        }
         let tab_id = tab.tab_id;
         // Stop playback only when this tab is the audible source; playback of
         // other tabs / list previews keeps running during the apply.
@@ -2757,7 +2765,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(EditorApplyResult {
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -2783,29 +2790,77 @@ impl crate::app::WavesPreviewer {
         });
     }
 
+    /// Whether the in-flight heavy apply (if any) targets `tab_idx`'s tab.
+    /// The single predicate behind UI gating, hotkey guards, and cancels.
+    pub(super) fn editor_apply_busy_for_tab(&self, tab_idx: usize) -> bool {
+        self.editor_apply_state
+            .as_ref()
+            .zip(self.tabs.get(tab_idx))
+            .map(|(state, tab)| state.tab_id == tab.tab_id)
+            .unwrap_or(false)
+    }
+
+    /// Guard for destructive edits on a tab whose heavy apply is running:
+    /// toast + true when the edit must be refused (the async result would
+    /// silently overwrite the concurrent edit on completion).
+    pub(super) fn editor_apply_busy_toast_for_tab(&mut self, tab_idx: usize) -> bool {
+        if self.editor_apply_busy_for_tab(tab_idx) {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "This tab is busy applying — wait for it or cancel it from the topbar",
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Single apply slot: when an apply is already running, toast and return
+    /// true so the caller refuses to spawn a second one (the busy tab's UI is
+    /// disabled, but other tabs' Apply buttons and hotkeys can still race).
+    pub(super) fn editor_apply_slot_busy_toast(&mut self) -> bool {
+        if self.editor_apply_state.is_some() {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "Another apply is still running — wait for it or cancel it from the topbar",
+            );
+            return true;
+        }
+        false
+    }
+
     /// Cancel the pending heavy apply only when it targets `tab_idx`'s tab.
     /// Other tabs' jobs keep running (undo/clear in one tab must not kill a
     /// job started from another).
     pub(super) fn cancel_editor_apply_for_tab(&mut self, tab_idx: usize) {
-        let matches_tab = self
-            .editor_apply_state
-            .as_ref()
-            .zip(self.tabs.get(tab_idx))
-            .map(|(state, tab)| state.tab_id == tab.tab_id)
-            .unwrap_or(false);
-        if matches_tab {
+        if self.editor_apply_busy_for_tab(tab_idx) {
             self.editor_apply_state = None;
         }
     }
 
     pub(super) fn drain_editor_apply_jobs(&mut self, ctx: &egui::Context) {
         let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>, u64)> = None;
+        let mut apply_dead = false;
         if let Some(state) = &mut self.editor_apply_state {
-            if let Ok(res) = state.rx.try_recv() {
-                let undo = state.undo.take();
-                let tab_id = state.tab_id;
-                apply_done = Some((res, undo, tab_id));
+            match state.rx.try_recv() {
+                Ok(res) => {
+                    let undo = state.undo.take();
+                    let tab_id = state.tab_id;
+                    apply_done = Some((res, undo, tab_id));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                // Worker died without sending (panic in the DSP): free the
+                // single apply slot or every later apply is refused forever.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => apply_dead = true,
             }
+        }
+        if apply_dead {
+            self.editor_apply_state = None;
+            self.push_toast(
+                crate::app::types::ToastSeverity::Error,
+                "Apply failed: the processing worker stopped unexpectedly",
+            );
+            ctx.request_repaint();
+            return;
         }
         if let Some((mut res, undo, tab_id)) = apply_done {
             // Resolve identity -> index at completion time; the tab may have
@@ -2813,10 +2868,7 @@ impl crate::app::WavesPreviewer {
             let cur_idx = self.tabs.iter().position(|t| t.tab_id == tab_id);
             let mut spectro_reset_path: Option<PathBuf> = None;
             if let Some(cur_idx) = cur_idx {
-                let mut applied_channels = std::mem::take(&mut res.channels);
-                if applied_channels.is_empty() && !res.samples.is_empty() {
-                    applied_channels = vec![res.samples.clone()];
-                }
+                let applied_channels = std::mem::take(&mut res.channels);
                 if let Some(tab) = self.tabs.get_mut(cur_idx) {
                     let old_len = tab.samples_len.max(1);
                     let old_view = tab.view_offset;
@@ -2878,11 +2930,13 @@ impl crate::app::WavesPreviewer {
                 // user is hearing (or looking at); playback of another tab or
                 // a list preview must survive the apply untouched.
                 let tab_path = self.tabs.get(cur_idx).map(|t| t.path.clone());
-                let adopt_audio = self.active_tab == Some(cur_idx)
-                    || matches!(
-                        (&self.playback_session.source, &tab_path),
-                        (crate::app::PlaybackSourceKind::EditorTab(p), Some(tp)) if p == tp
-                    );
+                // "Active tab" alone is not enough: active_tab stays set while
+                // the user works in the list workspace, and adopting there
+                // would stop an unrelated list preview mid-listen.
+                let adopt_audio = matches!(
+                    (&self.playback_session.source, &tab_path),
+                    (crate::app::PlaybackSourceKind::EditorTab(p), Some(tp)) if p == tp
+                ) || (self.active_tab == Some(cur_idx) && self.is_editor_workspace_active());
                 if adopt_audio {
                     self.audio.stop();
                     if let Some((path, buffer_sr, channels)) = self.tabs.get(cur_idx).map(|tab| {
@@ -2900,8 +2954,6 @@ impl crate::app::WavesPreviewer {
                         if let Some(tab) = self.tabs.get(cur_idx) {
                             self.apply_loop_mode_for_tab(tab);
                         }
-                    } else if !res.samples.is_empty() {
-                        self.audio.set_samples_mono(res.samples);
                     }
                 }
                 self.notify_if_tab_over_fs(cur_idx);

@@ -53,7 +53,7 @@ pub fn diff_snapshots(old: &WatchSnapshot, new: &WatchSnapshot) -> Vec<WatchEven
 // their target here; the watch drain drops events for paths written within
 // the TTL so the app doesn't react to its own output.
 
-const SELF_WRITE_TTL: Duration = Duration::from_secs(5);
+const SELF_WRITE_TTL: Duration = Duration::from_secs(15);
 
 fn self_writes() -> &'static Mutex<HashMap<PathBuf, Instant>> {
     static REG: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
@@ -77,13 +77,16 @@ pub fn recently_self_written(path: &Path) -> bool {
 // ---- Watch thread ----------------------------------------------------------
 
 pub struct FolderWatch {
-    pub rx: std::sync::mpsc::Receiver<Vec<WatchEvent>>,
-    pub root: PathBuf,
-    pub interval_ms: u64,
+    rx: std::sync::mpsc::Receiver<Vec<WatchEvent>>,
+    // Snapshot copies for the respawn check only — the thread captured its
+    // own clones, so mutating these would NOT retarget the running poller.
+    root: PathBuf,
+    interval_ms: u64,
     stop: Arc<AtomicBool>,
-    /// Set by the UI thread while bulk operations run; the poller idles
-    /// (keeping its snapshot) until cleared.
-    pub suspend: Arc<AtomicBool>,
+    /// Set by the UI thread while bulk operations / scans run; the poller
+    /// idles and REBASELINES on resume (changes made during the pause are
+    /// treated as self-caused or already covered by the operation itself).
+    suspend: Arc<AtomicBool>,
 }
 
 impl Drop for FolderWatch {
@@ -127,8 +130,13 @@ fn scan_snapshot(root: &Path, skip_dotfiles: bool) -> WatchSnapshot {
 }
 
 /// Spawn the poller. The first walk only establishes the baseline; events
-/// flow from the second walk on. A batch is flushed once a quiet poll
-/// follows it (debounce), so bulk copies arrive as one batch.
+/// flow from the second walk on. Debounce: a batch flushes on the first
+/// quiet poll after changes, or once it has aged past ~4 poll intervals —
+/// so bulk copies arrive as one batch, but one continuously-rewritten file
+/// can never starve unrelated events forever. Pending events are merged per
+/// path (latest wins), so a hot file contributes one entry, not one per
+/// poll. After a suspend (bulk op / rescan) the poller REBASELINES instead
+/// of diffing across the pause.
 pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) -> FolderWatch {
     let stop = Arc::new(AtomicBool::new(false));
     let suspend = Arc::new(AtomicBool::new(false));
@@ -141,28 +149,52 @@ pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) 
             .name("neowaves-folder-watch".into())
             .spawn(move || {
                 crate::app::threading::lower_current_thread_priority();
+                let max_pending_age =
+                    Duration::from_millis((interval_ms.saturating_mul(4)).max(1_000));
                 let mut snapshot: Option<WatchSnapshot> = None;
-                let mut pending: Vec<WatchEvent> = Vec::new();
+                let mut pending: HashMap<PathBuf, WatchEvent> = HashMap::new();
+                let mut pending_since: Option<Instant> = None;
+                let mut was_suspended = false;
                 loop {
                     std::thread::sleep(Duration::from_millis(interval_ms.max(20)));
                     if stop.load(Ordering::Relaxed) {
                         break;
                     }
                     if suspend.load(Ordering::Relaxed) {
+                        was_suspended = true;
                         continue;
                     }
                     let new = scan_snapshot(&root, skip_dotfiles);
+                    if was_suspended || snapshot.is_none() {
+                        was_suspended = false;
+                        snapshot = Some(new);
+                        pending.clear();
+                        pending_since = None;
+                        continue;
+                    }
                     let events = match &snapshot {
                         Some(old) => diff_snapshots(old, &new),
                         None => Vec::new(),
                     };
                     snapshot = Some(new);
-                    if events.is_empty() {
-                        if !pending.is_empty() && tx.send(std::mem::take(&mut pending)).is_err() {
+                    let quiet = events.is_empty();
+                    for event in events {
+                        pending.insert(event.path().to_path_buf(), event);
+                    }
+                    if !pending.is_empty() && pending_since.is_none() {
+                        pending_since = Some(Instant::now());
+                    }
+                    let overdue = pending_since
+                        .map(|t| t.elapsed() >= max_pending_age)
+                        .unwrap_or(false);
+                    if !pending.is_empty() && (quiet || overdue) {
+                        let mut batch: Vec<WatchEvent> =
+                            pending.drain().map(|(_, e)| e).collect();
+                        batch.sort_by(|a, b| a.path().cmp(b.path()));
+                        pending_since = None;
+                        if tx.send(batch).is_err() {
                             break;
                         }
-                    } else {
-                        pending.extend(events);
                     }
                 }
             });
@@ -217,28 +249,43 @@ impl crate::app::WavesPreviewer {
     /// enabled state, mirror the busy flag into its suspend switch, and
     /// apply any event batches.
     pub(super) fn tick_folder_watch(&mut self, ctx: &egui::Context) {
-        // (Re)spawn or drop so the watch always matches root + pref.
-        let desired_root = if self.watch_folder_enabled && !self.scan_in_progress {
-            self.root.clone()
-        } else {
-            None
-        };
-        let matches = match (&self.folder_watch, &desired_root) {
-            (None, None) => true,
+        // (Re)spawn or drop so the watch always matches root + pref. A scan
+        // does NOT drop the watch (that would discard its snapshot and any
+        // pending batch); it suspends it below, and the poller rebaselines
+        // on resume.
+        let desired_active = self.watch_folder_enabled && self.root.is_some();
+        let matches = match (&self.folder_watch, self.root.as_ref()) {
+            (None, _) => !desired_active,
+            (Some(_), None) => false,
             (Some(w), Some(root)) => {
-                &w.root == root && w.interval_ms == self.watch_poll_interval_ms
+                desired_active
+                    && &w.root == root
+                    && w.interval_ms == self.watch_poll_interval_ms
             }
-            _ => false,
         };
         if !matches {
-            self.folder_watch = desired_root
-                .map(|root| spawn_folder_watch(root, self.watch_poll_interval_ms, self.skip_dotfiles));
+            self.folder_watch = if desired_active {
+                let root = self.root.clone().expect("desired_active checked root");
+                self.debug_log(format!("folder watch: start {}", root.display()));
+                Some(spawn_folder_watch(
+                    root,
+                    self.watch_poll_interval_ms,
+                    self.skip_dotfiles,
+                ))
+            } else {
+                if self.folder_watch.is_some() {
+                    self.debug_log("folder watch: stop".to_string());
+                }
+                None
+            };
         }
         let Some(watch) = &self.folder_watch else {
             return;
         };
-        // Bulk operations pause polling (their own writes would spam events).
+        // Bulk operations and rescans pause polling (their writes / churn
+        // would spam events); the poller rebaselines when they finish.
         let busy = self.busy_overlay_blocking()
+            || self.scan_in_progress
             || self.export_state.is_some()
             || self.bulk_resample_state.is_some()
             || self.batch_loudnorm_state.is_some()
@@ -263,12 +310,31 @@ impl crate::app::WavesPreviewer {
             }
             match event {
                 WatchEvent::Added(path) => {
-                    if !self.path_index.contains_key(&path) {
+                    if self.path_index.contains_key(&path) {
+                        // Removed+recreated across polls (delete-then-copy
+                        // save): the row survives, but its caches describe
+                        // the old contents.
+                        if self.watch_apply_modified(&path) {
+                            modified += 1;
+                        } else {
+                            modified_skipped += 1;
+                        }
+                    } else {
                         added.push(path);
                     }
                 }
                 WatchEvent::Removed(path) => {
                     if !self.path_index.contains_key(&path) {
+                        continue;
+                    }
+                    if path.exists() {
+                        // Recreated before the drain ran: treat as modified
+                        // (remove_missing_path would refuse anyway).
+                        if self.watch_apply_modified(&path) {
+                            modified += 1;
+                        } else {
+                            modified_skipped += 1;
+                        }
                         continue;
                     }
                     let tab_open = self.tabs.iter().any(|t| t.path == path);
@@ -283,27 +349,11 @@ impl crate::app::WavesPreviewer {
                     if !self.path_index.contains_key(&path) {
                         continue;
                     }
-                    if self.tabs.iter().any(|t| t.path == path) {
+                    if self.watch_apply_modified(&path) {
+                        modified += 1;
+                    } else {
                         modified_skipped += 1;
-                        continue;
                     }
-                    // Drop every cached view of the old contents, then let the
-                    // meta pool re-resolve the row.
-                    if let Some(id) = self.path_index.get(&path) {
-                        if let Some(&idx) = self.item_index.get(&id) {
-                            if let Some(item) = self.items.get_mut(idx) {
-                                item.meta = None;
-                            }
-                        }
-                    }
-                    self.cancel_meta_for_path(&path);
-                    self.purge_spectro_cache_entry(&path);
-                    self.cancel_feature_analysis_for_path(&path);
-                    self.evict_list_preview_cache_path(&path);
-                    self.lufs_override.remove(&path);
-                    self.sample_rate_probe_cache.remove(&path);
-                    self.queue_meta_for_path(&path, false);
-                    modified += 1;
                 }
             }
         }
@@ -330,12 +380,35 @@ impl crate::app::WavesPreviewer {
             ));
         }
         if !parts.is_empty() {
-            self.push_toast(
-                crate::app::types::ToastSeverity::Info,
-                format!("Folder changed: {}", parts.join(", ")),
-            );
+            let msg = format!("Folder changed: {}", parts.join(", "));
+            self.debug_log(format!("folder watch: {msg}"));
+            self.push_toast(crate::app::types::ToastSeverity::Info, msg);
             ctx.request_repaint();
         }
+    }
+
+    /// Invalidate every cached view of a file the watcher saw change and
+    /// queue a metadata re-resolve. Returns false (skip) while an editor tab
+    /// holds the file — the tab keeps its in-memory copy untouched.
+    fn watch_apply_modified(&mut self, path: &Path) -> bool {
+        if self.tabs.iter().any(|t| t.path == path) {
+            return false;
+        }
+        if let Some(id) = self.path_index.get(path) {
+            if let Some(&idx) = self.item_index.get(&id) {
+                if let Some(item) = self.items.get_mut(idx) {
+                    item.meta = None;
+                }
+            }
+        }
+        self.cancel_meta_for_path(path);
+        self.purge_spectro_cache_entry(path);
+        self.cancel_feature_analysis_for_path(path);
+        self.evict_list_preview_cache_path(path);
+        self.lufs_override.remove(path);
+        self.sample_rate_probe_cache.remove(path);
+        self.queue_meta_for_path(&path.to_path_buf(), false);
+        true
     }
 
     #[cfg(feature = "kittest")]

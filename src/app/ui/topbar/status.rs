@@ -30,6 +30,7 @@ enum TopbarActivityCancel {
     Transcript,
     Music,
     VariationAudition,
+    MixAudition,
     DuplicateScan,
     EditorAnalysis,
 }
@@ -211,6 +212,14 @@ impl WavesPreviewer {
                 progress: None,
                 show_percentage: false,
                 cancel: Some(TopbarActivityCancel::EditorApply),
+            });
+        }
+        if let Some(state) = &self.mix_audition_state {
+            items.push(TopbarActivityItem {
+                label: format!("Mixing {} files for playback...", state.count),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::MixAudition),
             });
         }
         if let Some(state) = &self.plugin_process_state {
@@ -484,6 +493,9 @@ impl WavesPreviewer {
             }
             TopbarActivityCancel::Transcript => self.cancel_transcript_ai_run(),
             TopbarActivityCancel::Music => self.cancel_music_analysis_run(),
+            TopbarActivityCancel::MixAudition => {
+                self.cancel_mix_audition();
+            }
             TopbarActivityCancel::VariationAudition => {
                 self.cancel_variation_audition();
                 self.audio.stop();

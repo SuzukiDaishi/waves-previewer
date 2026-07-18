@@ -4376,8 +4376,15 @@ impl crate::app::WavesPreviewer {
                 {
                     let vis = (wave_w * tab.samples_per_px).ceil() as usize;
                     let max_left = display_samples_len.saturating_sub(vis);
+                    // Documented as equivalent to Shift+wheel, so it honors
+                    // the same direction-inversion pref.
+                    let pan_y = if self.invert_shift_wheel_pan {
+                        -scroll_y
+                    } else {
+                        scroll_y
+                    };
                     let next_exact =
-                        tab.view_offset_exact + (-scroll_y * tab.samples_per_px) as f64;
+                        tab.view_offset_exact + (-pan_y * tab.samples_per_px) as f64;
                     Self::editor_set_view_offset_exact(tab, next_exact, max_left);
                     ctx.request_repaint();
                 }
@@ -7620,6 +7627,16 @@ impl crate::app::WavesPreviewer {
                                 if matches!(tab.active_tool, ToolKind::Trim) {
                                     // Trim-specific range display should not persist after leaving Trim.
                                     tab.trim_range = None;
+                                }
+                                // De-click and De-clip share the scan-span
+                                // storage; leaving either drops it so one
+                                // tool's spans are never presented (panel
+                                // count + red overlay) as the other's.
+                                if matches!(
+                                    tab.active_tool,
+                                    ToolKind::DeClick | ToolKind::DeClip
+                                ) {
+                                    tab.declick_scan = None;
                                 }
                                 if matches!(tab.active_tool, ToolKind::MusicAnalyze) {
                                     tab.music_analysis_draft.provisional_markers.clear();

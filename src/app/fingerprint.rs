@@ -83,13 +83,15 @@ pub fn fingerprint_channels(channels: &[Vec<f32>], sample_rate: u32) -> FileFing
         ds.push(a + (b - a) * t);
     }
 
-    // Content-align the hash stream: drop leading silence so padded copies
-    // hash identically to their originals (the pad becomes `lead_trim_ms`).
-    const LEAD_SILENCE_AMP: f32 = 0.001; // -60 dBFS
-    let lead = ds
-        .iter()
-        .position(|v| v.abs() > LEAD_SILENCE_AMP)
-        .unwrap_or(ds.len());
+    // Content-align the hash stream: drop leading DIGITAL ZEROS so padded
+    // copies hash identically to their originals (the pad length becomes
+    // `lead_trim_ms`). Exact zeros only, deliberately: silence padding in
+    // game pipelines is zero samples, and an amplitude threshold would let
+    // a noisy/dithered intro straddle it between two otherwise identical
+    // files — desynchronizing their trims and breaking the aligned match
+    // they previously had. Gain scaling preserves zeroness, so gain
+    // variants keep matching too.
+    let lead = ds.iter().position(|v| *v != 0.0).unwrap_or(ds.len());
     let lead_trim_ms = lead as f32 * 1000.0 / FP_SAMPLE_RATE as f32;
     let (frames, mean_band_centroid) = spectral_frame_hashes(&ds[lead..]);
     FileFingerprint {
@@ -381,10 +383,17 @@ pub fn cluster_duplicates_with_options(
         for (ai, &a) in members.iter().enumerate() {
             for &b in members.iter().skip(ai + 1) {
                 let key = if a < b { (a, b) } else { (b, a) };
-                let (sim, offset_ms) = pair_sim
-                    .get(&key)
-                    .copied()
-                    .unwrap_or_else(|| (similarity(&fps[a], &fps[b]), 0.0));
+                // Transitive pairs (unioned through a chain) were below the
+                // threshold or gated in the sweep; re-measure them with the
+                // same mode the sweep used — plain similarity would hit the
+                // lead-trim gate for offset-matched groups and report 0.
+                let (sim, offset_ms) = pair_sim.get(&key).copied().unwrap_or_else(|| {
+                    if allow_offset {
+                        similarity_with_offset(&fps[a], &fps[b], max_offset_ms)
+                    } else {
+                        (similarity(&fps[a], &fps[b]), 0.0)
+                    }
+                });
                 min_sim = min_sim.min(sim);
                 max_offset = max_offset.max(offset_ms.abs());
             }

@@ -846,6 +846,9 @@ impl crate::app::WavesPreviewer {
     /// pre-warp audio, so they are cleared once the job is queued.
     pub(super) fn spawn_spectral_warp_apply_for_tab(&mut self, tab_idx: usize) {
         use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -858,9 +861,6 @@ impl crate::app::WavesPreviewer {
         let points = tab.spectral_warp_points.clone();
         let time_radius_ms = tab.tool_state.warp_time_radius_ms.max(1.0);
         let freq_radius_hz = tab.tool_state.warp_freq_radius_hz.max(1.0);
-        if self.editor_apply_state.is_some() {
-            return;
-        }
         let apply_tab_id = tab.tab_id;
         if matches!(&self.playback_session.source,
             crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
@@ -880,12 +880,10 @@ impl crate::app::WavesPreviewer {
                 .map(|ch| warp_channel_with_points(ch, sr, &points, time_radius_ms, freq_radius_hz))
                 .collect();
             let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -980,6 +978,9 @@ impl crate::app::WavesPreviewer {
     /// The stamps are consumed once the job is queued.
     pub(super) fn spawn_spectral_brush_apply_for_tab(&mut self, tab_idx: usize) {
         use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -990,9 +991,6 @@ impl crate::app::WavesPreviewer {
         let channels = tab.ch_samples.clone();
         let sr = tab.buffer_sample_rate.max(1);
         let stamps = tab.spectral_brush_stamps.clone();
-        if self.editor_apply_state.is_some() {
-            return;
-        }
         let apply_tab_id = tab.tab_id;
         if matches!(&self.playback_session.source,
             crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
@@ -1012,12 +1010,10 @@ impl crate::app::WavesPreviewer {
                 .map(|ch| brush_channel_with_stamps(ch, sr, &stamps))
                 .collect();
             let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -1188,6 +1184,9 @@ impl crate::app::WavesPreviewer {
     /// kept so the user can iterate.
     pub(super) fn spawn_denoise_apply_for_tab(&mut self, tab_idx: usize) {
         use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -1200,9 +1199,6 @@ impl crate::app::WavesPreviewer {
         let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
         let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
         let range = Self::editor_valid_selection(tab);
-        if self.editor_apply_state.is_some() {
-            return;
-        }
         let apply_tab_id = tab.tab_id;
         if matches!(&self.playback_session.source,
             crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
@@ -1218,12 +1214,10 @@ impl crate::app::WavesPreviewer {
             let out =
                 Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
             let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -1266,6 +1260,9 @@ impl crate::app::WavesPreviewer {
     /// undo). With a frequency band selected only that band is rebuilt.
     pub(super) fn spawn_spectral_heal_apply_for_tab(&mut self, tab_idx: usize) {
         use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
         let freq_fade_hz = self.spectral_edit_freq_fade_hz.max(0.0);
         let Some(tab) = self.tabs.get(tab_idx) else {
@@ -1290,9 +1287,6 @@ impl crate::app::WavesPreviewer {
         let band = tab.freq_selection;
         let undo = Some(Self::capture_undo_state_labeled(tab, "Heal Selection"));
         let channels = tab.ch_samples.clone();
-        if self.editor_apply_state.is_some() {
-            return;
-        }
         let apply_tab_id = tab.tab_id;
         if matches!(&self.playback_session.source,
             crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
@@ -1310,12 +1304,10 @@ impl crate::app::WavesPreviewer {
                 .map(|ch| heal_channel_range(ch, sr, s, e, band, freq_fade_hz, time_fade_ms))
                 .collect();
             let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,

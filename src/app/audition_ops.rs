@@ -295,7 +295,17 @@ impl crate::app::WavesPreviewer {
             }
             let _ = tx.send(Ok(Self::mix_buffers(&decoded)));
         });
+        self.debug_log(format!("mix audition: decoding {count} files"));
         self.mix_audition_state = Some(crate::app::types::MixAuditionState { rx, count });
+    }
+
+    /// Cancel a pending mix: dropping the receiver makes the worker's send
+    /// fail, so it exits after the file it is currently decoding.
+    pub(super) fn cancel_mix_audition(&mut self) {
+        if self.mix_audition_state.take().is_some() {
+            self.debug_log("mix audition: cancelled".to_string());
+            self.push_toast(ToastSeverity::Info, "Play together cancelled");
+        }
     }
 
     /// Equal-power sum of decoded buffers (channels x samples each) at
@@ -356,6 +366,7 @@ impl crate::app::WavesPreviewer {
                 self.audio.set_loop_enabled(false);
                 self.audio.seek_to_sample(0);
                 self.audio.play();
+                self.debug_log(format!("mix audition: playing {count} files"));
                 self.push_toast(
                     ToastSeverity::Info,
                     format!("Playing {count} files together (1/\u{221a}n mix)"),
@@ -364,6 +375,7 @@ impl crate::app::WavesPreviewer {
             }
             Ok(Err(msg)) => {
                 self.mix_audition_state = None;
+                self.debug_log(format!("mix audition failed: {msg}"));
                 self.push_toast(ToastSeverity::Error, format!("Play together failed: {msg}"));
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {

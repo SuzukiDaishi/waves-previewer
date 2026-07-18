@@ -620,6 +620,17 @@ impl super::WavesPreviewer {
             }
             return;
         }
+        let destructive = event_cut
+            || consumed_cut
+            || edge_x
+            || consumed_paste_mix
+            || consumed_paste_xf
+            || event_paste
+            || consumed_paste
+            || edge_v;
+        if destructive && self.editor_apply_busy_toast_for_tab(tab_idx) {
+            return;
+        }
         if event_cut || consumed_cut || edge_x {
             self.editor_cut_selection_to_audio_clipboard(tab_idx);
         } else if event_copy || consumed_copy || edge_c {

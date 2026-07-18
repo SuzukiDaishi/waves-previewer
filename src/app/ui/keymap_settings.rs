@@ -69,6 +69,15 @@ impl crate::app::WavesPreviewer {
         let Some(target) = keymap::binding(action) else {
             return Err("unknown action".into());
         };
+        if keymap::RESERVED_CHORDS
+            .iter()
+            .any(|&(m, k)| k == key && m.to_modifiers() == mods.to_modifiers())
+        {
+            return Err(format!(
+                "{} is reserved by a fixed shortcut family (gray rows)",
+                keymap::chord_text(mods, key)
+            ));
+        }
         for other in KEYMAP {
             if other.action == action {
                 continue;

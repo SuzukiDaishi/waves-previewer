@@ -2491,6 +2491,7 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
 }
 
 pub fn export_gain_audio(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    crate::app::watch::note_self_write(dst);
     let fmt = pick_format(src, dst)
         .ok_or_else(|| anyhow::anyhow!("unsupported format: {}", src.display()))?;
     match fmt.as_str() {
@@ -3201,6 +3202,7 @@ pub fn export_channels_audio_with_depth(
     dst: &Path,
     wav_depth: Option<WavBitDepth>,
 ) -> Result<()> {
+    crate::app::watch::note_self_write(dst);
     let ext = dst
         .extension()
         .and_then(|s| s.to_str())

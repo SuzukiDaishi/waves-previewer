@@ -298,7 +298,9 @@ impl super::WavesPreviewer {
                         tab.snap_zero_cross = !tab.snap_zero_cross;
                     }
                 }
-                if self.keymap_consume(ctx, Action::EditorDeleteSelection) {
+                if self.keymap_consume(ctx, Action::EditorDeleteSelection)
+                    && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                {
                     let ranges = self.all_selected_ranges(tab_idx);
                     let fired = if ranges.len() > 1 {
                         self.editor_delete_multi_ranges_and_join(tab_idx, ranges);
@@ -316,7 +318,9 @@ impl super::WavesPreviewer {
                         );
                     }
                 }
-                if self.keymap_consume(ctx, Action::EditorTrimSelection) {
+                if self.keymap_consume(ctx, Action::EditorTrimSelection)
+                    && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                {
                     let ranges = self.all_selected_ranges(tab_idx);
                     let fired = if ranges.len() > 1 {
                         self.editor_apply_trim_multi_ranges(tab_idx, ranges);
@@ -334,7 +338,9 @@ impl super::WavesPreviewer {
                         );
                     }
                 }
-                if self.keymap_consume(ctx, Action::EditorVirtualTrim) {
+                if self.keymap_consume(ctx, Action::EditorVirtualTrim)
+                    && !self.editor_apply_busy_toast_for_tab(tab_idx)
+                {
                     let ranges = self.all_selected_ranges(tab_idx);
                     if ranges.len() > 1 {
                         if let Some(path) = self.tabs.get(tab_idx).map(|t| t.path.clone()) {
@@ -383,12 +389,15 @@ impl super::WavesPreviewer {
                         self.editor_zoom_to_selection(tab_idx);
                     }
                     // `=` shares the physical key with `+` on many layouts, so
-                    // accept it as an unshifted zoom-in fallback.
-                    if self.keymap_consume(ctx, Action::EditorZoomIn)
-                        || ctx.input_mut(|i| {
+                    // accept it as an unshifted zoom-in fallback — but only
+                    // for the BUILT-IN chord: a user override replaces both
+                    // keys, and a pending rebind capture must swallow it.
+                    let zoom_in_fallback = self.keymap_capture.is_none()
+                        && !self.keymap_overrides.contains_key(&Action::EditorZoomIn)
+                        && ctx.input_mut(|i| {
                             i.consume_key(egui::Modifiers::NONE, egui::Key::Equals)
-                        })
-                    {
+                        });
+                    if self.keymap_consume(ctx, Action::EditorZoomIn) || zoom_in_fallback {
                         self.editor_zoom_step_at_playhead(tab_idx, true);
                     }
                     if self.keymap_consume(ctx, Action::EditorZoomOut) {
@@ -766,6 +775,9 @@ impl super::WavesPreviewer {
         } else {
             !self.list_undo_stack.is_empty()
         };
-        graph || editor || list
+        // Ctrl+Z's final fallback restores overwrite-export backups; the
+        // Edit menu must not gray Undo out while that path would fire.
+        let overwrite_export = !redo && !self.overwrite_undo_stack.is_empty();
+        graph || editor || list || overwrite_export
     }
 }

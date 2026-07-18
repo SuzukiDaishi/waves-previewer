@@ -297,6 +297,9 @@ impl crate::app::WavesPreviewer {
         let allow_auto_scroll = self.list_allow_auto_scroll(ctx, &metrics, key_moved);
         self.update_list_scroll_state(ctx, &metrics, allow_auto_scroll);
         let (table, filler_cols, header_dirty) = self.build_list_table(ui, &metrics);
+        // One copy per frame; the per-row closure below borrows self mutably,
+        // and the order cannot change mid-frame.
+        let column_order = self.list_column_order.clone();
 
         table
             .header(metrics.header_h, |mut header| {
@@ -459,7 +462,7 @@ impl crate::app::WavesPreviewer {
                         let mut clicked_to_load = false;
                         let mut clicked_to_select = false;
                         let is_dirty = self.has_edits_for_path(&path_owned);
-                        for sorted_col in self.list_column_order.clone() {
+                        for sorted_col in column_order.iter().copied() {
                         use crate::app::types::ColumnId as C;
                         match sorted_col {
                             C::Edited => {
@@ -1190,41 +1193,39 @@ impl crate::app::WavesPreviewer {
                         }
                             }
                             C::SilenceLead | C::SilenceTail => {
-                                let want = if sorted_col == C::SilenceLead { (cols.silence_lead, 0usize) } else { (cols.silence_tail, 1usize) };
-                                for (enabled, field) in [want] {
-
-                            if !enabled {
-                                continue;
-                            }
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let ms = self.meta_for_path(&path_owned).and_then(|m| {
-                                    if field == 0 {
-                                        m.silence_lead_ms
-                                    } else {
-                                        m.silence_tail_ms
-                                    }
-                                });
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(
-                                                ms.map(|v| format!("{:.0} ms", v))
-                                                    .unwrap_or_else(|| "...".into()),
+                                let lead = sorted_col == C::SilenceLead;
+                                let enabled =
+                                    if lead { cols.silence_lead } else { cols.silence_tail };
+                                if enabled {
+                                    row.col(|ui| {
+                                        if let Some(bg) = row_bg {
+                                            ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                        }
+                                        ui.visuals_mut().override_text_color = row_fg;
+                                        let ms = self.meta_for_path(&path_owned).and_then(|m| {
+                                            if lead {
+                                                m.silence_lead_ms
+                                            } else {
+                                                m.silence_tail_ms
+                                            }
+                                        });
+                                        let resp = ui.add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    ms.map(|v| format!("{:.0} ms", v))
+                                                        .unwrap_or_else(|| "...".into()),
+                                                )
+                                                .monospace(),
                                             )
-                                            .monospace(),
-                                        )
-                                        .sense(Sense::click()),
-                                    );
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
+                                            .sense(Sense::click()),
+                                        );
+                                        let resp =
+                                            self.attach_row_context_menu(resp, row_idx, ctx);
+                                        if resp.clicked_by(egui::PointerButton::Primary) {
+                                            clicked_to_load = true;
+                                        }
+                                    });
                                 }
-                            });
-                        }
                             }
                             C::Bpm => {
                                 if cols.bpm {

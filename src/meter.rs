@@ -198,9 +198,12 @@ fn tp_filter_bank() -> [[f32; TP_TAPS_PER_PHASE]; TP_PHASES] {
         } else {
             (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
         };
-        let w = 0.42
-            - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / (total - 1) as f64).cos()
-            + 0.08 * (4.0 * std::f64::consts::PI * n as f64 / (total - 1) as f64).cos();
+        // Hann — the SAME window the offline true-peak interpolator in
+        // wave.rs uses, so the realtime TP readout and the list's dBTP
+        // column measure inter-sample peaks with one filter, not two
+        // slightly different ones.
+        let w = 0.5
+            * (1.0 - (2.0 * std::f64::consts::PI * n as f64 / (total - 1) as f64).cos());
         // Interleaved prototype -> polyphase decomposition. Each phase keeps
         // unity DC gain because the prototype is a 4x interpolator.
         bank[n % TP_PHASES][n / TP_PHASES] = (sinc * w) as f32;

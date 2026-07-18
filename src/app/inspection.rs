@@ -42,7 +42,7 @@ impl Default for InspectionConfig {
             target_lufs: -14.0,
             lufs_tolerance_lu: 1.0,
             check_silence: true,
-            silence_threshold_dbfs: -60.0,
+            silence_threshold_dbfs: DEFAULT_SILENCE_THRESHOLD_DBFS,
             max_leading_silence_ms: 100.0,
             max_trailing_silence_ms: 1000.0,
             check_loop: true,
@@ -123,6 +123,10 @@ pub struct CachedAudioFacts {
 /// Leading/trailing spans (ms) where every channel stays below
 /// `threshold_dbfs`. A fully silent buffer reports the whole duration on
 /// both ends.
+/// Default threshold shared by the inspection config and the list's
+/// silence columns, so both features report the same numbers.
+pub const DEFAULT_SILENCE_THRESHOLD_DBFS: f32 = -60.0;
+
 pub fn scan_silence_ms(ch_samples: &[Vec<f32>], sample_rate: u32, threshold_dbfs: f32) -> (f32, f32) {
     let frames = ch_samples.iter().map(|c| c.len()).max().unwrap_or(0);
     let sr = sample_rate.max(1) as f32;

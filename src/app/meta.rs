@@ -347,10 +347,13 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let loudness = crate::wave::loudness_metrics_from_multi(&chans, sr).ok();
         let lufs_i = loudness.map(|l| l.lufs_i);
-        // Same -60 dBFS default the batch inspection uses; two linear scans
+        // Same threshold the batch inspection defaults to; two linear scans
         // over already-decoded channels, so it's computed unconditionally.
-        let (silence_lead_ms, silence_tail_ms) =
-            crate::app::inspection::scan_silence_ms(&chans, sr, -60.0);
+        let (silence_lead_ms, silence_tail_ms) = crate::app::inspection::scan_silence_ms(
+            &chans,
+            sr,
+            crate::app::inspection::DEFAULT_SILENCE_THRESHOLD_DBFS,
+        );
         let bpm = audio_io::read_audio_bpm(path);
         let (ch, bits) = info
             .as_ref()
