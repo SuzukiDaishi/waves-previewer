@@ -386,6 +386,14 @@ impl crate::app::WavesPreviewer {
                                 ui.checkbox(&mut next_cols.created_at, "Created");
                                 ui.checkbox(&mut next_cols.modified_at, "Modified");
                                 ui.checkbox(&mut next_cols.gain, "Gain");
+                                ui.checkbox(&mut next_cols.silence_lead, "Sil.Head")
+                                    .on_hover_text(
+                                        "Leading silence (ms, -60 dBFS threshold); computed on full decode",
+                                    );
+                                ui.checkbox(&mut next_cols.silence_tail, "Sil.Tail")
+                                    .on_hover_text(
+                                        "Trailing silence (ms, -60 dBFS threshold); computed on full decode",
+                                    );
                                 ui.checkbox(&mut next_cols.wave, "Wave");
                             });
                             let external_available = !self.external_visible_columns.is_empty();
@@ -411,7 +419,9 @@ impl crate::app::WavesPreviewer {
                                 || next_cols.created_at
                                 || next_cols.modified_at
                                 || next_cols.gain
-                                || next_cols.wave;
+                                || next_cols.wave
+                                || next_cols.silence_lead
+                                || next_cols.silence_tail;
                             if !any_visible {
                                 next_cols.file = true;
                             }

@@ -143,6 +143,16 @@ impl WavesPreviewer {
                     .filter(|v| v.is_finite() && *v > 0.0)
                     .map(|v| v as f64),
             ),
+            SortKey::SilenceLead => OwnedKey::Num(
+                m.and_then(|m| m.silence_lead_ms)
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as f64),
+            ),
+            SortKey::SilenceTail => OwnedKey::Num(
+                m.and_then(|m| m.silence_tail_ms)
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as f64),
+            ),
             SortKey::CreatedAt => OwnedKey::Num(
                 m.and_then(|m| m.created_at)
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())

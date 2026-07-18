@@ -397,6 +397,12 @@ impl crate::app::WavesPreviewer {
                                         .meta
                                         .as_ref()
                                         .and_then(|m| m.lufs_m_max)
+                                        .is_none())
+                                || ((cols.silence_lead || cols.silence_tail)
+                                    && item
+                                        .meta
+                                        .as_ref()
+                                        .and_then(|m| m.silence_lead_ms)
                                         .is_none()));
                             (
                                 needs_bg_full,
@@ -1140,6 +1146,42 @@ impl crate::app::WavesPreviewer {
                                 );
                                 let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
                                 if resp2.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+                        for (enabled, field) in [
+                            (cols.silence_lead, 0usize),
+                            (cols.silence_tail, 1usize),
+                        ] {
+                            if !enabled {
+                                continue;
+                            }
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let ms = self.meta_for_path(&path_owned).and_then(|m| {
+                                    if field == 0 {
+                                        m.silence_lead_ms
+                                    } else {
+                                        m.silence_tail_ms
+                                    }
+                                });
+                                let resp = ui
+                                    .add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                ms.map(|v| format!("{:.0} ms", v))
+                                                    .unwrap_or_else(|| "...".into()),
+                                            )
+                                            .monospace(),
+                                        )
+                                        .sense(Sense::click()),
+                                    );
+                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                if resp.clicked_by(egui::PointerButton::Primary) {
                                     clicked_to_load = true;
                                 }
                             });

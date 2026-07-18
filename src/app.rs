@@ -1757,6 +1757,8 @@ impl WavesPreviewer {
             lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
             true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: None,
             modified_at: None,
             cover_art: None,

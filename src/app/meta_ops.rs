@@ -29,6 +29,8 @@ impl super::WavesPreviewer {
                 | crate::app::types::SortKey::TruePeak
                 | crate::app::types::SortKey::LufsShort
                 | crate::app::types::SortKey::LufsMomentary
+                | crate::app::types::SortKey::SilenceLead
+                | crate::app::types::SortKey::SilenceTail
         )
     }
 

@@ -4052,6 +4052,8 @@ fn parse_list_column_keys(raw: &str) -> Result<Vec<String>> {
         ("lufs_s", cfg.lufs_s),
         ("lufs_m", cfg.lufs_m),
         ("bpm", cfg.bpm),
+        ("silence_lead", cfg.silence_lead),
+        ("silence_tail", cfg.silence_tail),
         ("created_at", cfg.created_at),
         ("modified_at", cfg.modified_at),
         ("gain", cfg.gain),
@@ -4089,6 +4091,8 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
         modified_at: false,
         gain: false,
         wave: false,
+        silence_lead: false,
+        silence_tail: false,
     };
     for key in raw.split(',').map(str::trim).filter(|key| !key.is_empty()) {
         match key {
@@ -4111,6 +4115,8 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
             "lufs_s" => cfg.lufs_s = true,
             "lufs_m" => cfg.lufs_m = true,
             "bpm" => cfg.bpm = true,
+            "silence_lead" => cfg.silence_lead = true,
+            "silence_tail" => cfg.silence_tail = true,
             "created_at" => cfg.created_at = true,
             "modified_at" => cfg.modified_at = true,
             "gain" => cfg.gain = true,
@@ -4146,6 +4152,8 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         modified_at: cfg.modified_at,
         gain: cfg.gain,
         wave: cfg.wave,
+        silence_lead: cfg.silence_lead,
+        silence_tail: cfg.silence_tail,
     }
 }
 

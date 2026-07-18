@@ -249,6 +249,8 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 lufs_s_max: None,
                 true_peak_db: None,
                 bpm: audio_io::read_audio_bpm(path),
+                silence_lead_ms: None,
+                silence_tail_ms: None,
                 created_at: info.created_at,
                 modified_at: info.modified_at,
                 cover_art: decode_cover_art_thumbnail(path),
@@ -274,6 +276,8 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             lufs_s_max: None,
             true_peak_db: None,
             bpm: None,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -343,6 +347,10 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let loudness = crate::wave::loudness_metrics_from_multi(&chans, sr).ok();
         let lufs_i = loudness.map(|l| l.lufs_i);
+        // Same -60 dBFS default the batch inspection uses; two linear scans
+        // over already-decoded channels, so it's computed unconditionally.
+        let (silence_lead_ms, silence_tail_ms) =
+            crate::app::inspection::scan_silence_ms(&chans, sr, -60.0);
         let bpm = audio_io::read_audio_bpm(path);
         let (ch, bits) = info
             .as_ref()
@@ -380,6 +388,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
             true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
+            silence_lead_ms: Some(silence_lead_ms),
+            silence_tail_ms: Some(silence_tail_ms),
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
             cover_art: decode_cover_art_thumbnail(path),
@@ -451,6 +461,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             lufs_s_max: None,
             true_peak_db: None,
             bpm,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
             cover_art: decode_cover_art_thumbnail(path),

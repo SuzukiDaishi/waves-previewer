@@ -286,6 +286,18 @@ impl WavesPreviewer {
             );
             filler_cols += 1;
         }
+        if cols.silence_lead {
+            table = table.column(
+                egui_extras::Column::initial(self.list_col_w("silence_lead", 80.0)).resizable(true),
+            );
+            filler_cols += 1;
+        }
+        if cols.silence_tail {
+            table = table.column(
+                egui_extras::Column::initial(self.list_col_w("silence_tail", 80.0)).resizable(true),
+            );
+            filler_cols += 1;
+        }
         if cols.bpm {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("bpm", 70.0)).resizable(true),
@@ -399,6 +411,7 @@ impl WavesPreviewer {
             "bits" => 50.0,
             "bit_rate" => 70.0,
             "peak" | "lufs" | "dbtp" | "lufs_s" | "lufs_m" => 90.0,
+            "silence_lead" | "silence_tail" => 80.0,
             "bpm" => 70.0,
             "created_at" | "modified_at" => 120.0,
             "gain" => 80.0,
@@ -621,6 +634,30 @@ impl WavesPreviewer {
                     &mut self.sort_key,
                     &mut self.sort_dir,
                     SortKey::LufsMomentary,
+                    false,
+                );
+            });
+        }
+        if cols.silence_lead {
+            sized_col!("silence_lead", |ui| {
+                *sort_changed |= sortable_header(
+                    ui,
+                    "Sil.Head",
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    SortKey::SilenceLead,
+                    false,
+                );
+            });
+        }
+        if cols.silence_tail {
+            sized_col!("silence_tail", |ui| {
+                *sort_changed |= sortable_header(
+                    ui,
+                    "Sil.Tail",
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    SortKey::SilenceTail,
                     false,
                 );
             });

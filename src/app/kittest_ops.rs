@@ -1082,6 +1082,8 @@ impl super::WavesPreviewer {
             SortKey::TruePeak => "TruePeak",
             SortKey::LufsShort => "LufsShort",
             SortKey::LufsMomentary => "LufsMomentary",
+            SortKey::SilenceLead => "SilenceLead",
+            SortKey::SilenceTail => "SilenceTail",
             SortKey::Bpm => "Bpm",
             SortKey::CreatedAt => "CreatedAt",
             SortKey::ModifiedAt => "ModifiedAt",
@@ -1645,6 +1647,16 @@ impl super::WavesPreviewer {
 
     pub fn test_set_editor_pref_invert_shift_wheel_pan(&mut self, enabled: bool) {
         self.invert_shift_wheel_pan = enabled;
+    }
+
+    pub fn test_meta_silence_ms(&self, path: &std::path::Path) -> Option<(f32, f32)> {
+        let meta = self.meta_for_path(path)?;
+        Some((meta.silence_lead_ms?, meta.silence_tail_ms?))
+    }
+
+    pub fn test_set_silence_columns(&mut self, enabled: bool) {
+        self.list_columns.silence_lead = enabled;
+        self.list_columns.silence_tail = enabled;
     }
 
     pub fn test_keymap_assign(&mut self, action: &str, chord: &str) -> Result<(), String> {
@@ -2246,6 +2258,8 @@ impl super::WavesPreviewer {
             lufs_s_max: None,
             true_peak_db: None,
             bpm: None,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: None,
             modified_at: None,
             cover_art: None,

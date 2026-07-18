@@ -286,6 +286,10 @@ pub struct ProjectListColumns {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    #[serde(default)]
+    pub silence_lead: bool,
+    #[serde(default)]
+    pub silence_tail: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1299,6 +1303,8 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         lufs_s_max: None,
         true_peak_db: None,
         bpm: None,
+        silence_lead_ms: None,
+        silence_tail_ms: None,
         created_at: None,
         modified_at: None,
         cover_art: None,

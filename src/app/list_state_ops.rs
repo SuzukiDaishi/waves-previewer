@@ -392,6 +392,8 @@ impl WavesPreviewer {
             SortKey::LufsShort => cols.lufs_s,
             SortKey::LufsMomentary => cols.lufs_m,
             SortKey::Bpm => cols.bpm,
+            SortKey::SilenceLead => cols.silence_lead,
+            SortKey::SilenceTail => cols.silence_tail,
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),

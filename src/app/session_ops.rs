@@ -589,6 +589,8 @@ impl super::WavesPreviewer {
                 super::types::SortKey::LufsShort => "LufsShort",
                 super::types::SortKey::LufsMomentary => "LufsMomentary",
                 super::types::SortKey::Bpm => "Bpm",
+                super::types::SortKey::SilenceLead => "SilenceLead",
+                super::types::SortKey::SilenceTail => "SilenceTail",
                 super::types::SortKey::CreatedAt => "CreatedAt",
                 super::types::SortKey::ModifiedAt => "ModifiedAt",
                 super::types::SortKey::External(_) => "External",
@@ -630,6 +632,8 @@ impl super::WavesPreviewer {
                 modified_at: self.list_columns.modified_at,
                 gain: self.list_columns.gain,
                 wave: self.list_columns.wave,
+                silence_lead: self.list_columns.silence_lead,
+                silence_tail: self.list_columns.silence_tail,
             },
             auto_play_list_nav: self.auto_play_list_nav,
             export_policy: Some(ProjectExportPolicy {
@@ -983,6 +987,8 @@ impl super::WavesPreviewer {
             modified_at: project.app.list_columns.modified_at,
             gain: project.app.list_columns.gain,
             wave: project.app.list_columns.wave,
+            silence_lead: project.app.list_columns.silence_lead,
+            silence_tail: project.app.list_columns.silence_tail,
         };
         self.sort_key = match project.app.sort_key.as_str() {
             "Folder" => super::types::SortKey::Folder,
@@ -999,6 +1005,8 @@ impl super::WavesPreviewer {
             "LufsShort" => super::types::SortKey::LufsShort,
             "LufsMomentary" => super::types::SortKey::LufsMomentary,
             "Bpm" => super::types::SortKey::Bpm,
+            "SilenceLead" => super::types::SortKey::SilenceLead,
+            "SilenceTail" => super::types::SortKey::SilenceTail,
             "CreatedAt" => super::types::SortKey::CreatedAt,
             "ModifiedAt" => super::types::SortKey::ModifiedAt,
             _ => super::types::SortKey::File,

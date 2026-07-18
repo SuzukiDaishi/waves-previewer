@@ -271,6 +271,8 @@ pub enum SortKey {
     LufsShort,
     LufsMomentary,
     Bpm,
+    SilenceLead,
+    SilenceTail,
     CreatedAt,
     ModifiedAt,
     External(usize),
@@ -356,6 +358,9 @@ pub struct ListColumnConfig {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    // Leading/trailing silence columns (full-decode metadata; default off).
+    pub silence_lead: bool,
+    pub silence_tail: bool,
 }
 
 impl Default for ListColumnConfig {
@@ -384,6 +389,8 @@ impl Default for ListColumnConfig {
             modified_at: false,
             gain: true,
             wave: true,
+            silence_lead: false,
+            silence_tail: false,
         }
     }
 }
@@ -1753,6 +1760,9 @@ pub struct FileMeta {
     /// True peak (BS.1770-4 Annex 2, oversampled), full decode only.
     pub true_peak_db: Option<f32>,
     pub bpm: Option<f32>,
+    /// Leading/trailing silence (-60 dBFS threshold) in ms, full decode only.
+    pub silence_lead_ms: Option<f32>,
+    pub silence_tail_ms: Option<f32>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
     pub cover_art: Option<Arc<egui::ColorImage>>,
