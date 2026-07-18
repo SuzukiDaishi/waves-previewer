@@ -112,7 +112,8 @@ use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
-    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode, RateMode,
+    ColumnId, ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode,
+    RateMode,
     StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
     ViewMode, WorkspaceView,
 };
@@ -596,6 +597,9 @@ pub struct WavesPreviewer {
     // dynamic row height for wave thumbnails (list view)
     pub wave_row_h: f32,
     pub list_columns: ListColumnConfig,
+    // Display order of list columns (always a sanitized permutation of
+    // ColumnId::ALL; visibility stays in `list_columns`).
+    pub list_column_order: Vec<types::ColumnId>,
     // persisted per-column widths (prefs.txt); key = column id in table.rs
     list_col_widths: std::collections::BTreeMap<String, f32>,
     // widths observed while rendering the current frame's header

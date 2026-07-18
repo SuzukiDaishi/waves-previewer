@@ -290,6 +290,12 @@ pub struct ProjectListColumns {
     pub silence_lead: bool,
     #[serde(default)]
     pub silence_tail: bool,
+    /// Display order by column name; empty = default order (old files).
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// Per-project column widths by name; empty = keep the global widths.
+    #[serde(default)]
+    pub widths: Vec<(String, f32)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

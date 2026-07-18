@@ -333,6 +333,151 @@ pub struct ListUndoAction {
     pub after: ListSelectionSnapshot,
 }
 
+/// Stable identity for every list column; display order is a Vec<ColumnId>
+/// (position-keyed orders break the moment a column is added).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ColumnId {
+    Edited,
+    CoverArt,
+    File,
+    Folder,
+    Transcript,
+    TranscriptLanguage,
+    External,
+    TypeBadge,
+    Length,
+    Channels,
+    SampleRate,
+    Bits,
+    BitRate,
+    Peak,
+    Lufs,
+    Dbtp,
+    LufsS,
+    LufsM,
+    SilenceLead,
+    SilenceTail,
+    Bpm,
+    CreatedAt,
+    ModifiedAt,
+    Gain,
+    Wave,
+}
+
+impl ColumnId {
+    /// Default display order — the historical fixed order of the table.
+    pub const ALL: &'static [ColumnId] = &[
+        ColumnId::Edited,
+        ColumnId::CoverArt,
+        ColumnId::File,
+        ColumnId::Folder,
+        ColumnId::Transcript,
+        ColumnId::TranscriptLanguage,
+        ColumnId::External,
+        ColumnId::TypeBadge,
+        ColumnId::Length,
+        ColumnId::Channels,
+        ColumnId::SampleRate,
+        ColumnId::Bits,
+        ColumnId::BitRate,
+        ColumnId::Peak,
+        ColumnId::Lufs,
+        ColumnId::Dbtp,
+        ColumnId::LufsS,
+        ColumnId::LufsM,
+        ColumnId::SilenceLead,
+        ColumnId::SilenceTail,
+        ColumnId::Bpm,
+        ColumnId::CreatedAt,
+        ColumnId::ModifiedAt,
+        ColumnId::Gain,
+        ColumnId::Wave,
+    ];
+
+    /// Stable identifier used by prefs/session files.
+    pub fn name(self) -> &'static str {
+        match self {
+            ColumnId::Edited => "edited",
+            ColumnId::CoverArt => "cover_art",
+            ColumnId::File => "file",
+            ColumnId::Folder => "folder",
+            ColumnId::Transcript => "transcript",
+            ColumnId::TranscriptLanguage => "transcript_language",
+            ColumnId::External => "external",
+            ColumnId::TypeBadge => "type_badge",
+            ColumnId::Length => "length",
+            ColumnId::Channels => "channels",
+            ColumnId::SampleRate => "sample_rate",
+            ColumnId::Bits => "bits",
+            ColumnId::BitRate => "bit_rate",
+            ColumnId::Peak => "peak",
+            ColumnId::Lufs => "lufs",
+            ColumnId::Dbtp => "dbtp",
+            ColumnId::LufsS => "lufs_s",
+            ColumnId::LufsM => "lufs_m",
+            ColumnId::SilenceLead => "silence_lead",
+            ColumnId::SilenceTail => "silence_tail",
+            ColumnId::Bpm => "bpm",
+            ColumnId::CreatedAt => "created_at",
+            ColumnId::ModifiedAt => "modified_at",
+            ColumnId::Gain => "gain",
+            ColumnId::Wave => "wave",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ColumnId> {
+        ColumnId::ALL.iter().copied().find(|c| c.name() == s)
+    }
+
+    /// Human label for the reorder settings list.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColumnId::Edited => "Edited",
+            ColumnId::CoverArt => "Art",
+            ColumnId::File => "File",
+            ColumnId::Folder => "Folder",
+            ColumnId::Transcript => "Transcript",
+            ColumnId::TranscriptLanguage => "Language",
+            ColumnId::External => "External",
+            ColumnId::TypeBadge => "Type",
+            ColumnId::Length => "Length",
+            ColumnId::Channels => "Channels",
+            ColumnId::SampleRate => "Sample Rate",
+            ColumnId::Bits => "Bits",
+            ColumnId::BitRate => "Bitrate",
+            ColumnId::Peak => "Peak",
+            ColumnId::Lufs => "LUFS",
+            ColumnId::Dbtp => "dBTP",
+            ColumnId::LufsS => "LUFS-S",
+            ColumnId::LufsM => "LUFS-M",
+            ColumnId::SilenceLead => "Silence Head",
+            ColumnId::SilenceTail => "Silence Tail",
+            ColumnId::Bpm => "BPM",
+            ColumnId::CreatedAt => "Created",
+            ColumnId::ModifiedAt => "Modified",
+            ColumnId::Gain => "Gain",
+            ColumnId::Wave => "Wave",
+        }
+    }
+}
+
+/// Normalize a stored order: drop unknown/duplicate entries and append any
+/// columns missing from it (new builds add columns old files never saw).
+pub fn sanitize_column_order(order: &[ColumnId]) -> Vec<ColumnId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<ColumnId> = order
+        .iter()
+        .copied()
+        .filter(|c| seen.insert(*c))
+        .collect();
+    for c in ColumnId::ALL {
+        if seen.insert(*c) {
+            out.push(*c);
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListColumnConfig {
     pub edited: bool,

@@ -430,6 +430,47 @@ impl crate::app::WavesPreviewer {
                                 self.ensure_sort_key_visible();
                                 self.request_sort();
                             }
+                            ui.collapsing("Column Order", |ui| {
+                                ui.label(
+                                    RichText::new(
+                                        "Move columns up (left) / down (right). Hidden columns keep \
+                                         their slot for when they're re-enabled.",
+                                    )
+                                    .weak(),
+                                );
+                                let order = self.list_column_order.clone();
+                                let mut moved: Option<(usize, isize)> = None;
+                                for (i, col) in order.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_enabled(i > 0, egui::Button::new("^").small())
+                                            .clicked()
+                                        {
+                                            moved = Some((i, -1));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                i + 1 < order.len(),
+                                                egui::Button::new("v").small(),
+                                            )
+                                            .clicked()
+                                        {
+                                            moved = Some((i, 1));
+                                        }
+                                        ui.label(col.label());
+                                    });
+                                }
+                                if let Some((i, d)) = moved {
+                                    let j = (i as isize + d) as usize;
+                                    self.list_column_order.swap(i, j);
+                                    self.save_prefs();
+                                }
+                                if ui.button("Reset Order").clicked() {
+                                    self.list_column_order =
+                                        crate::app::types::ColumnId::ALL.to_vec();
+                                    self.save_prefs();
+                                }
+                            });
                             ui.separator();
                             ui.label("Editor:");
                             let mut eps = self.zero_cross_epsilon;

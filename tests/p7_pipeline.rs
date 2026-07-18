@@ -34,6 +34,51 @@ mod p7_pipeline {
     }
 
     #[test]
+    fn column_reorder_moves_headers_and_persists_in_session() {
+        use egui_kittest::kittest::Queryable;
+        use neowaves::app::ColumnId;
+        let sr = 48_000u32;
+        let dir = make_temp_dir("colorder");
+        let tone: Vec<f32> = (0..(sr / 10) as usize)
+            .map(|i| (i as f32 / sr as f32 * 330.0 * std::f32::consts::TAU).sin() * 0.3)
+            .collect();
+        neowaves::wave::export_channels_audio(&[tone].to_vec(), sr, &dir.join("a.wav"))
+            .expect("export fixture");
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir.clone());
+        cfg.open_first = false;
+        let mut harness = harness_with_startup(cfg);
+        wait_until(&mut harness, "scan", |h| h.state().files.len() >= 1);
+        harness.run_steps(2);
+        // Default order: Length header is left of Bits.
+        let length_x = harness.get_by_label("Length").rect().left();
+        let bits_x = harness.get_by_label("Bits").rect().left();
+        assert!(length_x < bits_x, "default order: Length left of Bits");
+        // Move Bits before Length and re-render.
+        let mut order = harness.state().list_column_order.clone();
+        let bi = order.iter().position(|c| *c == ColumnId::Bits).unwrap();
+        let li = order.iter().position(|c| *c == ColumnId::Length).unwrap();
+        let bits_col = order.remove(bi);
+        order.insert(li, bits_col);
+        harness.state_mut().list_column_order = order.clone();
+        harness.run_steps(3);
+        let length_x = harness.get_by_label("Length").rect().left();
+        let bits_x = harness.get_by_label("Bits").rect().left();
+        assert!(
+            bits_x < length_x,
+            "reordered: Bits ({bits_x}) must sit left of Length ({length_x})"
+        );
+        // Round-trip through a session file.
+        let sess = dir.join("order.nwsess");
+        assert!(harness.state_mut().test_save_session_to(&sess));
+        harness.state_mut().list_column_order = ColumnId::ALL.to_vec();
+        assert!(harness.state_mut().test_open_session_from(&sess));
+        harness.run_steps(3);
+        assert_eq!(harness.state().list_column_order, order);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn silence_columns_fill_lead_and_tail_ms() {
         let sr = 48_000u32;
         let dir = make_temp_dir("silcols");

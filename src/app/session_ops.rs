@@ -634,6 +634,20 @@ impl super::WavesPreviewer {
                 wave: self.list_columns.wave,
                 silence_lead: self.list_columns.silence_lead,
                 silence_tail: self.list_columns.silence_tail,
+                order: self
+                    .list_column_order
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect(),
+                widths: {
+                    let mut widths: Vec<(String, f32)> = self
+                        .list_col_widths
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+                    widths.sort_by(|a, b| a.0.cmp(&b.0));
+                    widths
+                },
             },
             auto_play_list_nav: self.auto_play_list_nav,
             export_policy: Some(ProjectExportPolicy {
@@ -990,6 +1004,21 @@ impl super::WavesPreviewer {
             silence_lead: project.app.list_columns.silence_lead,
             silence_tail: project.app.list_columns.silence_tail,
         };
+        if !project.app.list_columns.order.is_empty() {
+            let parsed: Vec<super::types::ColumnId> = project
+                .app
+                .list_columns
+                .order
+                .iter()
+                .filter_map(|name| super::types::ColumnId::from_name(name))
+                .collect();
+            self.list_column_order = super::types::sanitize_column_order(&parsed);
+        }
+        for (key, w) in &project.app.list_columns.widths {
+            if w.is_finite() && *w > 4.0 {
+                self.list_col_widths.insert(key.clone(), *w);
+            }
+        }
         self.sort_key = match project.app.sort_key.as_str() {
             "Folder" => super::types::SortKey::Folder,
             "Transcript" => super::types::SortKey::Transcript,

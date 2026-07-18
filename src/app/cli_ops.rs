@@ -4154,6 +4154,8 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         wave: cfg.wave,
         silence_lead: cfg.silence_lead,
         silence_tail: cfg.silence_tail,
+        order: Vec::new(),
+        widths: Vec::new(),
     }
 }
 

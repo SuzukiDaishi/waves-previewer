@@ -168,6 +168,7 @@ impl WavesPreviewer {
             scan_pending_target: None,
             wave_row_h: 26.0,
             list_columns: ListColumnConfig::default(),
+            list_column_order: crate::app::types::ColumnId::ALL.to_vec(),
             list_col_widths: Default::default(),
             list_col_widths_seen: Vec::new(),
             list_table_ui_id: None,

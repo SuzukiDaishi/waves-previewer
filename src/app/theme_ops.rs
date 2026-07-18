@@ -330,6 +330,12 @@ impl WavesPreviewer {
                 self.invert_shift_wheel_pan = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("editor_wheel_mode=") {
                 self.editor_wheel_scrolls = rest.trim().eq_ignore_ascii_case("scroll");
+            } else if let Some(rest) = line.strip_prefix("list_col_order=") {
+                let parsed: Vec<crate::app::types::ColumnId> = rest
+                    .split(',')
+                    .filter_map(|name| crate::app::types::ColumnId::from_name(name.trim()))
+                    .collect();
+                self.list_column_order = crate::app::types::sanitize_column_order(&parsed);
             } else if let Some(rest) = line.strip_prefix("keymap=") {
                 if let Some((name, chord)) = rest.trim().split_once(':') {
                     if let (Some(action), Some(parsed)) = (
@@ -981,6 +987,16 @@ zoo_flip_manual={}\n",
             out.push_str(&path_text);
             out.push('\n');
         }
+        {
+            out.push_str("list_col_order=");
+            let names: Vec<&str> = self
+                .list_column_order
+                .iter()
+                .map(|c| c.name())
+                .collect();
+            out.push_str(&names.join(","));
+            out.push('\n');
+        }
         // Sorted for a deterministic file (HashMap iteration order isn't).
         let mut keymap_lines: Vec<String> = self
             .keymap_overrides
@@ -1230,6 +1246,38 @@ mod tests {
             WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
         bogus.load_prefs_from_path(&prefs);
         assert!(bogus.keymap_overrides.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn column_order_prefs_roundtrip_and_sanitize() {
+        use crate::app::types::{sanitize_column_order, ColumnId};
+        let dir = temp_dir("col_order");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        // Move Wave to the front.
+        let mut order = ColumnId::ALL.to_vec();
+        let wave = order.pop().unwrap();
+        order.insert(0, wave);
+        app.list_column_order = order.clone();
+        app.save_prefs_to_path(&prefs);
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.list_column_order, order);
+
+        // Unknown names are dropped, missing columns appended, dups removed.
+        std::fs::write(&prefs, "list_col_order=wave,bogus,wave,file\n").expect("write prefs");
+        let mut partial =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        partial.load_prefs_from_path(&prefs);
+        assert_eq!(partial.list_column_order.len(), ColumnId::ALL.len());
+        assert_eq!(partial.list_column_order[0], ColumnId::Wave);
+        assert_eq!(partial.list_column_order[1], ColumnId::File);
+
+        let sane = sanitize_column_order(&[]);
+        assert_eq!(sane, ColumnId::ALL.to_vec());
         let _ = std::fs::remove_dir_all(dir);
     }
 

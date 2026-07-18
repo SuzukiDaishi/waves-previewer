@@ -182,152 +182,208 @@ impl WavesPreviewer {
             .vscroll(false)
             .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
-        if cols.edited {
+        for sorted_col in self.list_column_order.clone() {
+            use crate::app::types::ColumnId as C;
+            match sorted_col {
+                C::Edited => {
+                    if cols.edited {
             table = table.column(egui_extras::Column::initial(30.0).resizable(false));
             filler_cols += 1;
         }
-        if cols.cover_art {
+                }
+                C::CoverArt => {
+                    if cols.cover_art {
             table = table.column(egui_extras::Column::initial(76.0).resizable(false));
             filler_cols += 1;
         }
-        if cols.file {
+                }
+                C::File => {
+                    if cols.file {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("file", 200.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.folder {
+                }
+                C::Folder => {
+                    if cols.folder {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("folder", 250.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.transcript {
+                }
+                C::Transcript => {
+                    if cols.transcript {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("transcript", 280.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.transcript_language {
+                }
+                C::TranscriptLanguage => {
+                    if cols.transcript_language {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("transcript_language", 56.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.external {
+                }
+                C::External => {
+                    if cols.external {
             for _ in 0..metrics.external_cols.len() {
                 table = table.column(egui_extras::Column::initial(140.0).resizable(true));
                 filler_cols += 1;
             }
         }
-        if cols.type_badge {
+                }
+                C::TypeBadge => {
+                    if cols.type_badge {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("type_badge", 58.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.length {
+                }
+                C::Length => {
+                    if cols.length {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("length", 60.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.channels {
+                }
+                C::Channels => {
+                    if cols.channels {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("channels", 40.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.sample_rate {
+                }
+                C::SampleRate => {
+                    if cols.sample_rate {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("sample_rate", 70.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.bits {
+                }
+                C::Bits => {
+                    if cols.bits {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("bits", 50.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.bit_rate {
+                }
+                C::BitRate => {
+                    if cols.bit_rate {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("bit_rate", 70.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.peak {
+                }
+                C::Peak => {
+                    if cols.peak {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("peak", 90.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.lufs {
+                }
+                C::Lufs => {
+                    if cols.lufs {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("lufs", 90.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.dbtp {
+                }
+                C::Dbtp => {
+                    if cols.dbtp {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("dbtp", 90.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.lufs_s {
+                }
+                C::LufsS => {
+                    if cols.lufs_s {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("lufs_s", 90.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.lufs_m {
+                }
+                C::LufsM => {
+                    if cols.lufs_m {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("lufs_m", 90.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.silence_lead {
+                }
+                C::SilenceLead => {
+                    if cols.silence_lead {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("silence_lead", 80.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.silence_tail {
+                }
+                C::SilenceTail => {
+                    if cols.silence_tail {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("silence_tail", 80.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.bpm {
+                }
+                C::Bpm => {
+                    if cols.bpm {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("bpm", 70.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.created_at {
+                }
+                C::CreatedAt => {
+                    if cols.created_at {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("created_at", 120.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.modified_at {
+                }
+                C::ModifiedAt => {
+                    if cols.modified_at {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("modified_at", 120.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.gain {
+                }
+                C::Gain => {
+                    if cols.gain {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("gain", 80.0)).resizable(true),
             );
             filler_cols += 1;
         }
-        if cols.wave {
+                }
+                C::Wave => {
+                    if cols.wave {
             table = table.column(
                 egui_extras::Column::initial(self.list_col_w("wave", 150.0)).resizable(true),
             );
             filler_cols += 1;
         }
+                }
+            }
+        }
+
         table = table
             .column(egui_extras::Column::remainder())
             .min_scrolled_height((metrics.avail_h - metrics.header_h).max(0.0));
@@ -435,7 +491,11 @@ impl WavesPreviewer {
                 self.list_col_widths_seen.push(($key, rect.width()));
             }};
         }
-        if cols.edited {
+        for sorted_col in self.list_column_order.clone() {
+            use crate::app::types::ColumnId as C;
+            match sorted_col {
+                C::Edited => {
+                    if cols.edited {
             header.col(|ui| {
                 let mut dot = RichText::new("\u{25CF}");
                 if header_dirty {
@@ -446,12 +506,16 @@ impl WavesPreviewer {
                 ui.label(dot);
             });
         }
-        if cols.cover_art {
+                }
+                C::CoverArt => {
+                    if cols.cover_art {
             header.col(|ui| {
                 ui.label(RichText::new("Art").strong());
             });
         }
-        if cols.file {
+                }
+                C::File => {
+                    if cols.file {
             sized_col!("file", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -463,7 +527,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.folder {
+                }
+                C::Folder => {
+                    if cols.folder {
             sized_col!("folder", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -475,7 +541,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.transcript {
+                }
+                C::Transcript => {
+                    if cols.transcript {
             sized_col!("transcript", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -487,12 +555,16 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.transcript_language {
+                }
+                C::TranscriptLanguage => {
+                    if cols.transcript_language {
             sized_col!("transcript_language", |ui| {
                 ui.label(RichText::new("Lang").strong());
             });
         }
-        if cols.external {
+                }
+                C::External => {
+                    if cols.external {
             for (idx, name) in metrics.external_cols.iter().enumerate() {
                 header.col(|ui| {
                     *sort_changed |= sortable_header(
@@ -506,7 +578,9 @@ impl WavesPreviewer {
                 });
             }
         }
-        if cols.type_badge {
+                }
+                C::TypeBadge => {
+                    if cols.type_badge {
             sized_col!("type_badge", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -518,7 +592,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.length {
+                }
+                C::Length => {
+                    if cols.length {
             sized_col!("length", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -530,7 +606,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.channels {
+                }
+                C::Channels => {
+                    if cols.channels {
             sized_col!("channels", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -542,7 +620,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.sample_rate {
+                }
+                C::SampleRate => {
+                    if cols.sample_rate {
             sized_col!("sample_rate", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -554,7 +634,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.bits {
+                }
+                C::Bits => {
+                    if cols.bits {
             sized_col!("bits", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -566,7 +648,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.bit_rate {
+                }
+                C::BitRate => {
+                    if cols.bit_rate {
             sized_col!("bit_rate", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -578,7 +662,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.peak {
+                }
+                C::Peak => {
+                    if cols.peak {
             sized_col!("peak", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -590,7 +676,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.lufs {
+                }
+                C::Lufs => {
+                    if cols.lufs {
             sized_col!("lufs", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -602,7 +690,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.dbtp {
+                }
+                C::Dbtp => {
+                    if cols.dbtp {
             sized_col!("dbtp", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -614,7 +704,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.lufs_s {
+                }
+                C::LufsS => {
+                    if cols.lufs_s {
             sized_col!("lufs_s", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -626,7 +718,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.lufs_m {
+                }
+                C::LufsM => {
+                    if cols.lufs_m {
             sized_col!("lufs_m", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -638,7 +732,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.silence_lead {
+                }
+                C::SilenceLead => {
+                    if cols.silence_lead {
             sized_col!("silence_lead", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -650,7 +746,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.silence_tail {
+                }
+                C::SilenceTail => {
+                    if cols.silence_tail {
             sized_col!("silence_tail", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -662,7 +760,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.bpm {
+                }
+                C::Bpm => {
+                    if cols.bpm {
             sized_col!("bpm", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -674,7 +774,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.created_at {
+                }
+                C::CreatedAt => {
+                    if cols.created_at {
             sized_col!("created_at", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -686,7 +788,9 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.modified_at {
+                }
+                C::ModifiedAt => {
+                    if cols.modified_at {
             sized_col!("modified_at", |ui| {
                 *sort_changed |= sortable_header(
                     ui,
@@ -698,16 +802,24 @@ impl WavesPreviewer {
                 );
             });
         }
-        if cols.gain {
+                }
+                C::Gain => {
+                    if cols.gain {
             sized_col!("gain", |ui| {
                 ui.label(RichText::new("Gain (dB)").strong());
             });
         }
-        if cols.wave {
+                }
+                C::Wave => {
+                    if cols.wave {
             sized_col!("wave", |ui| {
                 ui.label(RichText::new("Wave").strong());
             });
         }
+                }
+            }
+        }
+
         header.col(|_ui| {});
     }
 

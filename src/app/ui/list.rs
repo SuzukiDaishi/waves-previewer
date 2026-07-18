@@ -459,7 +459,11 @@ impl crate::app::WavesPreviewer {
                         let mut clicked_to_load = false;
                         let mut clicked_to_select = false;
                         let is_dirty = self.has_edits_for_path(&path_owned);
-                        if cols.edited {
+                        for sorted_col in self.list_column_order.clone() {
+                        use crate::app::types::ColumnId as C;
+                        match sorted_col {
+                            C::Edited => {
+                                if cols.edited {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -474,7 +478,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.cover_art {
+                            }
+                            C::CoverArt => {
+                                if cols.cover_art {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -544,7 +550,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.file {
+                            }
+                            C::File => {
+                                if cols.file {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -601,7 +609,9 @@ impl crate::app::WavesPreviewer {
                                 );
                             });
                         }
-                        if cols.folder {
+                            }
+                            C::Folder => {
+                                if cols.folder {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -655,7 +665,9 @@ impl crate::app::WavesPreviewer {
                                 );
                             });
                         }
-                        if cols.transcript {
+                            }
+                            C::Transcript => {
+                                if cols.transcript {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -720,7 +732,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.transcript_language {
+                            }
+                            C::TranscriptLanguage => {
+                                if cols.transcript_language {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -737,7 +751,9 @@ impl crate::app::WavesPreviewer {
                                 );
                             });
                         }
-                        if cols.external {
+                            }
+                            C::External => {
+                                if cols.external {
                             for name in external_cols.iter() {
                                 row.col(|ui| {
                                     if let Some(bg) = row_bg {
@@ -796,7 +812,9 @@ impl crate::app::WavesPreviewer {
                                 });
                             }
                         }
-                        if cols.type_badge {
+                            }
+                            C::TypeBadge => {
+                                if cols.type_badge {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -831,7 +849,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.length {
+                            }
+                            C::Length => {
+                                if cols.length {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -858,7 +878,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.channels {
+                            }
+                            C::Channels => {
+                                if cols.channels {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -886,7 +908,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.sample_rate {
+                            }
+                            C::SampleRate => {
+                                if cols.sample_rate {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -911,7 +935,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.bits {
+                            }
+                            C::Bits => {
+                                if cols.bits {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -936,7 +962,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.bit_rate {
+                            }
+                            C::BitRate => {
+                                if cols.bit_rate {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -961,7 +989,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.peak {
+                            }
+                            C::Peak => {
+                                if cols.peak {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1008,7 +1038,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.lufs {
+                            }
+                            C::Lufs => {
+                                if cols.lufs {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1045,7 +1077,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                                                if cols.dbtp {
+                            }
+                            C::Dbtp => {
+                                if cols.dbtp {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1080,7 +1114,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.lufs_s {
+                            }
+                            C::LufsS => {
+                                if cols.lufs_s {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1115,7 +1151,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.lufs_m {
+                            }
+                            C::LufsM => {
+                                if cols.lufs_m {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1150,10 +1188,11 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        for (enabled, field) in [
-                            (cols.silence_lead, 0usize),
-                            (cols.silence_tail, 1usize),
-                        ] {
+                            }
+                            C::SilenceLead | C::SilenceTail => {
+                                let want = if sorted_col == C::SilenceLead { (cols.silence_lead, 0usize) } else { (cols.silence_tail, 1usize) };
+                                for (enabled, field) in [want] {
+
                             if !enabled {
                                 continue;
                             }
@@ -1186,7 +1225,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.bpm {
+                            }
+                            C::Bpm => {
+                                if cols.bpm {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1214,7 +1255,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.created_at {
+                            }
+                            C::CreatedAt => {
+                                if cols.created_at {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1238,7 +1281,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.modified_at {
+                            }
+                            C::ModifiedAt => {
+                                if cols.modified_at {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1262,7 +1307,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.gain {
+                            }
+                            C::Gain => {
+                                if cols.gain {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1311,7 +1358,9 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
-                        if cols.wave {
+                            }
+                            C::Wave => {
+                                if cols.wave {
                             row.col(|ui| {
                                 if let Some(bg) = row_bg {
                                     ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1393,6 +1442,10 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                         }
+                            }
+                        }
+                        }
+
                         row.col(|ui| {
                             if let Some(bg) = row_bg {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
