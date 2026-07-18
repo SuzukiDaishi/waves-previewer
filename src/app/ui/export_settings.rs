@@ -353,6 +353,21 @@ impl crate::app::WavesPreviewer {
                             {
                                 self.save_prefs();
                             }
+                            {
+                                let mut watch = self.watch_folder_enabled;
+                                if ui
+                                    .checkbox(&mut watch, "Watch folder for changes")
+                                    .on_hover_text(
+                                        "Poll the open folder every few seconds and apply files \
+                                         added/removed/changed on disk (files open in the editor \
+                                         are never touched)",
+                                    )
+                                    .changed()
+                                {
+                                    self.watch_folder_enabled = watch;
+                                    self.save_prefs();
+                                }
+                            }
                             ui.separator();
                             ui.label("List Columns:");
                             let mut next_cols = self.list_columns;

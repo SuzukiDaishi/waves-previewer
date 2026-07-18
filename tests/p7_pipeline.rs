@@ -79,6 +79,46 @@ mod p7_pipeline {
     }
 
     #[test]
+    fn folder_watch_applies_added_and_removed_files() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("watch");
+        let tone: Vec<f32> = (0..(sr / 10) as usize)
+            .map(|i| (i as f32 / sr as f32 * 220.0 * std::f32::consts::TAU).sin() * 0.3)
+            .collect();
+        neowaves::wave::export_channels_audio(&[tone.clone()].to_vec(), sr, &dir.join("a.wav"))
+            .expect("export fixture");
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir.clone());
+        cfg.open_first = false;
+        let mut harness = harness_with_startup(cfg);
+        wait_until(&mut harness, "scan", |h| h.state().files.len() >= 1);
+        harness.state_mut().test_set_watch_interval_ms(50);
+        wait_until(&mut harness, "watch spawned", |h| h.state().test_watch_active());
+        // Give the poller its baseline snapshot.
+        std::thread::sleep(Duration::from_millis(150));
+        harness.run_steps(2);
+
+        // A file dropped into the folder appears in the list...
+        let added = dir.join("b.wav");
+        // Bypass the app's own exporter so this doesn't register as a
+        // self-write (external tools are what the watch is for).
+        {
+            let src = dir.join("a.wav");
+            std::fs::copy(&src, &added).expect("copy new file");
+        }
+        wait_until(&mut harness, "added file picked up", |h| {
+            h.state().files.len() >= 2
+        });
+
+        // ...and deleting it removes the row again.
+        std::fs::remove_file(&added).expect("remove file");
+        wait_until(&mut harness, "removed file dropped", |h| {
+            h.state().files.len() == 1
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn silence_columns_fill_lead_and_tail_ms() {
         let sr = 48_000u32;
         let dir = make_temp_dir("silcols");

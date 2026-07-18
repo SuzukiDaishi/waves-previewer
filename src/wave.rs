@@ -1532,6 +1532,7 @@ fn parse_riff_wave_chunks(path: &Path) -> Result<Vec<RiffWaveChunk>> {
 }
 
 fn encode_riff_wave_chunks(path: &Path, chunks: &[RiffWaveChunk]) -> Result<()> {
+    crate::app::watch::note_self_write(path);
     use std::fs;
     let mut out = Vec::new();
     out.extend_from_slice(b"RIFF");
@@ -3190,6 +3191,7 @@ pub fn export_selection_wav_with_depth(
 
 // Export full in-memory audio to a supported format (wav/mp3/m4a) based on dst extension.
 pub fn export_channels_audio(chans: &[Vec<f32>], sample_rate: u32, dst: &Path) -> Result<()> {
+    crate::app::watch::note_self_write(dst);
     export_channels_audio_with_depth(chans, sample_rate, dst, None)
 }
 
@@ -3287,6 +3289,7 @@ fn replace_file_atomic_win(tmp: &Path, src: &Path) -> std::io::Result<()> {
 /// Replace `src` with the finished `tmp`, never leaving a window where the
 /// original is deleted and unrecoverable. Optionally keeps `<name>.bak`.
 fn replace_file_with_tmp(tmp: &Path, src: &Path, backup: bool) -> Result<()> {
+    crate::app::watch::note_self_write(src);
     use std::fs;
     if backup {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");

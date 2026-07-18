@@ -330,6 +330,8 @@ impl WavesPreviewer {
                 self.invert_shift_wheel_pan = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("editor_wheel_mode=") {
                 self.editor_wheel_scrolls = rest.trim().eq_ignore_ascii_case("scroll");
+            } else if let Some(rest) = line.strip_prefix("watch_folder=") {
+                self.watch_folder_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("list_col_order=") {
                 let parsed: Vec<crate::app::types::ColumnId> = rest
                     .split(',')
@@ -985,6 +987,11 @@ zoo_flip_manual={}\n",
             let path_text = p.to_string_lossy().replace('\n', " ");
             out.push_str("plugin_search_path=");
             out.push_str(&path_text);
+            out.push('\n');
+        }
+        {
+            out.push_str("watch_folder=");
+            out.push_str(if self.watch_folder_enabled { "1" } else { "0" });
             out.push('\n');
         }
         {

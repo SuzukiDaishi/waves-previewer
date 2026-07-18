@@ -92,6 +92,7 @@ mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
 mod threading;
+pub mod watch;
 mod toast_ops;
 mod tool_ops;
 mod tooling;
@@ -726,6 +727,10 @@ pub struct WavesPreviewer {
     duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
     duplicate_report: Option<duplicate_ops::DuplicateReportState>,
     show_duplicates_window: bool,
+    // Folder watch (polling): rescans the root and applies disk changes.
+    folder_watch: Option<watch::FolderWatch>,
+    watch_folder_enabled: bool,
+    watch_poll_interval_ms: u64,
     // "Find Duplicates": also match copies shifted in time (silence-padded
     // variants) up to MAX_SIMILAR_OFFSET_MS, at a slightly raised threshold.
     dup_allow_offset: bool,
