@@ -3361,19 +3361,6 @@ pub fn overwrite_gain_audio(src: &Path, gain_db: f32, backup: bool) -> Result<()
 
 // ---- Loudness (LUFS) utilities ----
 
-// K-weighting biquad coefficients for fs=48kHz (BS.1770)
-const KW_B0_1: f32 = 1.5351249;
-const KW_B1_1: f32 = -2.6916962;
-const KW_B2_1: f32 = 1.1983929;
-const KW_A1_1: f32 = -1.6906593;
-const KW_A2_1: f32 = 0.73248076;
-
-const KW_B0_2: f32 = 1.0;
-const KW_B1_2: f32 = -2.0;
-const KW_B2_2: f32 = 1.0;
-const KW_A1_2: f32 = -1.9900475;
-const KW_A2_2: f32 = 0.99007225;
-
 const K_CONST: f32 = -0.691; // 997Hz calibration constant
 
 fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) {
@@ -3393,9 +3380,15 @@ fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32
 }
 
 fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
+    let kw = crate::meter::k_weight_coeffs(48_000);
+    let (s, h) = (kw.shelf, kw.highpass);
     for ch in chans.iter_mut() {
-        biquad_inplace_f32(ch, KW_B0_1, KW_B1_1, KW_B2_1, KW_A1_1, KW_A2_1);
-        biquad_inplace_f32(ch, KW_B0_2, KW_B1_2, KW_B2_2, KW_A1_2, KW_A2_2);
+        biquad_inplace_f32(
+            ch, s.b0 as f32, s.b1 as f32, s.b2 as f32, s.a1 as f32, s.a2 as f32,
+        );
+        biquad_inplace_f32(
+            ch, h.b0 as f32, h.b1 as f32, h.b2 as f32, h.a1 as f32, h.a2 as f32,
+        );
     }
 }
 

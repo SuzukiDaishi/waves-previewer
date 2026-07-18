@@ -276,9 +276,10 @@ mod tests {
     }
 
     #[test]
-    fn k_weight_matches_offline_constants_at_48k() {
-        // wave.rs hardcodes the ITU 48 kHz table; the recomputation must land
-        // on the same filter (offline and realtime paths agree).
+    fn k_weight_matches_itu_table_at_48k() {
+        // The recomputation must land on the published ITU BS.1770 48 kHz
+        // coefficient table. The offline path (wave.rs) shares this function,
+        // so this also pins offline/realtime agreement.
         let c = k_weight_coeffs(48_000);
         let expect_shelf = [1.535_124_9, -2.691_696_2, 1.198_392_9, -1.690_659_3, 0.732_480_76];
         let got_shelf = [c.shelf.b0, c.shelf.b1, c.shelf.b2, c.shelf.a1, c.shelf.a2];
