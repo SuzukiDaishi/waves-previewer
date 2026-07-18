@@ -4,6 +4,12 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### Playback & Metering (P6)
+- **Realtime LUFS + true peak**: the audio callback feeds a lock-free tap ring; a low-priority thread runs BS.1770 K-weighting (recomputed for the device sample rate and pinned to the ITU 48 kHz table by test), publishes momentary (400 ms) / short-term (3 s) LUFS and 4x-oversampled true peak, shown as a compact "M / S / TP" readout next to the topbar output meter. Readings invalidate ~500 ms after playback stops.
+- **Goniometer polish**: the STEREO pane's Lissajous mapping is now a unit-tested pure function (mono collapses to the mid axis, L = -R to the side axis) and the smoothed correlation value is shown numerically beside the pane title.
+- **Play Selected Together** (List menu): decode up to 16 selected files, align sample rates, mix at 1/sqrt(n), and play the sum once — a quick layering check without leaving the list.
+- **Resampler quality**: the Pitch/Time-Stretch offline pre-stage and lossy-encode paths now use rubato sinc SRC (Good), and the LUFS 48 kHz conversion uses Fast sinc instead of linear interpolation (loudness goldens unchanged). Multichannel LUFS weighting (5.1/7.1 surround x1.41, LFE excluded) confirmed shipped and its stale docs corrected.
+
 ### DSP & RX Parity (P5)
 - **Noise-shaped dither + 24-bit**: export dither is now a mode (Off / TPDF / TPDF + noise shaping); noise shaping adds per-channel 2nd-order error-feedback (NTF = (1 - z^-1)^2) pushing quantization noise out of the most audible band. A unified Quantizer backs all PCM paths (WAV/AIFF/converter/FLAC two-pass, determinism preserved), and 24-bit exports can opt into dithering. Prefs migrate from the old boolean key.
 - **De-clip tool**: detects flat runs pinned at the clipping rails (peak-relative threshold + corner test that rejects smooth low-frequency crests, square-wave rails rejected by run length) and rebuilds the chopped crests with the de-click Hermite bridge — the repair can rise above the rail (float headroom preserved). Scan overlay + async Apply + CLI support.

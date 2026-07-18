@@ -18,6 +18,7 @@
 補足:
 - **Help > Customize Shortcuts...** でテーブル定義のショートカットをクリック→キー押下で再割り当てできます（重複チョードは拒否、行の Reset / Reset All で既定に戻ります。`keymap=` 行として prefs に保存）。グレー行（複数キーからなる操作ファミリ）は固定です。
 - **Edit メニュー**（File と Export の間）に Undo / Redo が追加されました。エディタ / リスト / Effect Graph の各 Undo スタック状態に応じて有効化され、`Ctrl+Z` / `Ctrl+Y` と同じ経路を通ります。
+- トップバーの出力メーター隣に **M / S / TP** 読み出し（再生中の Momentary / Short-term LUFS と 4× オーバーサンプリングのトゥルーピーク dBTP）が表示されます。停止から約 0.5 秒で「-」に戻ります（幅の狭いウィンドウでは非表示）。エディタ下部の STEREO ペインには相関の数値も表示されます。
 
 ## List View
 - `P`: Auto Play 切り替え
@@ -36,6 +37,7 @@
 - 列幅はドラッグでリサイズすると prefs に保存され、次回起動時も維持されます。
 - **List > Inspect Files (QA)...**(行コンテキストメニューにも有り)で一括検査(ピーク超過 / LUFS 逸脱 / 無音余白 / ループ不整合)を実行できます。結果ウィンドウは severity フィルタ・行クリックでリスト選択・CSV 保存に対応。
 - **List > Normalize Loudness...** で選択(または全件)のラウドネスを目標 LUFS へ非破壊で揃えられます(pending gain を設定。ファイルは書き換えません。バッチ全体で 1 回の Undo)。
+- **List > Play Selected Together**: 選択ファイル(最大 16 件、超過分はトースト通知の上で先頭 16 件)をデコード・SR 整列し、1/√n の等パワーで合算して 1 回再生します(レイヤリングの当たり確認用)。
 - **List > Audition Selection (Round-robin / Random)**: 2 件以上選択した状態で、選択ファイルを順番（またはランダム、同一ファイル連続なし）に連続試聴します。各ファイルの自然終了で次へ進み、停止（Space / 別の行を選択 / topbar の「Audition n/m」の Cancel）で終了します。
 - **List > Find Duplicates...**: 選択(または全件)を指紋化して、完全一致(exact)と知覚的に近い(similar、音量違いも検出)ファイルをグループ表示します。行クリックでリスト選択、CSV 保存対応。
 - **List > Export Engine Metadata...**: Unity(JSON) / FMOD(JSON) / Wwise(TSV) 向けのメタデータテーブル(ループ・SR・ch・長さ・LUFS)を書き出します(音声変換なし)。CLI は `batch engine-export`。
