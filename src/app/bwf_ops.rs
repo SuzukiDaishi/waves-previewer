@@ -1,7 +1,7 @@
-//! BWF `bext` metadata batch editing (WAV only).
+//! BWF `bext` / RIFF INFO / iXML metadata batch editing (WAV only).
 
 use crate::app::types::ToastSeverity;
-use crate::wave::BextFields;
+use crate::wave::{BextFields, InfoFields, IxmlFields};
 
 impl crate::app::WavesPreviewer {
     pub(super) fn open_bwf_dialog(&mut self) {
@@ -21,6 +21,32 @@ impl crate::app::WavesPreviewer {
             }
         }
         self.bwf_fields = fields;
+        // Prefill INFO/iXML the same way (first WAV that carries them).
+        self.bwf_info = InfoFields::default();
+        self.bwf_ixml = IxmlFields::default();
+        for path in self.selected_paths() {
+            let is_wav = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("wav"))
+                .unwrap_or(false);
+            if !is_wav {
+                continue;
+            }
+            if self.bwf_info == InfoFields::default() {
+                if let Ok(Some(existing)) = crate::wave::read_wav_info(&path) {
+                    self.bwf_info = existing;
+                }
+            }
+            if self.bwf_ixml == IxmlFields::default() {
+                if let Ok(Some(existing)) = crate::wave::read_wav_ixml(&path) {
+                    self.bwf_ixml = existing;
+                }
+            }
+            if self.bwf_info != InfoFields::default() && self.bwf_ixml != IxmlFields::default() {
+                break;
+            }
+        }
         self.show_bwf_dialog = true;
     }
 
@@ -69,6 +95,33 @@ impl crate::app::WavesPreviewer {
                     .weak(),
                 );
                 ui.separator();
+                ui.collapsing("RIFF INFO tags", |ui| {
+                    ui.label("Title (INAM)");
+                    ui.text_edit_singleline(&mut self.bwf_info.name);
+                    ui.label("Artist (IART)");
+                    ui.text_edit_singleline(&mut self.bwf_info.artist);
+                    ui.label("Comment (ICMT)");
+                    ui.text_edit_singleline(&mut self.bwf_info.comment);
+                });
+                ui.collapsing("iXML production fields", |ui| {
+                    ui.label("Project");
+                    ui.text_edit_singleline(&mut self.bwf_ixml.project);
+                    ui.label("Scene");
+                    ui.text_edit_singleline(&mut self.bwf_ixml.scene);
+                    ui.label("Take");
+                    ui.text_edit_singleline(&mut self.bwf_ixml.take);
+                    ui.label("Tape");
+                    ui.text_edit_singleline(&mut self.bwf_ixml.tape);
+                    ui.label("Note");
+                    ui.text_edit_singleline(&mut self.bwf_ixml.note);
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "INFO / iXML sections left entirely empty keep whatever the files already carry.",
+                    )
+                    .weak(),
+                );
+                ui.separator();
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(wav_count > 0, egui::Button::new("Write"))
@@ -84,6 +137,8 @@ impl crate::app::WavesPreviewer {
         if apply_clicked {
             self.show_bwf_dialog = false;
             let fields = self.bwf_fields.clone();
+            let info = self.bwf_info.clone();
+            let ixml = self.bwf_ixml.clone();
             let mut written = 0usize;
             let mut skipped = 0usize;
             let mut failed = 0usize;
@@ -97,9 +152,13 @@ impl crate::app::WavesPreviewer {
                     skipped += 1;
                     continue;
                 }
-                match crate::wave::write_wav_bext(&path, &fields) {
-                    Ok(()) => written += 1,
-                    Err(_) => failed += 1,
+                let bext_ok = crate::wave::write_wav_bext(&path, &fields).is_ok();
+                let extra_ok =
+                    crate::wave::write_wav_info_ixml(&path, &info, &ixml).is_ok();
+                if bext_ok && extra_ok {
+                    written += 1;
+                } else {
+                    failed += 1;
                 }
             }
             let severity = if failed > 0 {

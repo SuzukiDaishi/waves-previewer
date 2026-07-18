@@ -1294,6 +1294,210 @@ pub fn read_wav_bext(path: &Path) -> Result<Option<BextFields>> {
     }))
 }
 
+/// RIFF LIST/INFO tags exposed for batch metadata writing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InfoFields {
+    /// INAM — title/name.
+    pub name: String,
+    /// IART — artist/author.
+    pub artist: String,
+    /// ICMT — comment.
+    pub comment: String,
+}
+
+/// Core iXML production fields (BWF iXML spec).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IxmlFields {
+    pub project: String,
+    pub scene: String,
+    pub take: String,
+    pub tape: String,
+    pub note: String,
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Build a RIFF `LIST` payload of form-type `INFO` with INAM/IART/ICMT
+/// sub-chunks (NUL-terminated, word-aligned). Empty fields are omitted;
+/// all-empty yields `None` (nothing to write).
+pub fn build_info_list_chunk(fields: &InfoFields) -> Option<Vec<u8>> {
+    let mut out = b"INFO".to_vec();
+    for (id, value) in [
+        (*b"INAM", fields.name.trim()),
+        (*b"IART", fields.artist.trim()),
+        (*b"ICMT", fields.comment.trim()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        out.extend_from_slice(&id);
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&bytes);
+        if bytes.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+    (out.len() > 4).then_some(out)
+}
+
+/// Build an `iXML` chunk payload with the core production fields.
+/// Hand-assembled XML (escaped) — no dependencies. All-empty => `None`.
+pub fn build_ixml_chunk(fields: &IxmlFields) -> Option<Vec<u8>> {
+    let mut body = String::new();
+    for (tag, value) in [
+        ("PROJECT", fields.project.trim()),
+        ("SCENE", fields.scene.trim()),
+        ("TAKE", fields.take.trim()),
+        ("TAPE", fields.tape.trim()),
+        ("NOTE", fields.note.trim()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        body.push_str(&format!("  <{tag}>{}</{tag}>\n", xml_escape(value)));
+    }
+    if body.is_empty() {
+        return None;
+    }
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<BWFXML>\n  <IXML_VERSION>1.5</IXML_VERSION>\n{body}</BWFXML>\n"
+    );
+    Some(xml.into_bytes())
+}
+
+fn is_info_list_chunk(chunk: &RiffWaveChunk) -> bool {
+    &chunk.id == b"LIST" && chunk.payload.get(0..4) == Some(b"INFO")
+}
+
+/// Write (or replace) the `LIST/INFO` and `iXML` chunks in a WAV,
+/// preserving everything else (audio, loops, markers, bext, other LIST
+/// types like `adtl`). Field sets that are entirely empty leave the
+/// existing chunk of that kind untouched; both empty is a no-op.
+pub fn write_wav_info_ixml(path: &Path, info: &InfoFields, ixml: &IxmlFields) -> Result<()> {
+    let info_payload = build_info_list_chunk(info);
+    let ixml_payload = build_ixml_chunk(ixml);
+    if info_payload.is_none() && ixml_payload.is_none() {
+        return Ok(());
+    }
+    let mut chunks = parse_riff_wave_chunks(path)?;
+    if let Some(payload) = info_payload {
+        if let Some(existing) = chunks.iter_mut().find(|c| is_info_list_chunk(c)) {
+            existing.payload = payload;
+        } else {
+            let data_pos = chunks
+                .iter()
+                .position(|c| &c.id == b"data")
+                .unwrap_or(chunks.len());
+            chunks.insert(
+                data_pos,
+                RiffWaveChunk {
+                    id: *b"LIST",
+                    payload,
+                },
+            );
+        }
+    }
+    if let Some(payload) = ixml_payload {
+        if let Some(existing) = chunks.iter_mut().find(|c| &c.id == b"iXML") {
+            existing.payload = payload;
+        } else {
+            let data_pos = chunks
+                .iter()
+                .position(|c| &c.id == b"data")
+                .unwrap_or(chunks.len());
+            chunks.insert(
+                data_pos,
+                RiffWaveChunk {
+                    id: *b"iXML",
+                    payload,
+                },
+            );
+        }
+    }
+    encode_riff_wave_chunks(path, &chunks)
+}
+
+/// Read the INAM/IART/ICMT tags from a WAV's `LIST/INFO` chunk.
+pub fn read_wav_info(path: &Path) -> Result<Option<InfoFields>> {
+    let chunks = parse_riff_wave_chunks(path)?;
+    let Some(chunk) = chunks.iter().find(|c| is_info_list_chunk(c)) else {
+        return Ok(None);
+    };
+    let d = &chunk.payload;
+    let mut fields = InfoFields::default();
+    let mut pos = 4usize;
+    while pos + 8 <= d.len() {
+        let id = [d[pos], d[pos + 1], d[pos + 2], d[pos + 3]];
+        let size =
+            u32::from_le_bytes([d[pos + 4], d[pos + 5], d[pos + 6], d[pos + 7]]) as usize;
+        let start = pos + 8;
+        let end = start.saturating_add(size).min(d.len());
+        let text = String::from_utf8_lossy(&d[start..end])
+            .trim_end_matches('\0')
+            .to_string();
+        match &id {
+            b"INAM" => fields.name = text,
+            b"IART" => fields.artist = text,
+            b"ICMT" => fields.comment = text,
+            _ => {}
+        }
+        pos = start + size + (size & 1);
+    }
+    Ok(Some(fields))
+}
+
+/// Best-effort read of the core iXML fields (exact inverse of our writer;
+/// tolerant of foreign files that use the same simple `<TAG>text</TAG>`
+/// shape).
+pub fn read_wav_ixml(path: &Path) -> Result<Option<IxmlFields>> {
+    let chunks = parse_riff_wave_chunks(path)?;
+    let Some(chunk) = chunks.iter().find(|c| &c.id == b"iXML") else {
+        return Ok(None);
+    };
+    let xml = String::from_utf8_lossy(&chunk.payload);
+    let grab = |tag: &str| -> String {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        xml.find(&open)
+            .and_then(|s| {
+                let start = s + open.len();
+                xml[start..].find(&close).map(|e| &xml[start..start + e])
+            })
+            .map(|raw| xml_unescape(raw.trim()))
+            .unwrap_or_default()
+    };
+    Ok(Some(IxmlFields {
+        project: grab("PROJECT"),
+        scene: grab("SCENE"),
+        take: grab("TAKE"),
+        tape: grab("TAPE"),
+        note: grab("NOTE"),
+    }))
+}
+
 #[derive(Clone)]
 struct RiffWaveChunk {
     id: [u8; 4],
@@ -4261,4 +4465,87 @@ mod tests {
             "12dB mid cut at the tone's frequency should lower its level: flat {rms_flat} cut {rms_cut}"
         );
     }
+    #[test]
+    fn info_and_ixml_roundtrip_and_coexist_with_bext() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_ixml_test_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("meta.wav");
+        // Odd-length comment exercises word-alignment padding.
+        let ch: Vec<f32> = (0..4801).map(|i| (i as f32 * 0.01).sin() * 0.4).collect();
+        export_channels_audio(&[ch].to_vec(), 48_000, &path).expect("export");
+
+        let info = super::InfoFields {
+            name: "Sword Hit 01".into(),
+            artist: "SFX Team".into(),
+            comment: "layered <metal> & \"leather\"".into(),
+        };
+        let ixml = super::IxmlFields {
+            project: "Game & Demo".into(),
+            scene: "S01".into(),
+            take: "3".into(),
+            tape: String::new(),
+            note: "punchy <mid>".into(),
+        };
+        super::write_wav_info_ixml(&path, &info, &ixml).expect("write info+ixml");
+        // bext written afterwards must coexist with both.
+        let bext = super::BextFields {
+            description: "desc".into(),
+            originator: "orig".into(),
+            ..Default::default()
+        };
+        super::write_wav_bext(&path, &bext).expect("write bext");
+
+        let got_info = super::read_wav_info(&path).expect("read info").expect("info present");
+        assert_eq!(got_info, info);
+        let got_ixml = super::read_wav_ixml(&path).expect("read ixml").expect("ixml present");
+        assert_eq!(got_ixml, ixml);
+        let got_bext = super::read_wav_bext(&path).expect("read bext").expect("bext present");
+        assert_eq!(got_bext.description, "desc");
+        // Audio survives all three writes bit-exact in count.
+        let (chans, sr) = crate::audio_io::decode_audio_multi(&path).expect("decode");
+        assert_eq!(sr, 48_000);
+        assert_eq!(chans[0].len(), 4801);
+
+        // Re-write with changed fields replaces (no duplicate chunks).
+        let info2 = super::InfoFields { name: "Renamed".into(), ..info.clone() };
+        super::write_wav_info_ixml(&path, &info2, &ixml).expect("rewrite");
+        let raw = std::fs::read(&path).expect("raw");
+        let count = raw.windows(4).filter(|w| w == b"INAM").count();
+        assert_eq!(count, 1, "INAM must not duplicate on rewrite");
+        assert_eq!(
+            super::read_wav_info(&path).unwrap().unwrap().name,
+            "Renamed"
+        );
+
+        // Empty field sets leave existing chunks untouched.
+        super::write_wav_info_ixml(&path, &Default::default(), &Default::default())
+            .expect("noop write");
+        assert_eq!(
+            super::read_wav_info(&path).unwrap().unwrap().name,
+            "Renamed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn info_ixml_builders_reject_empty_and_escape() {
+        assert!(super::build_info_list_chunk(&Default::default()).is_none());
+        assert!(super::build_ixml_chunk(&Default::default()).is_none());
+        let xml = super::build_ixml_chunk(&super::IxmlFields {
+            note: "a<b>&c\"d'e".into(),
+            ..Default::default()
+        })
+        .expect("chunk");
+        let xml = String::from_utf8(xml).expect("utf8");
+        assert!(xml.contains("a&lt;b&gt;&amp;c&quot;d&apos;e"), "{xml}");
+        assert!(!xml.contains("a<b>"), "raw text must be escaped: {xml}");
+    }
+
 }

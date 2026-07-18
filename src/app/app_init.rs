@@ -263,6 +263,8 @@ impl WavesPreviewer {
             engine_export_profile: crate::app::engine_export::EngineProfile::Unity,
             show_bwf_dialog: false,
             bwf_fields: crate::wave::BextFields::default(),
+            bwf_info: crate::wave::InfoFields::default(),
+            bwf_ixml: crate::wave::IxmlFields::default(),
             list_preview_prefetch_tx: None,
             list_preview_prefetch_rx: None,
             list_preview_prefetch_inflight: HashSet::new(),

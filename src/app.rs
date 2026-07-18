@@ -730,6 +730,8 @@ pub struct WavesPreviewer {
     engine_export_profile: engine_export::EngineProfile,
     show_bwf_dialog: bool,
     bwf_fields: crate::wave::BextFields,
+    bwf_info: crate::wave::InfoFields,
+    bwf_ixml: crate::wave::IxmlFields,
     list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,
