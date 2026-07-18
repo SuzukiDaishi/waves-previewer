@@ -438,26 +438,18 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let factor = if zoom_in { 0.9 } else { 1.1 };
-        let old_spp = tab.samples_per_px.max(0.0001);
         // wave_left only offsets both sides of the ratio computation, so an
         // origin of 0 is fine outside the paint pass.
-        let (anchor, t) = Self::editor_zoom_anchor(
-            EditorHorizontalZoomAnchorMode::Playhead,
+        Self::editor_apply_zoom_factor(
             tab,
+            factor,
+            EditorHorizontalZoomAnchorMode::Playhead,
             display_samples_len,
             0.0,
             wave_w,
             None,
             playhead_display,
         );
-        let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
-        let max_spp_fit = (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
-        let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
-        tab.samples_per_px = new_spp;
-        let vis = ((wave_w * new_spp).ceil()).max(1.0) as usize;
-        let max_left = display_samples_len.saturating_sub(vis);
-        let next_exact = Self::editor_exact_view_for_anchor(anchor, t, wave_w, new_spp);
-        Self::editor_set_view_offset_exact(tab, next_exact, max_left);
         Self::invalidate_editor_viewport_cache(tab);
     }
 
@@ -648,6 +640,48 @@ impl crate::app::WavesPreviewer {
                 }
             }
         }
+    }
+
+    /// Shared tail of every multiplicative zoom (keyboard, arrow keys,
+    /// wheel/pinch): clamp the new samples-per-px between max zoom-in and
+    /// fit-to-width, then re-anchor the view so the sample under the anchor
+    /// keeps its screen position. Viewport-cache invalidation stays with the
+    /// caller (paint-pass sites intentionally skip it).
+    #[allow(clippy::too_many_arguments)]
+    fn editor_apply_zoom_factor(
+        tab: &mut EditorTab,
+        factor: f32,
+        anchor_mode: EditorHorizontalZoomAnchorMode,
+        display_samples_len: usize,
+        wave_left: f32,
+        wave_w: f32,
+        pointer_x: Option<f32>,
+        playhead_display: usize,
+    ) {
+        let old_spp = tab.samples_per_px.max(0.0001);
+        let (anchor, t) = Self::editor_zoom_anchor(
+            anchor_mode,
+            tab,
+            display_samples_len,
+            wave_left,
+            wave_w,
+            pointer_x,
+            playhead_display,
+        );
+        let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
+        let max_spp_fit = Self::editor_fit_samples_per_px(display_samples_len, wave_w);
+        let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
+        tab.samples_per_px = new_spp;
+        let geom = EditorDisplayGeometry::new(
+            wave_left,
+            wave_w,
+            new_spp,
+            tab.view_offset,
+            tab.view_offset_exact,
+            display_samples_len,
+        );
+        let next_exact = Self::editor_exact_view_for_anchor(anchor, t, wave_w, new_spp);
+        Self::editor_set_view_offset_exact(tab, next_exact, geom.max_left());
     }
 
     #[cfg(feature = "kittest")]
@@ -4254,32 +4288,16 @@ impl crate::app::WavesPreviewer {
                 let zoom_out = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
                 if zoom_in || zoom_out {
                     let factor = if zoom_in { 0.9 } else { 1.1 };
-                    let old_spp = tab.samples_per_px.max(0.0001);
-                    let (anchor, t) = Self::editor_zoom_anchor(
-                        self.horizontal_zoom_anchor_mode,
+                    Self::editor_apply_zoom_factor(
                         tab,
+                        factor,
+                        self.horizontal_zoom_anchor_mode,
                         display_samples_len,
                         wave_left,
                         wave_w,
                         None,
                         playhead_display_now,
                     );
-                    let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
-                    let max_spp_fit =
-                        (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
-                    let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
-                    tab.samples_per_px = new_spp;
-                    let vis2 = EditorDisplayGeometry::new(
-                        wave_left,
-                        wave_w,
-                        tab.samples_per_px,
-                        tab.view_offset,
-                        tab.view_offset_exact,
-                        display_samples_len,
-                    );
-                    let next_exact =
-                        Self::editor_exact_view_for_anchor(anchor, t, wave_w, tab.samples_per_px);
-                    Self::editor_set_view_offset_exact(tab, next_exact, vis2.max_left());
                 }
             }
 
@@ -4346,32 +4364,16 @@ impl crate::app::WavesPreviewer {
                             }
                         })
                         .clamp(0.2, 5.0);
-                    let old_spp = tab.samples_per_px.max(0.0001);
-                    let (anchor, t) = Self::editor_zoom_anchor(
-                        self.horizontal_zoom_anchor_mode,
+                    Self::editor_apply_zoom_factor(
                         tab,
+                        factor,
+                        self.horizontal_zoom_anchor_mode,
                         display_samples_len,
                         wave_left,
                         wave_w,
                         pointer_x,
                         playhead_display_now,
                     );
-                    let min_spp = crate::app::EDITOR_MIN_SAMPLES_PER_PX;
-                    let max_spp_fit =
-                        (display_samples_len as f32 / wave_w.max(1.0)).max(min_spp);
-                    let new_spp = (old_spp * factor).clamp(min_spp, max_spp_fit);
-                    tab.samples_per_px = new_spp;
-                    let geom2 = EditorDisplayGeometry::new(
-                        wave_left,
-                        wave_w,
-                        tab.samples_per_px,
-                        tab.view_offset,
-                        tab.view_offset_exact,
-                        display_samples_len,
-                    );
-                    let next_exact =
-                        Self::editor_exact_view_for_anchor(anchor, t, wave_w, tab.samples_per_px);
-                    Self::editor_set_view_offset_exact(tab, next_exact, geom2.max_left());
                 }
                 // Wheel-scrolls mode: a plain vertical wheel pans the view
                 // horizontally (wheel up = view left, matching Shift+wheel).

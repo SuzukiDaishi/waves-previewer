@@ -459,6 +459,39 @@ impl ColumnId {
             ColumnId::Wave => "Wave",
         }
     }
+
+    /// Whether this column is visible under the given config. Single source
+    /// of truth for the ColumnId -> ListColumnConfig field mapping used by
+    /// the table/header/row builders.
+    pub fn enabled(self, cols: &ListColumnConfig) -> bool {
+        match self {
+            ColumnId::Edited => cols.edited,
+            ColumnId::CoverArt => cols.cover_art,
+            ColumnId::File => cols.file,
+            ColumnId::Folder => cols.folder,
+            ColumnId::Transcript => cols.transcript,
+            ColumnId::TranscriptLanguage => cols.transcript_language,
+            ColumnId::External => cols.external,
+            ColumnId::TypeBadge => cols.type_badge,
+            ColumnId::Length => cols.length,
+            ColumnId::Channels => cols.channels,
+            ColumnId::SampleRate => cols.sample_rate,
+            ColumnId::Bits => cols.bits,
+            ColumnId::BitRate => cols.bit_rate,
+            ColumnId::Peak => cols.peak,
+            ColumnId::Lufs => cols.lufs,
+            ColumnId::Dbtp => cols.dbtp,
+            ColumnId::LufsS => cols.lufs_s,
+            ColumnId::LufsM => cols.lufs_m,
+            ColumnId::SilenceLead => cols.silence_lead,
+            ColumnId::SilenceTail => cols.silence_tail,
+            ColumnId::Bpm => cols.bpm,
+            ColumnId::CreatedAt => cols.created_at,
+            ColumnId::ModifiedAt => cols.modified_at,
+            ColumnId::Gain => cols.gain,
+            ColumnId::Wave => cols.wave,
+        }
+    }
 }
 
 /// Normalize a stored order: drop unknown/duplicate entries and append any
