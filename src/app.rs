@@ -450,6 +450,9 @@ pub struct WavesPreviewer {
     pub meta_pool: Option<meta::MetaPool>,
     pub meta_inflight: rustc_hash::FxHashSet<PathBuf>,
     meta_sort_pending: bool,
+    // High-water mark of the meta backlog since it last drained; the topbar
+    // "Meta n/m" progress divides by this.
+    meta_backlog_peak: usize,
     /// Cached (computed_at, count) for the pending-gain scan; the topbar and
     /// list header read this every frame and a full O(n) item scan at 140k
     /// files is far too hot for the frame loop.

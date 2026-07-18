@@ -52,6 +52,7 @@ impl WavesPreviewer {
             meta_pool: None,
             meta_inflight: Default::default(),
             meta_sort_pending: false,
+            meta_backlog_peak: 0,
             pending_gain_count_cache: None,
             editor_wave_cache_tx: None,
             editor_wave_cache_rx: None,

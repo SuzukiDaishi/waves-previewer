@@ -174,6 +174,24 @@ impl WavesPreviewer {
                 cancel: None,
             });
         }
+        {
+            let inflight = self.meta_inflight.len();
+            if inflight == 0 {
+                self.meta_backlog_peak = 0;
+            } else if inflight > self.meta_backlog_peak {
+                self.meta_backlog_peak = inflight;
+            }
+            if let Some((label, progress)) =
+                Self::meta_backlog_activity(inflight, self.meta_backlog_peak)
+            {
+                items.push(TopbarActivityItem {
+                    label,
+                    progress: Some(progress),
+                    show_percentage: false,
+                    cancel: None,
+                });
+            }
+        }
         if let Some(status) = self
             .editor_decode_state
             .as_ref()
@@ -563,6 +581,21 @@ impl WavesPreviewer {
         }
     }
 
+    /// Topbar backlog item for the metadata pool: appears once more than 200
+    /// jobs are queued/running, with progress against the high-water mark
+    /// since the backlog last drained.
+    pub(crate) fn meta_backlog_activity(inflight: usize, peak: usize) -> Option<(String, f32)> {
+        if inflight <= 200 {
+            return None;
+        }
+        let total = peak.max(inflight).max(1);
+        let done = total - inflight;
+        Some((
+            format!("Meta {done}/{total}"),
+            done as f32 / total as f32,
+        ))
+    }
+
     pub(crate) fn format_loudness_readout(
         m: Option<f32>,
         s: Option<f32>,
@@ -769,6 +802,23 @@ impl WavesPreviewer {
             format!("{db:.1} dBFS")
         };
         ui.label(RichText::new(db_label).monospace());
+    }
+}
+
+#[cfg(test)]
+mod meta_backlog_tests {
+    #[test]
+    fn activity_appears_over_200_and_tracks_peak() {
+        let f = crate::app::WavesPreviewer::meta_backlog_activity;
+        assert!(f(0, 0).is_none());
+        assert!(f(200, 500).is_none(), "at or under 200 stays hidden");
+        let (label, progress) = f(300, 1_000).expect("backlog item");
+        assert_eq!(label, "Meta 700/1000");
+        assert!((progress - 0.7).abs() < 1e-6);
+        // Peak lower than inflight (fresh burst): clamps to inflight, 0%.
+        let (label, progress) = f(400, 100).expect("burst item");
+        assert_eq!(label, "Meta 0/400");
+        assert_eq!(progress, 0.0);
     }
 }
 
