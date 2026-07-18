@@ -168,6 +168,9 @@ impl WavesPreviewer {
         let cols = self.list_columns;
         let header_dirty = self.list_header_dirty();
         let mut filler_cols = 0usize;
+        // Remember where the table lives so commit_list_col_widths can probe
+        // the egui_extras resize-handle responses (ids derive from this ui).
+        self.list_table_ui_id = Some(ui.id());
         let mut table = TableBuilder::new(ui)
             .id_salt("list_table")
             .striped(true)
@@ -179,105 +182,132 @@ impl WavesPreviewer {
             .vscroll(false)
             .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
-        if cols.edited {
-            table = table.column(egui_extras::Column::initial(30.0).resizable(false));
-            filler_cols += 1;
-        }
-        if cols.cover_art {
-            table = table.column(egui_extras::Column::initial(76.0).resizable(false));
-            filler_cols += 1;
-        }
-        if cols.file {
-            table = table.column(egui_extras::Column::initial(200.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.folder {
-            table = table.column(egui_extras::Column::initial(250.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.transcript {
-            table = table.column(egui_extras::Column::initial(280.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.transcript_language {
-            table = table.column(egui_extras::Column::initial(56.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.external {
-            for _ in 0..metrics.external_cols.len() {
-                table = table.column(egui_extras::Column::initial(140.0).resizable(true));
-                filler_cols += 1;
+        for sorted_col in self.list_column_order.clone() {
+            use crate::app::types::ColumnId as C;
+            if !sorted_col.enabled(&cols) {
+                continue;
+            }
+            match sorted_col {
+                C::Edited => {
+                    table = table.column(egui_extras::Column::initial(30.0).resizable(false));
+                    filler_cols += 1;
+                }
+                C::CoverArt => {
+                    table = table.column(egui_extras::Column::initial(76.0).resizable(false));
+                    filler_cols += 1;
+                }
+                C::External => {
+                    for _ in 0..metrics.external_cols.len() {
+                        table =
+                            table.column(egui_extras::Column::initial(140.0).resizable(true));
+                        filler_cols += 1;
+                    }
+                }
+                other => {
+                    // All remaining columns are single resizable columns whose
+                    // width key is the column's stable name.
+                    let key = other.name();
+                    table = table.column(
+                        egui_extras::Column::initial(
+                            self.list_col_w(key, Self::list_col_default(key)),
+                        )
+                        .resizable(true),
+                    );
+                    filler_cols += 1;
+                }
             }
         }
-        if cols.type_badge {
-            table = table.column(egui_extras::Column::initial(58.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.length {
-            table = table.column(egui_extras::Column::initial(60.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.channels {
-            table = table.column(egui_extras::Column::initial(40.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.sample_rate {
-            table = table.column(egui_extras::Column::initial(70.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.bits {
-            table = table.column(egui_extras::Column::initial(50.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.bit_rate {
-            table = table.column(egui_extras::Column::initial(70.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.peak {
-            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.lufs {
-            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.dbtp {
-            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.lufs_s {
-            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.lufs_m {
-            table = table.column(egui_extras::Column::initial(90.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.bpm {
-            table = table.column(egui_extras::Column::initial(70.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.created_at {
-            table = table.column(egui_extras::Column::initial(120.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.modified_at {
-            table = table.column(egui_extras::Column::initial(120.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.gain {
-            table = table.column(egui_extras::Column::initial(80.0).resizable(true));
-            filler_cols += 1;
-        }
-        if cols.wave {
-            table = table.column(egui_extras::Column::initial(150.0).resizable(true));
-            filler_cols += 1;
-        }
+
         table = table
             .column(egui_extras::Column::remainder())
             .min_scrolled_height((metrics.avail_h - metrics.header_h).max(0.0));
         filler_cols += 1;
+        self.list_table_col_count = filler_cols;
         (table, filler_cols, header_dirty)
+    }
+
+    fn list_col_w(&self, key: &str, default: f32) -> f32 {
+        self.list_col_widths
+            .get(key)
+            .copied()
+            .filter(|w| w.is_finite() && *w >= 10.0)
+            .unwrap_or(default)
+    }
+
+    /// Persist header widths once a resize drag ends. Called after the table
+    /// renders; `list_col_widths_seen` was filled by `render_list_header`.
+    /// Persist header widths when a column-resize drag ends. The table can
+    /// also squeeze columns to fit the window; those layout changes must NOT
+    /// be persisted, so we only store when one of egui_extras' resize handles
+    /// actually finished a drag this frame.
+    pub(super) fn commit_list_col_widths(&mut self, ctx: &egui::Context) {
+        let seen_empty = self.list_col_widths_seen.is_empty();
+        let Some(ui_id) = self.list_table_ui_id else {
+            self.list_col_widths_seen.clear();
+            return;
+        };
+        if seen_empty {
+            return;
+        }
+        let state_id = ui_id.with("list_table");
+        let mut drag_stopped = false;
+        let mut dragging = false;
+        for i in 0..self.list_table_col_count {
+            let handle_id = state_id.with("resize_column").with(i);
+            if let Some(resp) = ctx.read_response(handle_id) {
+                drag_stopped |= resp.drag_stopped();
+                dragging |= resp.dragged();
+            }
+        }
+        if drag_stopped {
+            self.apply_seen_col_widths();
+        } else if !dragging {
+            self.list_col_widths_seen.clear();
+        }
+        // While dragging keep the latest widths so the release frame can
+        // still commit them even if the header repopulates first.
+    }
+
+    /// Store the observed widths that differ from the effective (stored or
+    /// default) value and persist prefs when anything changed.
+    pub(in crate::app) fn apply_seen_col_widths(&mut self) {
+        let seen = std::mem::take(&mut self.list_col_widths_seen);
+        let mut changed = false;
+        for (key, width) in seen {
+            if !width.is_finite() || width < 10.0 {
+                continue;
+            }
+            let effective = self.list_col_w(key, Self::list_col_default(key));
+            if (effective - width).abs() > 0.5 {
+                self.list_col_widths.insert(key.to_string(), width);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save_prefs();
+        }
+    }
+
+    fn list_col_default(key: &str) -> f32 {
+        match key {
+            "file" => 200.0,
+            "folder" => 250.0,
+            "transcript" => 280.0,
+            "transcript_language" => 56.0,
+            "type_badge" => 58.0,
+            "length" => 60.0,
+            "channels" => 40.0,
+            "sample_rate" => 70.0,
+            "bits" => 50.0,
+            "bit_rate" => 70.0,
+            "peak" | "lufs" | "dbtp" | "lufs_s" | "lufs_m" => 90.0,
+            "silence_lead" | "silence_tail" => 80.0,
+            "bpm" => 70.0,
+            "created_at" | "modified_at" => 120.0,
+            "gain" => 80.0,
+            "wave" => 150.0,
+            _ => 100.0,
+        }
     }
 
     pub(super) fn render_list_header(
@@ -288,255 +318,105 @@ impl WavesPreviewer {
         sort_changed: &mut bool,
     ) {
         let cols = self.list_columns;
-        if cols.edited {
-            header.col(|ui| {
-                let mut dot = RichText::new("\u{25CF}");
-                if header_dirty {
-                    dot = dot.color(Color32::from_rgb(255, 180, 60));
-                } else {
-                    dot = dot.weak();
-                }
-                ui.label(dot);
-            });
+        self.list_col_widths_seen.clear();
+        macro_rules! sized_col {
+            ($key:expr, $body:expr) => {{
+                let (rect, _resp) = header.col($body);
+                self.list_col_widths_seen.push(($key, rect.width()));
+            }};
         }
-        if cols.cover_art {
-            header.col(|ui| {
-                ui.label(RichText::new("Art").strong());
-            });
-        }
-        if cols.file {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "File",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::File,
-                    true,
-                );
-            });
-        }
-        if cols.folder {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Folder",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Folder,
-                    true,
-                );
-            });
-        }
-        if cols.transcript {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Transcript",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Transcript,
-                    true,
-                );
-            });
-        }
-        if cols.transcript_language {
-            header.col(|ui| {
-                ui.label(RichText::new("Lang").strong());
-            });
-        }
-        if cols.external {
-            for (idx, name) in metrics.external_cols.iter().enumerate() {
-                header.col(|ui| {
+        for sorted_col in self.list_column_order.clone() {
+            use crate::app::types::ColumnId as C;
+            if !sorted_col.enabled(&cols) {
+                continue;
+            }
+            // Sortable single columns share one (label, sort key, ascending)
+            // table; the width key is always the column's stable name.
+            let sortable = match sorted_col {
+                C::File => Some(("File", SortKey::File, true)),
+                C::Folder => Some(("Folder", SortKey::Folder, true)),
+                C::Transcript => Some(("Transcript", SortKey::Transcript, true)),
+                C::TypeBadge => Some(("Type", SortKey::Type, true)),
+                C::Length => Some(("Length", SortKey::Length, true)),
+                C::Channels => Some(("Ch", SortKey::Channels, true)),
+                C::SampleRate => Some(("SR", SortKey::SampleRate, true)),
+                C::Bits => Some(("Bits", SortKey::Bits, true)),
+                C::BitRate => Some(("Bitrate", SortKey::BitRate, true)),
+                C::Peak => Some(("dBFS (Peak)", SortKey::Level, false)),
+                C::Lufs => Some(("LUFS (I)", SortKey::Lufs, false)),
+                C::Dbtp => Some(("dBTP", SortKey::TruePeak, false)),
+                C::LufsS => Some(("LUFS-S", SortKey::LufsShort, false)),
+                C::LufsM => Some(("LUFS-M", SortKey::LufsMomentary, false)),
+                C::SilenceLead => Some(("Sil.Head", SortKey::SilenceLead, false)),
+                C::SilenceTail => Some(("Sil.Tail", SortKey::SilenceTail, false)),
+                C::Bpm => Some(("BPM", SortKey::Bpm, false)),
+                C::CreatedAt => Some(("Created", SortKey::CreatedAt, true)),
+                C::ModifiedAt => Some(("Modified", SortKey::ModifiedAt, true)),
+                _ => None,
+            };
+            if let Some((label, key, asc)) = sortable {
+                sized_col!(sorted_col.name(), |ui| {
                     *sort_changed |= sortable_header(
                         ui,
-                        name,
+                        label,
                         &mut self.sort_key,
                         &mut self.sort_dir,
-                        SortKey::External(idx),
-                        true,
+                        key,
+                        asc,
                     );
                 });
+                continue;
+            }
+            match sorted_col {
+                C::Edited => {
+                    header.col(|ui| {
+                        let mut dot = RichText::new("\u{25CF}");
+                        if header_dirty {
+                            dot = dot.color(Color32::from_rgb(255, 180, 60));
+                        } else {
+                            dot = dot.weak();
+                        }
+                        ui.label(dot);
+                    });
+                }
+                C::CoverArt => {
+                    header.col(|ui| {
+                        ui.label(RichText::new("Art").strong());
+                    });
+                }
+                C::External => {
+                    for (idx, name) in metrics.external_cols.iter().enumerate() {
+                        header.col(|ui| {
+                            *sort_changed |= sortable_header(
+                                ui,
+                                name,
+                                &mut self.sort_key,
+                                &mut self.sort_dir,
+                                SortKey::External(idx),
+                                true,
+                            );
+                        });
+                    }
+                }
+                C::TranscriptLanguage => {
+                    sized_col!("transcript_language", |ui| {
+                        ui.label(RichText::new("Lang").strong());
+                    });
+                }
+                C::Gain => {
+                    sized_col!("gain", |ui| {
+                        ui.label(RichText::new("Gain (dB)").strong());
+                    });
+                }
+                C::Wave => {
+                    sized_col!("wave", |ui| {
+                        ui.label(RichText::new("Wave").strong());
+                    });
+                }
+                _ => unreachable!("sortable columns handled above"),
             }
         }
-        if cols.type_badge {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Type",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Type,
-                    true,
-                );
-            });
-        }
-        if cols.length {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Length",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Length,
-                    true,
-                );
-            });
-        }
-        if cols.channels {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Ch",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Channels,
-                    true,
-                );
-            });
-        }
-        if cols.sample_rate {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "SR",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::SampleRate,
-                    true,
-                );
-            });
-        }
-        if cols.bits {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Bits",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Bits,
-                    true,
-                );
-            });
-        }
-        if cols.bit_rate {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Bitrate",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::BitRate,
-                    true,
-                );
-            });
-        }
-        if cols.peak {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "dBFS (Peak)",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Level,
-                    false,
-                );
-            });
-        }
-        if cols.lufs {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "LUFS (I)",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Lufs,
-                    false,
-                );
-            });
-        }
-        if cols.dbtp {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "dBTP",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::TruePeak,
-                    false,
-                );
-            });
-        }
-        if cols.lufs_s {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "LUFS-S",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::LufsShort,
-                    false,
-                );
-            });
-        }
-        if cols.lufs_m {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "LUFS-M",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::LufsMomentary,
-                    false,
-                );
-            });
-        }
-        if cols.bpm {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "BPM",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Bpm,
-                    false,
-                );
-            });
-        }
-        if cols.created_at {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Created",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::CreatedAt,
-                    true,
-                );
-            });
-        }
-        if cols.modified_at {
-            header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    "Modified",
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::ModifiedAt,
-                    true,
-                );
-            });
-        }
-        if cols.gain {
-            header.col(|ui| {
-                ui.label(RichText::new("Gain (dB)").strong());
-            });
-        }
-        if cols.wave {
-            header.col(|ui| {
-                ui.label(RichText::new("Wave").strong());
-            });
-        }
+
         header.col(|_ui| {});
     }
 

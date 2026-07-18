@@ -5,6 +5,30 @@ impl WavesPreviewer {
         let selected = self.selected_paths();
         let has_selection = !selected.is_empty();
         if ui
+            .add_enabled(has_selection, egui::Button::new("Open in Editor"))
+            .clicked()
+        {
+            if let Some(path) = selected.first().cloned() {
+                self.open_or_activate_tab(&path);
+            }
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Reveal in Folder"))
+            .clicked()
+        {
+            if let Some(path) = selected.first() {
+                if let Err(err) = crate::app::helpers::open_folder_with_file_selected(path) {
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Warning,
+                        format!("Reveal in folder failed: {err}"),
+                    );
+                }
+            }
+            ui.close();
+        }
+        ui.separator();
+        if ui
             .add_enabled(has_selection, egui::Button::new("Copy to Clipboard"))
             .clicked()
         {
@@ -114,6 +138,10 @@ impl WavesPreviewer {
         }
         let renameable_selected = self.selected_renameable_paths();
         if renameable_selected.len() == 1 {
+            if ui.button("Rename (F2, inline)").clicked() {
+                self.begin_inline_rename(renameable_selected[0].clone());
+                ui.close();
+            }
             if ui.button("Rename...").clicked() {
                 self.open_rename_dialog(renameable_selected[0].clone());
                 ui.close();
@@ -236,6 +264,43 @@ impl WavesPreviewer {
             self.open_resample_dialog(selected.clone());
             ui.close();
         }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Inspect Selected (QA)..."))
+            .clicked()
+        {
+            self.open_inspection_dialog();
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Normalize Loudness..."))
+            .clicked()
+        {
+            self.open_loudnorm_dialog();
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(!self.files.is_empty(), egui::Button::new("Select All"))
+            .clicked()
+        {
+            self.list_select_all();
+            ui.close();
+        }
+        if ui
+            .add_enabled(has_selection, egui::Button::new("Clear Selection"))
+            .clicked()
+        {
+            self.list_clear_selection();
+            ui.close();
+        }
+    }
+
+    /// Right-click selection rule: clicking inside the current
+    /// multi-selection keeps it; clicking outside selects that row.
+    pub(crate) fn handle_row_secondary_click(&mut self, row_idx: usize, mods: egui::Modifiers) {
+        if !self.selected_multi.contains(&row_idx) {
+            self.update_selection_on_click(row_idx, mods);
+        }
     }
 
     pub(super) fn attach_row_context_menu(
@@ -244,9 +309,9 @@ impl WavesPreviewer {
         row_idx: usize,
         ctx: &egui::Context,
     ) -> egui::Response {
-        if resp.secondary_clicked() && !self.selected_multi.contains(&row_idx) {
+        if resp.secondary_clicked() {
             let mods = ctx.input(|i| i.modifiers);
-            self.update_selection_on_click(row_idx, mods);
+            self.handle_row_secondary_click(row_idx, mods);
         }
         resp.context_menu(|ui| {
             self.list_row_context_menu_contents(ui);

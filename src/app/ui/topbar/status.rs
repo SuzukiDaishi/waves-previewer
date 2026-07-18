@@ -25,8 +25,13 @@ enum TopbarActivityCancel {
     EditorApply,
     PluginProcess,
     BulkResample,
+    Inspection,
+    BatchLoudnorm,
     Transcript,
     Music,
+    VariationAudition,
+    MixAudition,
+    DuplicateScan,
     EditorAnalysis,
 }
 
@@ -67,7 +72,7 @@ impl WavesPreviewer {
         if self.playback_session.is_playing {
             ui.label(
                 RichText::new("Playing")
-                    .color(Color32::from_rgb(120, 220, 140))
+                    .color(self.palette().playing_text)
                     .strong(),
             );
         }
@@ -170,6 +175,24 @@ impl WavesPreviewer {
                 cancel: None,
             });
         }
+        {
+            let inflight = self.meta_inflight.len();
+            if inflight == 0 {
+                self.meta_backlog_peak = 0;
+            } else if inflight > self.meta_backlog_peak {
+                self.meta_backlog_peak = inflight;
+            }
+            if let Some((label, progress)) =
+                Self::meta_backlog_activity(inflight, self.meta_backlog_peak)
+            {
+                items.push(TopbarActivityItem {
+                    label,
+                    progress: Some(progress),
+                    show_percentage: false,
+                    cancel: None,
+                });
+            }
+        }
         if let Some(status) = self
             .editor_decode_state
             .as_ref()
@@ -189,6 +212,14 @@ impl WavesPreviewer {
                 progress: None,
                 show_percentage: false,
                 cancel: Some(TopbarActivityCancel::EditorApply),
+            });
+        }
+        if let Some(state) = &self.mix_audition_state {
+            items.push(TopbarActivityItem {
+                label: format!("Mixing {} files for playback...", state.count),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::MixAudition),
             });
         }
         if let Some(state) = &self.plugin_process_state {
@@ -275,6 +306,60 @@ impl WavesPreviewer {
                 progress: Some(pct),
                 show_percentage: true,
                 cancel: Some(TopbarActivityCancel::BulkResample),
+            });
+        }
+        if let Some(state) = &self.batch_loudnorm_state {
+            let total = state.targets.len().max(1);
+            let (label, pct) = match state.phase {
+                crate::app::types::LoudnormPhase::Measure => {
+                    let done = total - state.pending.len().min(total);
+                    (
+                        format!("Loudness measure: {}/{}", done, total),
+                        done as f32 / total as f32,
+                    )
+                }
+                crate::app::types::LoudnormPhase::Apply => (
+                    format!("Loudness apply: {}/{}", state.apply_index, total),
+                    state.apply_index as f32 / total as f32,
+                ),
+            };
+            items.push(TopbarActivityItem {
+                label,
+                progress: Some(pct.clamp(0.0, 1.0)),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::BatchLoudnorm),
+            });
+        }
+        if let Some(state) = &self.inspection_run_state {
+            items.push(TopbarActivityItem {
+                label: format!("Inspecting: {}/{}", state.done, state.total.max(1)),
+                progress: Some((state.done as f32 / state.total.max(1) as f32).clamp(0.0, 1.0)),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::Inspection),
+            });
+        }
+        if let Some(state) = &self.duplicate_scan_state {
+            items.push(TopbarActivityItem {
+                label: format!("Duplicates: {}/{}", state.done, state.total.max(1)),
+                progress: Some((state.done as f32 / state.total.max(1) as f32).clamp(0.0, 1.0)),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::DuplicateScan),
+            });
+        }
+        if let Some(state) = &self.variation_audition {
+            let mode = match state.mode {
+                crate::app::types::VariationAuditionMode::RoundRobin => "RR",
+                crate::app::types::VariationAuditionMode::Random => "Rnd",
+            };
+            items.push(TopbarActivityItem {
+                label: format!(
+                    "Audition {}/{} ({mode})",
+                    state.cursor + 1,
+                    state.paths.len()
+                ),
+                progress: None,
+                show_percentage: false,
+                cancel: Some(TopbarActivityCancel::VariationAudition),
             });
         }
         if let Some(state) = &self.transcript_ai_state {
@@ -400,8 +485,22 @@ impl WavesPreviewer {
                     state.cancel_requested = true;
                 }
             }
+            TopbarActivityCancel::Inspection => {
+                self.cancel_inspection_run();
+            }
+            TopbarActivityCancel::BatchLoudnorm => {
+                self.cancel_batch_loudnorm();
+            }
             TopbarActivityCancel::Transcript => self.cancel_transcript_ai_run(),
             TopbarActivityCancel::Music => self.cancel_music_analysis_run(),
+            TopbarActivityCancel::MixAudition => {
+                self.cancel_mix_audition();
+            }
+            TopbarActivityCancel::VariationAudition => {
+                self.cancel_variation_audition();
+                self.audio.stop();
+            }
+            TopbarActivityCancel::DuplicateScan => self.cancel_duplicate_scan(),
             TopbarActivityCancel::EditorAnalysis => self.cancel_all_editor_analyses(),
         }
     }
@@ -452,8 +551,74 @@ impl WavesPreviewer {
                 self.ui_topbar_volume_control(ui, ctx, compact);
                 ui.separator();
                 self.ui_topbar_output_meter(ui, compact);
+                if !compact {
+                    self.ui_topbar_loudness_readout(ui);
+                }
             },
         );
+    }
+
+    /// Realtime BS.1770 readout fed by the metering thread: momentary /
+    /// short-term LUFS and 4x-oversampled true peak. "-" while idle.
+    fn ui_topbar_loudness_readout(&mut self, ui: &mut egui::Ui) {
+        let decode = |v: i32| {
+            (v != crate::audio::METER_VALUE_INVALID).then(|| v as f32 / 100.0)
+        };
+        let m = decode(
+            self.audio
+                .shared
+                .lufs_m_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let s = decode(
+            self.audio
+                .shared
+                .lufs_s_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let tp = decode(
+            self.audio
+                .shared
+                .true_peak_db_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let text = Self::format_loudness_readout(m, s, tp);
+        ui.label(egui::RichText::new(text).monospace().size(10.5).weak())
+            .on_hover_text(
+                "Realtime loudness of what's playing: M = momentary LUFS (400 ms), \
+                 S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled)",
+            );
+        if m.is_some() || s.is_some() || tp.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+        }
+    }
+
+    /// Topbar backlog item for the metadata pool: appears once more than 200
+    /// jobs are queued/running, with progress against the high-water mark
+    /// since the backlog last drained.
+    pub(crate) fn meta_backlog_activity(inflight: usize, peak: usize) -> Option<(String, f32)> {
+        if inflight <= 200 {
+            return None;
+        }
+        let total = peak.max(inflight).max(1);
+        let done = total - inflight;
+        Some((
+            format!("Meta {done}/{total}"),
+            done as f32 / total as f32,
+        ))
+    }
+
+    pub(crate) fn format_loudness_readout(
+        m: Option<f32>,
+        s: Option<f32>,
+        tp: Option<f32>,
+    ) -> String {
+        let fmt = |v: Option<f32>| match v {
+            Some(v) if v <= -99.0 => "-inf".to_string(),
+            Some(v) => format!("{v:+.1}"),
+            None => "-".to_string(),
+        };
+        format!("M {}  S {}  TP {}", fmt(m), fmt(s), fmt(tp))
     }
 
     fn ui_topbar_volume_control(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, compact: bool) {
@@ -517,10 +682,11 @@ impl WavesPreviewer {
         }
 
         let painter = ui.painter_at(rect);
+        let palette = self.palette();
         let text_col = if response.hovered() {
-            Color32::from_rgb(220, 226, 232)
+            palette.slider_label
         } else {
-            Color32::from_rgb(174, 180, 188)
+            palette.slider_label_weak
         };
         let body_font = egui::TextStyle::Body.resolve(ui.style());
         let mono_font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -531,19 +697,19 @@ impl WavesPreviewer {
             body_font.clone(),
             text_col,
         );
-        painter.rect_filled(track_rect, 3.0, Color32::from_rgb(24, 27, 31));
+        painter.rect_filled(track_rect, 3.0, palette.slider_track);
         let t = ((self.volume_db + 80.0) / 86.0).clamp(0.0, 1.0);
         let fill_rect = egui::Rect::from_min_max(
             track_rect.min,
             egui::pos2(track_rect.left() + track_rect.width() * t, track_rect.bottom()),
         );
-        painter.rect_filled(fill_rect, 3.0, Color32::from_rgb(88, 196, 118));
+        painter.rect_filled(fill_rect, 3.0, palette.slider_fill);
         let stroke_col = if response.has_focus() {
-            Color32::from_rgb(130, 190, 235)
+            palette.slider_value_text
         } else if response.hovered() {
-            Color32::from_rgb(120, 150, 165)
+            palette.slider_value_text_weak
         } else {
-            Color32::from_rgb(70, 76, 84)
+            palette.slider_knob_stroke
         };
         painter.rect_stroke(
             track_rect,
@@ -555,12 +721,12 @@ impl WavesPreviewer {
         painter.circle_filled(
             egui::pos2(knob_x, track_rect.center().y),
             5.0,
-            Color32::from_rgb(142, 224, 160),
+            palette.meter_text,
         );
         painter.circle_stroke(
             egui::pos2(knob_x, track_rect.center().y),
             5.0,
-            egui::Stroke::new(1.0, Color32::from_rgb(38, 52, 42)),
+            egui::Stroke::new(1.0, palette.meter_text_outline),
         );
         painter.text(
             egui::pos2(rect.right(), rect.center().y),
@@ -584,15 +750,51 @@ impl WavesPreviewer {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::empty());
         self.topbar_output_meter_rect = Some(rect);
         let painter = ui.painter_at(rect);
+        let palette = self.palette();
         let track_rect = rect.shrink(1.0);
-        painter.rect_filled(track_rect, 2.0, Color32::from_rgb(18, 18, 22));
-        let norm = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-        if norm > 0.0 {
-            let fill = egui::Rect::from_min_size(
-                track_rect.min,
-                egui::vec2(track_rect.width() * norm, track_rect.height()),
-            );
-            painter.rect_filled(fill, 2.0, Color32::from_rgb(100, 220, 120));
+        painter.rect_filled(track_rect, 2.0, palette.meter_track);
+        let norm_of = |db: f32| ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+        let ch_count = self.meter_ch_db.len();
+        if ch_count >= 2 {
+            // Per-output-channel sub-bars (RMS fill + peak-hold tick).
+            let sub_h = track_rect.height() / ch_count as f32;
+            for (i, &(rms_db, _peak_db)) in self.meter_ch_db.iter().enumerate() {
+                let top = track_rect.top() + sub_h * i as f32;
+                let sub = egui::Rect::from_min_max(
+                    egui::pos2(track_rect.left(), top + 0.5),
+                    egui::pos2(track_rect.right(), top + sub_h - 0.5),
+                );
+                let n = norm_of(rms_db);
+                if n > 0.0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            sub.min,
+                            egui::vec2(sub.width() * n, sub.height()),
+                        ),
+                        1.0,
+                        palette.meter_fill,
+                    );
+                }
+                if let Some(&hold_db) = self.meter_ch_hold_db.get(i) {
+                    let hn = norm_of(hold_db);
+                    if hn > 0.01 {
+                        let x = sub.left() + sub.width() * hn;
+                        painter.line_segment(
+                            [egui::pos2(x, sub.top()), egui::pos2(x, sub.bottom())],
+                            egui::Stroke::new(1.0, palette.meter_peak_tick),
+                        );
+                    }
+                }
+            }
+        } else {
+            let norm = norm_of(db);
+            if norm > 0.0 {
+                let fill = egui::Rect::from_min_size(
+                    track_rect.min,
+                    egui::vec2(track_rect.width() * norm, track_rect.height()),
+                );
+                painter.rect_filled(fill, 2.0, palette.meter_fill);
+            }
         }
         painter.rect_stroke(
             track_rect,
@@ -612,5 +814,36 @@ impl WavesPreviewer {
             format!("{db:.1} dBFS")
         };
         ui.label(RichText::new(db_label).monospace());
+    }
+}
+
+#[cfg(test)]
+mod meta_backlog_tests {
+    #[test]
+    fn activity_appears_over_200_and_tracks_peak() {
+        let f = crate::app::WavesPreviewer::meta_backlog_activity;
+        assert!(f(0, 0).is_none());
+        assert!(f(200, 500).is_none(), "at or under 200 stays hidden");
+        let (label, progress) = f(300, 1_000).expect("backlog item");
+        assert_eq!(label, "Meta 700/1000");
+        assert!((progress - 0.7).abs() < 1e-6);
+        // Peak lower than inflight (fresh burst): clamps to inflight, 0%.
+        let (label, progress) = f(400, 100).expect("burst item");
+        assert_eq!(label, "Meta 0/400");
+        assert_eq!(progress, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod loudness_readout_tests {
+    #[test]
+    fn formats_values_and_placeholders() {
+        let f = crate::app::WavesPreviewer::format_loudness_readout;
+        assert_eq!(f(None, None, None), "M -  S -  TP -");
+        assert_eq!(
+            f(Some(-23.06), Some(-22.94), Some(-1.2)),
+            "M -23.1  S -22.9  TP -1.2"
+        );
+        assert_eq!(f(Some(-120.0), None, Some(0.0)), "M -inf  S -  TP +0.0");
     }
 }

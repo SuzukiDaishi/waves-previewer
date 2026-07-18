@@ -1,0 +1,528 @@
+#[cfg(feature = "kittest")]
+mod p3_spectral_tools {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use egui_kittest::Harness;
+    use neowaves::kittest::harness_with_startup;
+    use neowaves::{StartupConfig, WavesPreviewer};
+
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "neowaves_p3_spectral_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ms,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    fn synth_sine(sr: u32, secs: f32, freq: f32) -> Vec<Vec<f32>> {
+        let frames = ((sr as f32) * secs).max(1.0) as usize;
+        let ch: Vec<f32> = (0..frames)
+            .map(|i| (i as f32 / sr as f32 * freq * std::f32::consts::TAU).sin() * 0.5)
+            .collect();
+        vec![ch]
+    }
+
+    fn harness_with_folder(dir: PathBuf) -> Harness<'static, WavesPreviewer> {
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir);
+        cfg.open_first = false;
+        harness_with_startup(cfg)
+    }
+
+    fn wait_for_scan(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().files.is_empty() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("scan timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_tab_ready(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            let ready = harness
+                .state()
+                .active_tab
+                .and_then(|idx| harness.state().tabs.get(idx))
+                .map(|tab| {
+                    tab.samples_len > 0
+                        && (!tab.loading || harness.state().test_audio_has_samples())
+                })
+                .unwrap_or(false);
+            if ready {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("tab ready timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_apply_done(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().test_editor_apply_busy() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(30) {
+                panic!("editor apply timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn tab_samples(harness: &Harness<'static, WavesPreviewer>) -> Vec<Vec<f32>> {
+        let idx = harness.state().active_tab.expect("active tab");
+        harness.state().tabs[idx].ch_samples.clone()
+    }
+
+    fn rms(sig: &[f32]) -> f32 {
+        if sig.is_empty() {
+            return 0.0;
+        }
+        (sig.iter().map(|v| v * v).sum::<f32>() / sig.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn spectral_brush_apply_attenuates_and_undoes() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("brush");
+        let src = dir.join("tone.wav");
+        neowaves::wave::export_channels_audio(&synth_sine(sr, 2.0, 1_000.0), sr, &src)
+            .expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let center = len / 2;
+        // Probe well inside the default 60 ms sigma (3 sigma = 180 ms).
+        let probe = center - 1_200..center + 1_200;
+        let rms_before = rms(&before[0][probe.clone()]);
+        assert!(rms_before > 0.2, "fixture tone missing: rms {rms_before}");
+
+        // Paint a hard cut right on the tone and apply it.
+        assert!(harness
+            .state_mut()
+            .test_spectral_brush_stamp(0.5, 1_000.0, 40.0));
+        assert!(harness.state_mut().test_spectral_brush_apply());
+        wait_for_apply_done(&mut harness);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len, "brush must not change length");
+        let rms_after = rms(&after[0][probe.clone()]);
+        let drop_db = 20.0 * (rms_after / rms_before).log10();
+        assert!(
+            drop_db < -15.0,
+            "stamp center not attenuated: {drop_db} dB ({rms_before} -> {rms_after})"
+        );
+        // Far from the stamp (well outside 3 sigma + FFT margins) the tone
+        // is untouched.
+        let far = 4_000..8_000;
+        assert_eq!(before[0][far.clone()], after[0][far.clone()]);
+        // Stamps are consumed by Apply.
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].spectral_brush_stamps.is_empty());
+        assert!(harness.state().tabs[tab_idx].dirty);
+
+        // Undo restores the original buffer bit-exactly.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spectral_heal_rebuilds_dropout_and_undoes() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("heal");
+        let src = dir.join("tone.wav");
+        // Tone with a 50 ms hole punched in the middle.
+        let mut chans = synth_sine(sr, 2.0, 1_000.0);
+        let len = chans[0].len();
+        let hole = len / 2..len / 2 + (sr as f32 * 0.05) as usize;
+        for v in &mut chans[0][hole.clone()] {
+            *v = 0.0;
+        }
+        neowaves::wave::export_channels_audio(&chans, sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let hole_rms = rms(&before[0][hole.clone()]);
+        assert!(hole_rms < 1e-3, "fixture hole not silent: {hole_rms}");
+
+        // Select just around the hole and heal it.
+        let sel_s = (hole.start - 256) as f32 / len as f32;
+        let sel_e = (hole.end + 256) as f32 / len as f32;
+        assert!(harness.state_mut().test_set_selection_frac(sel_s, sel_e));
+        assert!(harness.state_mut().test_spectral_heal_apply());
+        wait_for_apply_done(&mut harness);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len, "heal must not change length");
+        let healed_rms = rms(&after[0][hole.clone()]);
+        assert!(
+            healed_rms > 0.2,
+            "hole not rebuilt from context: rms {healed_rms}"
+        );
+        // Audio far outside the selection is untouched.
+        let far = 4_000..8_000;
+        assert_eq!(before[0][far.clone()], after[0][far.clone()]);
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].dirty);
+
+        // Undo restores the damaged original bit-exactly.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declip_scan_and_apply_repairs_clipping() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("declip");
+        let src = dir.join("clipped.wav");
+        // 0.9 sine hard-clipped at 0.7: every crest is a flat rail run.
+        let mut chans = synth_sine(sr, 1.0, 220.0);
+        for v in chans[0].iter_mut() {
+            *v = (*v * 1.8).clamp(-0.7, 0.7);
+        }
+        neowaves::wave::export_channels_audio(&chans, sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let found = harness.state_mut().test_declip_scan();
+        assert!(found > 100, "scan found only {found} clipped runs");
+
+        assert!(harness.state_mut().test_declip_apply());
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        // The rebuilt crests must rise above the rail.
+        let peak_after = after[0].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            peak_after > 0.705,
+            "repair never left the 0.7 rail: {peak_after}"
+        );
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dehum_detect_and_apply_removes_hum() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("dehum");
+        let src = dir.join("hummy.wav");
+        // 1 kHz content plus a 60 Hz hum line with two harmonics.
+        let n = sr as usize;
+        let ch: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (t * 1000.0 * std::f32::consts::TAU).sin() * 0.3
+                    + (t * 60.0 * std::f32::consts::TAU).sin() * 0.1
+                    + (t * 180.0 * std::f32::consts::TAU).sin() * 0.05
+            })
+            .collect();
+        neowaves::wave::export_channels_audio(&vec![ch], sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        let detected = harness
+            .state_mut()
+            .test_dehum_detect()
+            .expect("hum line should be detected");
+        assert!(
+            (detected - 60.0).abs() <= 0.5,
+            "detected {detected} Hz, expected ~60"
+        );
+        assert!(harness.state_mut().test_dehum_apply());
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        // Rough spectral check via RMS drop: hum carried a good share of the
+        // signal's energy, so a >=30 dB cut at 60/180 Hz lowers overall RMS.
+        let rms = |x: &[f32]| {
+            (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64).sqrt()
+        };
+        let settle = sr as usize / 2;
+        assert!(
+            rms(&after[0][settle..]) < rms(&before[0][settle..]) * 0.98,
+            "apply should remove hum energy"
+        );
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spectral_copy_paste_moves_band_content() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("speccp");
+        let src = dir.join("halftone.wav");
+        // First half: 1 kHz tone. Second half: silence.
+        let n = sr as usize;
+        let ch: Vec<f32> = (0..n)
+            .map(|i| {
+                if i < n / 2 {
+                    (i as f32 / sr as f32 * 1000.0 * std::f32::consts::TAU).sin() * 0.4
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        neowaves::wave::export_channels_audio(&vec![ch], sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // Copy the 1 kHz band from the tone half.
+        {
+            let idx = harness.state().active_tab.unwrap();
+            let tab = &mut harness.state_mut().tabs[idx];
+            tab.selection = Some((4_000, 20_000));
+            tab.freq_selection = Some((700.0, 1_300.0));
+        }
+        assert!(harness.state_mut().test_spectral_copy());
+        assert_eq!(
+            harness.state().test_spectral_clipboard_len(),
+            Some(16_000)
+        );
+        // Paste into the silent half (selection start = paste anchor).
+        {
+            let idx = harness.state().active_tab.unwrap();
+            let tab = &mut harness.state_mut().tabs[idx];
+            tab.selection = Some((30_000, 46_000));
+        }
+        assert!(harness.state_mut().test_spectral_paste(false));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        let rms = |x: &[f32]| {
+            (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64)
+                .sqrt()
+        };
+        assert!(
+            rms(&after[0][32_000..44_000]) > 0.05,
+            "pasted region should carry the tone: rms={}",
+            rms(&after[0][32_000..44_000])
+        );
+        // Far outside the paste region the audio is untouched.
+        assert_eq!(before[0][..28_000], after[0][..28_000]);
+        // Undo restores silence.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harmonic_action_refines_f0_and_mutes_harmonic_stack() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("harmonic");
+        let src = dir.join("harmonics.wav");
+        // 440 Hz + two harmonics + an unrelated 2 kHz tone (between harmonic bands).
+        let n = sr as usize;
+        let ch: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (t * 440.0 * std::f32::consts::TAU).sin() * 0.3
+                    + (t * 880.0 * std::f32::consts::TAU).sin() * 0.15
+                    + (t * 1320.0 * std::f32::consts::TAU).sin() * 0.1
+                    + (t * 2000.0 * std::f32::consts::TAU).sin() * 0.2
+            })
+            .collect();
+        neowaves::wave::export_channels_audio(&vec![ch.clone()], sr, &src)
+            .expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // A sloppy click at ~452 Hz refines onto the 440 Hz peak.
+        let f0 = harness
+            .state_mut()
+            .test_harmonic_click(24_000, 452.0)
+            .expect("harmonic action set");
+        assert!((f0 - 440.0).abs() < 5.0, "refined f0 = {f0}, expected ~440");
+        assert!(harness.state_mut().test_harmonic_apply(None));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+
+        let goertzel = |x: &[f32], freq: f32| -> f64 {
+            let w = 2.0 * std::f64::consts::PI * f64::from(freq) / f64::from(sr);
+            let coeff = 2.0 * w.cos();
+            let (mut s1, mut s2) = (0.0f64, 0.0f64);
+            for &v in x {
+                let s0 = f64::from(v) + coeff * s1 - s2;
+                s2 = s1;
+                s1 = s0;
+            }
+            (s1 * s1 + s2 * s2 - coeff * s1 * s2) / (x.len() as f64 * x.len() as f64)
+        };
+        let db = |p: f64| 10.0 * p.max(1e-30).log10();
+        let mid = 8_000..40_000;
+        for hz in [440.0, 880.0, 1320.0] {
+            let drop = db(goertzel(&before[0][mid.clone()], hz))
+                - db(goertzel(&after[0][mid.clone()], hz));
+            assert!(drop >= 20.0, "{hz} Hz only dropped {drop:.1} dB");
+        }
+        let bystander = db(goertzel(&before[0][mid.clone()], 2000.0))
+            - db(goertzel(&after[0][mid.clone()], 2000.0));
+        assert!(
+            bystander.abs() < 1.0,
+            "2 kHz bystander moved {bystander:.2} dB"
+        );
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn declick_scan_and_apply_repairs_clicks() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("declick");
+        let src = dir.join("clicky.wav");
+        let mut chans = synth_sine(sr, 1.0, 440.0);
+        let clicks = [10_000usize, 20_000, 30_000];
+        for &pos in &clicks {
+            chans[0][pos] = 1.0;
+        }
+        neowaves::wave::export_channels_audio(&chans, sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // Scan finds the injected clicks and stores marker spans.
+        let found = harness.state_mut().test_declick_scan();
+        assert!(found >= clicks.len(), "scan found only {found} clicks");
+        let tab_idx = harness.state().active_tab.unwrap();
+        {
+            let scan = harness.state().tabs[tab_idx]
+                .declick_scan
+                .as_ref()
+                .expect("scan stored");
+            for &pos in &clicks {
+                assert!(
+                    scan.spans.iter().any(|&(s, e)| pos >= s && pos < e),
+                    "click at {pos} missing from scan spans"
+                );
+            }
+        }
+
+        // Apply repairs them through the async pipeline (undoable).
+        assert!(harness.state_mut().test_declick_apply());
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        for &pos in &clicks {
+            assert!(
+                after[0][pos].abs() < 0.6,
+                "click at {pos} not repaired: {}",
+                after[0][pos]
+            );
+        }
+        // Apply invalidates the scan markers.
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].declick_scan.is_none());
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn denoise_learn_and_apply_reduces_noise_floor() {
+        let sr = 48_000u32;
+        let dir = make_temp_dir("denoise");
+        let src = dir.join("noisy.wav");
+        // First half: noise only. Second half: noise + tone.
+        let len = (sr * 2) as usize;
+        let noise_amp = 10f32.powf(-30.0 / 20.0);
+        let mut state = 99u64;
+        let mut ch: Vec<f32> = (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0) * noise_amp
+            })
+            .collect();
+        for (i, v) in ch.iter_mut().enumerate().skip(len / 2) {
+            *v += (i as f32 / sr as f32 * 1_000.0 * std::f32::consts::TAU).sin() * 0.25;
+        }
+        neowaves::wave::export_channels_audio(&[ch], sr, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+
+        let before = tab_samples(&harness);
+        // Learn from the noise-only first half.
+        assert!(harness.state_mut().test_set_selection_frac(0.02, 0.48));
+        assert!(harness.state_mut().test_denoise_learn(), "learn failed");
+        // Clear the selection so Apply covers the whole file.
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.0) || true);
+        let tab_idx = harness.state().active_tab.unwrap();
+        harness.state_mut().tabs[tab_idx].selection = None;
+
+        assert!(harness.state_mut().test_denoise_apply(), "apply not queued");
+        wait_for_apply_done(&mut harness);
+        let after = tab_samples(&harness);
+        let probe = 10_000..len / 2 - 10_000;
+        let drop_db = 20.0
+            * (rms(&after[0][probe.clone()]) / rms(&before[0][probe.clone()]).max(1e-12)).log10();
+        assert!(drop_db < -8.0, "noise floor only dropped {drop_db} dB");
+        // Undo restores the noisy original.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

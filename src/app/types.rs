@@ -271,6 +271,8 @@ pub enum SortKey {
     LufsShort,
     LufsMomentary,
     Bpm,
+    SilenceLead,
+    SilenceTail,
     CreatedAt,
     ModifiedAt,
     External(usize),
@@ -331,6 +333,184 @@ pub struct ListUndoAction {
     pub after: ListSelectionSnapshot,
 }
 
+/// Stable identity for every list column; display order is a Vec<ColumnId>
+/// (position-keyed orders break the moment a column is added).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ColumnId {
+    Edited,
+    CoverArt,
+    File,
+    Folder,
+    Transcript,
+    TranscriptLanguage,
+    External,
+    TypeBadge,
+    Length,
+    Channels,
+    SampleRate,
+    Bits,
+    BitRate,
+    Peak,
+    Lufs,
+    Dbtp,
+    LufsS,
+    LufsM,
+    SilenceLead,
+    SilenceTail,
+    Bpm,
+    CreatedAt,
+    ModifiedAt,
+    Gain,
+    Wave,
+}
+
+impl ColumnId {
+    /// Default display order — the historical fixed order of the table.
+    pub const ALL: &'static [ColumnId] = &[
+        ColumnId::Edited,
+        ColumnId::CoverArt,
+        ColumnId::File,
+        ColumnId::Folder,
+        ColumnId::Transcript,
+        ColumnId::TranscriptLanguage,
+        ColumnId::External,
+        ColumnId::TypeBadge,
+        ColumnId::Length,
+        ColumnId::Channels,
+        ColumnId::SampleRate,
+        ColumnId::Bits,
+        ColumnId::BitRate,
+        ColumnId::Peak,
+        ColumnId::Lufs,
+        ColumnId::Dbtp,
+        ColumnId::LufsS,
+        ColumnId::LufsM,
+        ColumnId::SilenceLead,
+        ColumnId::SilenceTail,
+        ColumnId::Bpm,
+        ColumnId::CreatedAt,
+        ColumnId::ModifiedAt,
+        ColumnId::Gain,
+        ColumnId::Wave,
+    ];
+
+    /// Stable identifier used by prefs/session files.
+    pub fn name(self) -> &'static str {
+        match self {
+            ColumnId::Edited => "edited",
+            ColumnId::CoverArt => "cover_art",
+            ColumnId::File => "file",
+            ColumnId::Folder => "folder",
+            ColumnId::Transcript => "transcript",
+            ColumnId::TranscriptLanguage => "transcript_language",
+            ColumnId::External => "external",
+            ColumnId::TypeBadge => "type_badge",
+            ColumnId::Length => "length",
+            ColumnId::Channels => "channels",
+            ColumnId::SampleRate => "sample_rate",
+            ColumnId::Bits => "bits",
+            ColumnId::BitRate => "bit_rate",
+            ColumnId::Peak => "peak",
+            ColumnId::Lufs => "lufs",
+            ColumnId::Dbtp => "dbtp",
+            ColumnId::LufsS => "lufs_s",
+            ColumnId::LufsM => "lufs_m",
+            ColumnId::SilenceLead => "silence_lead",
+            ColumnId::SilenceTail => "silence_tail",
+            ColumnId::Bpm => "bpm",
+            ColumnId::CreatedAt => "created_at",
+            ColumnId::ModifiedAt => "modified_at",
+            ColumnId::Gain => "gain",
+            ColumnId::Wave => "wave",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ColumnId> {
+        ColumnId::ALL.iter().copied().find(|c| c.name() == s)
+    }
+
+    /// Human label for the reorder settings list.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColumnId::Edited => "Edited",
+            ColumnId::CoverArt => "Art",
+            ColumnId::File => "File",
+            ColumnId::Folder => "Folder",
+            ColumnId::Transcript => "Transcript",
+            ColumnId::TranscriptLanguage => "Language",
+            ColumnId::External => "External",
+            ColumnId::TypeBadge => "Type",
+            ColumnId::Length => "Length",
+            ColumnId::Channels => "Channels",
+            ColumnId::SampleRate => "Sample Rate",
+            ColumnId::Bits => "Bits",
+            ColumnId::BitRate => "Bitrate",
+            ColumnId::Peak => "Peak",
+            ColumnId::Lufs => "LUFS",
+            ColumnId::Dbtp => "dBTP",
+            ColumnId::LufsS => "LUFS-S",
+            ColumnId::LufsM => "LUFS-M",
+            ColumnId::SilenceLead => "Silence Head",
+            ColumnId::SilenceTail => "Silence Tail",
+            ColumnId::Bpm => "BPM",
+            ColumnId::CreatedAt => "Created",
+            ColumnId::ModifiedAt => "Modified",
+            ColumnId::Gain => "Gain",
+            ColumnId::Wave => "Wave",
+        }
+    }
+
+    /// Whether this column is visible under the given config. Single source
+    /// of truth for the ColumnId -> ListColumnConfig field mapping used by
+    /// the table/header/row builders.
+    pub fn enabled(self, cols: &ListColumnConfig) -> bool {
+        match self {
+            ColumnId::Edited => cols.edited,
+            ColumnId::CoverArt => cols.cover_art,
+            ColumnId::File => cols.file,
+            ColumnId::Folder => cols.folder,
+            ColumnId::Transcript => cols.transcript,
+            ColumnId::TranscriptLanguage => cols.transcript_language,
+            ColumnId::External => cols.external,
+            ColumnId::TypeBadge => cols.type_badge,
+            ColumnId::Length => cols.length,
+            ColumnId::Channels => cols.channels,
+            ColumnId::SampleRate => cols.sample_rate,
+            ColumnId::Bits => cols.bits,
+            ColumnId::BitRate => cols.bit_rate,
+            ColumnId::Peak => cols.peak,
+            ColumnId::Lufs => cols.lufs,
+            ColumnId::Dbtp => cols.dbtp,
+            ColumnId::LufsS => cols.lufs_s,
+            ColumnId::LufsM => cols.lufs_m,
+            ColumnId::SilenceLead => cols.silence_lead,
+            ColumnId::SilenceTail => cols.silence_tail,
+            ColumnId::Bpm => cols.bpm,
+            ColumnId::CreatedAt => cols.created_at,
+            ColumnId::ModifiedAt => cols.modified_at,
+            ColumnId::Gain => cols.gain,
+            ColumnId::Wave => cols.wave,
+        }
+    }
+}
+
+/// Normalize a stored order: drop unknown/duplicate entries and append any
+/// columns missing from it (new builds add columns old files never saw).
+pub fn sanitize_column_order(order: &[ColumnId]) -> Vec<ColumnId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<ColumnId> = order
+        .iter()
+        .copied()
+        .filter(|c| seen.insert(*c))
+        .collect();
+    for c in ColumnId::ALL {
+        if seen.insert(*c) {
+            out.push(*c);
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ListColumnConfig {
     pub edited: bool,
@@ -356,6 +536,9 @@ pub struct ListColumnConfig {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    // Leading/trailing silence columns (full-decode metadata; default off).
+    pub silence_lead: bool,
+    pub silence_tail: bool,
 }
 
 impl Default for ListColumnConfig {
@@ -384,6 +567,8 @@ impl Default for ListColumnConfig {
             modified_at: false,
             gain: true,
             wave: true,
+            silence_lead: false,
+            silence_tail: false,
         }
     }
 }
@@ -624,12 +809,55 @@ pub enum ToolKind {
     Normalize,
     Loudness,
     Reverse,
+    InvertPolarity,
+    DcOffset,
+    InsertSilence,
+    Pencil,
+    DeClick,
+    DeClip,
+    DeHum,
+    DeNoise,
     NoiseGate,
     Eq,
     Compressor,
     MusicAnalyze,
     PluginFx,
     SpectralWarp,
+    SpectralBrush,
+}
+
+impl ToolKind {
+    /// Human-readable tool name (inspector header, undo history labels).
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolKind::LoopEdit => "Loop Edit",
+            ToolKind::Markers => "Markers",
+            ToolKind::Trim => "Trim",
+            ToolKind::Fade => "Fade",
+            ToolKind::Gain => "Gain",
+            ToolKind::Normalize => "Normalize",
+            ToolKind::PitchShift => "Pitch Shift",
+            ToolKind::TimeStretch => "Time Stretch",
+            ToolKind::Speed => "Speed",
+            ToolKind::Loudness => "LoudNorm",
+            ToolKind::NoiseGate => "Noise Gate",
+            ToolKind::Eq => "EQ",
+            ToolKind::Compressor => "Compressor",
+            ToolKind::MusicAnalyze => "Music Analyze",
+            ToolKind::PluginFx => "Plugin FX",
+            ToolKind::Reverse => "Reverse",
+            ToolKind::InvertPolarity => "Invert Polarity",
+            ToolKind::DcOffset => "DC Offset",
+            ToolKind::InsertSilence => "Insert Silence",
+            ToolKind::Pencil => "Pencil",
+            ToolKind::DeClick => "De-click",
+            ToolKind::DeClip => "De-clip",
+            ToolKind::DeHum => "De-hum",
+            ToolKind::DeNoise => "De-noise",
+            ToolKind::SpectralWarp => "Spectral Warp",
+            ToolKind::SpectralBrush => "Spectral Brush",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -733,6 +961,145 @@ impl Default for MusicAnalysisDraft {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LoudnormPhase {
+    Measure,
+    Apply,
+}
+
+/// State machine for the GUI batch loudness normalize (measure via the meta
+/// pool, then frame-budgeted apply through the unified gain framework).
+pub struct BatchLoudnormState {
+    pub targets: Vec<PathBuf>,
+    pub target_lufs: f32,
+    pub phase: LoudnormPhase,
+    pub pending: std::collections::HashSet<PathBuf>,
+    pub queue: Vec<PathBuf>,
+    pub apply_index: usize,
+    pub before: ListSelectionSnapshot,
+    pub before_items: Vec<ListUndoItem>,
+    pub cancel_requested: bool,
+    pub updated: usize,
+    pub tab_edited: usize,
+    pub skipped: usize,
+    pub clip_risk: usize,
+    pub failed: usize,
+    #[allow(dead_code)]
+    pub started_at: std::time::Instant,
+}
+
+/// Streaming state for an in-progress batch inspection run.
+pub struct InspectionRunState {
+    pub total: usize,
+    pub done: usize,
+    pub rx: std::sync::mpsc::Receiver<crate::app::inspection::InspectionRow>,
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub rows: Vec<crate::app::inspection::InspectionRow>,
+    #[allow(dead_code)]
+    pub started_at: std::time::Instant,
+}
+
+/// Finished inspection results shown in the results window.
+pub struct InspectionReportState {
+    pub rows: Vec<crate::app::inspection::InspectionRow>,
+    pub cfg: crate::app::inspection::InspectionConfig,
+    pub generated_at: std::time::SystemTime,
+    pub cancelled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteMode {
+    Insert,
+    Mix,
+    CrossfadeInsert,
+}
+
+/// Order in which a multi-variation audition walks the selected files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariationAuditionMode {
+    RoundRobin,
+    Random,
+}
+
+/// In-progress multi-variation audition: the selected list rows play one
+/// "Play Selected Together": a worker decodes + SR-aligns + mixes the
+/// selection; the drain plays the sum as a one-shot preview buffer.
+pub struct MixAuditionState {
+    pub rx: std::sync::mpsc::Receiver<Result<Vec<Vec<f32>>, String>>,
+    pub count: usize,
+}
+
+/// after another (round-robin or random) until the user stops playback.
+#[derive(Clone, Debug)]
+pub struct VariationAuditionState {
+    pub paths: Vec<std::path::PathBuf>,
+    pub mode: VariationAuditionMode,
+    /// Index into `paths` of the item currently playing.
+    pub cursor: usize,
+    /// Items started so far (for the "Audition 3/8" display).
+    pub played: usize,
+    /// The current item was actually heard playing (guards the async
+    /// load window against being mistaken for a finished playback).
+    pub item_started: bool,
+    /// LCG state for the Random mode.
+    pub rng: u64,
+}
+
+/// In-app audio clipboard for editor cut/copy/paste-insert (sample data at
+/// the source tab's buffer rate; adapted on paste).
+#[derive(Clone, Debug)]
+pub struct EditorAudioClip {
+    pub channels: Vec<Vec<f32>>,
+    pub sample_rate: u32,
+}
+
+impl ToolState {
+    /// Canonical defaults used everywhere a fresh tool state is created.
+    pub fn default_values() -> Self {
+        Self {
+            fade_in_ms: 0.0,
+            fade_out_ms: 0.0,
+            gain_db: 0.0,
+            normalize_target_db: -6.0,
+            loudness_target_lufs: -14.0,
+            pitch_semitones: 0.0,
+            stretch_rate: 1.0,
+            speed_rate: 1.0,
+            warp_time_radius_ms: 150.0,
+            warp_freq_radius_hz: 300.0,
+            brush_cut_db: 24.0,
+            brush_time_radius_ms: 60.0,
+            brush_freq_radius_hz: 200.0,
+            declick_sensitivity: 0.5,
+            declip_sensitivity: 0.5,
+            dehum_hz: 50.0,
+            dehum_harmonics: 8,
+            dehum_q: 30.0,
+            dehum_depth_db: 40.0,
+            denoise_reduction_db: 12.0,
+            denoise_strength: 2.0,
+            loop_repeat: 2,
+            noise_gate_threshold_db: -40.0,
+            noise_gate_attack_ms: 2.0,
+            noise_gate_release_ms: 100.0,
+            eq_low_shelf_freq_hz: 120.0,
+            eq_low_shelf_gain_db: 0.0,
+            eq_mid_freq_hz: 1000.0,
+            eq_mid_gain_db: 0.0,
+            eq_mid_q: 1.0,
+            eq_high_shelf_freq_hz: 8000.0,
+            eq_high_shelf_gain_db: 0.0,
+            compressor_threshold_db: -18.0,
+            compressor_ratio: 3.0,
+            compressor_attack_ms: 10.0,
+            compressor_release_ms: 150.0,
+            compressor_makeup_db: 0.0,
+            insert_silence_ms: 1000.0,
+            invert_smooth_boundaries: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct ToolState {
     pub fade_in_ms: f32,
@@ -745,6 +1112,17 @@ pub struct ToolState {
     pub speed_rate: f32,
     pub warp_time_radius_ms: f32,
     pub warp_freq_radius_hz: f32,
+    pub brush_cut_db: f32,
+    pub brush_time_radius_ms: f32,
+    pub brush_freq_radius_hz: f32,
+    pub declick_sensitivity: f32,
+    pub declip_sensitivity: f32,
+    pub dehum_hz: f32,
+    pub dehum_harmonics: u32,
+    pub dehum_q: f32,
+    pub dehum_depth_db: f32,
+    pub denoise_reduction_db: f32,
+    pub denoise_strength: f32,
     pub loop_repeat: u32,
     pub noise_gate_threshold_db: f32,
     pub noise_gate_attack_ms: f32,
@@ -761,6 +1139,10 @@ pub struct ToolState {
     pub compressor_attack_ms: f32,
     pub compressor_release_ms: f32,
     pub compressor_makeup_db: f32,
+    pub insert_silence_ms: f32,
+    /// Short (~2 ms) polarity crossfade at interior range boundaries so a
+    /// partial invert doesn't step-discontinue against untouched audio.
+    pub invert_smooth_boundaries: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -864,6 +1246,12 @@ pub struct PluginFxDraft {
     pub last_error: Option<String>,
     pub last_backend_note: Option<String>,
     pub last_backend_log: Option<String>,
+    /// A/B compare: the inactive slot's (params, state_blob).
+    pub ab_alt: Option<(Vec<PluginParamUiState>, Option<Vec<u8>>)>,
+    /// Which slot the current draft represents (false = A, true = B).
+    pub ab_active_b: bool,
+    /// Re-render the preview automatically (debounced) on param changes.
+    pub auto_preview: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -940,6 +1328,9 @@ pub struct PluginProcessResult {
     pub job_id: u64,
     pub tab_idx: usize,
     pub is_apply: bool,
+    /// Debounced auto-preview render: adopt with a position-preserving
+    /// buffer swap instead of stopping playback.
+    pub is_auto: bool,
     pub channels: Vec<Vec<f32>>,
     pub state_blob: Option<Vec<u8>>,
     pub backend: crate::plugin::PluginHostBackend,
@@ -965,6 +1356,7 @@ pub struct PluginProcessState {
     pub started_at: Instant,
     pub tab_idx: usize,
     pub is_apply: bool,
+    pub is_auto: bool,
     pub rx: std::sync::mpsc::Receiver<PluginProcessResult>,
     pub undo: Option<EditorUndoState>,
 }
@@ -1067,6 +1459,22 @@ pub enum LeaveIntent {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ToastSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// Transient user-facing notification shown by the toast overlay.
+pub struct Toast {
+    pub message: String,
+    pub severity: ToastSeverity,
+    pub created_at: std::time::Instant,
+    /// Consecutive duplicates collapse into one toast with a counter.
+    pub count: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChannelViewMode {
     Mixdown,
     All,
@@ -1117,6 +1525,16 @@ pub struct MiniMeterState {
     pub active: bool,           // decay animation still in motion
 }
 
+/// WORLD aperiodicity edit draft: a per-frame multiplier applied to every
+/// band of that frame at resynthesis (result clamped into 0..1). Transient
+/// like the F0 draft; reset after apply / re-analysis.
+#[derive(Clone, Debug, Default)]
+pub struct WorldApDraft {
+    pub values: Vec<f32>,
+    pub source_frames: usize,
+    pub dirty: bool,
+}
+
 /// Per-tab draft for editing the WORLD F0 trajectory before resynthesis.
 /// `values` mirrors `WorldFeatureData::f0_values` (0.0 = unvoiced).
 #[derive(Clone, Debug, Default)]
@@ -1130,6 +1548,9 @@ pub struct WorldF0Draft {
 }
 
 pub struct EditorTab {
+    /// Stable identity across index shifts (tab close/reorder); async jobs
+    /// target tabs by id so a result never lands on the wrong tab.
+    pub tab_id: u64,
     pub path: PathBuf,
     pub display_name: String,
     pub waveform_minmax: Vec<(f32, f32)>,
@@ -1138,6 +1559,15 @@ pub struct EditorTab {
     pub loop_enabled: bool,
     pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
+    // Pencil-stroke transient state: undo snapshot captured at stroke start,
+    // last drawn point for interpolation, and the stroke's target channels.
+    pub pencil_undo: Option<Box<EditorUndoState>>,
+    pub pencil_last_point: Option<(usize, f32)>,
+    pub pencil_stroke_channels: Vec<usize>,
+    // Monitoring-only channel mute/solo (indexed by source channel). Not part
+    // of the edit state: excluded from undo/dirty and never saved.
+    pub ch_muted: Vec<bool>,
+    pub ch_solo: Vec<bool>,
     pub ch_samples_arc: Arc<Vec<Vec<f32>>>, // Arc mirror of ch_samples for worker sends (updated after every write to ch_samples)
     pub buffer_sample_rate: u32,            // current sample rate of ch_samples
     pub samples_len: usize,                 // length in samples
@@ -1174,6 +1604,9 @@ pub struct EditorTab {
     // Transient drag state for spectral selection: (lane index, anchor Hz)
     pub freq_selection_drag: Option<(usize, f32)>,
     pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
+    /// Labeled [start, end) ranges (buffer sample space). Undo-snapshotted
+    /// and remapped by destructive edits alongside the markers.
+    pub regions: Vec<crate::markers::RegionEntry>,
     pub markers_saved: Vec<MarkerEntry>,   // last saved markers
     pub markers_committed: Vec<MarkerEntry>, // New field
     pub markers_applied: Vec<MarkerEntry>, // last applied markers
@@ -1234,7 +1667,9 @@ pub struct EditorTab {
     pub loop_detect_state: Option<LoopDetectState>,
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
     pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
+    pub world_ap_draft: Option<WorldApDraft>, // WORLD aperiodicity draft (transient)
     pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
+    pub world_formant_ratio: f32, // WORLD resynthesis: spectral-envelope warp (1.0 = off)
     // --- Gain automation curve (DAW-style breakpoint envelope, transient) ---
     pub gain_env_enabled: bool, // Gain tool: edit the curve on the waveform canvas
     pub gain_env_points: Vec<(usize, f32)>, // (sample, dB) breakpoints, kept sorted by sample
@@ -1246,6 +1681,69 @@ pub struct EditorTab {
     pub spectral_warp_edit: bool, // canvas warp editing enabled (owns the pointer)
     pub spectral_warp_points: Vec<SpectralWarpPoint>, // accumulated warp strokes
     pub spectral_warp_drag: Option<usize>, // index of the point being dragged
+    // --- Spectral brush (paint attenuation on Spec/Log views, transient) ---
+    pub spectral_brush_edit: bool, // canvas brush painting enabled (owns the pointer)
+    pub spectral_brush_stamps: Vec<SpectralBrushStamp>, // accumulated brush stamps
+    pub spectral_brush_last: Option<(usize, f32)>, // last stamp (sample, hz) this stroke
+    // --- De-click scan result (transient; invalidated by edits) ---
+    pub declick_scan: Option<DeclickScan>,
+    // --- De-noise learned profile (transient; SR-checked on use) ---
+    pub noise_profile: Option<NoiseProfile>,
+    // --- Plugin FX auto-preview debounce (transient) ---
+    pub plugin_fx_param_dirty_at: Option<std::time::Instant>,
+}
+
+/// Per-bin average noise magnitudes learned from a selection, used by the
+/// De-noise tool's spectral subtraction.
+#[derive(Clone, Debug)]
+pub struct NoiseProfile {
+    pub fft_size: usize,
+    pub sample_rate: u32,
+    /// One magnitude vector per channel (mono profiles apply to all).
+    pub mag_per_channel: Vec<Vec<f32>>,
+    /// Where the profile came from, for the inspector status line (ms).
+    pub learned_from_ms: (f32, f32),
+}
+
+/// Spectral-region clipboard: band-masked STFT frames of a copied
+/// time+frequency selection. Pasteable into the same buffer sample rate
+/// only (frames are hop/FFT-grid specific).
+#[derive(Clone)]
+pub struct SpectralClip {
+    pub sr: u32,
+    pub freq_range: (f32, f32),
+    pub len_samples: usize,
+    /// channel -> frame -> half-spectrum (already band-masked at copy).
+    pub frames: Vec<Vec<Vec<realfft::num_complex::Complex<f32>>>>,
+}
+
+/// Transient harmonic-action state (Ctrl+click in a spectral view): the
+/// refined fundamental plus popup parameters. Cleared on apply/cancel.
+#[derive(Clone, Copy)]
+pub struct HarmonicAction {
+    pub tab_id: u64,
+    pub f0: f32,
+    pub harmonics: u32,
+    pub atten_db: f32,
+}
+
+/// Saved transport/loop state while Alt+drag scrubbing; restored on release.
+pub struct ScrubState {
+    pub tab_id: u64,
+    pub was_playing: bool,
+    pub prev_loop_enabled: bool,
+    pub prev_loop_start: usize,
+    pub prev_loop_end: usize,
+}
+
+/// Result of a de-click Scan pass, drawn as red span markers on the
+/// waveform until the buffer or the sensitivity changes.
+#[derive(Clone, Debug)]
+pub struct DeclickScan {
+    pub sensitivity: f32,
+    pub spans: Vec<(usize, usize)>,
+    /// Range the scan covered (whole file when `None` at scan time).
+    pub range: Option<(usize, usize)>,
 }
 
 /// One spectral-warp control point: spectrogram content around
@@ -1258,7 +1756,143 @@ pub struct SpectralWarpPoint {
     pub delta_hz: f32,
 }
 
+/// One spectral-brush stamp: spectrogram content around
+/// (`sample`, `freq_hz`) is attenuated by `cut_db` with Gaussian falloff.
+/// The radii are baked in at stamp time so strokes painted with different
+/// brush sizes coexist.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralBrushStamp {
+    pub sample: usize,
+    pub freq_hz: f32,
+    pub cut_db: f32,
+    pub time_sigma_ms: f32,
+    pub freq_sigma_hz: f32,
+}
+
 impl EditorTab {
+    /// All-defaults constructor shared by every tab-creation site.
+    /// Sites override only the fields that differ (cached restore vs
+    /// fresh load) so new fields need exactly one default here.
+    pub fn new_base(path: std::path::PathBuf, display_name: String) -> Self {
+        static NEXT_TAB_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            tab_id: NEXT_TAB_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            path: path,
+            display_name: display_name,
+            waveform_minmax: Vec::new(),
+            waveform_pyramid: None,
+            loop_enabled: false,
+            loading: true,
+            ch_samples: Vec::new(),
+            pencil_undo: None,
+            pencil_last_point: None,
+            pencil_stroke_channels: Vec::new(),
+            ch_muted: Vec::new(),
+            ch_solo: Vec::new(),
+            ch_samples_arc: std::sync::Arc::new(Vec::new()),
+            buffer_sample_rate: 1,
+            samples_len: 0,
+            samples_len_visual: 0,
+            loading_waveform_minmax: Vec::new(),
+            view_offset: 0,
+            view_offset_exact: 0.0,
+            samples_per_px: 0.0,
+            vertical_zoom: 1.0,
+            vertical_view_center: 0.0,
+            last_wave_w: 0.0,
+            last_amplitude_nav_rect: None,
+            last_amplitude_viewport_rect: None,
+            last_amplitude_nav_click_at: 0.0,
+            last_amplitude_nav_click_pos: None,
+            viewport_source_generation: 1,
+            viewport_render_requested_generation: 0,
+            viewport_render_requested_key: None,
+            viewport_render_pending_fine_at: None,
+            viewport_render_inflight_coarse_generation: None,
+            viewport_render_inflight_fine_generation: None,
+            viewport_render_coarse: None,
+            viewport_render_fine: None,
+            viewport_render_last: None,
+            dirty: false,
+            ops: Vec::new(),
+            selection: None,
+            extra_selections: vec![],
+            freq_selection: None,
+            freq_selection_drag: None,
+            markers: Vec::new(),
+            regions: Vec::new(),
+            markers_committed: Vec::new(),
+            markers_saved: Vec::new(),
+            markers_applied: Vec::new(),
+            markers_dirty: false,
+            ab_loop: None,
+            loop_region: None,
+            loop_region_committed: None,
+            loop_region_applied: None,
+            loop_markers_saved: None,
+            loop_markers_dirty: false,
+            trim_range: None,
+            loop_xfade_samples: 0,
+            loop_xfade_shape: crate::app::types::LoopXfadeShape::EqualPower,
+            fade_in_range: None,
+            fade_out_range: None,
+            fade_in_shape: crate::app::types::FadeShape::SCurve,
+            fade_out_shape: crate::app::types::FadeShape::SCurve,
+            primary_view: crate::app::types::EditorPrimaryView::Wave,
+            spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
+            other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
+            show_waveform_overlay: false,
+            channel_view: ChannelView::mixdown(),
+            bpm_enabled: false,
+            bpm_value: 120.0,
+            bpm_user_set: false,
+            bpm_offset_sec: 0.0,
+            time_sig_numerator: 4,
+            time_sig_denominator: 4,
+            seek_hold: None,
+            snap_zero_cross: true,
+            selection_anchor_sample: None,
+            right_drag_mode: None,
+            active_tool: crate::app::types::ToolKind::LoopEdit,
+            tool_state: crate::app::types::ToolState::default_values(),
+            loop_mode: crate::app::types::LoopMode::Off,
+            dragging_marker: None,
+            preview_audio_tool: None,
+            active_tool_last: None,
+            preview_offset_samples: None,
+            preview_overlay: None,
+            music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
+            plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
+            pending_loop_unwrap: None,
+            undo_stack: Vec::new(),
+            undo_bytes: 0,
+            redo_stack: Vec::new(),
+            redo_bytes: 0,
+            auto_trim_config: crate::app::auto_trim::AutoTrimConfig::default(),
+            auto_trim_state: None,
+            loop_detect_state: None,
+            mini_meter: crate::app::types::MiniMeterState::default(),
+            world_f0_draft: None,
+            world_ap_draft: None,
+            world_f0_focus: false,
+            world_formant_ratio: 1.0,
+            gain_env_enabled: false,
+            gain_env_points: Vec::new(),
+            gain_env_drag: None,
+            pitch_drag_active: false,
+            stretch_drag_target: None,
+            spectral_warp_edit: false,
+            spectral_warp_points: Vec::new(),
+            spectral_warp_drag: None,
+            spectral_brush_edit: false,
+            spectral_brush_stamps: Vec::new(),
+            spectral_brush_last: None,
+            declick_scan: None,
+            noise_profile: None,
+            plugin_fx_param_dirty_at: None,
+        }
+    }
+
     pub fn leaf_view_mode(&self) -> ViewMode {
         match self.primary_view {
             EditorPrimaryView::Wave => ViewMode::Waveform,
@@ -1304,6 +1938,9 @@ pub struct FileMeta {
     /// True peak (BS.1770-4 Annex 2, oversampled), full decode only.
     pub true_peak_db: Option<f32>,
     pub bpm: Option<f32>,
+    /// Leading/trailing silence (-60 dBFS threshold) in ms, full decode only.
+    pub silence_lead_ms: Option<f32>,
+    pub silence_tail_ms: Option<f32>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
     pub cover_art: Option<Arc<egui::ColorImage>>,
@@ -1637,14 +2274,13 @@ pub struct SessionSaveState {
 pub struct EditorApplyState {
     pub msg: String,
     pub rx: std::sync::mpsc::Receiver<EditorApplyResult>,
-    #[allow(dead_code)]
-    pub tab_idx: usize,
+    /// Target tab identity; resolved back to an index on completion so a
+    /// result is discarded (not misapplied) if the tab was closed meanwhile.
+    pub tab_id: u64,
     pub undo: Option<EditorUndoState>,
 }
 
 pub struct EditorApplyResult {
-    pub tab_idx: usize,
-    pub samples: Vec<f32>,
     pub channels: Vec<Vec<f32>>,
     /// Arc mirror of `channels`, cloned on the worker so the UI thread
     /// doesn't pay a full-buffer copy on adoption.
@@ -1764,6 +2400,9 @@ pub struct EditorDecodeUiStatus {
 
 #[derive(Clone)]
 pub struct EditorUndoState {
+    /// Operation that follows this snapshot (what Undo would revert);
+    /// shown in the History panel.
+    pub label: String,
     /// Snapshot of the audio buffers. Arc-shared with the tab's worker
     /// mirror when possible so capturing an undo point is copy-free.
     pub ch_samples: Arc<Vec<Vec<f32>>>,
@@ -1797,6 +2436,7 @@ pub struct EditorUndoState {
     pub dirty: bool,
     pub approx_bytes: usize,
     pub markers: Vec<MarkerEntry>,
+    pub regions: Vec<crate::markers::RegionEntry>,
     pub markers_committed: Vec<MarkerEntry>,
     pub markers_applied: Vec<MarkerEntry>,
     pub loop_region_applied: Option<(usize, usize)>,
@@ -1817,6 +2457,7 @@ pub struct CachedEdit {
     pub loop_markers_saved: Option<(usize, usize)>,
     pub loop_markers_dirty: bool,
     pub markers: Vec<MarkerEntry>,
+    pub regions: Vec<crate::markers::RegionEntry>,
     pub markers_saved: Vec<MarkerEntry>,
     pub markers_committed: Vec<MarkerEntry>,
     pub markers_applied: Vec<MarkerEntry>,
@@ -2637,6 +3278,10 @@ pub struct EffectGraphPluginNodeRuntimeState {
     pub last_error: Option<String>,
     pub last_backend_note: Option<String>,
     pub last_backend_log: Option<String>,
+    /// A/B compare: the inactive slot's (params, state_blob_b64).
+    pub ab_alt: Option<(Vec<EffectGraphPluginParamState>, Option<String>)>,
+    /// Which slot the current config represents (false = A, true = B).
+    pub ab_active_b: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

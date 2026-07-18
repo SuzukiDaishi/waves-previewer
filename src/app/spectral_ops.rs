@@ -87,25 +87,22 @@ fn band_bin_gains(
     gains
 }
 
-/// Apply a per-bin gain mask to `signal` via STFT → mask → weighted
-/// overlap-add ISTFT. Returns a signal of the same length. Uses reflect
-/// padding of half a window on both sides so the edges reconstruct
-/// exactly like the interior.
-fn stft_apply_band_gain(
-    signal: &[f32],
-    sr: u32,
-    lo_hz: f32,
-    hi_hz: f32,
-    fade_hz: f32,
-    keep_band: bool,
-) -> Vec<f32> {
+/// Generic STFT frame engine: Hann analysis/synthesis windows, 75%
+/// overlap, weighted overlap-add, reflect padding of half a window on
+/// both sides so the edges reconstruct exactly like the interior.
+/// `process` runs once per frame with the frame's center position in
+/// signal coordinates and the mutable half-spectrum. Returns a signal of
+/// the same length (the input unchanged on FFT failure).
+fn stft_process_frames<F>(signal: &[f32], mut process: F) -> Vec<f32>
+where
+    F: FnMut(f32, &mut [realfft::num_complex::Complex<f32>]),
+{
     let n = signal.len();
     if n == 0 {
         return Vec::new();
     }
     let win = SPECTRAL_FFT_SIZE;
     let hop = SPECTRAL_HOP_SIZE;
-    let gains = band_bin_gains(win, sr, lo_hz, hi_hz, fade_hz, keep_band);
 
     // Reflect-pad by win/2 (repeat-pad when the signal is shorter than
     // the pad) so every output sample has full analysis-window coverage.
@@ -145,15 +142,16 @@ fn stft_apply_band_gain(
 
     for frame_idx in 0..frame_count {
         let start = frame_idx * hop;
+        // With pad == win/2 the center of frame k sits at k*hop in
+        // signal coordinates.
+        let t_center = (frame_idx * hop) as f32;
         for i in 0..win {
             frame[i] = padded[start + i] * window[i];
         }
         if rfft.process(&mut frame, &mut spec).is_err() {
             return signal.to_vec();
         }
-        for (bin, v) in spec.iter_mut().enumerate() {
-            *v *= gains[bin.min(gains.len() - 1)];
-        }
+        process(t_center, &mut spec);
         // Enforce a real time-domain signal.
         spec[0].im = 0.0;
         if let Some(last) = spec.last_mut() {
@@ -172,6 +170,131 @@ fn stft_apply_band_gain(
         out[i] /= norm[i].max(1e-8);
     }
     out[pad..pad + n].to_vec()
+}
+
+/// Apply a per-bin gain mask to `signal` via STFT → mask → weighted
+/// overlap-add ISTFT. Returns a signal of the same length.
+fn stft_apply_band_gain(
+    signal: &[f32],
+    sr: u32,
+    lo_hz: f32,
+    hi_hz: f32,
+    fade_hz: f32,
+    keep_band: bool,
+) -> Vec<f32> {
+    let gains = band_bin_gains(SPECTRAL_FFT_SIZE, sr, lo_hz, hi_hz, fade_hz, keep_band);
+    stft_process_frames(signal, |_t, spec| {
+        for (bin, v) in spec.iter_mut().enumerate() {
+            *v *= gains[bin.min(gains.len() - 1)];
+        }
+    })
+}
+
+/// Hard ceiling for accumulated brush attenuation, so stacked strokes
+/// converge to "silence" instead of denormal territory.
+const MAX_BRUSH_CUT_DB: f32 = 80.0;
+
+/// Paint-out attenuation for one channel: each stamp cuts spectrogram
+/// magnitude around (`sample`, `freq_hz`) by up to its `cut_db`, with
+/// Gaussian falloff in time and frequency (sigmas baked into the stamp).
+/// Overlapping stamps add in dB (clamped to [`MAX_BRUSH_CUT_DB`]). Only
+/// the influenced region (plus STFT margins) is processed; its edges are
+/// crossfaded against the original so nothing clicks, and audio outside
+/// the region is returned bit-identical.
+pub(crate) fn brush_channel_with_stamps(
+    ch: &[f32],
+    sr: u32,
+    stamps: &[crate::app::types::SpectralBrushStamp],
+) -> Vec<f32> {
+    let n = ch.len();
+    if n == 0 || stamps.is_empty() {
+        return ch.to_vec();
+    }
+    let sr_f = sr.max(1) as f32;
+    let max_sigma_samples = stamps
+        .iter()
+        .map(|s| (s.time_sigma_ms.max(1.0) / 1000.0) * sr_f)
+        .fold(1.0f32, f32::max);
+    let reach = (max_sigma_samples * 3.0).ceil() as usize + SPECTRAL_FFT_SIZE * 2;
+    let min_t = stamps.iter().map(|p| p.sample).min().unwrap_or(0);
+    let max_t = stamps.iter().map(|p| p.sample).max().unwrap_or(0);
+    let seg_s = min_t.saturating_sub(reach);
+    let seg_e = (max_t + reach).min(n);
+    if seg_e <= seg_s {
+        return ch.to_vec();
+    }
+
+    let mut sorted: Vec<crate::app::types::SpectralBrushStamp> = stamps.to_vec();
+    sorted.sort_by_key(|s| s.sample);
+    let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+    let hz_per_bin = sr_f / SPECTRAL_FFT_SIZE as f32;
+    // Sliding window into `sorted`: stamps are sample-ordered and frames
+    // advance monotonically, so each stamp is skipped past exactly once
+    // (O(frames + stamps) window management, not O(frames * stamps)).
+    let mut lo_idx = 0usize;
+    let mut cut_db = vec![0.0f32; bins];
+
+    let processed = stft_process_frames(&ch[seg_s..seg_e], |t_center, spec| {
+        let t_abs = t_center + seg_s as f32;
+        while lo_idx < sorted.len() {
+            let s = &sorted[lo_idx];
+            let sigma_t = (s.time_sigma_ms.max(1.0) / 1000.0) * sr_f;
+            if (s.sample as f32) + sigma_t * 3.0 < t_abs {
+                lo_idx += 1;
+            } else {
+                break;
+            }
+        }
+        cut_db.iter_mut().for_each(|v| *v = 0.0);
+        let mut any = false;
+        for s in &sorted[lo_idx..] {
+            let sigma_t = (s.time_sigma_ms.max(1.0) / 1000.0) * sr_f;
+            let dt = s.sample as f32 - t_abs;
+            if dt > max_sigma_samples * 3.0 {
+                // Every later stamp starts even further ahead of this
+                // frame than the widest possible reach.
+                break;
+            }
+            if dt.abs() > sigma_t * 3.0 {
+                continue;
+            }
+            let wt = (-0.5 * (dt / sigma_t) * (dt / sigma_t)).exp();
+            let sigma_f = s.freq_sigma_hz.max(hz_per_bin);
+            let b_lo = (((s.freq_hz - sigma_f * 3.0) / hz_per_bin).floor().max(0.0)) as usize;
+            let b_hi = (((s.freq_hz + sigma_f * 3.0) / hz_per_bin).ceil() as usize).min(bins - 1);
+            for bin in b_lo..=b_hi.min(bins - 1) {
+                let df = (bin as f32 * hz_per_bin - s.freq_hz) / sigma_f;
+                cut_db[bin] += s.cut_db.max(0.0) * wt * (-0.5 * df * df).exp();
+                any = true;
+            }
+        }
+        if !any {
+            return;
+        }
+        for (bin, v) in spec.iter_mut().enumerate() {
+            let db = cut_db[bin.min(bins - 1)].min(MAX_BRUSH_CUT_DB);
+            if db > 1e-3 {
+                *v *= 10f32.powf(-db / 20.0);
+            }
+        }
+    });
+
+    let mut out = ch.to_vec();
+    let seg_len = seg_e - seg_s;
+    // Edge fade only where the segment abuts untouched audio.
+    let fade_n = SPECTRAL_FFT_SIZE.min(seg_len / 4);
+    for i in 0..seg_len {
+        let mut w = 1.0f32;
+        if seg_s > 0 && i < fade_n {
+            w = w.min(raised_cosine((i as f32 + 0.5) / fade_n as f32));
+        }
+        if seg_e < n && i + fade_n >= seg_len {
+            let from_end = seg_len - 1 - i;
+            w = w.min(raised_cosine((from_end as f32 + 0.5) / fade_n as f32));
+        }
+        out[seg_s + i] = ch[seg_s + i] * (1.0 - w) + processed[i] * w;
+    }
+    out
 }
 
 /// Image-like frequency warp of the STFT (liquify-style): each warp point
@@ -388,6 +511,244 @@ pub(crate) fn warp_channel_with_points(
     out
 }
 
+/// Learn a per-bin average noise magnitude from `[s, e)` of one channel.
+/// Returns one magnitude per STFT bin (the profile for this channel).
+pub(crate) fn learn_noise_profile_channel(ch: &[f32], s: usize, e: usize) -> Vec<f32> {
+    let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+    let n = ch.len();
+    let e = e.min(n);
+    if s >= e {
+        return vec![0.0f32; bins];
+    }
+    let mut acc = vec![0.0f64; bins];
+    let mut count = 0usize;
+    let _ = stft_process_frames(&ch[s..e], |_t, spec| {
+        for (bin, a) in acc.iter_mut().enumerate() {
+            *a += spec[bin.min(spec.len() - 1)].norm() as f64;
+        }
+        count += 1;
+    });
+    if count == 0 {
+        return vec![0.0f32; bins];
+    }
+    acc.iter().map(|a| (*a / count as f64) as f32).collect()
+}
+
+/// Profile-based spectral subtraction de-noise for one channel.
+/// Per bin: `g = clamp(1 - strength * (N/|X|)^2, floor, 1)` with
+/// `floor = 10^(-reduction_db/20)` (the maximum attenuation), then an
+/// asymmetric one-pole across frames (slow release, fast attack) to tame
+/// musical noise. `range = None` processes the whole channel; `Some`
+/// processes only that region (plus STFT margins) with crossfaded edges,
+/// leaving the rest bit-identical.
+pub(crate) fn denoise_channel(
+    ch: &[f32],
+    profile: &[f32],
+    reduction_db: f32,
+    strength: f32,
+    range: Option<(usize, usize)>,
+) -> Vec<f32> {
+    let n = ch.len();
+    let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+    if n == 0 || profile.len() != bins || profile.iter().all(|&m| m <= 0.0) {
+        return ch.to_vec();
+    }
+    let floor = 10f32.powf(-reduction_db.clamp(0.0, 80.0) / 20.0);
+    let strength = strength.clamp(1.0, 4.0);
+    let (seg_s, seg_e) = match range {
+        Some((s, e)) => {
+            let e = e.min(n);
+            if s >= e {
+                return ch.to_vec();
+            }
+            (
+                s.saturating_sub(SPECTRAL_FFT_SIZE * 2),
+                (e + SPECTRAL_FFT_SIZE * 2).min(n),
+            )
+        }
+        None => (0, n),
+    };
+
+    let mut g_prev = vec![1.0f32; bins];
+    let processed = stft_process_frames(&ch[seg_s..seg_e], |_t, spec| {
+        for bin in 0..bins.min(spec.len()) {
+            let x = spec[bin].norm();
+            let ratio = if x > 1e-12 { profile[bin] / x } else { 1.0 };
+            let g_raw = (1.0 - strength * ratio * ratio).clamp(floor, 1.0);
+            // Asymmetric smoothing: gains fall (more suppression) quickly,
+            // recover slowly — flickering bins are what reads as
+            // "musical noise".
+            let a = if g_raw > g_prev[bin] { 0.6 } else { 0.25 };
+            let g = g_prev[bin] * a + g_raw * (1.0 - a);
+            g_prev[bin] = g;
+            spec[bin] *= g.clamp(floor, 1.0);
+        }
+    });
+
+    let mut out = ch.to_vec();
+    match range {
+        None => out.copy_from_slice(&processed),
+        Some((s, e)) => {
+            let e = e.min(n);
+            let sel_len = e - s;
+            // Same edge treatment as the other region-scoped spectral
+            // edits: raised-cosine into the untouched audio.
+            let fade_n = (SPECTRAL_FFT_SIZE / 2).min(sel_len / 2).max(1);
+            for i in 0..sel_len {
+                let w = selection_edge_weight(i, sel_len, fade_n);
+                out[s + i] = ch[s + i] * (1.0 - w) + processed[(s - seg_s) + i] * w;
+            }
+        }
+    }
+    out
+}
+
+/// Frames of spectral context averaged on each side of a healed region.
+const HEAL_CONTEXT_FRAMES: usize = 4;
+/// Selections longer than this are refused by the Heal button (the whole
+/// region is STFT-buffered in memory twice).
+pub(crate) const HEAL_MAX_SELECTION_SECS: f32 = 120.0;
+
+/// RX-style inpaint of `[s, e)` from its spectral context: per-bin
+/// magnitudes interpolate linearly in time between the averages of
+/// [`HEAL_CONTEXT_FRAMES`] frames on each side, and phase advances from
+/// the left context's measured per-bin phase velocity so steady tones
+/// bridge the gap coherently. With `band = Some((lo, hi))` only that band
+/// is replaced (raised-cosine edges of `freq_fade_hz`); the time edges
+/// crossfade over `time_fade_ms`. Samples outside `[s, e)` are returned
+/// bit-identical. Degenerate or context-free selections return the input.
+pub(crate) fn heal_channel_range(
+    ch: &[f32],
+    sr: u32,
+    s: usize,
+    e: usize,
+    band: Option<(f32, f32)>,
+    freq_fade_hz: f32,
+    time_fade_ms: f32,
+) -> Vec<f32> {
+    use realfft::num_complex::Complex;
+    let n = ch.len();
+    let e = e.min(n);
+    if s >= e || n == 0 {
+        return ch.to_vec();
+    }
+    let win = SPECTRAL_FFT_SIZE;
+    let hop = SPECTRAL_HOP_SIZE;
+    let bins = win / 2 + 1;
+    let ctx_span = (HEAL_CONTEXT_FRAMES + 2) * win;
+    let seg_s = s.saturating_sub(ctx_span);
+    let seg_e = (e + ctx_span).min(n);
+    let seg = &ch[seg_s..seg_e];
+
+    // Pass 1: collect every analysis frame's spectrum.
+    let mut frames: Vec<Vec<Complex<f32>>> = Vec::new();
+    let _ = stft_process_frames(seg, |_t, spec| frames.push(spec.to_vec()));
+    if frames.is_empty() {
+        return ch.to_vec();
+    }
+
+    // Frame k's center sits at k*hop in segment coordinates. Interior
+    // frames are the ones whose centers fall inside the selection.
+    let sel_s = (s - seg_s) as f32;
+    let sel_e = (e - seg_s) as f32;
+    let first_in = ((sel_s / hop as f32).ceil() as usize).min(frames.len());
+    let last_ex = ((sel_e / hop as f32).ceil() as usize).min(frames.len());
+    if first_in >= last_ex {
+        return ch.to_vec();
+    }
+    let left_s = first_in.saturating_sub(HEAL_CONTEXT_FRAMES);
+    let right_e = (last_ex + HEAL_CONTEXT_FRAMES).min(frames.len());
+    let has_left = left_s < first_in;
+    let has_right = last_ex < right_e;
+    if !has_left && !has_right {
+        return ch.to_vec();
+    }
+
+    let avg_mag = |range: core::ops::Range<usize>| -> Vec<f32> {
+        let count = range.len().max(1) as f32;
+        let mut mag = vec![0.0f32; bins];
+        for k in range {
+            for (bin, m) in mag.iter_mut().enumerate() {
+                *m += frames[k][bin].norm();
+            }
+        }
+        mag.iter_mut().for_each(|m| *m /= count);
+        mag
+    };
+    let left_mag = if has_left {
+        avg_mag(left_s..first_in)
+    } else {
+        avg_mag(last_ex..right_e)
+    };
+    let right_mag = if has_right {
+        avg_mag(last_ex..right_e)
+    } else {
+        left_mag.clone()
+    };
+
+    // Phase seed and per-frame advance from the last two left-context
+    // frames (falling back to each bin's natural advance of
+    // 2*pi*bin*hop/win when there is no usable left context).
+    let phase_ref = if has_left { first_in - 1 } else { last_ex };
+    let mut phase0 = vec![0.0f32; bins];
+    let mut dphi = vec![0.0f32; bins];
+    for bin in 0..bins {
+        phase0[bin] = frames[phase_ref][bin].arg();
+        let natural = 2.0 * core::f32::consts::PI * bin as f32 * hop as f32 / win as f32;
+        dphi[bin] = if has_left && phase_ref > 0 {
+            let prev = frames[phase_ref - 1][bin];
+            let cur = frames[phase_ref][bin];
+            if prev.norm() > 1e-9 && cur.norm() > 1e-9 {
+                (cur * prev.conj()).arg()
+            } else {
+                natural
+            }
+        } else {
+            natural
+        };
+    }
+
+    let wband: Vec<f32> = match band {
+        Some((lo, hi)) => band_bin_gains(win, sr, lo, hi, freq_fade_hz.max(1.0), true),
+        None => vec![1.0f32; bins],
+    };
+
+    // Pass 2: resynthesize with the interior frames rebuilt.
+    let denom = (last_ex - first_in).max(1) as f32;
+    let mut k = 0usize;
+    let healed = stft_process_frames(seg, |_t, spec| {
+        let idx = k;
+        k += 1;
+        if idx < first_in || idx >= last_ex {
+            return;
+        }
+        let u = (idx - first_in) as f32 / denom;
+        let steps = (idx - phase_ref) as f32;
+        for bin in 0..bins.min(spec.len()) {
+            let w = wband[bin];
+            if w <= 0.0 {
+                continue;
+            }
+            let mag = left_mag[bin] * (1.0 - u) + right_mag[bin] * u;
+            let ph = phase0[bin] + dphi[bin] * steps;
+            let (sin, cos) = ph.sin_cos();
+            let repaired = Complex::new(mag * cos, mag * sin);
+            spec[bin] = spec[bin] * (1.0 - w) + repaired * w;
+        }
+    });
+
+    // Write back only inside the selection, with click-free time edges.
+    let mut out = ch.to_vec();
+    let sel_len = e - s;
+    let fade_n = ((time_fade_ms.max(3.0) / 1000.0) * sr.max(1) as f32).round() as usize;
+    let fade_n = fade_n.min(sel_len / 2);
+    for i in 0..sel_len {
+        let w = selection_edge_weight(i, sel_len, fade_n);
+        out[s + i] = ch[s + i] * (1.0 - w) + healed[(s - seg_s) + i] * w;
+    }
+    out
+}
+
 impl crate::app::WavesPreviewer {
     /// Ordered primary selection `[start, end)` in display samples, only
     /// when it is valid against the current buffer.
@@ -485,6 +846,9 @@ impl crate::app::WavesPreviewer {
     /// pre-warp audio, so they are cleared once the job is queued.
     pub(super) fn spawn_spectral_warp_apply_for_tab(&mut self, tab_idx: usize) {
         use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -497,8 +861,12 @@ impl crate::app::WavesPreviewer {
         let points = tab.spectral_warp_points.clone();
         let time_radius_ms = tab.tool_state.warp_time_radius_ms.max(1.0);
         let freq_radius_hz = tab.tool_state.warp_freq_radius_hz.max(1.0);
-        self.editor_apply_state = None;
-        self.audio.stop();
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.spectral_warp_points.clear();
             tab.spectral_warp_drag = None;
@@ -512,13 +880,10 @@ impl crate::app::WavesPreviewer {
                 .map(|ch| warp_channel_with_points(ch, sr, &points, time_radius_ms, freq_radius_hz))
                 .collect();
             let len = out.get(0).map(Vec::len).unwrap_or(0);
-            let mono = crate::app::WavesPreviewer::mixdown_channels(&out, len);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(crate::app::types::EditorApplyResult {
-                tab_idx,
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -530,9 +895,474 @@ impl crate::app::WavesPreviewer {
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg: "Applying Spectral Warp...".to_string(),
             rx,
-            tab_idx,
+            tab_id: apply_tab_id,
             undo,
         });
+    }
+
+    /// True when the tab has at least one spectral-brush stamp that would
+    /// actually attenuate content.
+    pub(super) fn editor_spectral_brush_ready(tab: &crate::app::types::EditorTab) -> bool {
+        tab.spectral_brush_stamps.iter().any(|s| s.cut_db > 0.1)
+    }
+
+    /// Render the current spectral-brush stamps into a non-destructive
+    /// preview on a worker thread (same channels as the warp preview).
+    pub(super) fn spawn_spectral_brush_preview_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || !Self::editor_spectral_brush_ready(tab) {
+            return;
+        }
+        let path = tab.path.clone();
+        let channels = tab.ch_samples.clone();
+        let samples_len = tab.samples_len;
+        let sr = tab.buffer_sample_rate.max(1);
+        let stamps = tab.spectral_brush_stamps.clone();
+
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = Some(crate::app::types::ToolKind::SpectralBrush);
+        }
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
+        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
+        let preview_gen = self.heavy_preview_gen_counter;
+        self.heavy_preview_expected_gen = preview_gen;
+        self.heavy_preview_expected_path = Some(path.clone());
+        self.heavy_preview_expected_tool = Some(crate::app::types::ToolKind::SpectralBrush);
+        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
+        let overlay_gen = self.overlay_gen_counter;
+        self.overlay_expected_gen = overlay_gen;
+        self.overlay_expected_path = Some(path.clone());
+        self.overlay_expected_tool = Some(crate::app::types::ToolKind::SpectralBrush);
+
+        let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
+        let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
+        std::thread::spawn(move || {
+            let processed: Vec<Vec<f32>> = channels
+                .iter()
+                .map(|ch| brush_channel_with_stamps(ch, sr, &stamps))
+                .collect();
+            let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
+            let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
+            let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
+                processed,
+                crate::app::types::ToolKind::SpectralBrush,
+                timeline_len,
+            );
+            let _ = overlay_tx.send((
+                path.clone(),
+                crate::app::types::ToolKind::SpectralBrush,
+                overlay,
+                overlay_gen,
+                true,
+            ));
+            if !mono.is_empty() {
+                let _ = preview_tx.send((
+                    path,
+                    crate::app::types::ToolKind::SpectralBrush,
+                    mono,
+                    preview_gen,
+                ));
+            }
+        });
+        self.heavy_preview_rx = Some(preview_rx);
+        self.heavy_overlay_rx = Some(overlay_rx);
+    }
+
+    /// Destructively apply the current spectral-brush stamps on a worker
+    /// thread through the shared apply pipeline (busy overlay + undo).
+    /// The stamps are consumed once the job is queued.
+    pub(super) fn spawn_spectral_brush_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || !Self::editor_spectral_brush_ready(tab) {
+            return;
+        }
+        let undo = Some(Self::capture_undo_state(tab));
+        let channels = tab.ch_samples.clone();
+        let sr = tab.buffer_sample_rate.max(1);
+        let stamps = tab.spectral_brush_stamps.clone();
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.spectral_brush_stamps.clear();
+            tab.spectral_brush_last = None;
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
+        std::thread::spawn(move || {
+            let out: Vec<Vec<f32>> = channels
+                .iter()
+                .map(|ch| brush_channel_with_stamps(ch, sr, &stamps))
+                .collect();
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(crate::app::types::EditorApplyResult {
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Applying Spectral Brush...".to_string(),
+            rx,
+            tab_id: apply_tab_id,
+            undo,
+        });
+    }
+
+    /// Learn a noise profile from the current selection (synchronous; the
+    /// selection is capped at 60 s which the STFT sweeps in well under a
+    /// frame's budget for typical files).
+    pub(super) fn editor_denoise_learn_profile(&mut self, tab_idx: usize) {
+        const LEARN_MAX_SECS: f32 = 60.0;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading {
+            return;
+        }
+        let Some((s, mut e)) = Self::editor_valid_selection(tab) else {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                "De-noise: select a noise-only region first, then Learn",
+            );
+            return;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let max_len = (LEARN_MAX_SECS * sr as f32) as usize;
+        if e - s > max_len {
+            e = s + max_len;
+        }
+        let mag_per_channel: Vec<Vec<f32>> = tab
+            .ch_samples
+            .iter()
+            .map(|ch| learn_noise_profile_channel(ch, s, e))
+            .collect();
+        let profile = crate::app::types::NoiseProfile {
+            fft_size: SPECTRAL_FFT_SIZE,
+            sample_rate: sr,
+            mag_per_channel,
+            learned_from_ms: (
+                s as f32 * 1000.0 / sr as f32,
+                e as f32 * 1000.0 / sr as f32,
+            ),
+        };
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.noise_profile = Some(profile);
+        }
+        self.push_toast(
+            crate::app::types::ToastSeverity::Info,
+            "De-noise: profile learned from selection",
+        );
+    }
+
+    /// True when the tab has a noise profile usable against its current
+    /// buffer (same FFT layout and sample rate).
+    pub(super) fn editor_denoise_ready(tab: &crate::app::types::EditorTab) -> bool {
+        tab.noise_profile
+            .as_ref()
+            .map(|p| {
+                p.fft_size == SPECTRAL_FFT_SIZE
+                    && p.sample_rate == tab.buffer_sample_rate.max(1)
+                    && !p.mag_per_channel.is_empty()
+            })
+            .unwrap_or(false)
+    }
+
+    fn denoise_processed_channels(
+        channels: &[Vec<f32>],
+        profile: &crate::app::types::NoiseProfile,
+        reduction_db: f32,
+        strength: f32,
+        range: Option<(usize, usize)>,
+    ) -> Vec<Vec<f32>> {
+        channels
+            .iter()
+            .enumerate()
+            .map(|(ci, ch)| {
+                let mags = profile
+                    .mag_per_channel
+                    .get(ci)
+                    .or_else(|| profile.mag_per_channel.first());
+                match mags {
+                    Some(mags) => denoise_channel(ch, mags, reduction_db, strength, range),
+                    None => ch.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Render the de-noise into a non-destructive preview on a worker
+    /// thread (same channels as the warp/brush previews).
+    pub(super) fn spawn_denoise_preview_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || !Self::editor_denoise_ready(tab) {
+            return;
+        }
+        let path = tab.path.clone();
+        let channels = tab.ch_samples.clone();
+        let samples_len = tab.samples_len;
+        let profile = tab.noise_profile.clone().unwrap();
+        let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
+        let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
+        let range = Self::editor_valid_selection(tab);
+
+        self.audio.stop();
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = Some(crate::app::types::ToolKind::DeNoise);
+        }
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
+        self.heavy_preview_gen_counter = self.heavy_preview_gen_counter.wrapping_add(1);
+        let preview_gen = self.heavy_preview_gen_counter;
+        self.heavy_preview_expected_gen = preview_gen;
+        self.heavy_preview_expected_path = Some(path.clone());
+        self.heavy_preview_expected_tool = Some(crate::app::types::ToolKind::DeNoise);
+        self.overlay_gen_counter = self.overlay_gen_counter.wrapping_add(1);
+        let overlay_gen = self.overlay_gen_counter;
+        self.overlay_expected_gen = overlay_gen;
+        self.overlay_expected_path = Some(path.clone());
+        self.overlay_expected_tool = Some(crate::app::types::ToolKind::DeNoise);
+
+        let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
+        let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
+        std::thread::spawn(move || {
+            let processed =
+                Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
+            let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
+            let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
+            let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
+                processed,
+                crate::app::types::ToolKind::DeNoise,
+                timeline_len,
+            );
+            let _ = overlay_tx.send((
+                path.clone(),
+                crate::app::types::ToolKind::DeNoise,
+                overlay,
+                overlay_gen,
+                true,
+            ));
+            if !mono.is_empty() {
+                let _ = preview_tx.send((
+                    path,
+                    crate::app::types::ToolKind::DeNoise,
+                    mono,
+                    preview_gen,
+                ));
+            }
+        });
+        self.heavy_preview_rx = Some(preview_rx);
+        self.heavy_overlay_rx = Some(overlay_rx);
+    }
+
+    /// Destructively apply the de-noise on a worker thread through the
+    /// shared apply pipeline (busy overlay + undo). The learned profile is
+    /// kept so the user can iterate.
+    pub(super) fn spawn_denoise_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || !Self::editor_denoise_ready(tab) {
+            return;
+        }
+        let undo = Some(Self::capture_undo_state(tab));
+        let channels = tab.ch_samples.clone();
+        let profile = tab.noise_profile.clone().unwrap();
+        let reduction_db = tab.tool_state.denoise_reduction_db.max(0.0);
+        let strength = tab.tool_state.denoise_strength.clamp(1.0, 4.0);
+        let range = Self::editor_valid_selection(tab);
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
+        std::thread::spawn(move || {
+            let out =
+                Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(crate::app::types::EditorApplyResult {
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Applying De-noise...".to_string(),
+            rx,
+            tab_id: apply_tab_id,
+            undo,
+        });
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_denoise_learn(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_denoise_learn_profile(tab_idx);
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.noise_profile.is_some())
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_denoise_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_denoise_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
+    }
+
+    /// Heal (inpaint) the current selection from its spectral context on a
+    /// worker thread through the shared apply pipeline (busy overlay +
+    /// undo). With a frequency band selected only that band is rebuilt.
+    pub(super) fn spawn_spectral_heal_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
+        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let freq_fade_hz = self.spectral_edit_freq_fade_hz.max(0.0);
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading {
+            return;
+        }
+        let Some((s, e)) = Self::editor_valid_selection(tab) else {
+            return;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        if (e - s) as f32 / sr as f32 > HEAL_MAX_SELECTION_SECS {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Warning,
+                format!(
+                    "Heal: selection is longer than {HEAL_MAX_SELECTION_SECS:.0} s — select a shorter range"
+                ),
+            );
+            return;
+        }
+        let band = tab.freq_selection;
+        let undo = Some(Self::capture_undo_state_labeled(tab, "Heal Selection"));
+        let channels = tab.ch_samples.clone();
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
+        std::thread::spawn(move || {
+            let out: Vec<Vec<f32>> = channels
+                .iter()
+                .map(|ch| heal_channel_range(ch, sr, s, e, band, freq_fade_hz, time_fade_ms))
+                .collect();
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(crate::app::types::EditorApplyResult {
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Healing selection...".to_string(),
+            rx,
+            tab_id: apply_tab_id,
+            undo,
+        });
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_heal_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_spectral_heal_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_brush_stamp(&mut self, frac: f32, freq_hz: f32, cut_db: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        if tab.samples_len == 0 {
+            return false;
+        }
+        let sample = ((tab.samples_len as f32) * frac.clamp(0.0, 1.0)) as usize;
+        tab.spectral_brush_stamps
+            .push(crate::app::types::SpectralBrushStamp {
+                sample,
+                freq_hz,
+                cut_db,
+                time_sigma_ms: tab.tool_state.brush_time_radius_ms.max(1.0),
+                freq_sigma_hz: tab.tool_state.brush_freq_radius_hz.max(1.0),
+            });
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_brush_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_spectral_brush_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
     }
 
     /// Destructively mute the current selection. With a frequency band
@@ -556,7 +1386,7 @@ impl crate::app::WavesPreviewer {
             };
             let band = tab.freq_selection;
             let sr = tab.buffer_sample_rate.max(1);
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Spectral Mute");
             let sel_len = e - s;
             let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
             let fade_n = fade_n.min(sel_len / 2);
@@ -894,6 +1724,289 @@ mod tests {
         assert_eq!(&out[seg_e..], &sig[seg_e..]);
     }
 
+    fn brush_stamp(
+        sample: usize,
+        freq_hz: f32,
+        cut_db: f32,
+    ) -> crate::app::types::SpectralBrushStamp {
+        crate::app::types::SpectralBrushStamp {
+            sample,
+            freq_hz,
+            cut_db,
+            time_sigma_ms: 80.0,
+            freq_sigma_hz: 200.0,
+        }
+    }
+
+    #[test]
+    fn brush_no_stamps_is_identity() {
+        let sr = 48_000u32;
+        let sig = sine(1_000.0, sr, 24_000);
+        let out = brush_channel_with_stamps(&sig, sr, &[]);
+        assert_eq!(out, sig);
+    }
+
+    #[test]
+    fn brush_attenuates_target_keeps_far_frequency() {
+        let sr = 48_000u32;
+        let len = 96_000usize; // 2 s
+        let low = sine(1_000.0, sr, len);
+        let high = sine(5_000.0, sr, len);
+        let mixed: Vec<f32> = low.iter().zip(&high).map(|(a, b)| a + b).collect();
+        let stamps = [brush_stamp(len / 2, 1_000.0, 30.0)];
+        let out = brush_channel_with_stamps(&mixed, sr, &stamps);
+        assert_eq!(out.len(), mixed.len());
+        // Around the stamp (within ~1 sigma) the 1 kHz partial drops hard.
+        let probe = &out[len / 2 - 2_000..len / 2 + 2_000];
+        let src = &mixed[len / 2 - 2_000..len / 2 + 2_000];
+        let cut = goertzel(probe, sr, 1_000.0);
+        let cut_src = goertzel(src, sr, 1_000.0);
+        let drop_db = 20.0 * (cut / cut_src.max(1e-12)).log10();
+        assert!(drop_db < -15.0, "1 kHz not attenuated enough: {drop_db} dB");
+        // 5 kHz (far outside the 200 Hz sigma) survives within 0.5 dB.
+        let keep = goertzel(probe, sr, 5_000.0);
+        let keep_src = goertzel(src, sr, 5_000.0);
+        let keep_db = 20.0 * (keep / keep_src.max(1e-12)).log10();
+        assert!(keep_db.abs() < 0.5, "5 kHz changed by {keep_db} dB");
+    }
+
+    #[test]
+    fn brush_region_is_bounded() {
+        let sr = 48_000u32;
+        let len = 192_000usize; // 4 s
+        let sig = sine(1_000.0, sr, len);
+        let stamps = [brush_stamp(len / 2, 1_000.0, 24.0)];
+        let out = brush_channel_with_stamps(&sig, sr, &stamps);
+        let sigma = (80.0 / 1000.0) * sr as f32;
+        let reach = (sigma * 3.0).ceil() as usize + SPECTRAL_FFT_SIZE * 2;
+        let seg_s = len / 2 - reach;
+        let seg_e = len / 2 + reach;
+        assert_eq!(&out[..seg_s], &sig[..seg_s], "audio before the stamp changed");
+        assert_eq!(&out[seg_e..], &sig[seg_e..], "audio after the stamp changed");
+    }
+
+    #[test]
+    fn brush_stacking_deepens_cut_and_clamps() {
+        let sr = 48_000u32;
+        let len = 96_000usize;
+        let sig = sine(1_000.0, sr, len);
+        let one = [brush_stamp(len / 2, 1_000.0, 12.0)];
+        let two = [
+            brush_stamp(len / 2, 1_000.0, 12.0),
+            brush_stamp(len / 2, 1_000.0, 12.0),
+        ];
+        let out1 = brush_channel_with_stamps(&sig, sr, &one);
+        let out2 = brush_channel_with_stamps(&sig, sr, &two);
+        let probe = len / 2 - 1_000..len / 2 + 1_000;
+        let m1 = goertzel(&out1[probe.clone()], sr, 1_000.0);
+        let m2 = goertzel(&out2[probe.clone()], sr, 1_000.0);
+        assert!(m2 < m1 * 0.7, "stacked stamps did not deepen the cut: {m2} vs {m1}");
+        // A huge stack clamps at MAX_BRUSH_CUT_DB instead of denormals.
+        let many: Vec<_> = (0..20).map(|_| brush_stamp(len / 2, 1_000.0, 40.0)).collect();
+        let out_many = brush_channel_with_stamps(&sig, sr, &many);
+        assert!(out_many.iter().all(|v| v.is_finite()));
+    }
+
+    /// Deterministic LCG noise in [-1, 1].
+    fn lcg_noise(len: usize, seed: u64) -> Vec<f32> {
+        let mut state = seed.max(1);
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn denoise_reduces_noise_keeps_tone() {
+        let sr = 48_000u32;
+        let len = 96_000usize; // 2 s
+        let noise_amp = 10f32.powf(-30.0 / 20.0);
+        let tone_amp = 10f32.powf(-12.0 / 20.0);
+        let noise: Vec<f32> = lcg_noise(len, 7).iter().map(|v| v * noise_amp).collect();
+        // First half: noise only. Second half: noise + tone.
+        let mut sig = noise.clone();
+        for i in len / 2..len {
+            sig[i] += (2.0 * core::f32::consts::PI * 1_000.0 * i as f32 / sr as f32).sin()
+                * tone_amp;
+        }
+        // Learn on the noise-only first half.
+        let profile = learn_noise_profile_channel(&sig, 4_800, len / 2 - 4_800);
+        let out = denoise_channel(&sig, &profile, 20.0, 2.0, None);
+        assert_eq!(out.len(), sig.len());
+        // Noise-only region drops by at least 12 dB.
+        let probe_noise = 10_000..len / 2 - 10_000;
+        let before_rms = rms(&sig[probe_noise.clone()]);
+        let after_rms = rms(&out[probe_noise.clone()]);
+        let drop_db = 20.0 * (after_rms / before_rms.max(1e-12)).log10();
+        assert!(drop_db < -12.0, "noise only dropped {drop_db} dB");
+        // The tone survives within ~1 dB.
+        let probe_tone = len / 2 + 10_000..len - 10_000;
+        let tone_before = goertzel(&sig[probe_tone.clone()], sr, 1_000.0);
+        let tone_after = goertzel(&out[probe_tone.clone()], sr, 1_000.0);
+        let tone_db = 20.0 * (tone_after / tone_before.max(1e-12)).log10();
+        assert!(tone_db.abs() < 1.0, "tone changed by {tone_db} dB");
+    }
+
+    #[test]
+    fn denoise_reduction_floor_is_respected() {
+        let sr = 48_000u32;
+        let _ = sr;
+        let len = 96_000usize;
+        let noise: Vec<f32> = lcg_noise(len, 11)
+            .iter()
+            .map(|v| v * 10f32.powf(-30.0 / 20.0))
+            .collect();
+        let profile = learn_noise_profile_channel(&noise, 4_800, len - 4_800);
+        // A 12 dB floor caps the attenuation: expect roughly 8..14 dB.
+        let out = denoise_channel(&noise, &profile, 12.0, 2.0, None);
+        let probe = 10_000..len - 10_000;
+        let drop_db =
+            20.0 * (rms(&out[probe.clone()]) / rms(&noise[probe.clone()]).max(1e-12)).log10();
+        assert!(
+            drop_db < -8.0 && drop_db > -14.0,
+            "12 dB floor not respected: dropped {drop_db} dB"
+        );
+    }
+
+    #[test]
+    fn denoise_bad_profile_is_identity() {
+        let sig = sine(1_000.0, 48_000, 24_000);
+        // Wrong bin count -> untouched.
+        let out = denoise_channel(&sig, &[0.1f32; 64], 20.0, 2.0, None);
+        assert_eq!(out, sig);
+        // Empty (all-zero) profile -> untouched.
+        let bins = SPECTRAL_FFT_SIZE / 2 + 1;
+        let out = denoise_channel(&sig, &vec![0.0f32; bins], 20.0, 2.0, None);
+        assert_eq!(out, sig);
+    }
+
+    #[test]
+    fn denoise_range_leaves_outside_bit_identical() {
+        let len = 96_000usize;
+        let noise: Vec<f32> = lcg_noise(len, 23)
+            .iter()
+            .map(|v| v * 10f32.powf(-30.0 / 20.0))
+            .collect();
+        let profile = learn_noise_profile_channel(&noise, 4_800, len / 2);
+        let (s, e) = (len / 2, len / 2 + 19_200);
+        let out = denoise_channel(&noise, &profile, 20.0, 2.0, Some((s, e)));
+        let seg_s = s - SPECTRAL_FFT_SIZE * 2;
+        let seg_e = e + SPECTRAL_FFT_SIZE * 2;
+        assert_eq!(&out[..s], &noise[..s], "audio before the range changed");
+        assert_eq!(&out[e..], &noise[e..], "audio after the range changed");
+        let _ = (seg_s, seg_e);
+        // Inside the range the noise actually drops.
+        let probe = s + 4_800..e - 4_800;
+        let drop_db =
+            20.0 * (rms(&out[probe.clone()]) / rms(&noise[probe.clone()]).max(1e-12)).log10();
+        assert!(drop_db < -8.0, "in-range noise only dropped {drop_db} dB");
+    }
+
+    #[test]
+    fn heal_degenerate_selection_is_identity() {
+        let sr = 48_000u32;
+        let sig = sine(1_000.0, sr, 24_000);
+        let out = heal_channel_range(&sig, sr, 12_000, 12_000, None, 100.0, 5.0);
+        assert_eq!(out, sig);
+        // Selection shorter than one hop: no interior frame, identity.
+        let out = heal_channel_range(&sig, sr, 12_000, 12_100, None, 100.0, 5.0);
+        assert_eq!(out, sig);
+    }
+
+    #[test]
+    fn heal_bridges_zeroed_dropout_with_the_tone() {
+        let sr = 48_000u32;
+        let len = 96_000usize; // 2 s
+        let clean = sine(1_000.0, sr, len);
+        let mut damaged = clean.clone();
+        // 50 ms dropout in the middle.
+        let s = len / 2;
+        let e = s + (sr as f32 * 0.05) as usize;
+        for v in &mut damaged[s..e] {
+            *v = 0.0;
+        }
+        // Heal a selection just around the dropout.
+        let sel_s = s.saturating_sub(256);
+        let sel_e = e + 256;
+        let out = heal_channel_range(&damaged, sr, sel_s, sel_e, None, 100.0, 5.0);
+        assert_eq!(out.len(), damaged.len());
+        // Outside the selection: bit-identical.
+        assert_eq!(&out[..sel_s], &damaged[..sel_s]);
+        assert_eq!(&out[sel_e..], &damaged[sel_e..]);
+        // Inside the dropout the 1 kHz tone is rebuilt to a solid fraction
+        // of the clean amplitude.
+        let healed_mag = goertzel(&out[s..e], sr, 1_000.0);
+        let clean_mag = goertzel(&clean[s..e], sr, 1_000.0);
+        assert!(
+            (healed_mag - clean_mag).abs() < clean_mag * 0.25,
+            "tone not rebuilt: healed {healed_mag} vs clean {clean_mag}"
+        );
+        let damaged_mag = goertzel(&damaged[s..e], sr, 1_000.0);
+        assert!(healed_mag > damaged_mag * 2.0, "heal changed nothing");
+    }
+
+    #[test]
+    fn heal_removes_impulses_toward_the_tone() {
+        let sr = 48_000u32;
+        let len = 96_000usize;
+        let clean = sine(500.0, sr, len);
+        let mut damaged = clean.clone();
+        let s = len / 2;
+        let e = s + 4_800; // 100 ms
+        // Scatter hard clicks through the region.
+        let mut i = s + 37;
+        while i < e {
+            damaged[i] = 1.0;
+            i += 331;
+        }
+        let out = heal_channel_range(&damaged, sr, s, e, None, 100.0, 5.0);
+        // Interior (away from the edge fades) is close to the clean sine.
+        let interior = s + 480..e - 480;
+        let err: Vec<f32> = out[interior.clone()]
+            .iter()
+            .zip(&clean[interior])
+            .map(|(o, c)| o - c)
+            .collect();
+        assert!(
+            rms(&err) < 0.05,
+            "healed interior deviates from clean tone: rms {}",
+            rms(&err)
+        );
+    }
+
+    #[test]
+    fn heal_band_limited_keeps_out_of_band_content() {
+        let sr = 48_000u32;
+        let len = 96_000usize;
+        let low = sine(440.0, sr, len);
+        let high = sine(2_000.0, sr, len);
+        let mixed: Vec<f32> = low.iter().zip(&high).map(|(a, b)| a + b).collect();
+        let s = len / 2;
+        let e = s + 4_800;
+        // Heal only 1.5-2.5 kHz over a clean signal: 440 Hz must ride
+        // through untouched, 2 kHz is rebuilt from context (~same tone).
+        let out = heal_channel_range(&mixed, sr, s, e, Some((1_500.0, 2_500.0)), 100.0, 5.0);
+        let probe = s + 480..e - 480;
+        let low_out = goertzel(&out[probe.clone()], sr, 440.0);
+        let low_src = goertzel(&mixed[probe.clone()], sr, 440.0);
+        assert!(
+            (low_out - low_src).abs() < low_src * 0.05,
+            "440 Hz changed by band-limited heal: {low_out} vs {low_src}"
+        );
+        let high_out = goertzel(&out[probe.clone()], sr, 2_000.0);
+        let high_src = goertzel(&mixed[probe.clone()], sr, 2_000.0);
+        assert!(
+            (high_out - high_src).abs() < high_src * 0.3,
+            "2 kHz not rebuilt to context level: {high_out} vs {high_src}"
+        );
+        assert_eq!(&out[..s], &mixed[..s]);
+        assert_eq!(&out[e..], &mixed[e..]);
+    }
+
     #[test]
     fn edge_weight_is_symmetric_and_click_free() {
         let len = 1000;
@@ -908,5 +2021,381 @@ mod tests {
             assert!(w >= prev);
             prev = w;
         }
+    }
+}
+
+// ---- Spectral region copy/paste (P5-12) ----------------------------------
+
+impl crate::app::WavesPreviewer {
+    /// Copy the current time+frequency selection as band-masked STFT frames
+    /// into the spectral clipboard. Returns false when there is nothing to
+    /// copy (no time or frequency selection).
+    pub(super) fn editor_spectral_copy(&mut self, tab_idx: usize) -> bool {
+        let freq_fade = self.spectral_edit_freq_fade_hz.max(0.0);
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some((s, e)) = Self::editor_valid_selection(tab) else {
+            return false;
+        };
+        let Some((lo, hi)) = tab.freq_selection else {
+            return false;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let gains = band_bin_gains(SPECTRAL_FFT_SIZE, sr, lo, hi, freq_fade, true);
+        let mut frames_per_ch = Vec::with_capacity(tab.ch_samples.len());
+        for ch in &tab.ch_samples {
+            let end = e.min(ch.len());
+            if end <= s {
+                frames_per_ch.push(Vec::new());
+                continue;
+            }
+            let mut frames: Vec<Vec<realfft::num_complex::Complex<f32>>> = Vec::new();
+            let _ = stft_process_frames(&ch[s..end], |_t, spec| {
+                frames.push(
+                    spec.iter()
+                        .zip(gains.iter())
+                        .map(|(c, g)| c * *g)
+                        .collect(),
+                );
+            });
+            frames_per_ch.push(frames);
+        }
+        self.spectral_clipboard = Some(crate::app::types::SpectralClip {
+            sr,
+            freq_range: (lo, hi),
+            len_samples: e - s,
+            frames: frames_per_ch,
+        });
+        self.push_toast(
+            crate::app::types::ToastSeverity::Info,
+            format!(
+                "Copied spectral region ({:.0}-{:.0} Hz, {:.2}s)",
+                lo,
+                hi,
+                (e - s) as f32 / sr as f32
+            ),
+        );
+        true
+    }
+
+    /// Paste the spectral clipboard at the selection start / playhead
+    /// (snapped to the STFT hop grid). `add` sums the content in; otherwise
+    /// the band content is replaced. Time edges use the spectral-mute time
+    /// fade, frequency edges keep the raised-cosine mask baked at copy.
+    pub(super) fn editor_spectral_paste(&mut self, tab_idx: usize, add: bool) -> bool {
+        let Some(clip) = self.spectral_clipboard.clone() else {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "Spectral clipboard is empty",
+            );
+            return false;
+        };
+        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let freq_fade = self.spectral_edit_freq_fade_hz.max(0.0);
+        let pos = self.editor_insert_position(tab_idx);
+        {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            if tab.loading || tab.samples_len == 0 {
+                return false;
+            }
+            if clip.sr != tab.buffer_sample_rate.max(1) {
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Warning,
+                    format!(
+                        "Spectral paste needs the same sample rate (clip {} Hz, tab {} Hz)",
+                        clip.sr,
+                        tab.buffer_sample_rate.max(1)
+                    ),
+                );
+                return false;
+            }
+        }
+        // Snap to the hop grid so clip frames line up with analysis frames.
+        let p = (pos / SPECTRAL_HOP_SIZE) * SPECTRAL_HOP_SIZE;
+        let (undo_state, changed) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let len = clip.len_samples.min(tab.samples_len.saturating_sub(p));
+            if len == 0 {
+                return false;
+            }
+            let undo_state = Self::capture_undo_state_labeled(
+                tab,
+                if add { "Spectral Paste (Add)" } else { "Spectral Paste" },
+            );
+            let sr = tab.buffer_sample_rate.max(1);
+            let (lo, hi) = clip.freq_range;
+            let gains = band_bin_gains(SPECTRAL_FFT_SIZE, sr, lo, hi, freq_fade, true);
+            let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                let src_frames = match clip.frames.get(ci.min(clip.frames.len().saturating_sub(1)))
+                {
+                    Some(f) if !f.is_empty() => f,
+                    _ => continue,
+                };
+                let end = (p + len).min(ch.len());
+                if end <= p {
+                    continue;
+                }
+                let region_len = end - p;
+                let region: Vec<f32> = ch[p..end].to_vec();
+                let out = stft_process_frames(&region, |t_center, spec| {
+                    let fi = ((t_center.max(0.0) as usize) / SPECTRAL_HOP_SIZE)
+                        .min(src_frames.len() - 1);
+                    let src = &src_frames[fi];
+                    let t_idx = (t_center.max(0.0) as usize).min(region_len - 1);
+                    let w = selection_edge_weight(t_idx, region_len, fade_n);
+                    for (b, c) in spec.iter_mut().enumerate() {
+                        let g = gains.get(b).copied().unwrap_or(0.0) * w;
+                        if g <= 0.0 {
+                            continue;
+                        }
+                        let s = src
+                            .get(b)
+                            .copied()
+                            .unwrap_or(realfft::num_complex::Complex::new(0.0, 0.0));
+                        if add {
+                            *c += s * g;
+                        } else {
+                            *c = *c * (1.0 - g) + s * g;
+                        }
+                    }
+                });
+                if out.len() == region_len {
+                    ch[p..end].copy_from_slice(&out);
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (undo_state, true)
+        };
+        if changed {
+            self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        }
+        changed
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_copy(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_spectral_copy(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_paste(&mut self, add: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_spectral_paste(tab_idx, add)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_spectral_clipboard_len(&self) -> Option<usize> {
+        self.spectral_clipboard.as_ref().map(|c| c.len_samples)
+    }
+}
+
+// ---- Harmonic action (P5-13, transient Ctrl+click helper) ----------------
+
+/// Combined per-bin gain for `n` harmonic bands `[k*f0*(1-tol), k*f0*(1+tol)]`
+/// with `atten_lin` gain inside each band (0.0 = mute) and raised-cosine
+/// edges. Bands multiply, so overlapping bands never over-attenuate below
+/// `atten_lin^overlap`.
+pub(super) fn harmonic_band_gains(
+    fft_size: usize,
+    sr: u32,
+    f0: f32,
+    n: u32,
+    tol: f32,
+    atten_lin: f32,
+) -> Vec<f32> {
+    let bins = fft_size / 2 + 1;
+    let mut gains = vec![1.0f32; bins];
+    let nyquist = sr.max(1) as f32 * 0.5;
+    let hz_per_bin = sr.max(1) as f32 / fft_size as f32;
+    let atten = atten_lin.clamp(0.0, 1.0);
+    for k in 1..=n.max(1) {
+        let center = f0.max(1.0) * k as f32;
+        if center >= nyquist {
+            break;
+        }
+        // The relative tolerance can be narrower than the FFT's bin spacing
+        // for low fundamentals; keep at least ~2 bins of half-width so the
+        // mask has a fully-attenuated core despite the raised-cosine edges
+        // (band_bin_gains enforces >= 1 bin of fade).
+        let half = (center * tol).max(2.0 * hz_per_bin);
+        let lo = (center - half).max(0.0);
+        let hi = (center + half).min(nyquist);
+        let fade = (hi - lo) * 0.25;
+        let inside = band_bin_gains(fft_size, sr, lo, hi, fade, true);
+        for (g, w) in gains.iter_mut().zip(inside.iter()) {
+            *g *= 1.0 - (1.0 - atten) * *w;
+        }
+    }
+    gains
+}
+
+/// Refine a clicked frequency to the nearest spectral peak via parabolic
+/// interpolation of log magnitudes in a Hann-windowed frame centered at
+/// `sample`. Searches ±10% (at least ±3 bins) around the click.
+pub(super) fn refine_peak_frequency(
+    ch: &[f32],
+    sr: u32,
+    sample: usize,
+    clicked_hz: f32,
+) -> Option<f32> {
+    let win = SPECTRAL_FFT_SIZE;
+    if ch.len() < 8 || sr == 0 || !clicked_hz.is_finite() || clicked_hz <= 0.0 {
+        return None;
+    }
+    let start = sample.saturating_sub(win / 2).min(ch.len().saturating_sub(1));
+    let mut frame = vec![0.0f32; win];
+    for (i, v) in frame.iter_mut().enumerate() {
+        let idx = start + i;
+        let s = ch.get(idx).copied().unwrap_or(0.0);
+        let x = i as f32 / win as f32;
+        *v = s * (0.5 - 0.5 * (2.0 * core::f32::consts::PI * x).cos());
+    }
+    let mut planner = RealFftPlanner::<f32>::new();
+    let rfft = planner.plan_fft_forward(win);
+    let mut spec = rfft.make_output_vec();
+    if rfft.process(&mut frame, &mut spec).is_err() {
+        return None;
+    }
+    let hz_per_bin = sr as f32 / win as f32;
+    let clicked_bin = (clicked_hz / hz_per_bin).round() as isize;
+    let radius = ((clicked_hz * 0.10 / hz_per_bin).ceil() as isize).max(3);
+    let lo = (clicked_bin - radius).max(1) as usize;
+    let hi = ((clicked_bin + radius) as usize).min(spec.len().saturating_sub(2));
+    if hi <= lo {
+        return None;
+    }
+    let mag = |b: usize| spec[b].norm().max(1e-12);
+    let mut best = lo;
+    for b in lo..=hi {
+        if mag(b) > mag(best) {
+            best = b;
+        }
+    }
+    // Parabolic interpolation on log magnitudes of the peak and neighbours.
+    let (m0, m1, m2) = (mag(best - 1).ln(), mag(best).ln(), mag(best + 1).ln());
+    let denom = m0 - 2.0 * m1 + m2;
+    let d = if denom.abs() > 1e-9 {
+        (0.5 * (m0 - m2) / denom).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    Some(((best as f32 + d) * hz_per_bin).max(1.0))
+}
+
+impl crate::app::WavesPreviewer {
+    /// Ctrl+click in a spectral view: refine the clicked frequency to the
+    /// nearest peak and open the transient harmonic-action popup.
+    pub(super) fn editor_harmonic_click(&mut self, tab_idx: usize, sample: usize, hz: f32) {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let refined = tab
+            .ch_samples
+            .first()
+            .and_then(|ch| refine_peak_frequency(ch, sr, sample, hz))
+            .unwrap_or(hz);
+        self.harmonic_action = Some(crate::app::types::HarmonicAction {
+            tab_id: tab.tab_id,
+            f0: refined,
+            harmonics: 8,
+            atten_db: 24.0,
+        });
+    }
+
+    /// Apply the harmonic-action bands in one multi-band STFT pass over the
+    /// time selection (whole file without one). `atten_db == None` mutes.
+    pub(super) fn editor_apply_harmonic_action(
+        &mut self,
+        tab_idx: usize,
+        atten_db: Option<f32>,
+    ) -> bool {
+        let Some(action) = self.harmonic_action else {
+            return false;
+        };
+        let time_fade_ms = self.spectral_edit_time_fade_ms.max(0.0);
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            if tab.tab_id != action.tab_id || tab.loading || tab.samples_len == 0 {
+                return false;
+            }
+            let (s, e) =
+                Self::editor_valid_selection(tab).unwrap_or((0, tab.samples_len));
+            let sr = tab.buffer_sample_rate.max(1);
+            let undo_state = Self::capture_undo_state_labeled(
+                tab,
+                if atten_db.is_some() {
+                    "Harmonic Attenuate"
+                } else {
+                    "Harmonic Mute"
+                },
+            );
+            let atten_lin = atten_db
+                .map(|d| 10f32.powf(-d.abs() / 20.0))
+                .unwrap_or(0.0);
+            let gains = harmonic_band_gains(
+                SPECTRAL_FFT_SIZE,
+                sr,
+                action.f0,
+                action.harmonics,
+                0.03,
+                atten_lin,
+            );
+            let sel_len = e - s;
+            let fade_n = ((time_fade_ms / 1000.0) * sr as f32).round() as usize;
+            let fade_n = fade_n.min(sel_len / 2);
+            for ch in tab.ch_samples.iter_mut() {
+                let seg_s = s.saturating_sub(SPECTRAL_FFT_SIZE);
+                let seg_e = (e + SPECTRAL_FFT_SIZE).min(ch.len());
+                if seg_e <= seg_s {
+                    continue;
+                }
+                let processed = stft_process_frames(&ch[seg_s..seg_e], |_t, spec| {
+                    for (c, g) in spec.iter_mut().zip(gains.iter()) {
+                        *c *= *g;
+                    }
+                });
+                let filtered = &processed[(s - seg_s)..(s - seg_s + sel_len).min(processed.len())];
+                for i in 0..sel_len.min(filtered.len()) {
+                    let w = selection_edge_weight(i, sel_len, fade_n);
+                    ch[s + i] = ch[s + i] * (1.0 - w) + filtered[i] * w;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.harmonic_action = None;
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_harmonic_click(&mut self, sample: usize, hz: f32) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.editor_harmonic_click(tab_idx, sample, hz);
+        self.harmonic_action.as_ref().map(|a| a.f0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_harmonic_apply(&mut self, atten_db: Option<f32>) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_apply_harmonic_action(tab_idx, atten_db)
     }
 }

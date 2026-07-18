@@ -21,9 +21,64 @@ impl WavesPreviewer {
     pub(super) fn ui_topbar_menu_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             self.ui_topbar_file_menu(ui);
+            self.ui_topbar_edit_menu(ui);
             self.ui_topbar_export_menu(ui);
             self.ui_topbar_list_menu(ui);
             self.ui_topbar_tools_menu(ui, ctx);
+            self.ui_topbar_help_menu(ui);
+        });
+    }
+
+    fn ui_topbar_edit_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Edit", |ui| {
+            let can_undo = self.undo_redo_available(false);
+            let can_redo = self.undo_redo_available(true);
+            if ui
+                .add_enabled(can_undo, egui::Button::new("Undo"))
+                .on_hover_text("Ctrl+Z")
+                .clicked()
+            {
+                self.trigger_undo_redo(false);
+                ui.close();
+            }
+            if ui
+                .add_enabled(can_redo, egui::Button::new("Redo"))
+                .on_hover_text("Ctrl+Y / Ctrl+Shift+Z")
+                .clicked()
+            {
+                self.trigger_undo_redo(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button("History...")
+                .on_hover_text("Edit history of the active editor tab")
+                .clicked()
+            {
+                self.show_undo_history_window = true;
+                ui.close();
+            }
+            if ui
+                .button("Regions...")
+                .on_hover_text("Labeled ranges of the active editor tab")
+                .clicked()
+            {
+                self.show_regions_window = true;
+                ui.close();
+            }
+        });
+    }
+
+    fn ui_topbar_help_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Help", |ui| {
+            if ui.button("Keyboard Shortcuts...").clicked() {
+                self.show_shortcuts_window = true;
+                ui.close();
+            }
+            if ui.button("Customize Shortcuts...").clicked() {
+                self.show_keymap_window = true;
+                ui.close();
+            }
         });
     }
 
@@ -62,6 +117,10 @@ impl WavesPreviewer {
             if ui.button("Session Save (Ctrl+S)").clicked() {
                 if let Err(err) = self.save_project() {
                     self.debug_log(format!("session save error: {err}"));
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        format!("Session save failed: {err}"),
+                    );
                 }
                 ui.close();
             }
@@ -70,6 +129,10 @@ impl WavesPreviewer {
                     let path = ensure_extension(path, "nwsess");
                     if let Err(err) = self.save_project_as(path) {
                         self.debug_log(format!("session save error: {err}"));
+                        self.push_toast(
+                            crate::app::types::ToastSeverity::Error,
+                            format!("Session save-as failed: {err}"),
+                        );
                     }
                 }
                 ui.close();
@@ -77,6 +140,10 @@ impl WavesPreviewer {
             if ui.button("Session Close").clicked() {
                 if let Err(err) = self.close_project_with_autosave() {
                     self.debug_log(format!("session close save error: {err}"));
+                    self.push_toast(
+                        crate::app::types::ToastSeverity::Error,
+                        format!("Session close autosave failed: {err}"),
+                    );
                 }
                 ui.close();
             }
@@ -191,6 +258,85 @@ impl WavesPreviewer {
                 self.clear_edits_for_paths(&selected);
                 ui.close();
             }
+            ui.separator();
+            if ui.button("Inspect Files (QA)...").clicked() {
+                self.open_inspection_dialog();
+                ui.close();
+            }
+            if ui.button("Normalize Loudness...").clicked() {
+                self.open_loudnorm_dialog();
+                ui.close();
+            }
+            if ui
+                .button("Find Duplicates...")
+                .on_hover_text(
+                    "Scan the selection (or the whole list) for exact duplicates and perceptually similar files",
+                )
+                .clicked()
+            {
+                self.start_duplicate_scan();
+                ui.close();
+            }
+            if ui
+                .button("Export Engine Metadata...")
+                .on_hover_text(
+                    "Write a Wwise/FMOD/Unity metadata table (loops, rates, lengths, LUFS) for the selection or list",
+                )
+                .clicked()
+            {
+                self.show_engine_export_dialog = true;
+                ui.close();
+            }
+            if ui
+                .button("Edit BWF Metadata...")
+                .on_hover_text(
+                    "Write bext (Broadcast WAV) description/originator into the selected WAV files",
+                )
+                .clicked()
+            {
+                self.open_bwf_dialog();
+                ui.close();
+            }
+            ui.separator();
+            let multi = self.selected_paths().len() >= 2;
+            if ui
+                .add_enabled(
+                    multi,
+                    egui::Button::new("Audition Selection (Round-robin)"),
+                )
+                .on_hover_text(
+                    "Play the selected files one after another in order; stop playback to end",
+                )
+                .clicked()
+            {
+                self.start_variation_audition(
+                    crate::app::types::VariationAuditionMode::RoundRobin,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(multi, egui::Button::new("Audition Selection (Random)"))
+                .on_hover_text(
+                    "Play the selected files in random order (never the same file twice in a row)",
+                )
+                .clicked()
+            {
+                self.start_variation_audition(
+                    crate::app::types::VariationAuditionMode::Random,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(multi, egui::Button::new("Play Selected Together"))
+                .on_hover_text(
+                    "Mix the selected files (up to 16) at equal power (1/\u{221a}n) and \
+                     play the sum once — quick layering check",
+                )
+                .clicked()
+            {
+                self.start_mix_audition();
+                ui.close();
+            }
         });
     }
 
@@ -206,6 +352,10 @@ impl WavesPreviewer {
                 if self.recording_tab.input_devices.is_empty() {
                     self.recording_refresh_devices();
                 }
+                ui.close();
+            }
+            if ui.button("Plugin Manager...").clicked() {
+                self.show_plugin_manager = true;
                 ui.close();
             }
             ui.separator();

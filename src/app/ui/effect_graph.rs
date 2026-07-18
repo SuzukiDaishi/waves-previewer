@@ -1914,6 +1914,230 @@ impl crate::app::WavesPreviewer {
                                     }
                                 });
 
+                                if let Some(plugin_key) = config.plugin_key.clone() {
+                                    ui.separator();
+                                    ui.label(
+                                        RichText::new("Presets & A/B")
+                                            .small()
+                                            .color(Color32::from_rgb(150, 190, 255)),
+                                    );
+                                    let mut load_preset: Option<std::path::PathBuf> = None;
+                                    let mut delete_preset: Option<std::path::PathBuf> = None;
+                                    egui::ComboBox::from_id_salt(format!(
+                                        "plugin_preset_load_{idx}"
+                                    ))
+                                    .width(ui.available_width().min(220.0))
+                                    .selected_text("Load preset...")
+                                    .show_ui(ui, |ui| {
+                                        let presets =
+                                            Self::list_plugin_presets_for_key(&plugin_key);
+                                        if presets.is_empty() {
+                                            ui.label(
+                                                RichText::new("(No presets saved)")
+                                                    .small()
+                                                    .color(Color32::from_rgb(118, 132, 148)),
+                                            );
+                                        }
+                                        for (name, path) in presets {
+                                            ui.horizontal(|ui| {
+                                                if ui.selectable_label(false, &name).clicked() {
+                                                    load_preset = Some(path.clone());
+                                                }
+                                                if ui.small_button("Delete").clicked() {
+                                                    delete_preset = Some(path.clone());
+                                                }
+                                            });
+                                        }
+                                    });
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(
+                                                &mut self.plugin_preset_name_input,
+                                            )
+                                            .hint_text("Preset name")
+                                            .desired_width(140.0),
+                                        );
+                                        let can_save = !self
+                                            .plugin_preset_name_input
+                                            .trim()
+                                            .is_empty();
+                                        if ui
+                                            .add_enabled(can_save, egui::Button::new("Save Preset"))
+                                            .clicked()
+                                        {
+                                            let name =
+                                                self.plugin_preset_name_input.trim().to_string();
+                                            match Self::save_plugin_preset_for_key(
+                                                &plugin_key,
+                                                &name,
+                                                config.params.clone(),
+                                                config.state_blob_b64.clone(),
+                                            ) {
+                                                Ok(_) => {
+                                                    self.plugin_preset_name_input.clear();
+                                                    self.push_effect_graph_console(
+                                                        EffectGraphSeverity::Info,
+                                                        "preset",
+                                                        format!("Saved preset \"{name}\""),
+                                                        Some(node.id.clone()),
+                                                    );
+                                                }
+                                                Err(err) => self.push_effect_graph_console(
+                                                    EffectGraphSeverity::Error,
+                                                    "preset",
+                                                    err,
+                                                    Some(node.id.clone()),
+                                                ),
+                                            }
+                                        }
+                                    });
+                                    if let Some(path) = load_preset {
+                                        match crate::app::plugin_preset_ops::load_plugin_preset_from(&path)
+                                        {
+                                            Ok(preset) => {
+                                                self.effect_graph_push_undo_snapshot();
+                                                if let Some(node_mut) =
+                                                    self.effect_graph.draft.nodes.get_mut(idx)
+                                                {
+                                                    if let EffectGraphNodeData::PluginFx {
+                                                        config,
+                                                    } = &mut node_mut.data
+                                                    {
+                                                        config.params = preset.params.clone();
+                                                        config.state_blob_b64 =
+                                                            preset.state_blob_b64.clone();
+                                                    }
+                                                }
+                                                self.effect_graph.draft_dirty = true;
+                                                self.revalidate_effect_graph_draft();
+                                                self.push_effect_graph_console(
+                                                    EffectGraphSeverity::Info,
+                                                    "preset",
+                                                    format!("Loaded preset \"{}\"", preset.name),
+                                                    Some(node.id.clone()),
+                                                );
+                                            }
+                                            Err(err) => self.push_effect_graph_console(
+                                                EffectGraphSeverity::Error,
+                                                "preset",
+                                                err,
+                                                Some(node.id.clone()),
+                                            ),
+                                        }
+                                    }
+                                    if let Some(path) = delete_preset {
+                                        match crate::app::plugin_preset_ops::delete_plugin_preset_file(&path)
+                                        {
+                                            Ok(()) => self.push_effect_graph_console(
+                                                EffectGraphSeverity::Info,
+                                                "preset",
+                                                "Preset deleted".to_string(),
+                                                Some(node.id.clone()),
+                                            ),
+                                            Err(err) => self.push_effect_graph_console(
+                                                EffectGraphSeverity::Error,
+                                                "preset",
+                                                err,
+                                                Some(node.id.clone()),
+                                            ),
+                                        }
+                                    }
+                                    ui.horizontal_wrapped(|ui| {
+                                        let (has_alt, active_b) = self
+                                            .effect_graph
+                                            .plugin_runtime
+                                            .get(&node.id)
+                                            .map(|r| (r.ab_alt.is_some(), r.ab_active_b))
+                                            .unwrap_or((false, false));
+                                        if !has_alt {
+                                            if ui
+                                                .button("Store B")
+                                                .on_hover_text(
+                                                    "Copy the current settings into slot B, then tweak and use A/B Swap to compare",
+                                                )
+                                                .clicked()
+                                            {
+                                                let entry = self
+                                                    .effect_graph
+                                                    .plugin_runtime
+                                                    .entry(node.id.clone())
+                                                    .or_default();
+                                                entry.ab_alt = Some((
+                                                    config.params.clone(),
+                                                    config.state_blob_b64.clone(),
+                                                ));
+                                                entry.ab_active_b = false;
+                                            }
+                                        } else {
+                                            if ui.button("A/B Swap").clicked() {
+                                                self.effect_graph_push_undo_snapshot();
+                                                let alt = self
+                                                    .effect_graph
+                                                    .plugin_runtime
+                                                    .get_mut(&node.id)
+                                                    .and_then(|entry| {
+                                                        entry.ab_active_b = !entry.ab_active_b;
+                                                        entry.ab_alt.take()
+                                                    });
+                                                if let Some((alt_params, alt_blob)) = alt {
+                                                    let mut stored = None;
+                                                    if let Some(node_mut) = self
+                                                        .effect_graph
+                                                        .draft
+                                                        .nodes
+                                                        .get_mut(idx)
+                                                    {
+                                                        if let EffectGraphNodeData::PluginFx {
+                                                            config,
+                                                        } = &mut node_mut.data
+                                                        {
+                                                            stored = Some((
+                                                                std::mem::replace(
+                                                                    &mut config.params,
+                                                                    alt_params,
+                                                                ),
+                                                                std::mem::replace(
+                                                                    &mut config.state_blob_b64,
+                                                                    alt_blob,
+                                                                ),
+                                                            ));
+                                                        }
+                                                    }
+                                                    if let (Some(cur), Some(entry)) = (
+                                                        stored,
+                                                        self.effect_graph
+                                                            .plugin_runtime
+                                                            .get_mut(&node.id),
+                                                    ) {
+                                                        entry.ab_alt = Some(cur);
+                                                    }
+                                                }
+                                                self.effect_graph.draft_dirty = true;
+                                                self.revalidate_effect_graph_draft();
+                                            }
+                                            ui.label(
+                                                RichText::new(if active_b {
+                                                    "Active: B"
+                                                } else {
+                                                    "Active: A"
+                                                })
+                                                .small()
+                                                .color(Color32::from_rgb(150, 190, 255)),
+                                            );
+                                            if ui.small_button("Clear A/B").clicked() {
+                                                if let Some(entry) = self
+                                                    .effect_graph
+                                                    .plugin_runtime
+                                                    .get_mut(&node.id)
+                                                {
+                                                    entry.ab_alt = None;
+                                                    entry.ab_active_b = false;
+                                                }
+                                            }
+                                        }
+                                    });
+                                    ui.separator();
+                                }
                                 ui.label(
                                     RichText::new(format!("Backend: {backend_label}"))
                                         .small()

@@ -8,6 +8,7 @@ use super::external_ops;
 use super::project::{
     describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
+    project_region_to_entry, region_entry_to_project,
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
     project_music_analysis_to_draft, project_plugin_fx_draft_from_draft,
     project_plugin_fx_draft_to_draft, project_spectrogram_from_cfg, project_tab_from_tab,
@@ -588,6 +589,8 @@ impl super::WavesPreviewer {
                 super::types::SortKey::LufsShort => "LufsShort",
                 super::types::SortKey::LufsMomentary => "LufsMomentary",
                 super::types::SortKey::Bpm => "Bpm",
+                super::types::SortKey::SilenceLead => "SilenceLead",
+                super::types::SortKey::SilenceTail => "SilenceTail",
                 super::types::SortKey::CreatedAt => "CreatedAt",
                 super::types::SortKey::ModifiedAt => "ModifiedAt",
                 super::types::SortKey::External(_) => "External",
@@ -629,6 +632,22 @@ impl super::WavesPreviewer {
                 modified_at: self.list_columns.modified_at,
                 gain: self.list_columns.gain,
                 wave: self.list_columns.wave,
+                silence_lead: self.list_columns.silence_lead,
+                silence_tail: self.list_columns.silence_tail,
+                order: self
+                    .list_column_order
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect(),
+                widths: {
+                    let mut widths: Vec<(String, f32)> = self
+                        .list_col_widths
+                        .iter()
+                        .map(|(k, v)| (k.clone(), *v))
+                        .collect();
+                    widths.sort_by(|a, b| a.0.cmp(&b.0));
+                    widths
+                },
             },
             auto_play_list_nav: self.auto_play_list_nav,
             export_policy: Some(ProjectExportPolicy {
@@ -721,6 +740,7 @@ impl super::WavesPreviewer {
                 loop_markers_saved: cached.loop_markers_saved.map(|v| [v.0, v.1]),
                 loop_markers_dirty: cached.loop_markers_dirty,
                 markers: cached.markers.iter().map(marker_entry_to_project).collect(),
+                regions: cached.regions.iter().map(region_entry_to_project).collect(),
                 markers_saved: cached
                     .markers_saved
                     .iter()
@@ -981,7 +1001,24 @@ impl super::WavesPreviewer {
             modified_at: project.app.list_columns.modified_at,
             gain: project.app.list_columns.gain,
             wave: project.app.list_columns.wave,
+            silence_lead: project.app.list_columns.silence_lead,
+            silence_tail: project.app.list_columns.silence_tail,
         };
+        if !project.app.list_columns.order.is_empty() {
+            let parsed: Vec<super::types::ColumnId> = project
+                .app
+                .list_columns
+                .order
+                .iter()
+                .filter_map(|name| super::types::ColumnId::from_name(name))
+                .collect();
+            self.list_column_order = super::types::sanitize_column_order(&parsed);
+        }
+        for (key, w) in &project.app.list_columns.widths {
+            if w.is_finite() && *w > 4.0 {
+                self.list_col_widths.insert(key.clone(), *w);
+            }
+        }
         self.sort_key = match project.app.sort_key.as_str() {
             "Folder" => super::types::SortKey::Folder,
             "Transcript" => super::types::SortKey::Transcript,
@@ -997,6 +1034,8 @@ impl super::WavesPreviewer {
             "LufsShort" => super::types::SortKey::LufsShort,
             "LufsMomentary" => super::types::SortKey::LufsMomentary,
             "Bpm" => super::types::SortKey::Bpm,
+            "SilenceLead" => super::types::SortKey::SilenceLead,
+            "SilenceTail" => super::types::SortKey::SilenceTail,
             "CreatedAt" => super::types::SortKey::CreatedAt,
             "ModifiedAt" => super::types::SortKey::ModifiedAt,
             _ => super::types::SortKey::File,
@@ -1370,6 +1409,11 @@ impl super::WavesPreviewer {
                     loop_markers_saved: edit.loop_markers_saved.map(|v| (v[0], v[1])),
                     loop_markers_dirty: edit.loop_markers_dirty,
                     markers: edit.markers.iter().map(project_marker_to_entry).collect(),
+                    regions: edit
+                        .regions
+                        .iter()
+                        .map(project_region_to_entry)
+                        .collect(),
                     markers_committed: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_applied: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_saved: edit
@@ -1447,6 +1491,7 @@ impl super::WavesPreviewer {
                         loop_markers_saved: tab.loop_region.map(|v| (v[0], v[1])),
                         loop_markers_dirty: tab.loop_markers_dirty,
                         markers: tab.markers.iter().map(project_marker_to_entry).collect(),
+                        regions: tab.regions.iter().map(project_region_to_entry).collect(),
                         markers_committed: tab
                             .markers
                             .iter()
@@ -1606,15 +1651,18 @@ impl super::WavesPreviewer {
             let preview = self.tabs.get(active).and_then(|tab| {
                 let tool = tab.preview_audio_tool?;
                 let overlay = tab.preview_overlay.as_ref()?;
-                let mono = if let Some(m) = overlay.mixdown.as_ref() {
-                    m.clone()
-                } else {
-                    overlay.channels.get(0).cloned().unwrap_or_default()
-                };
-                Some((tool, mono))
+                if !overlay.channels.is_empty() {
+                    return Some((tool, overlay.channels.clone(), Vec::new()));
+                }
+                let mono = overlay.mixdown.as_ref().cloned().unwrap_or_default();
+                Some((tool, Vec::new(), mono))
             });
-            if let Some((tool, mono)) = preview {
-                self.set_preview_mono(active, tool, mono);
+            if let Some((tool, channels, mono)) = preview {
+                if !channels.is_empty() {
+                    self.set_preview_channels(active, tool, channels);
+                } else if !mono.is_empty() {
+                    self.set_preview_mono(active, tool, mono);
+                }
             }
         }
         if let Some(path) = selected_path {

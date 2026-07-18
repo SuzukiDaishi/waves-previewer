@@ -82,13 +82,156 @@ impl WavBitDepth {
     }
 }
 
+/// Symmetric 16-bit conversion (standard PCM convention): full-scale -1.0
+/// maps to i16::MIN (-32768); +1.0 clamps to i16::MAX (32767).
+#[inline]
+pub fn f32_to_i16_sym(v: f32) -> i16 {
+    (v * 32768.0)
+        .round()
+        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[inline]
+pub fn i16_to_f32_sym(v: i16) -> f32 {
+    v as f32 / 32768.0
+}
+
+/// TPDF (triangular) dither noise generator: +/-1 LSB peak at the target
+/// integer scale. Deterministic LCG so the FLAC MD5 pass and encode pass can
+/// reproduce the identical sequence from the same seed.
+pub struct TpdfDither {
+    state: u32,
+}
+
+impl TpdfDither {
+    pub const DEFAULT_SEED: u32 = 0x9E37_79B9;
+
+    pub fn new(seed: u32) -> Self {
+        Self { state: seed | 1 }
+    }
+
+    #[inline]
+    fn next_uniform(&mut self) -> f32 {
+        self.state = self
+            .state
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        (self.state >> 8) as f32 / 16_777_216.0
+    }
+
+    /// Triangular sample in (-1.0, 1.0) LSB.
+    #[inline]
+    pub fn next(&mut self) -> f32 {
+        self.next_uniform() - self.next_uniform()
+    }
+}
+
+/// How float samples are dithered when quantizing to integer PCM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DitherMode {
+    /// Plain rounding (bit-exact, correlated quantization error).
+    Off,
+    /// Flat TPDF dither: +/-1 LSB triangular noise before rounding.
+    Tpdf,
+    /// TPDF dither plus 2nd-order error-feedback noise shaping
+    /// (NTF = (1 - z^-1)^2): pushes quantization noise out of the low band
+    /// where hearing is most sensitive, at the cost of more HF noise.
+    TpdfNoiseShaped,
+}
+
+impl DitherMode {
+    pub fn prefs_name(self) -> &'static str {
+        match self {
+            DitherMode::Off => "off",
+            DitherMode::Tpdf => "tpdf",
+            DitherMode::TpdfNoiseShaped => "tpdf_ns",
+        }
+    }
+
+    pub fn from_prefs_name(s: &str) -> Option<DitherMode> {
+        match s.trim() {
+            "off" => Some(DitherMode::Off),
+            "tpdf" => Some(DitherMode::Tpdf),
+            "tpdf_ns" => Some(DitherMode::TpdfNoiseShaped),
+            _ => None,
+        }
+    }
+}
+
+/// Integer quantizer shared by every PCM export path (WAV/AIFF/FLAC/format
+/// converter). Callers keep their historical scale/clamp conventions by
+/// passing them in; the quantizer adds dither and (optionally) per-channel
+/// 2nd-order error-feedback noise shaping on top. Deterministic for a given
+/// construction, so FLAC's MD5 and encode passes can replay the sequence.
+pub struct Quantizer {
+    scale: f64,
+    min: f64,
+    max: f64,
+    mode: DitherMode,
+    rng: TpdfDither,
+    /// Per-channel (e[n-1], e[n-2]) error history for noise shaping. The
+    /// interleaved writers index this by channel so each channel's error
+    /// filter sees its own past, not its neighbor's.
+    err: Vec<(f64, f64)>,
+}
+
+impl Quantizer {
+    pub fn new(scale: f64, min: f64, max: f64, channels: usize, mode: DitherMode) -> Self {
+        Self {
+            scale,
+            min,
+            max,
+            mode,
+            rng: TpdfDither::new(TpdfDither::DEFAULT_SEED),
+            err: vec![(0.0, 0.0); channels.max(1)],
+        }
+    }
+
+    /// Effective dither mode for an integer export at `bits`, from the
+    /// current codec export options (16-bit uses `dither_mode`; 24-bit only
+    /// dithers when `dither_24bit` is also set; anything wider is Off).
+    pub fn export_mode_for_bits(bits: u32) -> DitherMode {
+        let opts = codec_export_options();
+        if bits <= 16 {
+            opts.dither_mode
+        } else if bits <= 24 && opts.dither_24bit {
+            opts.dither_mode
+        } else {
+            DitherMode::Off
+        }
+    }
+
+    /// Quantize one sample of channel `ch` to an integer code. `v` is in
+    /// [-1, 1] (callers pre-clamp as they historically did).
+    #[inline]
+    pub fn quantize(&mut self, ch: usize, v: f32) -> i32 {
+        let x = f64::from(v) * self.scale;
+        match self.mode {
+            DitherMode::Off => x.round().clamp(self.min, self.max) as i32,
+            DitherMode::Tpdf => (x + f64::from(self.rng.next()))
+                .round()
+                .clamp(self.min, self.max) as i32,
+            DitherMode::TpdfNoiseShaped => {
+                let slot = ch.min(self.err.len() - 1);
+                let (e1, e2) = self.err[slot];
+                // Error feedback for NTF (1 - z^-1)^2: with q = u + e and
+                // u = x - 2 e[n-1] + e[n-2], the output error becomes
+                // e - 2 e[n-1] + e[n-2] (2nd-order highpass).
+                let u = x - 2.0 * e1 + e2;
+                let q = (u + f64::from(self.rng.next()))
+                    .round()
+                    .clamp(self.min, self.max);
+                self.err[slot] = (q - u, e1);
+                q as i32
+            }
+        }
+    }
+}
+
 fn quantize_sample(sample: f32, depth: WavBitDepth) -> f32 {
     let sample = sample.clamp(-1.0, 1.0);
     match depth {
-        WavBitDepth::Pcm16 => {
-            let max_abs = i16::MAX as f32;
-            ((sample * max_abs).round().clamp(-max_abs, max_abs)) / max_abs
-        }
+        WavBitDepth::Pcm16 => f32_to_i16_sym(sample) as f32 / 32768.0,
         WavBitDepth::Pcm24 => {
             let max_abs = 8_388_607.0f32;
             ((sample * max_abs).round().clamp(-max_abs, max_abs)) / max_abs
@@ -151,6 +294,23 @@ fn write_wav_range_with_depth(
         },
     };
     let mut writer = hound::WavWriter::create(dst, spec)?;
+    let mut quant = match depth {
+        WavBitDepth::Pcm16 => Quantizer::new(
+            32768.0,
+            i16::MIN as f64,
+            i16::MAX as f64,
+            ch as usize,
+            Quantizer::export_mode_for_bits(16),
+        ),
+        WavBitDepth::Pcm24 => Quantizer::new(
+            8_388_607.0,
+            -8_388_607.0,
+            8_388_607.0,
+            ch as usize,
+            Quantizer::export_mode_for_bits(24),
+        ),
+        WavBitDepth::Float32 => Quantizer::new(1.0, -1.0, 1.0, 1, DitherMode::Off),
+    };
     for i in s..e {
         for ci in 0..(ch as usize) {
             let v = chans
@@ -161,12 +321,10 @@ fn write_wav_range_with_depth(
                 .clamp(-1.0, 1.0);
             match depth {
                 WavBitDepth::Pcm16 => {
-                    writer.write_sample::<i16>((v * i16::MAX as f32).round() as i16)?;
+                    writer.write_sample::<i16>(quant.quantize(ci, v) as i16)?;
                 }
                 WavBitDepth::Pcm24 => {
-                    let max_abs = 8_388_607.0f32;
-                    let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
-                    writer.write_sample::<i32>(q)?;
+                    writer.write_sample::<i32>(quant.quantize(ci, v))?;
                 }
                 WavBitDepth::Float32 => {
                     writer.write_sample::<f32>(v)?;
@@ -231,6 +389,23 @@ fn write_aiff_with_depth(
     let sound_len = frames * channels * bytes_per_sample;
 
     let mut sound: Vec<u8> = Vec::with_capacity(sound_len);
+    let mut quant = match depth {
+        WavBitDepth::Pcm16 => Quantizer::new(
+            32768.0,
+            i16::MIN as f64,
+            i16::MAX as f64,
+            channels,
+            Quantizer::export_mode_for_bits(16),
+        ),
+        WavBitDepth::Pcm24 => Quantizer::new(
+            8_388_607.0,
+            -8_388_607.0,
+            8_388_607.0,
+            channels,
+            Quantizer::export_mode_for_bits(24),
+        ),
+        WavBitDepth::Float32 => Quantizer::new(1.0, -1.0, 1.0, 1, DitherMode::Off),
+    };
     for i in 0..frames {
         for ci in 0..channels {
             let v = chans
@@ -241,12 +416,11 @@ fn write_aiff_with_depth(
                 .clamp(-1.0, 1.0);
             match depth {
                 WavBitDepth::Pcm16 => {
-                    let q = (v * i16::MAX as f32).round() as i16;
+                    let q = quant.quantize(ci, v) as i16;
                     sound.extend_from_slice(&q.to_be_bytes());
                 }
                 WavBitDepth::Pcm24 => {
-                    let max_abs = 8_388_607.0f32;
-                    let q = (v * max_abs).round().clamp(-max_abs, max_abs) as i32;
+                    let q = quant.quantize(ci, v);
                     sound.extend_from_slice(&q.to_be_bytes()[1..4]);
                 }
                 WavBitDepth::Float32 => {
@@ -603,6 +777,18 @@ fn resample_channels_with_rubato_fft(
     resample_all_channels(chans, resampler)
 }
 
+/// Counts silent downgrades from the rubato resampler to naive linear
+/// interpolation. The UI polls this each frame and surfaces a warning toast
+/// when it grows (the resample functions themselves stay pure and are called
+/// from worker threads).
+pub static RESAMPLE_FALLBACK_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn note_resample_fallback(in_sr: u32, out_sr: u32) {
+    RESAMPLE_FALLBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("resample: rubato failed, fell back to linear interpolation ({in_sr} -> {out_sr} Hz)");
+}
+
 pub fn resample_quality(
     mono: &[f32],
     in_sr: u32,
@@ -623,7 +809,10 @@ pub fn resample_quality(
     };
     match resample_with_rubato(mono, in_sr, out_sr, params, chunk_size) {
         Ok(out) if !out.is_empty() => out,
-        _ => resample_linear(mono, in_sr, out_sr),
+        _ => {
+            note_resample_fallback(in_sr, out_sr);
+            resample_linear(mono, in_sr, out_sr)
+        }
     }
 }
 
@@ -986,6 +1175,329 @@ pub fn write_wav_loop_markers(path: &Path, loop_opt: Option<(u32, u32)>) -> Resu
     replace_file_with_tmp(&tmp, path, false)
 }
 
+/// BWF `bext` fields we read/write. Only the human-facing strings are
+/// exposed; time reference and UMID are written as zeros.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BextFields {
+    /// Up to 256 bytes.
+    pub description: String,
+    /// Up to 32 bytes.
+    pub originator: String,
+    /// Up to 32 bytes.
+    pub originator_reference: String,
+    /// `yyyy-mm-dd`; filled with the current date when empty.
+    pub origination_date: String,
+    /// `hh:mm:ss`; filled with the current time when empty.
+    pub origination_time: String,
+}
+
+fn push_fixed_ascii(out: &mut Vec<u8>, s: &str, len: usize) {
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(len);
+    out.extend_from_slice(&bytes[..n]);
+    out.resize(out.len() + (len - n), 0);
+}
+
+fn read_fixed_ascii(data: &[u8], start: usize, len: usize) -> String {
+    let end = (start + len).min(data.len());
+    let slice = &data[start.min(end)..end];
+    let trimmed: Vec<u8> = slice
+        .iter()
+        .copied()
+        .take_while(|&b| b != 0)
+        .collect();
+    String::from_utf8_lossy(&trimmed).trim_end().to_string()
+}
+
+/// Serialize a BWF version-1 `bext` payload (602 bytes, empty coding
+/// history, zero time reference / UMID).
+fn encode_bext_payload(fields: &BextFields) -> Vec<u8> {
+    let now = chrono::Local::now();
+    let date = if fields.origination_date.trim().is_empty() {
+        now.format("%Y-%m-%d").to_string()
+    } else {
+        fields.origination_date.clone()
+    };
+    let time = if fields.origination_time.trim().is_empty() {
+        now.format("%H:%M:%S").to_string()
+    } else {
+        fields.origination_time.clone()
+    };
+    let mut out = Vec::with_capacity(602);
+    push_fixed_ascii(&mut out, &fields.description, 256);
+    push_fixed_ascii(&mut out, &fields.originator, 32);
+    push_fixed_ascii(&mut out, &fields.originator_reference, 32);
+    push_fixed_ascii(&mut out, &date, 10);
+    push_fixed_ascii(&mut out, &time, 8);
+    out.extend_from_slice(&0u32.to_le_bytes()); // TimeReferenceLow
+    out.extend_from_slice(&0u32.to_le_bytes()); // TimeReferenceHigh
+    out.extend_from_slice(&1u16.to_le_bytes()); // Version
+    out.resize(out.len() + 64, 0); // UMID (zero)
+    out.resize(602, 0); // Reserved + no coding history
+    out
+}
+
+/// Write (or replace) the BWF `bext` chunk in a WAV file, preserving all
+/// other chunks. The chunk is placed where the old one was, or right
+/// before `data` for files that had none.
+pub fn write_wav_bext(path: &Path, fields: &BextFields) -> Result<()> {
+    use std::fs;
+    let mut chunks = parse_riff_wave_chunks(path)?;
+    let payload = encode_bext_payload(fields);
+    if let Some(existing) = chunks.iter_mut().find(|c| &c.id == b"bext") {
+        existing.payload = payload;
+    } else {
+        let data_pos = chunks
+            .iter()
+            .position(|c| &c.id == b"data")
+            .unwrap_or(chunks.len());
+        chunks.insert(
+            data_pos,
+            RiffWaveChunk {
+                id: *b"bext",
+                payload,
+            },
+        );
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(b"WAVE");
+    for chunk in &chunks {
+        out.extend_from_slice(&chunk.id);
+        out.extend_from_slice(&(chunk.payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&chunk.payload);
+        if chunk.payload.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+    let riff_size = (out.len().saturating_sub(8)) as u32;
+    out[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let tmp = unique_sibling_tmp(path, "bext", "wav");
+    fs::write(&tmp, out)?;
+    replace_file_with_tmp(&tmp, path, false)
+}
+
+/// Read the BWF `bext` fields from a WAV file (None when absent).
+pub fn read_wav_bext(path: &Path) -> Result<Option<BextFields>> {
+    let chunks = parse_riff_wave_chunks(path)?;
+    let Some(chunk) = chunks.iter().find(|c| &c.id == b"bext") else {
+        return Ok(None);
+    };
+    let d = &chunk.payload;
+    Ok(Some(BextFields {
+        description: read_fixed_ascii(d, 0, 256),
+        originator: read_fixed_ascii(d, 256, 32),
+        originator_reference: read_fixed_ascii(d, 288, 32),
+        origination_date: read_fixed_ascii(d, 320, 10),
+        origination_time: read_fixed_ascii(d, 330, 8),
+    }))
+}
+
+/// RIFF LIST/INFO tags exposed for batch metadata writing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InfoFields {
+    /// INAM — title/name.
+    pub name: String,
+    /// IART — artist/author.
+    pub artist: String,
+    /// ICMT — comment.
+    pub comment: String,
+}
+
+/// Core iXML production fields (BWF iXML spec).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IxmlFields {
+    pub project: String,
+    pub scene: String,
+    pub take: String,
+    pub tape: String,
+    pub note: String,
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Build a RIFF `LIST` payload of form-type `INFO` with INAM/IART/ICMT
+/// sub-chunks (NUL-terminated, word-aligned). Empty fields are omitted;
+/// all-empty yields `None` (nothing to write).
+pub fn build_info_list_chunk(fields: &InfoFields) -> Option<Vec<u8>> {
+    let mut out = b"INFO".to_vec();
+    for (id, value) in [
+        (*b"INAM", fields.name.trim()),
+        (*b"IART", fields.artist.trim()),
+        (*b"ICMT", fields.comment.trim()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        out.extend_from_slice(&id);
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&bytes);
+        if bytes.len() & 1 == 1 {
+            out.push(0);
+        }
+    }
+    (out.len() > 4).then_some(out)
+}
+
+/// Build an `iXML` chunk payload with the core production fields.
+/// Hand-assembled XML (escaped) — no dependencies. All-empty => `None`.
+pub fn build_ixml_chunk(fields: &IxmlFields) -> Option<Vec<u8>> {
+    let mut body = String::new();
+    for (tag, value) in [
+        ("PROJECT", fields.project.trim()),
+        ("SCENE", fields.scene.trim()),
+        ("TAKE", fields.take.trim()),
+        ("TAPE", fields.tape.trim()),
+        ("NOTE", fields.note.trim()),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        body.push_str(&format!("  <{tag}>{}</{tag}>\n", xml_escape(value)));
+    }
+    if body.is_empty() {
+        return None;
+    }
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<BWFXML>\n  <IXML_VERSION>1.5</IXML_VERSION>\n{body}</BWFXML>\n"
+    );
+    Some(xml.into_bytes())
+}
+
+fn is_info_list_chunk(chunk: &RiffWaveChunk) -> bool {
+    &chunk.id == b"LIST" && chunk.payload.get(0..4) == Some(b"INFO")
+}
+
+/// Write (or replace) the `LIST/INFO` and `iXML` chunks in a WAV,
+/// preserving everything else (audio, loops, markers, bext, other LIST
+/// types like `adtl`). Field sets that are entirely empty leave the
+/// existing chunk of that kind untouched; both empty is a no-op.
+pub fn write_wav_info_ixml(path: &Path, info: &InfoFields, ixml: &IxmlFields) -> Result<()> {
+    let info_payload = build_info_list_chunk(info);
+    let ixml_payload = build_ixml_chunk(ixml);
+    if info_payload.is_none() && ixml_payload.is_none() {
+        return Ok(());
+    }
+    let mut chunks = parse_riff_wave_chunks(path)?;
+    if let Some(payload) = info_payload {
+        if let Some(existing) = chunks.iter_mut().find(|c| is_info_list_chunk(c)) {
+            existing.payload = payload;
+        } else {
+            let data_pos = chunks
+                .iter()
+                .position(|c| &c.id == b"data")
+                .unwrap_or(chunks.len());
+            chunks.insert(
+                data_pos,
+                RiffWaveChunk {
+                    id: *b"LIST",
+                    payload,
+                },
+            );
+        }
+    }
+    if let Some(payload) = ixml_payload {
+        if let Some(existing) = chunks.iter_mut().find(|c| &c.id == b"iXML") {
+            existing.payload = payload;
+        } else {
+            let data_pos = chunks
+                .iter()
+                .position(|c| &c.id == b"data")
+                .unwrap_or(chunks.len());
+            chunks.insert(
+                data_pos,
+                RiffWaveChunk {
+                    id: *b"iXML",
+                    payload,
+                },
+            );
+        }
+    }
+    encode_riff_wave_chunks(path, &chunks)
+}
+
+/// Read the INAM/IART/ICMT tags from a WAV's `LIST/INFO` chunk.
+pub fn read_wav_info(path: &Path) -> Result<Option<InfoFields>> {
+    let chunks = parse_riff_wave_chunks(path)?;
+    let Some(chunk) = chunks.iter().find(|c| is_info_list_chunk(c)) else {
+        return Ok(None);
+    };
+    let d = &chunk.payload;
+    let mut fields = InfoFields::default();
+    let mut pos = 4usize;
+    while pos + 8 <= d.len() {
+        let id = [d[pos], d[pos + 1], d[pos + 2], d[pos + 3]];
+        let size =
+            u32::from_le_bytes([d[pos + 4], d[pos + 5], d[pos + 6], d[pos + 7]]) as usize;
+        let start = pos + 8;
+        let end = start.saturating_add(size).min(d.len());
+        let text = String::from_utf8_lossy(&d[start..end])
+            .trim_end_matches('\0')
+            .to_string();
+        match &id {
+            b"INAM" => fields.name = text,
+            b"IART" => fields.artist = text,
+            b"ICMT" => fields.comment = text,
+            _ => {}
+        }
+        pos = start + size + (size & 1);
+    }
+    Ok(Some(fields))
+}
+
+/// Best-effort read of the core iXML fields (exact inverse of our writer;
+/// tolerant of foreign files that use the same simple `<TAG>text</TAG>`
+/// shape).
+pub fn read_wav_ixml(path: &Path) -> Result<Option<IxmlFields>> {
+    let chunks = parse_riff_wave_chunks(path)?;
+    let Some(chunk) = chunks.iter().find(|c| &c.id == b"iXML") else {
+        return Ok(None);
+    };
+    let xml = String::from_utf8_lossy(&chunk.payload);
+    let grab = |tag: &str| -> String {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        xml.find(&open)
+            .and_then(|s| {
+                let start = s + open.len();
+                xml[start..].find(&close).map(|e| &xml[start..start + e])
+            })
+            .map(|raw| xml_unescape(raw.trim()))
+            .unwrap_or_default()
+    };
+    Ok(Some(IxmlFields {
+        project: grab("PROJECT"),
+        scene: grab("SCENE"),
+        take: grab("TAKE"),
+        tape: grab("TAPE"),
+        note: grab("NOTE"),
+    }))
+}
+
 #[derive(Clone)]
 struct RiffWaveChunk {
     id: [u8; 4],
@@ -1020,6 +1532,7 @@ fn parse_riff_wave_chunks(path: &Path) -> Result<Vec<RiffWaveChunk>> {
 }
 
 fn encode_riff_wave_chunks(path: &Path, chunks: &[RiffWaveChunk]) -> Result<()> {
+    crate::app::watch::note_self_write(path);
     use std::fs;
     let mut out = Vec::new();
     out.extend_from_slice(b"RIFF");
@@ -1256,7 +1769,7 @@ pub fn process_pitchshift_offline(
     out_sr: u32,
     semitones: f32,
 ) -> Vec<f32> {
-    let resampled = resample_linear(mono, in_sr, out_sr);
+    let resampled = resample_quality(mono, in_sr, out_sr, ResampleQuality::Good);
     if resampled.is_empty() {
         return Vec::new();
     }
@@ -1289,7 +1802,7 @@ pub fn process_pitchshift_offline(
 // Heavy offline: time-stretch preserving pitch
 pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: f32) -> Vec<f32> {
     let rate = rate.clamp(0.25, 4.0);
-    let resampled = resample_linear(mono, in_sr, out_sr);
+    let resampled = resample_quality(mono, in_sr, out_sr, ResampleQuality::Good);
     if resampled.is_empty() {
         return Vec::new();
     }
@@ -1954,18 +2467,20 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
             }
         }
         hound::SampleFormat::Int => {
-            let max_abs = match spec.bits_per_sample {
-                8 => 127.0,
-                16 => 32767.0,
-                24 => 8_388_607.0,
-                32 => 2_147_483_647.0,
-                b => ((1u64 << (b - 1)) - 1) as f64 as f32,
-            };
+            // Symmetric scaling: -1.0 -> -2^(bits-1), +1.0 clamps to
+            // 2^(bits-1) - 1. f64 keeps 32-bit quantization exact.
+            let scale = (1u64 << (spec.bits_per_sample - 1)) as f64;
+            let mut quant = Quantizer::new(
+                scale,
+                -scale,
+                scale - 1.0,
+                spec.channels as usize,
+                Quantizer::export_mode_for_bits(spec.bits_per_sample as u32),
+            );
             for i in 0..frames {
                 for ch in 0..(spec.channels as usize) {
                     let s = chans.get(ch).and_then(|c| c.get(i)).copied().unwrap_or(0.0);
-                    let v = (s * max_abs).round().clamp(-(max_abs), max_abs) as i32;
-                    writer.write_sample::<i32>(v)?;
+                    writer.write_sample::<i32>(quant.quantize(ch, s))?;
                 }
             }
         }
@@ -1976,6 +2491,7 @@ pub fn export_gain_wav(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
 }
 
 pub fn export_gain_audio(src: &Path, dst: &Path, gain_db: f32) -> Result<()> {
+    crate::app::watch::note_self_write(dst);
     let fmt = pick_format(src, dst)
         .ok_or_else(|| anyhow::anyhow!("unsupported format: {}", src.display()))?;
     match fmt.as_str() {
@@ -2046,6 +2562,12 @@ pub struct CodecExportOptions {
     pub aac_bitrate_kbps: u32,
     /// Vorbis perceptual quality in [-0.2, 1.0].
     pub ogg_quality: f32,
+    /// Dither applied when quantizing to 16-bit integer PCM (WAV/AIFF/FLAC/
+    /// export-gain writer). Float paths are never dithered.
+    pub dither_mode: DitherMode,
+    /// Also dither 24-bit integer exports (same mode). Off by default: at
+    /// 24-bit the quantization floor is already below any analog chain.
+    pub dither_24bit: bool,
 }
 
 impl Default for CodecExportOptions {
@@ -2054,6 +2576,8 @@ impl Default for CodecExportOptions {
             mp3_bitrate_kbps: 192,
             aac_bitrate_kbps: 192,
             ogg_quality: 0.5,
+            dither_mode: DitherMode::Tpdf,
+            dither_24bit: false,
         }
     }
 }
@@ -2134,10 +2658,7 @@ fn resample_channels(chans: &[Vec<f32>], in_sr: u32, out_sr: u32) -> Vec<Vec<f32
     if in_sr == out_sr {
         return chans.to_vec();
     }
-    chans
-        .iter()
-        .map(|c| resample_linear(c, in_sr, out_sr))
-        .collect()
+    resample_channels_quality(chans, in_sr, out_sr, ResampleQuality::Good)
 }
 
 fn encode_ogg_vorbis(dst: &Path, chans: &[Vec<f32>], in_sr: u32) -> Result<()> {
@@ -2213,9 +2734,18 @@ fn encode_flac(
     let frames = source_frames.max(FLAC_MIN_BLOCK);
     let max_abs = ((1i64 << (bits_per_sample - 1)) - 1) as f32;
     let bytes_per_sample = bits_per_sample / 8;
-    let quantize = |v: f32| -> i32 {
-        let v = v.clamp(-1.0, 1.0);
-        (v * max_abs).round().clamp(-max_abs, max_abs) as i32
+    // Both passes below must produce bit-identical samples (the pass-1 MD5 is
+    // stored in STREAMINFO), so each pass creates its own generator from the
+    // same seed and walks the samples in the same order.
+    let flac_dither_mode = Quantizer::export_mode_for_bits(bits_per_sample as u32);
+    let make_quantizer = || {
+        Quantizer::new(
+            f64::from(max_abs),
+            f64::from(-max_abs),
+            f64::from(max_abs),
+            channels,
+            flac_dither_mode,
+        )
     };
     let config = flacenc::config::Encoder::default()
         .into_verified()
@@ -2229,9 +2759,10 @@ fn encode_flac(
     // few cheap ops per sample — negligible next to FLAC's LPC/Rice coding —
     // and this keeps peak RAM bounded by one block regardless of clip length.
     let mut md5 = <md5::Md5 as md5::Digest>::new();
+    let mut md5_quant = make_quantizer();
     for i in 0..frames {
-        for ch in chans {
-            let q = quantize(ch.get(i).copied().unwrap_or(0.0));
+        for (ci, ch) in chans.iter().enumerate() {
+            let q = md5_quant.quantize(ci, ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0));
             md5::Digest::update(&mut md5, &q.to_le_bytes()[0..bytes_per_sample]);
         }
     }
@@ -2253,12 +2784,16 @@ fn encode_flac(
     let mut block_scratch: Vec<i32> = Vec::with_capacity(block_size * channels);
     let mut pos = 0usize;
     let mut frame_number = 0usize;
+    let mut encode_quant = make_quantizer();
     while pos < frames {
         let this_block = (frames - pos).min(block_size);
         block_scratch.clear();
         for i in pos..pos + this_block {
-            for ch in chans {
-                block_scratch.push(quantize(ch.get(i).copied().unwrap_or(0.0)));
+            for (ci, ch) in chans.iter().enumerate() {
+                block_scratch.push(
+                    encode_quant
+                        .quantize(ci, ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0)),
+                );
             }
         }
         let mut framebuf = flacenc::source::FrameBuf::with_size(channels, this_block)
@@ -2606,8 +3141,7 @@ fn interleave_i16(chans: &[Vec<f32>]) -> Vec<i16> {
 }
 
 fn f32_to_i16(v: f32) -> i16 {
-    let clamped = v.clamp(-1.0, 1.0);
-    (clamped * i16::MAX as f32).round() as i16
+    f32_to_i16_sym(v.clamp(-1.0, 1.0))
 }
 
 fn aac_freq_index(sr: u32) -> Option<SampleFreqIndex> {
@@ -2658,6 +3192,7 @@ pub fn export_selection_wav_with_depth(
 
 // Export full in-memory audio to a supported format (wav/mp3/m4a) based on dst extension.
 pub fn export_channels_audio(chans: &[Vec<f32>], sample_rate: u32, dst: &Path) -> Result<()> {
+    crate::app::watch::note_self_write(dst);
     export_channels_audio_with_depth(chans, sample_rate, dst, None)
 }
 
@@ -2667,6 +3202,12 @@ pub fn export_channels_audio_with_depth(
     dst: &Path,
     wav_depth: Option<WavBitDepth>,
 ) -> Result<()> {
+    // A zero-channel buffer (e.g. from a failed decode) must fail here with a
+    // real error — hound panics on a zero block align otherwise.
+    if chans.is_empty() {
+        anyhow::bail!("no audio channels to export: {}", dst.display());
+    }
+    crate::app::watch::note_self_write(dst);
     let ext = dst
         .extension()
         .and_then(|s| s.to_str())
@@ -2721,9 +3262,41 @@ fn unique_sibling_tmp(src: &Path, tag: &str, ext: &str) -> std::path::PathBuf {
     ))
 }
 
+/// Atomic replace on Windows: ReplaceFileW swaps `src`'s contents with `tmp`
+/// in one filesystem transaction, so a crash never leaves the destination
+/// path missing (unlike the park-and-rename fallback below).
+#[cfg(windows)]
+fn replace_file_atomic_win(tmp: &Path, src: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReplaceFileW, REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS,
+    };
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+    let replaced = wide(src);
+    let replacement = wide(tmp);
+    let ok = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            std::ptr::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS | REPLACEFILE_IGNORE_ACL_ERRORS,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Replace `src` with the finished `tmp`, never leaving a window where the
 /// original is deleted and unrecoverable. Optionally keeps `<name>.bak`.
 fn replace_file_with_tmp(tmp: &Path, src: &Path, backup: bool) -> Result<()> {
+    crate::app::watch::note_self_write(src);
     use std::fs;
     if backup {
         let fname = src.file_name().and_then(|s| s.to_str()).unwrap_or("backup");
@@ -2735,8 +3308,16 @@ fn replace_file_with_tmp(tmp: &Path, src: &Path, backup: bool) -> Result<()> {
     if fs::rename(tmp, src).is_ok() {
         return Ok(());
     }
-    // Park the original under a unique sidecar name, move the new file in,
-    // then drop the sidecar; on failure the original is restored.
+    // Windows: ReplaceFileW swaps the file atomically (no crash window).
+    #[cfg(windows)]
+    if src.exists() && replace_file_atomic_win(tmp, src).is_ok() {
+        return Ok(());
+    }
+    // Last resort: park the original under a unique sidecar name, move the
+    // new file in, then drop the sidecar; on failure the original is
+    // restored. A crash between the two renames can leave `src` missing
+    // (recoverable from the sidecar), which is why ReplaceFileW is tried
+    // first.
     let ext = src.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
     let sidecar = unique_sibling_tmp(src, "old", ext);
     fs::rename(src, &sidecar)
@@ -2785,19 +3366,6 @@ pub fn overwrite_gain_audio(src: &Path, gain_db: f32, backup: bool) -> Result<()
 
 // ---- Loudness (LUFS) utilities ----
 
-// K-weighting biquad coefficients for fs=48kHz (BS.1770)
-const KW_B0_1: f32 = 1.5351249;
-const KW_B1_1: f32 = -2.6916962;
-const KW_B2_1: f32 = 1.1983929;
-const KW_A1_1: f32 = -1.6906593;
-const KW_A2_1: f32 = 0.73248076;
-
-const KW_B0_2: f32 = 1.0;
-const KW_B1_2: f32 = -2.0;
-const KW_B2_2: f32 = 1.0;
-const KW_A1_2: f32 = -1.9900475;
-const KW_A2_2: f32 = 0.99007225;
-
 const K_CONST: f32 = -0.691; // 997Hz calibration constant
 
 fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) {
@@ -2817,9 +3385,15 @@ fn biquad_inplace_f32(x: &mut [f32], b0: f32, b1: f32, b2: f32, a1: f32, a2: f32
 }
 
 fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
+    let kw = crate::meter::k_weight_coeffs(48_000);
+    let (s, h) = (kw.shelf, kw.highpass);
     for ch in chans.iter_mut() {
-        biquad_inplace_f32(ch, KW_B0_1, KW_B1_1, KW_B2_1, KW_A1_1, KW_A2_1);
-        biquad_inplace_f32(ch, KW_B0_2, KW_B1_2, KW_B2_2, KW_A1_2, KW_A2_2);
+        biquad_inplace_f32(
+            ch, s.b0 as f32, s.b1 as f32, s.b2 as f32, s.a1 as f32, s.a2 as f32,
+        );
+        biquad_inplace_f32(
+            ch, h.b0 as f32, h.b1 as f32, h.b2 as f32, h.a1 as f32, h.a2 as f32,
+        );
     }
 }
 
@@ -2827,11 +3401,14 @@ fn ensure_sr_48k(chans: &[Vec<f32>], in_sr: u32) -> (Vec<Vec<f32>>, u32) {
     if in_sr == 48_000 {
         return (chans.to_vec(), in_sr);
     }
-    let mut out = Vec::with_capacity(chans.len());
-    for ch in chans {
-        out.push(resample_linear(ch, in_sr, 48_000));
-    }
-    (out, 48_000)
+    // Fast windowed-sinc: the metadata pool runs this per file, and BS.1770's
+    // K-weighted gating is insensitive to the last dB of stop-band rejection,
+    // but linear interpolation's rolloff/imaging measurably skewed LUFS for
+    // high-sample-rate sources.
+    (
+        resample_channels_quality(chans, in_sr, 48_000, ResampleQuality::Fast),
+        48_000,
+    )
 }
 
 fn block_means_power(power: &[f32], win: usize, hop: usize) -> Vec<f64> {
@@ -3347,6 +3924,81 @@ mod tests {
     }
 
     #[test]
+    fn bext_write_read_roundtrip_preserves_other_chunks() {
+        use crate::wave::{read_wav_bext, write_wav_bext, BextFields};
+        let dir = make_temp_dir("bext_roundtrip");
+        let src = dir.join("bwf.wav");
+        export_channels_audio(&synth_stereo(48_000, 0.5), 48_000, &src).expect("export wav");
+        crate::loop_markers::write_loop_markers(&src, Some((5_000, 20_000)))
+            .expect("write loop markers");
+        let audio_before = crate::audio_io::decode_audio_multi(&src).expect("decode before").0;
+
+        // A file without bext reads as None.
+        assert_eq!(read_wav_bext(&src).expect("read"), None);
+
+        let fields = BextFields {
+            description: "Town ambience, morning market".to_string(),
+            originator: "NeoWaves".to_string(),
+            originator_reference: "NW-0042".to_string(),
+            origination_date: "2026-07-16".to_string(),
+            origination_time: "12:34:56".to_string(),
+        };
+        write_wav_bext(&src, &fields).expect("write bext");
+        let loaded = read_wav_bext(&src).expect("read back").expect("bext present");
+        assert_eq!(loaded, fields);
+        // Fixed BWF v1 payload size.
+        let bext = parse_riff_wave_chunks(&src)
+            .unwrap()
+            .into_iter()
+            .find(|c| &c.id == b"bext")
+            .expect("bext chunk");
+        assert_eq!(bext.payload.len(), 602);
+        // Loops and audio survive the rewrite bit-exactly.
+        assert_eq!(
+            crate::loop_markers::read_loop_markers(&src),
+            Some((5_000, 20_000))
+        );
+        assert_eq!(
+            crate::audio_io::decode_audio_multi(&src).expect("decode after").0,
+            audio_before
+        );
+
+        // Overwrite updates in place (no duplicate chunk).
+        let mut updated = fields.clone();
+        updated.description = "Updated".to_string();
+        write_wav_bext(&src, &updated).expect("overwrite bext");
+        let n_bext = parse_riff_wave_chunks(&src)
+            .unwrap()
+            .iter()
+            .filter(|c| &c.id == b"bext")
+            .count();
+        assert_eq!(n_bext, 1);
+        assert_eq!(
+            read_wav_bext(&src).unwrap().unwrap().description,
+            "Updated"
+        );
+
+        // Empty date/time are auto-stamped as yyyy-mm-dd / hh:mm:ss.
+        write_wav_bext(&src, &BextFields::default()).expect("auto stamp");
+        let stamped = read_wav_bext(&src).unwrap().unwrap();
+        assert_eq!(stamped.origination_date.len(), 10);
+        assert_eq!(stamped.origination_time.len(), 8);
+
+        // Over-long fields are truncated to the fixed layout.
+        let long = BextFields {
+            description: "x".repeat(400),
+            originator: "y".repeat(64),
+            ..Default::default()
+        };
+        write_wav_bext(&src, &long).expect("write long fields");
+        let clipped = read_wav_bext(&src).unwrap().unwrap();
+        assert_eq!(clipped.description.len(), 256);
+        assert_eq!(clipped.originator.len(), 32);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn overwrite_gain_wav_preserves_ancillary_chunks() {
         let dir = make_temp_dir("wav_chunk_preserve");
         let src = dir.join("source.wav");
@@ -3816,4 +4468,87 @@ mod tests {
             "12dB mid cut at the tone's frequency should lower its level: flat {rms_flat} cut {rms_cut}"
         );
     }
+    #[test]
+    fn info_and_ixml_roundtrip_and_coexist_with_bext() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_ixml_test_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("meta.wav");
+        // Odd-length comment exercises word-alignment padding.
+        let ch: Vec<f32> = (0..4801).map(|i| (i as f32 * 0.01).sin() * 0.4).collect();
+        export_channels_audio(&[ch].to_vec(), 48_000, &path).expect("export");
+
+        let info = super::InfoFields {
+            name: "Sword Hit 01".into(),
+            artist: "SFX Team".into(),
+            comment: "layered <metal> & \"leather\"".into(),
+        };
+        let ixml = super::IxmlFields {
+            project: "Game & Demo".into(),
+            scene: "S01".into(),
+            take: "3".into(),
+            tape: String::new(),
+            note: "punchy <mid>".into(),
+        };
+        super::write_wav_info_ixml(&path, &info, &ixml).expect("write info+ixml");
+        // bext written afterwards must coexist with both.
+        let bext = super::BextFields {
+            description: "desc".into(),
+            originator: "orig".into(),
+            ..Default::default()
+        };
+        super::write_wav_bext(&path, &bext).expect("write bext");
+
+        let got_info = super::read_wav_info(&path).expect("read info").expect("info present");
+        assert_eq!(got_info, info);
+        let got_ixml = super::read_wav_ixml(&path).expect("read ixml").expect("ixml present");
+        assert_eq!(got_ixml, ixml);
+        let got_bext = super::read_wav_bext(&path).expect("read bext").expect("bext present");
+        assert_eq!(got_bext.description, "desc");
+        // Audio survives all three writes bit-exact in count.
+        let (chans, sr) = crate::audio_io::decode_audio_multi(&path).expect("decode");
+        assert_eq!(sr, 48_000);
+        assert_eq!(chans[0].len(), 4801);
+
+        // Re-write with changed fields replaces (no duplicate chunks).
+        let info2 = super::InfoFields { name: "Renamed".into(), ..info.clone() };
+        super::write_wav_info_ixml(&path, &info2, &ixml).expect("rewrite");
+        let raw = std::fs::read(&path).expect("raw");
+        let count = raw.windows(4).filter(|w| w == b"INAM").count();
+        assert_eq!(count, 1, "INAM must not duplicate on rewrite");
+        assert_eq!(
+            super::read_wav_info(&path).unwrap().unwrap().name,
+            "Renamed"
+        );
+
+        // Empty field sets leave existing chunks untouched.
+        super::write_wav_info_ixml(&path, &Default::default(), &Default::default())
+            .expect("noop write");
+        assert_eq!(
+            super::read_wav_info(&path).unwrap().unwrap().name,
+            "Renamed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn info_ixml_builders_reject_empty_and_escape() {
+        assert!(super::build_info_list_chunk(&Default::default()).is_none());
+        assert!(super::build_ixml_chunk(&Default::default()).is_none());
+        let xml = super::build_ixml_chunk(&super::IxmlFields {
+            note: "a<b>&c\"d'e".into(),
+            ..Default::default()
+        })
+        .expect("chunk");
+        let xml = String::from_utf8(xml).expect("utf8");
+        assert!(xml.contains("a&lt;b&gt;&amp;c&quot;d&apos;e"), "{xml}");
+        assert!(!xml.contains("a<b>"), "raw text must be escaped: {xml}");
+    }
+
 }

@@ -158,7 +158,7 @@ pub struct MetaPool {
 impl MetaPool {
     pub fn enqueue(&self, task: MetaTask) {
         let path = task_path(&task).clone();
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.tasks.insert(path.clone(), task).is_none() {
             inner.lo.push_back(path);
         }
@@ -167,7 +167,7 @@ impl MetaPool {
 
     pub fn enqueue_front(&self, task: MetaTask) {
         let path = task_path(&task).clone();
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.tasks.insert(path.clone(), task);
         if inner.promoted.insert(path.clone()) {
             inner.hi.push_front(path);
@@ -176,7 +176,7 @@ impl MetaPool {
     }
 
     pub fn promote_path(&self, path: &PathBuf) {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.tasks.contains_key(path) && inner.promoted.insert(path.clone()) {
             inner.hi.push_front(path.clone());
             self.shared.cv.notify_one();
@@ -189,7 +189,7 @@ impl MetaPool {
     /// was removed — in that case no `MetaUpdate` will arrive and the caller
     /// must clear its own inflight bookkeeping.
     pub fn cancel_path(&self, path: &Path) -> bool {
-        let mut inner = self.shared.inner.lock().unwrap();
+        let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.promoted.remove(path);
         let removed = inner.tasks.remove(path).is_some();
         if let Some(flag) = inner.running.get(path) {
@@ -249,6 +249,8 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
                 lufs_s_max: None,
                 true_peak_db: None,
                 bpm: audio_io::read_audio_bpm(path),
+                silence_lead_ms: None,
+                silence_tail_ms: None,
                 created_at: info.created_at,
                 modified_at: info.modified_at,
                 cover_art: decode_cover_art_thumbnail(path),
@@ -274,6 +276,8 @@ fn header_meta(path: &PathBuf) -> Result<FileMeta, FileMeta> {
             lufs_s_max: None,
             true_peak_db: None,
             bpm: None,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -343,6 +347,13 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
         crate::wave::build_minmax(&mut thumb, &mono, 128);
         let loudness = crate::wave::loudness_metrics_from_multi(&chans, sr).ok();
         let lufs_i = loudness.map(|l| l.lufs_i);
+        // Same threshold the batch inspection defaults to; two linear scans
+        // over already-decoded channels, so it's computed unconditionally.
+        let (silence_lead_ms, silence_tail_ms) = crate::app::inspection::scan_silence_ms(
+            &chans,
+            sr,
+            crate::app::inspection::DEFAULT_SILENCE_THRESHOLD_DBFS,
+        );
         let bpm = audio_io::read_audio_bpm(path);
         let (ch, bits) = info
             .as_ref()
@@ -380,6 +391,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
             true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
+            silence_lead_ms: Some(silence_lead_ms),
+            silence_tail_ms: Some(silence_tail_ms),
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
             cover_art: decode_cover_art_thumbnail(path),
@@ -451,6 +464,8 @@ fn decode_full_meta(path: &PathBuf) -> Option<FileMeta> {
             lufs_s_max: None,
             true_peak_db: None,
             bpm,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: info.as_ref().and_then(|i| i.created_at),
             modified_at: info.as_ref().and_then(|i| i.modified_at),
             cover_art: decode_cover_art_thumbnail(path),
@@ -492,7 +507,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
             crate::app::threading::lower_current_thread_priority();
             loop {
                 let popped = {
-                    let mut guard = shared.inner.lock().unwrap();
+                    let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     loop {
                         let next_path = loop {
                             if let Some(p) = guard.hi.pop_front() {
@@ -527,7 +542,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                 };
                 let task_path_owned = task_path(&task).clone();
                 run_meta_task(task, &cancel, &tx);
-                let mut guard = shared.inner.lock().unwrap();
+                let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                 guard.running.remove(&task_path_owned);
             }
         });

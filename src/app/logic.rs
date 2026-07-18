@@ -1112,6 +1112,7 @@ impl super::WavesPreviewer {
                     loop_markers_saved: tab.loop_markers_saved,
                     loop_markers_dirty: tab.loop_markers_dirty,
                     markers: tab.markers.clone(),
+                    regions: tab.regions.clone(),
                     markers_committed: tab.markers_committed.clone(),
                     markers_saved: tab.markers_saved.clone(),
                     markers_applied: tab.markers_applied.clone(),
@@ -1480,6 +1481,8 @@ impl super::WavesPreviewer {
                     | SortKey::TruePeak
                     | SortKey::LufsShort
                     | SortKey::LufsMomentary
+                    | SortKey::SilenceLead
+                    | SortKey::SilenceTail
                     | SortKey::Bpm
                     | SortKey::CreatedAt
                     | SortKey::ModifiedAt
@@ -1530,34 +1533,7 @@ impl super::WavesPreviewer {
         tab.selection_anchor_sample = None;
         tab.right_drag_mode = None;
         tab.active_tool = crate::app::types::ToolKind::LoopEdit;
-        tab.tool_state = crate::app::types::ToolState {
-            fade_in_ms: 0.0,
-            fade_out_ms: 0.0,
-            gain_db: 0.0,
-            normalize_target_db: -6.0,
-            loudness_target_lufs: -14.0,
-            pitch_semitones: 0.0,
-            stretch_rate: 1.0,
-            speed_rate: 1.0,
-            warp_time_radius_ms: 150.0,
-            warp_freq_radius_hz: 300.0,
-            loop_repeat: 2,
-            noise_gate_threshold_db: -40.0,
-            noise_gate_attack_ms: 2.0,
-            noise_gate_release_ms: 100.0,
-            eq_low_shelf_freq_hz: 120.0,
-            eq_low_shelf_gain_db: 0.0,
-            eq_mid_freq_hz: 1000.0,
-            eq_mid_gain_db: 0.0,
-            eq_mid_q: 1.0,
-            eq_high_shelf_freq_hz: 8000.0,
-            eq_high_shelf_gain_db: 0.0,
-            compressor_threshold_db: -18.0,
-            compressor_ratio: 3.0,
-            compressor_attack_ms: 10.0,
-            compressor_release_ms: 150.0,
-            compressor_makeup_db: 0.0,
-        };
+        tab.tool_state = crate::app::types::ToolState::default_values();
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
         tab.preview_audio_tool = None;
@@ -1818,6 +1794,20 @@ impl super::WavesPreviewer {
                 tab.markers_dirty = false;
             }
         }
+        match crate::markers::read_regions(path, out_sr, file_sr) {
+            Ok(mut regions) => {
+                for r in regions.iter_mut() {
+                    r.end = r.end.min(tab.samples_len);
+                    r.start = r.start.min(r.end);
+                }
+                regions.retain(|r| r.end > r.start);
+                tab.regions = regions;
+            }
+            Err(err) => {
+                eprintln!("read regions failed {}: {err:?}", path.display());
+                tab.regions.clear();
+            }
+        }
     }
 
     pub(super) fn write_markers_for_tab(&mut self, tab_idx: usize) -> bool {
@@ -1921,6 +1911,11 @@ impl super::WavesPreviewer {
     pub(super) fn select_and_load(&mut self, row_idx: usize, auto_scroll: bool) {
         if row_idx >= self.files.len() {
             return;
+        }
+        // A manual row change ends a running variation audition (the
+        // audition's own advances set the guard flag).
+        if self.variation_audition.is_some() && !self.variation_audition_advancing {
+            self.variation_audition = None;
         }
         self.list_play_pending = false;
         self.selected = Some(row_idx);

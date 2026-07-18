@@ -34,12 +34,246 @@ impl super::WavesPreviewer {
         self.audio.has_audio_source()
     }
 
+    pub fn test_toast_messages(&self) -> Vec<String> {
+        self.toasts.iter().map(|t| t.message.clone()).collect()
+    }
+
+    pub fn test_set_shortcuts_window_open(&mut self, open: bool) {
+        self.show_shortcuts_window = open;
+    }
+
+    pub fn test_shortcuts_window_open(&self) -> bool {
+        self.show_shortcuts_window
+    }
+
+    pub fn test_set_plugin_manager_open(&mut self, open: bool) {
+        self.show_plugin_manager = open;
+    }
+
+    pub fn test_undo_available(&self, redo: bool) -> bool {
+        self.undo_redo_available(redo)
+    }
+
+    pub fn test_trigger_undo_redo(&mut self, redo: bool) -> bool {
+        self.trigger_undo_redo(redo)
+    }
+
+    pub fn test_list_select_all(&mut self) {
+        self.list_select_all();
+    }
+
+    pub fn test_list_clear_selection(&mut self) {
+        self.list_clear_selection();
+    }
+
+    pub fn test_row_secondary_click(&mut self, row_idx: usize) {
+        self.handle_row_secondary_click(row_idx, egui::Modifiers::NONE);
+    }
+
+    pub fn test_set_theme_light(&mut self, light: bool) {
+        self.theme_mode = if light {
+            crate::app::types::ThemeMode::Light
+        } else {
+            crate::app::types::ThemeMode::Dark
+        };
+    }
+
+    pub fn test_theme_is_light(&self) -> bool {
+        self.theme_mode == crate::app::types::ThemeMode::Light
+    }
+
+    pub fn test_plugin_manager_open(&self) -> bool {
+        self.show_plugin_manager
+    }
+
     pub fn test_audio_is_streaming_wav(&self, path: &Path) -> bool {
         self.audio.is_streaming_wav_path(path)
     }
 
     pub fn test_set_auto_play_list_nav(&mut self, enabled: bool) {
         self.auto_play_list_nav = enabled;
+    }
+
+    pub fn test_set_list_click_audition(&mut self, enabled: bool) {
+        self.list_click_audition = enabled;
+    }
+
+    pub fn test_list_click_audition(&self) -> bool {
+        self.list_click_audition
+    }
+
+    pub fn test_inline_rename_path(&self) -> Option<&Path> {
+        self.inline_rename_path.as_deref()
+    }
+
+    pub fn test_list_col_width_stored(&self, key: &str) -> Option<f32> {
+        self.list_col_widths.get(key).copied()
+    }
+
+    pub fn test_push_seen_col_width(&mut self, key: &'static str, width: f32) {
+        self.list_col_widths_seen.push((key, width));
+    }
+
+    pub fn test_apply_seen_col_widths(&mut self) {
+        self.apply_seen_col_widths();
+    }
+
+    pub fn test_set_channel_mute(&mut self, ch: usize, muted: bool) -> bool {
+        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) else {
+            return false;
+        };
+        let n = tab.ch_samples.len();
+        if ch >= n {
+            return false;
+        }
+        tab.ch_muted.resize(n, false);
+        tab.ch_muted[ch] = muted;
+        true
+    }
+
+    pub fn test_set_channel_solo(&mut self, ch: usize, solo: bool) -> bool {
+        let Some(tab) = self.active_tab.and_then(|i| self.tabs.get_mut(i)) else {
+            return false;
+        };
+        let n = tab.ch_samples.len();
+        if ch >= n {
+            return false;
+        }
+        tab.ch_solo.resize(n, false);
+        tab.ch_solo[ch] = solo;
+        true
+    }
+
+    pub fn test_visible_list_paths(&self) -> Vec<std::path::PathBuf> {
+        self.files
+            .iter()
+            .filter_map(|id| self.item_for_id(*id))
+            .map(|item| item.path.clone())
+            .collect()
+    }
+
+    pub fn test_begin_inspection_run(&mut self, paths: Vec<std::path::PathBuf>) {
+        let cfg = self.inspection_cfg.clone();
+        self.begin_inspection_run(paths, cfg);
+    }
+
+    pub fn test_set_inspection_cfg(&mut self, cfg: crate::app::inspection::InspectionConfig) {
+        self.inspection_cfg = cfg;
+    }
+
+    pub fn test_inspection_run_active(&self) -> bool {
+        self.inspection_run_state.is_some()
+    }
+
+    pub fn test_inspection_report_rows(&self) -> usize {
+        self.inspection_report.as_ref().map(|r| r.rows.len()).unwrap_or(0)
+    }
+
+    pub fn test_inspection_report_cancelled(&self) -> Option<bool> {
+        self.inspection_report.as_ref().map(|r| r.cancelled)
+    }
+
+    pub fn test_inspection_row(&self, idx: usize) -> Option<crate::app::inspection::InspectionRow> {
+        self.inspection_report
+            .as_ref()
+            .and_then(|r| r.rows.get(idx))
+            .cloned()
+    }
+
+    pub fn test_inspection_row_for_file(
+        &self,
+        file: &str,
+    ) -> Option<crate::app::inspection::InspectionRow> {
+        self.inspection_report
+            .as_ref()
+            .and_then(|r| r.rows.iter().find(|row| row.file == file))
+            .cloned()
+    }
+
+    pub fn test_show_inspection_window(&self) -> bool {
+        self.show_inspection_window
+    }
+
+    pub fn test_inspection_click_row(&mut self, idx: usize) -> bool {
+        let Some(path) = self
+            .inspection_report
+            .as_ref()
+            .and_then(|r| r.rows.get(idx))
+            .map(|r| std::path::PathBuf::from(&r.path))
+        else {
+            return false;
+        };
+        let Some(row_idx) = self.row_for_path(&path) else {
+            return false;
+        };
+        self.update_selection_on_click(row_idx, egui::Modifiers::NONE);
+        self.selected = Some(row_idx);
+        self.scroll_to_selected = true;
+        true
+    }
+
+    pub fn test_save_inspection_csv(&mut self, path: &Path) -> bool {
+        let Some(report) = self.inspection_report.as_ref() else {
+            return false;
+        };
+        crate::app::inspection::write_batch_inspection_report(path, &report.rows, &report.cfg)
+            .is_ok()
+    }
+
+    pub fn test_cancel_inspection_run(&mut self) {
+        self.cancel_inspection_run();
+    }
+
+    pub fn test_begin_batch_loudnorm(&mut self, paths: Vec<std::path::PathBuf>, target: f32) {
+        self.begin_batch_loudnorm(paths, target);
+    }
+
+    pub fn test_batch_loudnorm_active(&self) -> bool {
+        self.batch_loudnorm_state.is_some()
+    }
+
+    /// (updated, tab_edited, skipped, clip_risk, failed) of the running batch.
+    pub fn test_batch_loudnorm_counts(&self) -> Option<(usize, usize, usize, usize, usize)> {
+        self.batch_loudnorm_state
+            .as_ref()
+            .map(|s| (s.updated, s.tab_edited, s.skipped, s.clip_risk, s.failed))
+    }
+
+    pub fn test_pending_gain_db(&self, path: &Path) -> f32 {
+        self.pending_gain_db_for_path(path)
+    }
+
+    pub fn test_list_undo_once(&mut self) -> bool {
+        self.test_list_undo()
+    }
+
+    pub fn test_engine_channel_masks(&self) -> (u64, u64) {
+        self.audio.channel_masks()
+    }
+
+    /// Write per-channel meter values into the shared engine state as if the
+    /// audio callback had produced them (no real device in tests).
+    pub fn test_inject_channel_meters(&mut self, levels: &[(f32, f32)]) {
+        use std::sync::atomic::Ordering;
+        let n = levels.len().min(crate::audio::METER_CH_SLOTS);
+        for i in 0..crate::audio::METER_CH_SLOTS {
+            let (rms, peak) = levels.get(i).copied().unwrap_or((0.0, 0.0));
+            self.audio.shared.meter_ch_rms[i].store(rms, Ordering::Relaxed);
+            self.audio.shared.meter_ch_peak[i].store(peak, Ordering::Relaxed);
+        }
+        self.audio.shared.meter_ch_count.store(n, Ordering::Relaxed);
+    }
+
+    pub fn test_channel_meter_db(&self) -> Vec<(f32, f32)> {
+        self.meter_ch_db.clone()
+    }
+
+    pub fn test_set_inline_rename_buffer(&mut self, text: &str) -> bool {
+        if self.inline_rename_path.is_none() {
+            return false;
+        }
+        self.inline_rename_buffer = text.to_string();
+        true
     }
 
     pub fn test_mode_name(&self) -> &'static str {
@@ -88,6 +322,36 @@ impl super::WavesPreviewer {
     /// True while an editor apply job (including WORLD resynthesis) runs.
     pub fn test_editor_apply_busy(&self) -> bool {
         self.editor_apply_state.is_some()
+    }
+
+    /// Mirror of the modal busy overlay's block condition.
+    pub fn test_busy_overlay_blocking(&self) -> bool {
+        self.busy_overlay_blocking()
+    }
+
+    /// Close a tab immediately (test-only, no dirty prompt), mimicking the
+    /// index bookkeeping of the interactive close path.
+    pub fn test_force_close_tab(&mut self, tab_idx: usize) -> bool {
+        if tab_idx >= self.tabs.len() {
+            return false;
+        }
+        self.tabs.remove(tab_idx);
+        self.active_tab = match self.active_tab {
+            Some(idx) if idx == tab_idx => {
+                if self.tabs.is_empty() {
+                    None
+                } else {
+                    Some(idx.min(self.tabs.len() - 1))
+                }
+            }
+            Some(idx) if idx > tab_idx => Some(idx - 1),
+            other => other,
+        };
+        true
+    }
+
+    pub fn test_tab_id(&self, tab_idx: usize) -> Option<u64> {
+        self.tabs.get(tab_idx).map(|t| t.tab_id)
     }
 
     /// WORLD feature analysis result for the active tab, if cached:
@@ -818,6 +1082,8 @@ impl super::WavesPreviewer {
             SortKey::TruePeak => "TruePeak",
             SortKey::LufsShort => "LufsShort",
             SortKey::LufsMomentary => "LufsMomentary",
+            SortKey::SilenceLead => "SilenceLead",
+            SortKey::SilenceTail => "SilenceTail",
             SortKey::Bpm => "Bpm",
             SortKey::CreatedAt => "CreatedAt",
             SortKey::ModifiedAt => "ModifiedAt",
@@ -1381,6 +1647,42 @@ impl super::WavesPreviewer {
 
     pub fn test_set_editor_pref_invert_shift_wheel_pan(&mut self, enabled: bool) {
         self.invert_shift_wheel_pan = enabled;
+    }
+
+    pub fn test_meta_silence_ms(&self, path: &std::path::Path) -> Option<(f32, f32)> {
+        let meta = self.meta_for_path(path)?;
+        Some((meta.silence_lead_ms?, meta.silence_tail_ms?))
+    }
+
+    pub fn test_set_silence_columns(&mut self, enabled: bool) {
+        self.list_columns.silence_lead = enabled;
+        self.list_columns.silence_tail = enabled;
+    }
+
+    pub fn test_keymap_assign(&mut self, action: &str, chord: &str) -> Result<(), String> {
+        let action = crate::app::keymap::Action::from_name(action)
+            .ok_or_else(|| format!("unknown action: {action}"))?;
+        let (mods, key) = crate::app::keymap::parse_chord(chord)
+            .ok_or_else(|| format!("bad chord: {chord}"))?;
+        self.keymap_assign(action, mods, key)
+    }
+
+    pub fn test_keymap_effective(&self, action: &str) -> Option<String> {
+        let action = crate::app::keymap::Action::from_name(action)?;
+        self.keymap_effective_chord(action)
+            .map(|(m, k)| crate::app::keymap::chord_text(m, k))
+    }
+
+    pub fn test_keymap_override_count(&self) -> usize {
+        self.keymap_overrides.len()
+    }
+
+    pub fn test_editor_pref_wheel_scrolls(&self) -> bool {
+        self.editor_wheel_scrolls
+    }
+
+    pub fn test_set_editor_pref_wheel_scrolls(&mut self, enabled: bool) {
+        self.editor_wheel_scrolls = enabled;
     }
 
     pub fn test_editor_pref_horizontal_zoom_anchor(&self) -> &'static str {
@@ -1956,6 +2258,8 @@ impl super::WavesPreviewer {
             lufs_s_max: None,
             true_peak_db: None,
             bpm: None,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -2123,6 +2427,13 @@ impl super::WavesPreviewer {
             return false;
         };
         self.rename_file_path(&path, new_name).is_ok()
+    }
+
+    pub fn test_editor_undo(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.undo_in_tab(tab_idx)
     }
 
     pub fn test_list_undo(&mut self) -> bool {

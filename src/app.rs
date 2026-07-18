@@ -19,7 +19,9 @@ type HeavyOverlayMessage = (
 
 mod app_init;
 mod audio_ops;
+mod audition_ops;
 mod auto_trim;
+mod bwf_ops;
 mod auto_trim_ops;
 mod capture;
 mod cli_ops;
@@ -27,12 +29,18 @@ mod cli_workspace;
 mod clipboard_ops;
 mod crash_report_ops;
 mod debug_ops;
+pub mod declick;
+pub mod declip;
+pub mod dehum;
 mod dialogs;
 mod editor_decode_ops;
 mod editor_features;
 mod editor_ops;
+mod duplicate_ops;
 mod editor_viewport;
+pub mod engine_export;
 mod effect_graph_ops;
+pub mod fingerprint;
 mod export_ops;
 mod external;
 mod external_load_jobs;
@@ -43,6 +51,10 @@ mod gain_ops;
 mod helpers;
 mod hf_cache;
 mod input_ops;
+mod inspect_ops;
+mod loudnorm_batch_ops;
+pub mod inspection;
+pub mod keymap;
 #[cfg(feature = "kittest")]
 mod kittest_ops;
 mod list_ops;
@@ -61,6 +73,7 @@ mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
 mod plugin_ops;
+pub mod plugin_preset_ops;
 mod preview;
 mod preview_ops;
 mod project;
@@ -79,6 +92,8 @@ mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
 mod threading;
+pub mod watch;
+mod toast_ops;
 mod tool_ops;
 mod tooling;
 mod transcript;
@@ -98,7 +113,8 @@ use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
-    ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, RateMode,
+    ColumnId, ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode,
+    RateMode,
     StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
     ViewMode, WorkspaceView,
 };
@@ -419,6 +435,10 @@ pub struct WavesPreviewer {
     // unified numeric control via DragValue; no string normalization
     pub pitch_semitones: f32,
     pub meter_db: f32,
+    // per-output-channel meter readback (rms_db, peak_db) + UI peak hold
+    meter_ch_db: Vec<(f32, f32)>,
+    meter_ch_hold_db: Vec<f32>,
+    meter_ch_last_time: Option<std::time::Instant>,
     topbar_volume_rect: Option<egui::Rect>,
     topbar_output_meter_rect: Option<egui::Rect>,
     topbar_search_rect: Option<egui::Rect>,
@@ -432,6 +452,9 @@ pub struct WavesPreviewer {
     pub meta_pool: Option<meta::MetaPool>,
     pub meta_inflight: rustc_hash::FxHashSet<PathBuf>,
     meta_sort_pending: bool,
+    // High-water mark of the meta backlog since it last drained; the topbar
+    // "Meta n/m" progress divides by this.
+    meta_backlog_peak: usize,
     /// Cached (computed_at, count) for the pending-gain scan; the topbar and
     /// list header read this every frame and a full O(n) item scan at 140k
     /// files is far too hot for the frame loop.
@@ -575,6 +598,15 @@ pub struct WavesPreviewer {
     // dynamic row height for wave thumbnails (list view)
     pub wave_row_h: f32,
     pub list_columns: ListColumnConfig,
+    // Display order of list columns (always a sanitized permutation of
+    // ColumnId::ALL; visibility stays in `list_columns`).
+    pub list_column_order: Vec<types::ColumnId>,
+    // persisted per-column widths (prefs.txt); key = column id in table.rs
+    list_col_widths: std::collections::BTreeMap<String, f32>,
+    // widths observed while rendering the current frame's header
+    list_col_widths_seen: Vec<(&'static str, f32)>,
+    list_table_ui_id: Option<egui::Id>,
+    list_table_col_count: usize,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
     /// TTL cache for `Path::is_file()` checks in the list view. Probing the
     /// filesystem for every visible row on every frame stalls the UI thread,
@@ -603,6 +635,19 @@ pub struct WavesPreviewer {
     /// until the project is saved (sidecar audio persists them) and they're removed
     pub recording_temp_files: Vec<PathBuf>,
     clipboard_c_was_down: bool,
+    editor_audio_clipboard: Option<EditorAudioClip>,
+    inspection_run_state: Option<InspectionRunState>,
+    inspection_report: Option<InspectionReportState>,
+    show_inspection_dialog: bool,
+    show_inspection_window: bool,
+    inspection_window_filter_idx: u8,
+    batch_loudnorm_state: Option<BatchLoudnormState>,
+    show_loudnorm_dialog: bool,
+    loudnorm_dialog_target: f32,
+    inspection_cfg: crate::app::inspection::InspectionConfig,
+    editor_clip_c_was_down: bool,
+    editor_clip_x_was_down: bool,
+    editor_clip_v_was_down: bool,
     clipboard_v_was_down: bool,
     undo_z_was_down: bool,
     // list undo/redo
@@ -636,6 +681,9 @@ pub struct WavesPreviewer {
     scroll_to_selected: bool,
     last_list_scroll_at: Option<std::time::Instant>,
     auto_play_list_nav: bool,
+    // single click = select + audition (default). When false, single click only
+    // selects; audition happens via Space / keyboard nav / autoplay.
+    list_click_audition: bool,
     suppress_list_enter: bool,
     list_has_focus: bool,
     search_has_focus: bool,
@@ -656,6 +704,8 @@ pub struct WavesPreviewer {
     editor_play_selection_state: Option<(usize, usize)>,
     invert_wave_zoom_wheel: bool,
     invert_shift_wheel_pan: bool,
+    // When on, a plain wheel scrolls the view horizontally and Ctrl+wheel zooms.
+    editor_wheel_scrolls: bool,
     horizontal_zoom_anchor_mode: EditorHorizontalZoomAnchorMode,
     editor_pause_resume_mode: EditorPauseResumeMode,
     // processing mode
@@ -671,6 +721,25 @@ pub struct WavesPreviewer {
     list_preview_partial_ready: bool,
     list_preview_pending_path: Option<PathBuf>,
     list_play_pending: bool,
+    variation_audition: Option<types::VariationAuditionState>,
+    variation_audition_advancing: bool,
+    mix_audition_state: Option<types::MixAuditionState>,
+    duplicate_scan_state: Option<duplicate_ops::DuplicateScanState>,
+    duplicate_report: Option<duplicate_ops::DuplicateReportState>,
+    show_duplicates_window: bool,
+    // Folder watch (polling): rescans the root and applies disk changes.
+    folder_watch: Option<watch::FolderWatch>,
+    watch_folder_enabled: bool,
+    watch_poll_interval_ms: u64,
+    // "Find Duplicates": also match copies shifted in time (silence-padded
+    // variants) up to MAX_SIMILAR_OFFSET_MS, at a slightly raised threshold.
+    dup_allow_offset: bool,
+    show_engine_export_dialog: bool,
+    engine_export_profile: engine_export::EngineProfile,
+    show_bwf_dialog: bool,
+    bwf_fields: crate::wave::BextFields,
+    bwf_info: crate::wave::InfoFields,
+    bwf_ixml: crate::wave::IxmlFields,
     list_preview_prefetch_tx: Option<std::sync::mpsc::Sender<ListPreviewPrefetchResult>>,
     list_preview_prefetch_rx: Option<std::sync::mpsc::Receiver<ListPreviewPrefetchResult>>,
     list_preview_prefetch_inflight: HashSet<PathBuf>,
@@ -678,6 +747,8 @@ pub struct WavesPreviewer {
     list_preview_cache_order: VecDeque<PathBuf>,
     plugin_search_paths: Vec<PathBuf>,
     plugin_search_path_input: String,
+    plugin_preset_name_input: String,
+    show_plugin_manager: bool,
     plugin_catalog: Vec<PluginCatalogEntry>,
     plugin_scan_state: Option<PluginScanState>,
     plugin_scan_error: Option<String>,
@@ -728,6 +799,23 @@ pub struct WavesPreviewer {
     // export/save settings (simple, in-memory)
     export_cfg: ExportConfig,
     show_export_settings: bool,
+    show_shortcuts_window: bool,
+    show_keymap_window: bool,
+    show_undo_history_window: bool,
+    show_regions_window: bool,
+    // Alt+drag scrub: saved loop/transport state while active.
+    scrub_state: Option<crate::app::types::ScrubState>,
+    // UI scratch for the WORLD aperiodicity multiplier slider.
+    world_ap_slider: f32,
+    // Spectral-region clipboard (Ctrl+C/V in Spec/Log views with a
+    // frequency selection).
+    spectral_clipboard: Option<crate::app::types::SpectralClip>,
+    // Transient harmonic action (Ctrl+click in Spec/Log views).
+    harmonic_action: Option<crate::app::types::HarmonicAction>,
+    // User chord overrides for Table-dispatched actions (persisted in prefs).
+    keymap_overrides: std::collections::HashMap<keymap::Action, (keymap::Mods, egui::Key)>,
+    // Row currently waiting for a key press in the rebinding window.
+    keymap_capture: Option<keymap::Action>,
     show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,
@@ -738,6 +826,11 @@ pub struct WavesPreviewer {
     item_bg_mode: ItemBgMode,
     show_rename_dialog: bool,
     rename_target: Option<PathBuf>,
+    // inline (in-cell) rename state; path identifies the row so sorting can't
+    // retarget the edit.
+    inline_rename_path: Option<PathBuf>,
+    inline_rename_buffer: String,
+    inline_rename_focus_next: bool,
     rename_input: String,
     rename_focus_next: bool,
     rename_error: Option<String>,
@@ -775,6 +868,13 @@ pub struct WavesPreviewer {
     // leaving dirty editor confirmation
     leave_intent: Option<LeaveIntent>,
     show_leave_prompt: bool,
+    /// Transient user-facing notifications (see toast_ops).
+    toasts: Vec<Toast>,
+    /// Watermark over wave::RESAMPLE_FALLBACK_COUNT (see toast_ops).
+    last_seen_resample_fallbacks: u64,
+    // quit confirmation for unsaved in-memory edits
+    show_quit_prompt: bool,
+    force_quit: bool,
     pending_activate_path: Option<PathBuf>,
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
@@ -1140,6 +1240,66 @@ impl WavesPreviewer {
         };
         let audio_sample = self.map_display_to_audio_sample(tab, display_sample);
         self.audio.seek_to_sample(audio_sample);
+    }
+
+    /// Push the active editor tab's channel mute/solo state to the audio
+    /// engine every frame. Anything other than the editor workspace (list
+    /// preview, effect graph) plays with all channels audible, so a stale
+    /// mask can never leak across sources.
+    /// Read the callback's per-channel meters and maintain UI-side peak-hold
+    /// ballistics. `meter_ch_db` holds (rms_db, peak_db) per output channel.
+    pub(super) fn update_channel_meters(&mut self) {
+        const FLOOR_DB: f32 = -80.0;
+        let (count, rms, peak) = self.audio.channel_meter_snapshot();
+        let now = std::time::Instant::now();
+        let dt = self
+            .meter_ch_last_time
+            .map(|t| now.duration_since(t).as_secs_f32())
+            .unwrap_or(0.0)
+            .clamp(0.0, 0.25);
+        self.meter_ch_last_time = Some(now);
+        let db_of = |v: f32| {
+            if v <= 1.0e-4 {
+                FLOOR_DB
+            } else {
+                (20.0 * v.log10()).max(FLOOR_DB)
+            }
+        };
+        self.meter_ch_db.resize(count, (FLOOR_DB, FLOOR_DB));
+        self.meter_ch_hold_db.resize(count, FLOOR_DB);
+        for i in 0..count {
+            let rms_db = db_of(rms[i]);
+            let peak_db = db_of(peak[i]);
+            self.meter_ch_db[i] = (rms_db, peak_db);
+            let hold = &mut self.meter_ch_hold_db[i];
+            *hold = (*hold - dt * 12.0).max(peak_db).max(FLOOR_DB);
+        }
+    }
+
+    pub(super) fn sync_channel_masks_to_engine(&self) {
+        let (mute, solo) = if self.is_editor_workspace_active() {
+            self.active_tab
+                .and_then(|idx| self.tabs.get(idx))
+                .map(|tab| {
+                    let mut mute = 0u64;
+                    let mut solo = 0u64;
+                    for (c, &m) in tab.ch_muted.iter().enumerate().take(64) {
+                        if m {
+                            mute |= 1 << c;
+                        }
+                    }
+                    for (c, &s) in tab.ch_solo.iter().enumerate().take(64) {
+                        if s {
+                            solo |= 1 << c;
+                        }
+                    }
+                    (mute, solo)
+                })
+                .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        self.audio.set_channel_masks(mute, solo);
     }
 
     pub(super) fn playback_sync_state_snapshot(&mut self) {
@@ -1611,6 +1771,8 @@ impl WavesPreviewer {
             lufs_s_max: loudness.and_then(|l| l.lufs_s_max),
             true_peak_db: loudness.and_then(|l| l.true_peak_db),
             bpm,
+            silence_lead_ms: None,
+            silence_tail_ms: None,
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -2384,6 +2546,9 @@ impl WavesPreviewer {
             Arc::new(tab.ch_samples.clone())
         };
         EditorUndoState {
+            // Overwritten by capture_undo_state_labeled at sites whose
+            // operation isn't the active tool.
+            label: tab.active_tool.label().to_string(),
             ch_samples,
             samples_len: tab.samples_len,
             samples_len_visual: tab.samples_len_visual,
@@ -2414,6 +2579,7 @@ impl WavesPreviewer {
             dirty: tab.dirty,
             approx_bytes,
             markers: tab.markers.clone(),
+            regions: tab.regions.clone(),
             markers_committed: tab.markers_committed.clone(),
             markers_applied: tab.markers_applied.clone(),
             loop_region_applied: tab.loop_region_applied,
@@ -2445,6 +2611,12 @@ impl WavesPreviewer {
         if let Some(st) = &state {
             *bytes = bytes.saturating_sub(st.approx_bytes);
         }
+        state
+    }
+
+    fn capture_undo_state_labeled(tab: &EditorTab, label: &str) -> EditorUndoState {
+        let mut state = Self::capture_undo_state(tab);
+        state.label = label.to_string();
         state
     }
 
@@ -2509,6 +2681,7 @@ impl WavesPreviewer {
             tab.plugin_fx_draft = state.plugin_fx_draft;
             tab.show_waveform_overlay = state.show_waveform_overlay;
             tab.markers = state.markers;
+            tab.regions = state.regions;
             tab.markers_committed = state.markers_committed;
             tab.markers_applied = state.markers_applied;
             tab.loop_region_applied = state.loop_region_applied;
@@ -2561,7 +2734,8 @@ impl WavesPreviewer {
             let Some(undo_state) = undo_state else {
                 return false;
             };
-            let redo_state = Self::capture_undo_state(tab);
+            // The redo entry represents the operation being undone.
+            let redo_state = Self::capture_undo_state_labeled(tab, &undo_state.label);
             (undo_state, redo_state)
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
@@ -2579,7 +2753,8 @@ impl WavesPreviewer {
             let Some(redo_state) = redo_state else {
                 return false;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            // The undo entry regains the label of the operation being redone.
+            let undo_state = Self::capture_undo_state_labeled(tab, &redo_state.label);
             (redo_state, undo_state)
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {

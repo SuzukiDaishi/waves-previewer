@@ -4,6 +4,110 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### List & Pipeline (P7)
+- **Folder watch**: the open folder is polled every ~3 s (low-priority thread, scan filters shared); files added/removed/changed on disk merge into, leave, or refresh the list automatically with a summary toast. Files open in an editor tab are never touched, the app's own writes are suppressed via a 5 s registry, and bulk operations pause polling. Settings toggle, default on.
+- **Column reorder + per-project layout**: list columns can be reordered (Settings > List Columns > Column Order, up/down per column); the order is a stable ColumnId permutation driving definitions, headers, and cells from one loop. Sessions (.nwsess) now store per-project column order and widths (serde-defaulted; old files unchanged).
+- **Silence columns**: optional Sil.Head / Sil.Tail columns (leading/trailing silence ms at -60 dBFS, full-decode metadata), sortable, session/CLI aware.
+- **Offset-tolerant duplicates**: fingerprints are content-aligned (leading silence trimmed and recorded), so silence-padded copies match frame-for-frame; offset matches need +2.5% similarity, groups show the offset, and O(1) duration/centroid gates skip hopeless comparisons. Toggleable per scan (default on).
+- **RIFF INFO + iXML batch write**: the BWF dialog also writes INAM/IART/ICMT and PROJECT/SCENE/TAKE/TAPE/NOTE via dependency-free chunk builders (round-trip tested; empty sections leave existing chunks alone).
+- **Meta backlog progress**: a "Meta n/m" topbar item appears when more than 200 metadata jobs are queued (visible rows were already prioritized to the queue front).
+
+### Playback & Metering (P6)
+- **Realtime LUFS + true peak**: the audio callback feeds a lock-free tap ring; a low-priority thread runs BS.1770 K-weighting (recomputed for the device sample rate and pinned to the ITU 48 kHz table by test), publishes momentary (400 ms) / short-term (3 s) LUFS and 4x-oversampled true peak, shown as a compact "M / S / TP" readout next to the topbar output meter. Readings invalidate ~500 ms after playback stops.
+- **Goniometer polish**: the STEREO pane's Lissajous mapping is now a unit-tested pure function (mono collapses to the mid axis, L = -R to the side axis) and the smoothed correlation value is shown numerically beside the pane title.
+- **Play Selected Together** (List menu): decode up to 16 selected files, align sample rates, mix at 1/sqrt(n), and play the sum once — a quick layering check without leaving the list.
+- **Resampler quality**: the Pitch/Time-Stretch offline pre-stage and lossy-encode paths now use rubato sinc SRC (Good), and the LUFS 48 kHz conversion uses Fast sinc instead of linear interpolation (loudness goldens unchanged). Multichannel LUFS weighting (5.1/7.1 surround x1.41, LFE excluded) confirmed shipped and its stale docs corrected.
+
+### DSP & RX Parity (P5)
+- **Noise-shaped dither + 24-bit**: export dither is now a mode (Off / TPDF / TPDF + noise shaping); noise shaping adds per-channel 2nd-order error-feedback (NTF = (1 - z^-1)^2) pushing quantization noise out of the most audible band. A unified Quantizer backs all PCM paths (WAV/AIFF/converter/FLAC two-pass, determinism preserved), and 24-bit exports can opt into dithering. Prefs migrate from the old boolean key.
+- **De-clip tool**: detects flat runs pinned at the clipping rails (peak-relative threshold + corner test that rejects smooth low-frequency crests, square-wave rails rejected by run length) and rebuilds the chopped crests with the de-click Hermite bridge — the repair can rise above the rail (float headroom preserved). Scan overlay + async Apply + CLI support.
+- **De-hum tool**: cascade of narrow RBJ biquad cuts at the mains fundamental and up to 16 harmonics (STFT rejected: 2048-bin resolution is too coarse for 50/60 Hz). Detect sweeps 45-65 Hz with Goertzel probes; Hz/harmonics/Q/depth adjustable; a selection limits the apply via crossfaded splice. CLI supported.
+- **Edit history panel** (Edit > History...): labeled undo/redo entries (operation names from the concrete apply paths), click to jump multiple steps through the existing undo/redo machinery.
+- **Region list** (Edit > Regions...): labeled ranges on the editor tab that ride undo and destructive-edit remapping like markers; add-from-selection, inline rename, click-to-select, sidecar (<file>.regions.json) + .nwsess persistence, CSV export.
+- **Scrub playback**: Alt+drag on the waveform loops a ±40 ms window under the pointer via the existing loop atomics; release restores the previous loop/transport state exactly.
+- **WORLD aperiodicity editing**: per-frame breathiness multiplier draft (Set All / Set Selection / Reset) baked in at Resynthesize, clamped into 0..1 per band; fine 5 ms re-analysis resamples the curve.
+- **Spectral region copy/paste**: with a frequency selection in Spec/Log views, Ctrl+C copies band-masked STFT frames and Ctrl+V replaces (Ctrl+Shift+V adds) the band content at the selection start/playhead, snapped to the hop grid, same-sample-rate only.
+- **Harmonic action**: Ctrl+click a partial in Spec/Log — f0 refines onto the nearest peak, harmonic bands highlight, and one multi-band STFT pass mutes or attenuates the whole stack over the selection.
+
+### Usability Completion (P4)
+- **Non-blocking heavy applies**: pitch/stretch/speed/loudness, de-click/de-noise, spectral warp/brush/heal, and WORLD resynthesis no longer raise the app-wide modal overlay. Only the target tab is gated (in-tab banner); the list, other tabs, and playback of other sources stay interactive. Progress + Cancel live in the topbar activity slot. Tabs are tracked by a stable id, so closing a tab mid-apply discards the result instead of corrupting whichever tab shifted into its index. One apply runs at a time.
+- **Rebindable shortcuts**: Help > Customize Shortcuts... lets table-dispatched chords be reassigned by clicking a row and pressing the new chord (conflicts across overlapping contexts refused, per-row Reset / Reset All, persisted as `keymap=` prefs lines). The read-only shortcut list shows the effective (overridden) chords.
+- **Tool icon toolbar**: the editor's 22-item Tool ComboBox is now a grouped icon toolbar (hover for names, wraps in narrow panels) with the active tool highlighted; selection semantics (preview discard, gesture reset) unchanged.
+- **Editor zoom/nav keys**: `+`/`=` zoom in, `-` zooms out around the playhead; `[`/`]` page the view by one visible width.
+- **Wheel behavior option**: Settings > "Wheel scrolls the view (Ctrl+wheel zooms)" turns a plain vertical wheel into horizontal view scrolling (Ctrl+wheel / pinch still zooms). Default stays zoom-on-wheel.
+- **Edit menu** (File | Edit | Export) with Undo/Redo wired to the same dispatch as `Ctrl+Z`/`Ctrl+Y`, enabled from the editor/list/effect-graph undo stacks.
+- **List context menu**: Open in Editor and Reveal in Folder at the top; Select All / Clear Selection at the bottom. Right-clicking inside a multi-selection keeps it.
+- **Empty-state onboarding**: with no folder and no items, the list shows a centered panel with Open Folder... and up to five recent sessions.
+- **Polarity invert boundary smoothing** (option, default off): ~2 ms polarity crossfade at interior range boundaries so partial inverts don't click; edge-touching ranges and the default path stay bit-exact.
+
+### Pipeline & QA (Stage B / P3)
+- **Naming-rule check** in batch inspection (GUI dialog + CLI `--naming-pattern`): file stems failing the regex get warnings; an invalid pattern reports a config error on every row. Pattern persists to prefs.
+- **Find Duplicates** (List menu): worker-pool fingerprinting (gain-invariant spectral-shape hashes + exact content hash) clusters exact duplicates and perceptually similar files into a results window with click-to-select and CSV export.
+- **Export Engine Metadata** (List menu + CLI `batch engine-export`): Unity JSON / FMOD JSON / Wwise TSV metadata tables (loops, sample rate, channels, length, LUFS) for the selection or list — no audio conversion.
+- **Edit BWF Metadata** (List menu): batch-write the bext chunk (description/originator/reference, auto-stamped date/time) into selected WAVs, preserving all other chunks; non-WAV files are skipped and counted. iXML remains out of scope.
+- **WORLD formant editing**: a Formant slider (0.5x-2.0x) in the World view warps the spectral envelope along frequency at resynthesis — formant shifts without pitch changes, applied in both the display-grid and fine 5 ms re-analysis paths.
+- **Light theme pass**: hand-painted widgets (list selection/markers, dirty/error accents, volume slider, output meter) now draw through a theme-aware palette; the editor's audio canvas intentionally stays dark (DAW-style) in both themes.
+
+### Spectral Repair & Restoration (Stage A)
+- **Spectral Brush** (Spec/Log views, next to Spectral Warp): drag on the spectrogram to paint content out RX-eraser-style. Stamps attenuate magnitude with Gaussian falloff in time and frequency (Strength 3-80 dB, Radius ms/Hz baked per stamp), stack additively in dB (clamped at 80 dB), render a preview on release, and Apply through the async pipeline with undo. Only the influenced region is processed; audio outside the stroke stays bit-identical.
+- **Heal Selection** (beside the spectral Mute button): rebuilds the selected time range (optionally band-limited by a frequency selection) from the surrounding audio — per-bin magnitudes interpolate across the gap between the context averages and phase advances at the measured per-bin velocity, so steady tones bridge dropouts coherently. Selections over 120 s are refused with a toast.
+- **De-click tool**: second-difference residual detection with per-window MAD-adaptive threshold (sensitivity slider), Hermite-bridge repair. Scan marks the detected spans in red on the waveform (invalidated by any edit or sensitivity change); Apply repairs whole file or selection with undo. Also available via CLI `apply`.
+- **De-noise tool**: learn a per-channel noise profile from a noise-only selection, then reduce it via power spectral subtraction (Reduction = max attenuation floor, Strength = over-subtraction) with asymmetric gain smoothing against musical noise. Preview/Apply through the shared worker pipelines; selection-scoped applies crossfade their edges.
+- Shared STFT engine refactor: `stft_process_frames` (reflect-padded Hann WOLA, 2048/512) now backs the band gain, brush, heal, and noise-profile paths.
+
+### Waveform Editing Completion (Stage A)
+- **Mix paste** (`Ctrl+Shift+V`) sums the clipboard into the buffer without changing length; **crossfade-insert paste** (`Ctrl+Alt+V`) splices the clip in with equal-power joins at both seams.
+- **Pencil tool**: at high zoom (> 2 px per sample) drag on the waveform to draw sample values directly (linear interpolation between drag points, lane-targeted, one undo step per stroke).
+- **Channel-scoped edits**: with a Custom channel view active, gain / normalize / fade / mute / noise gate / EQ / compressor / DC removal / polarity invert apply only to the visible channels (normalize measures its peak within them). Light previews follow the same mask and the inspector shows "Applies to: ch N". File-level list gain deliberately ignores the mask.
+- `EditorTab` construction deduplicated into `EditorTab::new_base` (one place to default new fields).
+
+### Plugins (Stage A)
+- **Presets & A/B**: save/load/delete named parameter presets (JSON per plugin under the NeoWaves config dir, state blob included) from both the effect-graph plugin node and the editor's Plugin FX tool; an A/B slot stores a second parameter set and swaps on demand.
+- **Plugin Manager window** (Tools menu): catalog overview, rescan with status/error display, and search-path management persisted to prefs.
+- **Auto preview**: a Plugin FX toggle re-renders the preview ~300 ms after any parameter change (sliders, Enable/Bypass, presets, A/B, native-GUI edits) with a position-preserving buffer swap, so tweaking parameters feels continuous.
+
+### List (Stage A)
+- **Multi-variation audition**: with 2+ rows selected, List > Audition Selection plays them in round-robin or random order (never the same file twice in a row), advancing on each natural playback end. Stop playback, select another row, or press Cancel on the topbar "Audition n/m" item to end it.
+
+### Batch QA (P2 batch)
+- **Inspect Files (QA)**: batch inspection over the selection or the whole list — effective true-peak ceiling, integrated-loudness window, leading/trailing silence thresholds, and loop-marker validity (bounds checking that the readers never did). Runs on up to four low-priority worker threads with topbar progress + cancel; results open in a severity-filtered window (click a row to select the file, Save CSV...). Same checks are exposed as `--cli batch inspect` with json/csv/md/txt reports.
+- **Normalize Loudness (GUI)**: batch loudness normalize to a target LUFS (default -14) for the selection or whole list. Measures via the async metadata pool, then routes each file's gain delta through the unified gain framework — pending list gain (one undo action for the whole batch) or a destructive edit for files open in editor tabs. Non-destructive: no audio files are written; clip-risk files are counted and reported in the completion toast.
+
+### Waveform Editing Basics (P2 batch)
+- New editor tools: **Invert Polarity** (flip sample polarity over the selection or whole file) and **DC Offset** removal (per-channel mean subtraction with a live measured-DC readout), both with preview, undo, session restore, and CLI apply support.
+- **Insert Silence** tool inserts N ms of zeros at the selection start (or the playhead); markers, loop regions, selections, and fade ranges after the insert point shift right. Built on a shared insert infrastructure (`editor_insert_channels_at`).
+- **In-editor audio cut/copy/paste-insert**: Ctrl+C/X/V in the editor workspace operate on an in-app audio clipboard. Paste splices at the selection start / playhead with undo; cross-tab pastes are resampled to the target buffer rate and channel-adapted.
+- **TPDF dither** (default on, Settings toggle) when quantizing to 16-bit integer PCM in the WAV/AIFF/FLAC/gain-export writers. Deterministic generator keeps FLAC's two-pass MD5 self-consistent.
+
+### Usability (P1 batch)
+- New Help menu with a read-only Keyboard Shortcuts window, generated from a central keymap table (`src/app/keymap.rs`); simple shortcut dispatch now goes through the table so a future rebinding UI only needs to swap the lookup.
+- Destructive editor keys `C` (delete+join) and `T` (trim) show an info toast pointing at Ctrl+Z after they fire.
+- Editor: `Home`/`End` seek to start/end, `Z` zooms to the selection, `Esc` discards a pending tool preview.
+- Editor: per-channel playback mute/solo (M/S menu next to the channel view toggles). Monitoring only - the masks resolve to channel selection inside the callback's fold-down mapping, are excluded from undo/dirty/save, and never apply to list playback.
+- Topbar output meter shows per-output-channel RMS bars with peak-hold ticks while the callback reports multichannel levels (falls back to the old single bar otherwise).
+- List: optional "Single click auditions" setting (default on = current behavior). When off, a single click only selects; Space, keyboard navigation, and Auto Play still audition. Double-click still opens the editor.
+- List: inline rename via `F2` (or the context menu) with Enter to commit and Esc to cancel; errors surface as toasts. The modal rename stays for batch use.
+- List: column widths persist across sessions (saved when a resize drag ends; window-squeeze relayouts are never saved). Column reorder and per-project widths remain out of scope.
+
+### Data Safety
+- Windows file overwrite now uses `ReplaceFileW` (atomic swap), removing the crash window where the destination could be left missing during the park-and-rename fallback (which remains as last resort).
+- Gain / Normalize / Loudness applies no longer hard-clip the editing buffer to +/-1.0; editing buffers keep full float headroom (boost then cut round-trips losslessly). Clipping only happens at export/quantize and playback output. An info toast reports when an edit leaves peaks above 0 dBFS.
+- Closing the window with unsaved in-memory edits (dirty tabs, cached edits, pending gains) now asks for confirmation instead of silently discarding them; Ctrl+W on a dirty tab routes through the Leave Editor prompt. Screenshot/debug automation exits bypass the prompt.
+
+### Notifications
+- New toast overlay (below the topbar, click to dismiss, auto-expiring) surfaces failures that previously only reached the debug log or stderr: session save/save-as/close errors, export failures, editor tab-limit skips, and resampler quality fallbacks.
+
+### Playback
+- Sources with more channels than the output device are folded down (each output channel averages the source channels congruent to it) instead of dropping the surplus channels.
+- Tool previews (Fade / Gain / Normalize / Loudness / Reverse / NoiseGate / EQ / Compressor / LoopEdit unwrap / MusicAnalyze) now play the per-channel buffer instead of a mono mixdown, preserving stereo imaging. Normalize previews measure peak across all channels, matching the destructive apply.
+
+### Correctness
+- Loop edits via the K/P shortcuts now push editor undo states (matching L / Inspector loop applies).
+- Digit-key seek fixed: both `0` and `1` used to jump to the end. Keys `1..9,0` now span start (0%) to end (100%) in keyboard row order.
+- 16-bit PCM encode/decode uses symmetric 32768 scaling (standard convention; -1.0 maps to -32768). The generic integer writer quantizes symmetrically for all depths.
+- Spectral/feature lanes (Spec/Log/Mel/Tempogram/Chromagram/World) no longer drift up to one STFT hop against the waveform lane at high zoom (fractional per-column frame mapping).
+- Meta pool and VST3 state-stream mutexes recover from poisoning instead of cascading panics; removed per-event wheel debug prints.
+
 ## 0.20260709.0 - 2026-07-09
 
 ### Unified Gain Framework: List Volume Changes Are Editor Edits

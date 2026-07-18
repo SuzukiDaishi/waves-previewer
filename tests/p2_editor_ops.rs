@@ -1,0 +1,457 @@
+#[cfg(feature = "kittest")]
+mod p2_editor_ops {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use egui_kittest::Harness;
+    use neowaves::kittest::harness_with_startup;
+    use neowaves::{StartupConfig, WavesPreviewer};
+
+    fn make_temp_dir(tag: &str) -> PathBuf {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "neowaves_p2_editor_ops_{tag}_{}_{}_{}",
+            std::process::id(),
+            now_ms,
+            seq
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp test dir");
+        dir
+    }
+
+    fn synth_stereo(sr: u32, secs: f32) -> Vec<Vec<f32>> {
+        let frames = ((sr as f32) * secs).max(1.0) as usize;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let t = (i as f32) / (sr as f32);
+            left.push((t * 220.0 * std::f32::consts::TAU).sin() * 0.30);
+            right.push((t * 440.0 * std::f32::consts::TAU).sin() * 0.25);
+        }
+        vec![left, right]
+    }
+
+    fn harness_with_folder(dir: PathBuf) -> Harness<'static, WavesPreviewer> {
+        let mut cfg = StartupConfig::default();
+        cfg.open_folder = Some(dir);
+        cfg.open_first = false;
+        harness_with_startup(cfg)
+    }
+
+    fn wait_for_scan(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if !harness.state().files.is_empty() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("scan timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_tab_ready(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            let ready = harness
+                .state()
+                .active_tab
+                .and_then(|idx| harness.state().tabs.get(idx))
+                .map(|tab| {
+                    tab.samples_len > 0
+                        && (!tab.loading || harness.state().test_audio_has_samples())
+                })
+                .unwrap_or(false);
+            if ready {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                panic!("tab ready timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn open_editor_tab(
+        tag: &str,
+        channels: &[Vec<f32>],
+    ) -> (Harness<'static, WavesPreviewer>, PathBuf) {
+        let dir = make_temp_dir(tag);
+        let src = dir.join("source.wav");
+        neowaves::wave::export_channels_audio(channels, 48_000, &src).expect("export source wav");
+        let mut harness = harness_with_folder(dir.clone());
+        wait_for_scan(&mut harness);
+        assert!(harness.state_mut().test_open_first_tab());
+        wait_for_tab_ready(&mut harness);
+        (harness, dir)
+    }
+
+    fn tab_samples(harness: &Harness<'static, WavesPreviewer>) -> Vec<Vec<f32>> {
+        let idx = harness.state().active_tab.expect("active tab");
+        harness.state().tabs[idx].ch_samples.clone()
+    }
+
+    #[test]
+    fn invert_polarity_negates_range_and_undoes() {
+        let (mut harness, dir) = open_editor_tab("invert", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+
+        // Whole-file invert: every sample exactly negated.
+        assert!(harness
+            .state_mut()
+            .test_apply_invert_polarity_frac(0.0, 1.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        assert_eq!(before.len(), after.len());
+        for (b_ch, a_ch) in before.iter().zip(after.iter()) {
+            assert_eq!(b_ch.len(), a_ch.len());
+            for (b, a) in b_ch.iter().zip(a_ch.iter()) {
+                assert_eq!(*a, -*b, "sample must be exactly negated");
+            }
+        }
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].dirty);
+
+        // Undo restores the original samples bit-exactly.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        let restored = tab_samples(&harness);
+        assert_eq!(before, restored);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dc_offset_removal_zeroes_mean_and_undoes() {
+        // Sine + constant bias per channel.
+        let mut chans = synth_stereo(48_000, 0.5);
+        for v in chans[0].iter_mut() {
+            *v += 0.15;
+        }
+        for v in chans[1].iter_mut() {
+            *v -= 0.08;
+        }
+        let (mut harness, dir) = open_editor_tab("dc", &chans);
+        let before = tab_samples(&harness);
+
+        assert!(harness.state_mut().test_apply_remove_dc_frac(0.0, 1.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        for ch in after.iter() {
+            let mean: f64 = ch.iter().map(|&v| f64::from(v)).sum::<f64>() / ch.len() as f64;
+            assert!(
+                mean.abs() < 1.0e-4,
+                "mean after DC removal should be ~0, got {mean}"
+            );
+        }
+        // The AC content is preserved: after + mean == before.
+        let mean0: f64 =
+            before[0].iter().map(|&v| f64::from(v)).sum::<f64>() / before[0].len() as f64;
+        let k = before[0].len() / 3;
+        assert!((f64::from(after[0][k]) + mean0 - f64::from(before[0][k])).abs() < 1.0e-4);
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn insert_silence_shifts_markers_and_undoes() {
+        let (mut harness, dir) = open_editor_tab("ins_silence", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len_before = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        // Place a marker after the insert point and one before.
+        {
+            let state = harness.state_mut();
+            let tab = &mut state.tabs[tab_idx];
+            tab.markers.push(neowaves::markers::MarkerEntry {
+                sample: len_before / 4,
+                label: "before".into(),
+            });
+            tab.markers.push(neowaves::markers::MarkerEntry {
+                sample: (len_before * 3) / 4,
+                label: "after".into(),
+            });
+        }
+
+        // Insert 100 ms of silence at the middle.
+        assert!(harness.state_mut().test_insert_silence_at_frac(0.5, 100.0));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        let ins_len = (48_000f64 * 0.1).round() as usize;
+        assert_eq!(after[0].len(), len_before + ins_len);
+        let pos = len_before / 2;
+        // Inserted region is silent; audio around it is preserved.
+        assert!(after[0][pos..pos + ins_len].iter().all(|&v| v == 0.0));
+        assert_eq!(after[0][pos - 1], before[0][pos - 1]);
+        assert_eq!(after[0][pos + ins_len], before[0][pos]);
+
+        // Marker before the insert point stays; the one after shifts right.
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            assert_eq!(tab.markers[0].sample, len_before / 4);
+            assert_eq!(tab.markers[1].sample, (len_before * 3) / 4 + ins_len);
+            assert!(tab.dirty);
+        }
+
+        // Undo restores length and samples.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_copy_cut_paste_insert_roundtrip() {
+        let (mut harness, dir) = open_editor_tab("clipboard", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        // Copy the middle quarter.
+        assert!(harness.state_mut().test_set_selection_frac(0.25, 0.5));
+        harness.run_steps(1);
+        let copied = harness.state_mut().test_editor_copy_selection();
+        assert!(copied > 0);
+        assert_eq!(harness.state().test_editor_audio_clipboard_len(), copied);
+        // Copy does not modify the buffer.
+        assert_eq!(tab_samples(&harness)[0].len(), len);
+
+        // Paste-insert at the end (clear selection, seek to the end).
+        {
+            let state = harness.state_mut();
+            state.tabs[tab_idx].selection = None;
+            state.tabs[tab_idx].extra_selections.clear();
+        }
+        harness.state_mut().audio.seek_to_sample(len);
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_editor_paste_insert());
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len + copied);
+        // The pasted tail equals the copied region.
+        let s = len / 4;
+        for ch in 0..after.len() {
+            for k in 0..copied {
+                assert_eq!(after[ch][len + k], before[ch][s + k]);
+            }
+        }
+
+        // Undo removes the paste.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(tab_samples(&harness)[0].len(), len);
+
+        // Cut removes the selection and fills the clipboard.
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.25));
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_editor_cut_selection());
+        harness.run_steps(2);
+        let after_cut = tab_samples(&harness);
+        assert_eq!(after_cut[0].len(), len - len / 4);
+        assert!(harness.state().test_editor_audio_clipboard_len() > 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mix_paste_sums_without_changing_length() {
+        use neowaves::app::PasteMode;
+        let (mut harness, dir) = open_editor_tab("mix_paste", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        // Copy the first quarter, then mix-paste it at the middle.
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.25));
+        harness.run_steps(1);
+        let copied = harness.state_mut().test_editor_copy_selection();
+        assert!(copied > 0);
+        {
+            let state = harness.state_mut();
+            state.tabs[tab_idx].selection = None;
+        }
+        harness.state_mut().audio.seek_to_sample(len / 2);
+        harness.run_steps(1);
+        assert!(harness.state_mut().test_editor_paste_mode(PasteMode::Mix));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len, "mix paste keeps the length");
+        let pos = len / 2;
+        for ch in 0..after.len() {
+            let k = copied / 2;
+            let expect = before[ch][pos + k] + before[ch][k];
+            assert!(
+                (after[ch][pos + k] - expect).abs() < 1e-6,
+                "mixed sample = sum"
+            );
+            // Outside the mixed span: unchanged.
+            assert_eq!(after[ch][pos - 1], before[ch][pos - 1]);
+        }
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn crossfade_paste_inserts_with_blended_joins() {
+        use neowaves::app::PasteMode;
+        let (mut harness, dir) = open_editor_tab("xf_paste", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        assert!(harness.state_mut().test_set_selection_frac(0.0, 0.25));
+        harness.run_steps(1);
+        let copied = harness.state_mut().test_editor_copy_selection();
+        assert!(copied > 0);
+        {
+            let state = harness.state_mut();
+            state.tabs[tab_idx].selection = None;
+        }
+        harness.state_mut().audio.seek_to_sample(len / 2);
+        harness.run_steps(1);
+        assert!(harness
+            .state_mut()
+            .test_editor_paste_mode(PasteMode::CrossfadeInsert));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        assert_eq!(after[0].len(), len + copied, "insert length like plain insert");
+        let pos = len / 2;
+        // The middle of the pasted span is the untouched clip content.
+        let mid = copied / 2;
+        assert!((after[0][pos + mid] - before[0][mid]).abs() < 1e-6);
+        // Audio before/after the insert span is untouched.
+        assert_eq!(after[0][pos - 1], before[0][pos - 1]);
+        assert_eq!(after[0][pos + copied], before[0][pos]);
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(tab_samples(&harness)[0].len(), len);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pencil_stroke_writes_linear_segment_and_undoes() {
+        let (mut harness, dir) = open_editor_tab("pencil", &synth_stereo(48_000, 0.2));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+
+        assert!(harness
+            .state_mut()
+            .test_pencil_stroke(0.25, 0.5, 0.5, -0.5));
+        harness.run_steps(2);
+
+        let after = tab_samples(&harness);
+        let a = (len as f32 * 0.25) as usize;
+        let b = (len as f32 * 0.5) as usize;
+        for ch in 0..after.len() {
+            // Endpoints hit the drawn values; midpoint is the linear blend.
+            assert!((after[ch][a] - 0.5).abs() < 1e-6, "start value");
+            assert!((after[ch][b] + 0.5).abs() < 1e-6, "end value");
+            let mid = (a + b) / 2;
+            let t = (mid - a) as f32 / (b - a) as f32;
+            let expect = 0.5 + (-0.5 - 0.5) * t;
+            assert!((after[ch][mid] - expect).abs() < 2e-3, "midpoint linear");
+            // Outside the stroke: untouched.
+            assert_eq!(after[ch][a - 1], before[ch][a - 1]);
+            assert_eq!(after[ch][b + 1], before[ch][b + 1]);
+        }
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].dirty);
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invert_polarity_partial_range_leaves_rest_untouched() {
+        let (mut harness, dir) = open_editor_tab("invert_part", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+        let len = before[0].len();
+        let (s, e) = (len / 4, len / 2);
+
+        assert!(harness
+            .state_mut()
+            .test_apply_invert_polarity_frac(0.25, 0.5));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        for ch in 0..before.len() {
+            for i in 0..len {
+                if i >= s && i < e {
+                    assert_eq!(after[ch][i], -before[ch][i]);
+                } else {
+                    assert_eq!(after[ch][i], before[ch][i]);
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_scoped_gain_and_normalize_respect_custom_view() {
+        let (mut harness, dir) = open_editor_tab("chmask", &synth_stereo(48_000, 0.5));
+        let before = tab_samples(&harness);
+
+        // Custom channel view on ch0: gain must leave ch1 bit-exact.
+        assert!(harness.state_mut().test_set_channel_view_custom(vec![0]));
+        assert!(harness.state_mut().test_apply_gain(0.0, 1.0, 6.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        let g = 10f32.powf(6.0 / 20.0);
+        for (b, a) in before[0].iter().zip(after[0].iter()) {
+            assert!((a - b * g).abs() < 1e-4, "ch0 gained by +6 dB");
+        }
+        assert_eq!(before[1], after[1], "ch1 untouched by masked gain");
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        // Masked normalize peaks against the scoped channel only: ch1's
+        // own peak (0.25 sine) sets the gain, not ch0's louder 0.30.
+        assert!(harness.state_mut().test_set_channel_view_custom(vec![1]));
+        assert!(harness.state_mut().test_apply_normalize(0.0, 1.0, -6.0));
+        harness.run_steps(2);
+        let after = tab_samples(&harness);
+        assert_eq!(before[0], after[0], "ch0 untouched by masked normalize");
+        let peak1 = before[1].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let expect_g = 10f32.powf(-6.0 / 20.0) / peak1;
+        for (b, a) in before[1].iter().zip(after[1].iter()) {
+            assert!((a - b * expect_g).abs() < 1e-4, "ch1 normalized to its own peak");
+        }
+        let peak_after = after[1].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(
+            (peak_after - 10f32.powf(-6.0 / 20.0)).abs() < 1e-3,
+            "masked channel hits the -6 dB target"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

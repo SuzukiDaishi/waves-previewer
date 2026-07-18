@@ -1268,7 +1268,7 @@ impl crate::app::WavesPreviewer {
         self.plugin_gui_state = None;
     }
 
-    fn spawn_plugin_process_for_tab(&mut self, tab_idx: usize, is_apply: bool) {
+    fn spawn_plugin_process_for_tab(&mut self, tab_idx: usize, is_apply: bool, is_auto: bool) {
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -1400,6 +1400,7 @@ impl crate::app::WavesPreviewer {
                 job_id,
                 tab_idx,
                 is_apply,
+                is_auto,
                 channels: channels_out,
                 state_blob: state_blob_out,
                 backend,
@@ -1412,17 +1413,71 @@ impl crate::app::WavesPreviewer {
             started_at: Instant::now(),
             tab_idx,
             is_apply,
+            is_auto,
             rx,
             undo,
         });
     }
 
     pub(super) fn spawn_plugin_preview_for_tab(&mut self, tab_idx: usize) {
-        self.spawn_plugin_process_for_tab(tab_idx, false);
+        self.spawn_plugin_process_for_tab(tab_idx, false, false);
     }
 
     pub(super) fn spawn_plugin_apply_for_tab(&mut self, tab_idx: usize) {
-        self.spawn_plugin_process_for_tab(tab_idx, true);
+        self.spawn_plugin_process_for_tab(tab_idx, true, false);
+    }
+
+    /// Debounce window for the Plugin FX auto preview.
+    pub(crate) const PLUGIN_AUTO_PREVIEW_DEBOUNCE_MS: u128 = 300;
+
+    /// True when a debounced auto-preview render should start now: params
+    /// were touched at least the debounce window ago and no plugin job is
+    /// in flight (a busy job defers the render — it re-fires with the
+    /// latest params once the job drains).
+    pub(crate) fn plugin_auto_preview_due(
+        dirty_at: Option<Instant>,
+        now: Instant,
+        busy: bool,
+    ) -> bool {
+        match dirty_at {
+            Some(t) if !busy => {
+                now.saturating_duration_since(t).as_millis() >= Self::PLUGIN_AUTO_PREVIEW_DEBOUNCE_MS
+            }
+            _ => false,
+        }
+    }
+
+    /// Per-frame driver for the Plugin FX auto preview: when the active
+    /// tab's draft has auto-preview enabled and its params settled for the
+    /// debounce window, re-render the preview with a position-preserving
+    /// buffer swap (latest-wins via the shared job id check).
+    pub(super) fn poll_plugin_auto_preview(&mut self, ctx: &egui::Context) {
+        let Some(tab_idx) = self.active_tab else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if !tab.plugin_fx_draft.auto_preview
+            || !matches!(tab.active_tool, crate::app::types::ToolKind::PluginFx)
+            || tab.plugin_fx_draft.plugin_key.is_none()
+        {
+            return;
+        }
+        let dirty_at = tab.plugin_fx_param_dirty_at;
+        if dirty_at.is_none() {
+            return;
+        }
+        let busy = self.plugin_process_state.is_some();
+        if Self::plugin_auto_preview_due(dirty_at, Instant::now(), busy) {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.plugin_fx_param_dirty_at = None;
+            }
+            self.spawn_plugin_process_for_tab(tab_idx, false, true);
+        } else {
+            // Keep frames coming while the debounce clock runs.
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
     }
 
     pub(super) fn cancel_plugin_process(&mut self) {
@@ -1533,6 +1588,11 @@ impl crate::app::WavesPreviewer {
                     }
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         let applied = Self::apply_gui_param_delta(tab, &params);
+                        if (applied > 0 || state_blob.is_some())
+                            && tab.plugin_fx_draft.auto_preview
+                        {
+                            tab.plugin_fx_param_dirty_at = Some(Instant::now());
+                        }
                         if state_blob.is_some() {
                             tab.plugin_fx_draft.state_blob = state_blob;
                         }
@@ -2187,7 +2247,12 @@ impl crate::app::WavesPreviewer {
                             let editor_ch_count = tab.ch_samples.len();
                             tab.preview_overlay = Some(overlay);
                             tab.preview_audio_tool = Some(ToolKind::PluginFx);
-                            tab.plugin_fx_draft.state_blob = result.state_blob;
+                            // A render that raced a newer GUI/param edit must
+                            // not clobber the fresher state blob — the pending
+                            // dirty flag re-renders with it anyway.
+                            if tab.plugin_fx_param_dirty_at.is_none() {
+                                tab.plugin_fx_draft.state_blob = result.state_blob;
+                            }
                             tab.plugin_fx_draft.backend = Some(result.backend);
                             tab.plugin_fx_draft.last_error = None;
                             let frames = tab
@@ -2223,11 +2288,21 @@ impl crate::app::WavesPreviewer {
                                 Self::join_backend_log_lines(lines);
                         }
                         if preview_ch_count > 0 {
-                            self.set_preview_channels(
-                                result.tab_idx,
-                                ToolKind::PluginFx,
-                                preview_channels,
-                            );
+                            if result.is_auto {
+                                // Auto preview: swap the playing buffer in
+                                // place so the listen position survives.
+                                self.set_preview_channels_keep_pos(
+                                    result.tab_idx,
+                                    ToolKind::PluginFx,
+                                    preview_channels,
+                                );
+                            } else {
+                                self.set_preview_channels(
+                                    result.tab_idx,
+                                    ToolKind::PluginFx,
+                                    preview_channels,
+                                );
+                            }
                         }
                         Self::plugin_push_metric(&mut self.debug.plugin_preview_ms, elapsed_ms);
                     }
@@ -2248,6 +2323,38 @@ impl crate::app::WavesPreviewer {
             .and_then(|n| n.to_str())
             .unwrap_or("(plugin)")
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod auto_preview_tests {
+    use crate::app::WavesPreviewer;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn auto_preview_due_obeys_debounce_and_busy() {
+        let now = Instant::now();
+        // No dirty timestamp: never due.
+        assert!(!WavesPreviewer::plugin_auto_preview_due(None, now, false));
+        // Dirty but inside the debounce window: not yet.
+        assert!(!WavesPreviewer::plugin_auto_preview_due(
+            Some(now - Duration::from_millis(100)),
+            now,
+            false
+        ));
+        // Past the window: due.
+        assert!(WavesPreviewer::plugin_auto_preview_due(
+            Some(now - Duration::from_millis(400)),
+            now,
+            false
+        ));
+        // Past the window but a job is in flight: defer (re-fires later
+        // with the latest params).
+        assert!(!WavesPreviewer::plugin_auto_preview_due(
+            Some(now - Duration::from_millis(400)),
+            now,
+            true
+        ));
     }
 }
 

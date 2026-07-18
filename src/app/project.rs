@@ -121,6 +121,8 @@ pub struct ProjectEdit {
     pub loop_markers_saved: Option<[usize; 2]>,
     pub loop_markers_dirty: bool,
     pub markers: Vec<ProjectMarker>,
+    #[serde(default)]
+    pub regions: Vec<ProjectRegion>,
     pub markers_saved: Vec<ProjectMarker>,
     pub markers_dirty: bool,
     pub trim_range: Option<[usize; 2]>,
@@ -284,6 +286,16 @@ pub struct ProjectListColumns {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    #[serde(default)]
+    pub silence_lead: bool,
+    #[serde(default)]
+    pub silence_tail: bool,
+    /// Display order by column name; empty = default order (old files).
+    #[serde(default)]
+    pub order: Vec<String>,
+    /// Per-project column widths by name; empty = keep the global widths.
+    #[serde(default)]
+    pub widths: Vec<(String, f32)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -342,6 +354,8 @@ pub struct ProjectTab {
     #[serde(default)]
     pub cursor_sample: Option<usize>,
     pub markers: Vec<ProjectMarker>,
+    #[serde(default)]
+    pub regions: Vec<ProjectRegion>,
     pub markers_dirty: bool,
     pub loop_markers_dirty: bool,
     pub fade_in_range: Option<[usize; 2]>,
@@ -499,6 +513,29 @@ pub struct ProjectChannelView {
 pub struct ProjectMarker {
     pub sample: usize,
     pub label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectRegion {
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+}
+
+pub fn project_region_to_entry(r: &ProjectRegion) -> crate::markers::RegionEntry {
+    crate::markers::RegionEntry {
+        start: r.start,
+        end: r.end,
+        label: r.label.clone(),
+    }
+}
+
+pub fn region_entry_to_project(r: &crate::markers::RegionEntry) -> ProjectRegion {
+    ProjectRegion {
+        start: r.start,
+        end: r.end,
+        label: r.label.clone(),
+    }
 }
 
 fn component_eq(a: std::path::Component<'_>, b: std::path::Component<'_>) -> bool {
@@ -909,6 +946,7 @@ pub fn project_tab_from_tab(
                 label: m.label.clone(),
             })
             .collect(),
+        regions: tab.regions.iter().map(region_entry_to_project).collect(),
         markers_dirty: tab.markers_dirty,
         loop_markers_dirty: tab.loop_markers_dirty,
         fade_in_range: tab.fade_in_range.map(|(a, b)| [a, b]),
@@ -1047,6 +1085,10 @@ pub fn project_plugin_fx_draft_to_draft(draft: &ProjectPluginFxDraft) -> PluginF
         last_error: draft.last_error.clone(),
         last_backend_note: None,
         last_backend_log: draft.last_backend_log.clone(),
+        // A/B slots and auto-preview are session-transient.
+        ab_alt: None,
+        ab_active_b: false,
+        auto_preview: false,
     }
 }
 
@@ -1084,6 +1126,13 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         } else {
             300.0
         },
+        // Brush/de-click params are session-transient; projects load defaults.
+        brush_cut_db: 24.0,
+        brush_time_radius_ms: 60.0,
+        brush_freq_radius_hz: 200.0,
+        declick_sensitivity: 0.5,
+        denoise_reduction_db: 12.0,
+        denoise_strength: 2.0,
         loop_repeat: t.loop_repeat.max(2),
         noise_gate_threshold_db: t.noise_gate_threshold_db,
         noise_gate_attack_ms: t.noise_gate_attack_ms,
@@ -1100,6 +1149,13 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         compressor_attack_ms: t.compressor_attack_ms,
         compressor_release_ms: t.compressor_release_ms,
         compressor_makeup_db: t.compressor_makeup_db,
+        insert_silence_ms: 1000.0,
+        invert_smooth_boundaries: false,
+        declip_sensitivity: 0.5,
+        dehum_hz: 50.0,
+        dehum_harmonics: 8,
+        dehum_q: 30.0,
+        dehum_depth_db: 40.0,
     }
 }
 
@@ -1128,6 +1184,15 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "Normalize" => ToolKind::Normalize,
         "Loudness" => ToolKind::Loudness,
         "Reverse" => ToolKind::Reverse,
+        "InvertPolarity" => ToolKind::InvertPolarity,
+        "DcOffset" => ToolKind::DcOffset,
+        "InsertSilence" => ToolKind::InsertSilence,
+        "Pencil" => ToolKind::Pencil,
+        "DeClick" => ToolKind::DeClick,
+        "DeClip" => ToolKind::DeClip,
+        "DeHum" => ToolKind::DeHum,
+        "DeNoise" => ToolKind::DeNoise,
+        "SpectralBrush" => ToolKind::SpectralBrush,
         "PluginFx" => ToolKind::PluginFx,
         _ => ToolKind::LoopEdit,
     }
@@ -1244,6 +1309,8 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         lufs_s_max: None,
         true_peak_db: None,
         bpm: None,
+        silence_lead_ms: None,
+        silence_tail_ms: None,
         created_at: None,
         modified_at: None,
         cover_art: None,
@@ -1503,6 +1570,9 @@ wave = true
             last_error: None,
             last_backend_log: Some("Probe: NativeVst3 params=1".to_string()),
             last_backend_note: None,
+            ab_alt: None,
+            ab_active_b: false,
+            auto_preview: false,
         };
         let project = project_plugin_fx_draft_from_draft(&src);
         let restored = project_plugin_fx_draft_to_draft(&project);
@@ -1529,6 +1599,9 @@ wave = true
             last_error: None,
             last_backend_log: None,
             last_backend_note: None,
+            ab_alt: None,
+            ab_active_b: false,
+            auto_preview: false,
         };
         let project = project_plugin_fx_draft_from_draft(&src);
         assert_eq!(project.backend.as_deref(), Some("native_clap"));

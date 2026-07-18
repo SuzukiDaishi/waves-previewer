@@ -114,6 +114,7 @@ impl WavesPreviewer {
                     self.debug_log(format!("screenshot saved: {}", path.display()));
                 }
                 if self.exit_after_screenshot {
+                    self.force_quit = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     self.exit_after_screenshot = false;
                 }
@@ -1630,6 +1631,7 @@ impl WavesPreviewer {
                 self.save_debug_summary(path);
             }
             DebugAction::Exit => {
+                self.force_quit = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }

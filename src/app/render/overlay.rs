@@ -39,6 +39,24 @@ pub fn waveform_y_from_amp(
     lane_rect.center().y - normalized * (lane_rect.height() * 0.48)
 }
 
+/// Inverse of `waveform_y_from_amp` for pencil-style input mapping.
+pub fn waveform_amp_from_y(
+    lane_rect: Rect,
+    vertical_zoom: f32,
+    vertical_view_center: f32,
+    y: f32,
+) -> f32 {
+    let zoom = vertical_zoom.clamp(
+        crate::app::EDITOR_MIN_VERTICAL_ZOOM,
+        crate::app::EDITOR_MAX_VERTICAL_ZOOM,
+    );
+    let visible_half = visible_half_amplitude(zoom).max(f32::EPSILON);
+    let center = clamped_vertical_view_center(zoom, vertical_view_center);
+    let normalized =
+        ((lane_rect.center().y - y) / (lane_rect.height() * 0.48).max(f32::EPSILON)).clamp(-1.0, 1.0);
+    center + normalized * visible_half
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct WaveformDeviceColumns {
     left_device_px: i32,

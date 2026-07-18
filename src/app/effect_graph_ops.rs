@@ -118,34 +118,7 @@ fn embedded_effect_graph_sample_channels() -> Result<(Vec<Vec<f32>>, u32), Strin
 }
 
 fn default_tool_state() -> ToolState {
-    ToolState {
-        fade_in_ms: 0.0,
-        fade_out_ms: 0.0,
-        gain_db: 0.0,
-        normalize_target_db: -6.0,
-        loudness_target_lufs: -14.0,
-        pitch_semitones: 0.0,
-        stretch_rate: 1.0,
-        speed_rate: 1.0,
-        warp_time_radius_ms: 150.0,
-        warp_freq_radius_hz: 300.0,
-        loop_repeat: 2,
-        noise_gate_threshold_db: -40.0,
-        noise_gate_attack_ms: 2.0,
-        noise_gate_release_ms: 100.0,
-        eq_low_shelf_freq_hz: 120.0,
-        eq_low_shelf_gain_db: 0.0,
-        eq_mid_freq_hz: 1000.0,
-        eq_mid_gain_db: 0.0,
-        eq_mid_q: 1.0,
-        eq_high_shelf_freq_hz: 8000.0,
-        eq_high_shelf_gain_db: 0.0,
-        compressor_threshold_db: -18.0,
-        compressor_ratio: 3.0,
-        compressor_attack_ms: 10.0,
-        compressor_release_ms: 150.0,
-        compressor_makeup_db: 0.0,
-    }
+    ToolState::default_values()
 }
 
 fn effect_graph_build_rough_waveform(channels: &[Vec<f32>]) -> Vec<(f32, f32)> {
@@ -1634,6 +1607,28 @@ fn remap_range(
     } else {
         None
     }
+}
+
+fn remap_regions(
+    regions: &[crate::markers::RegionEntry],
+    old_len: usize,
+    new_len: usize,
+) -> Vec<crate::markers::RegionEntry> {
+    if old_len == 0 || new_len == 0 {
+        return Vec::new();
+    }
+    let ratio = new_len as f64 / old_len as f64;
+    let mut out: Vec<crate::markers::RegionEntry> = regions
+        .iter()
+        .map(|r| crate::markers::RegionEntry {
+            start: ((r.start as f64) * ratio).round().max(0.0) as usize,
+            end: (((r.end as f64) * ratio).round().max(0.0) as usize).min(new_len),
+            label: r.label.clone(),
+        })
+        .filter(|r| r.end > r.start)
+        .collect();
+    out.sort_by_key(|r| (r.start, r.end));
+    out
 }
 
 fn remap_markers(markers: &[MarkerEntry], old_len: usize, new_len: usize) -> Vec<MarkerEntry> {
@@ -5091,6 +5086,7 @@ impl WavesPreviewer {
                 loop_markers_saved: tab.loop_markers_saved,
                 loop_markers_dirty: tab.loop_markers_dirty,
                 markers: tab.markers.clone(),
+                regions: tab.regions.clone(),
                 markers_saved: tab.markers_saved.clone(),
                 markers_committed: tab.markers_committed.clone(),
                 markers_applied: tab.markers_applied.clone(),
@@ -5137,6 +5133,7 @@ impl WavesPreviewer {
                 loop_markers_saved: remap_range(existing.loop_markers_saved, old_len, new_len),
                 loop_markers_dirty: existing.loop_markers_dirty,
                 markers: remap_markers(&existing.markers, old_len, new_len),
+                regions: remap_regions(&existing.regions, old_len, new_len),
                 markers_saved: remap_markers(&existing.markers_saved, old_len, new_len),
                 markers_committed: remap_markers(&existing.markers_committed, old_len, new_len),
                 markers_applied: remap_markers(&existing.markers_applied, old_len, new_len),
@@ -5178,6 +5175,7 @@ impl WavesPreviewer {
                 loop_markers_saved: None,
                 loop_markers_dirty: false,
                 markers: Vec::new(),
+                regions: Vec::new(),
                 markers_saved: Vec::new(),
                 markers_committed: Vec::new(),
                 markers_applied: Vec::new(),

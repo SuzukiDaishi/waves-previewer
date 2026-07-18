@@ -94,6 +94,11 @@ impl WavesPreviewer {
         self.debug_log("settings reset to defaults".to_string());
     }
 
+    /// Theme-aware palette for the hand-painted widgets.
+    pub(super) fn palette(&self) -> crate::app::render::colors::Palette {
+        crate::app::render::colors::Palette::for_theme(self.theme_mode)
+    }
+
     fn theme_visuals(theme: ThemeMode) -> Visuals {
         let mut visuals = match theme {
             ThemeMode::Dark => Visuals::dark(),
@@ -323,6 +328,25 @@ impl WavesPreviewer {
                 self.invert_wave_zoom_wheel = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("editor_invert_shift_wheel_pan=") {
                 self.invert_shift_wheel_pan = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("editor_wheel_mode=") {
+                self.editor_wheel_scrolls = rest.trim().eq_ignore_ascii_case("scroll");
+            } else if let Some(rest) = line.strip_prefix("watch_folder=") {
+                self.watch_folder_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_col_order=") {
+                let parsed: Vec<crate::app::types::ColumnId> = rest
+                    .split(',')
+                    .filter_map(|name| crate::app::types::ColumnId::from_name(name.trim()))
+                    .collect();
+                self.list_column_order = crate::app::types::sanitize_column_order(&parsed);
+            } else if let Some(rest) = line.strip_prefix("keymap=") {
+                if let Some((name, chord)) = rest.trim().split_once(':') {
+                    if let (Some(action), Some(parsed)) = (
+                        crate::app::keymap::Action::from_name(name),
+                        crate::app::keymap::parse_chord(chord),
+                    ) {
+                        self.keymap_overrides.insert(action, parsed);
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("editor_horizontal_zoom_anchor=") {
                 self.horizontal_zoom_anchor_mode = match rest.trim().to_ascii_lowercase().as_str() {
                     "playhead" => EditorHorizontalZoomAnchorMode::Playhead,
@@ -407,6 +431,20 @@ impl WavesPreviewer {
                 };
             } else if let Some(rest) = line.strip_prefix("auto_play_list_nav=") {
                 self.auto_play_list_nav = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_click_audition=") {
+                self.list_click_audition = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("list_col_widths=") {
+                self.list_col_widths.clear();
+                for part in rest.split(',') {
+                    let Some((key, w)) = part.split_once(':') else {
+                        continue;
+                    };
+                    if let Ok(w) = w.trim().parse::<f32>() {
+                        if w.is_finite() && w >= 10.0 && !key.trim().is_empty() {
+                            self.list_col_widths.insert(key.trim().to_string(), w);
+                        }
+                    }
+                }
             } else if let Some(rest) = line.strip_prefix("transcript_ai_opt_in=") {
                 self.transcript_ai_opt_in = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("transcript_language=") {
@@ -525,6 +563,60 @@ impl WavesPreviewer {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     self.export_cfg.codec.ogg_quality = v.clamp(-0.2, 1.0);
                 }
+            } else if let Some(rest) = line.strip_prefix("inspect_cfg=") {
+                // key=value pairs separated by commas; unknown keys ignored.
+                for part in rest.split(',') {
+                    let Some((k, v)) = part.split_once(':') else {
+                        continue;
+                    };
+                    let cfg = &mut self.inspection_cfg;
+                    let b = matches!(v.trim(), "1" | "true");
+                    let f = v.trim().parse::<f32>().ok();
+                    match k.trim() {
+                        "tp" => cfg.check_true_peak = b,
+                        "tp_db" => cfg.tp_ceiling_db = f.unwrap_or(cfg.tp_ceiling_db),
+                        "loud" => cfg.check_loudness = b,
+                        "target" => cfg.target_lufs = f.unwrap_or(cfg.target_lufs),
+                        "tol" => cfg.lufs_tolerance_lu = f.unwrap_or(cfg.lufs_tolerance_lu),
+                        "sil" => cfg.check_silence = b,
+                        "sil_db" => {
+                            cfg.silence_threshold_dbfs = f.unwrap_or(cfg.silence_threshold_dbfs)
+                        }
+                        "lead_ms" => {
+                            cfg.max_leading_silence_ms = f.unwrap_or(cfg.max_leading_silence_ms)
+                        }
+                        "trail_ms" => {
+                            cfg.max_trailing_silence_ms = f.unwrap_or(cfg.max_trailing_silence_ms)
+                        }
+                        "loop" => cfg.check_loop = b,
+                        "req_loop" => cfg.require_loop = b,
+                        "naming" => cfg.check_naming = b,
+                        _ => {}
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("inspect_naming=") {
+                // Own key: the regex may contain commas/colons that would
+                // break the inspect_cfg key:value list.
+                self.inspection_cfg.naming_pattern = rest.trim().to_string();
+            } else if let Some(rest) = line.strip_prefix("loudnorm_target=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    self.loudnorm_dialog_target = v.clamp(-36.0, 0.0);
+                }
+            } else if let Some(rest) = line.strip_prefix("export_dither=") {
+                // Legacy boolean key (pre dither-mode): on -> flat TPDF.
+                self.export_cfg.codec.dither_mode =
+                    if matches!(rest.trim(), "1" | "true" | "yes" | "on") {
+                        crate::wave::DitherMode::Tpdf
+                    } else {
+                        crate::wave::DitherMode::Off
+                    };
+            } else if let Some(rest) = line.strip_prefix("export_dither_mode=") {
+                if let Some(mode) = crate::wave::DitherMode::from_prefs_name(rest) {
+                    self.export_cfg.codec.dither_mode = mode;
+                }
+            } else if let Some(rest) = line.strip_prefix("export_dither_24bit=") {
+                self.export_cfg.codec.dither_24bit =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("recent_session=") {
                 let raw = rest.trim().trim_matches('"');
                 if !raw.is_empty() {
@@ -639,6 +731,25 @@ impl WavesPreviewer {
         };
         let audio_output_device = self.audio_output_device_name.as_deref().unwrap_or("");
         let auto_play_list_nav = if self.auto_play_list_nav { "1" } else { "0" };
+        let list_click_audition = if self.list_click_audition { "1" } else { "0" };
+        let inspect_cfg = {
+            let c = &self.inspection_cfg;
+            let b = |v: bool| if v { "1" } else { "0" };
+            format!(
+                "tp:{},tp_db:{:.2},loud:{},target:{:.2},tol:{:.2},sil:{},sil_db:{:.1},lead_ms:{:.1},trail_ms:{:.1},loop:{},req_loop:{},naming:{}",
+                b(c.check_true_peak), c.tp_ceiling_db, b(c.check_loudness), c.target_lufs,
+                c.lufs_tolerance_lu, b(c.check_silence), c.silence_threshold_dbfs,
+                c.max_leading_silence_ms, c.max_trailing_silence_ms, b(c.check_loop), b(c.require_loop),
+                b(c.check_naming)
+            )
+        };
+        let inspect_naming = self.inspection_cfg.naming_pattern.clone();
+        let list_col_widths = self
+            .list_col_widths
+            .iter()
+            .map(|(k, w)| format!("{k}:{w:.1}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let transcript_ai_opt_in = if self.transcript_ai_opt_in { "1" } else { "0" };
         let transcript_overwrite_existing_srt = if self.transcript_ai_cfg.overwrite_existing_srt {
             "1"
@@ -692,6 +803,11 @@ impl WavesPreviewer {
         } else {
             "0"
         };
+        let editor_wheel_mode = if self.editor_wheel_scrolls {
+            "scroll"
+        } else {
+            "zoom"
+        };
         let horizontal_zoom_anchor = match self.horizontal_zoom_anchor_mode {
             EditorHorizontalZoomAnchorMode::Pointer => "pointer",
             EditorHorizontalZoomAnchorMode::Playhead => "playhead",
@@ -705,6 +821,7 @@ impl WavesPreviewer {
 zero_cross_eps={:.6}\n\
 editor_invert_wave_zoom_wheel={}\n\
 editor_invert_shift_wheel_pan={}\n\
+editor_wheel_mode={}\n\
 editor_horizontal_zoom_anchor={}\n\
 editor_pause_resume_mode={}\n\
 spectro_fft={}\n\
@@ -723,6 +840,11 @@ item_bg_mode={}\n\
 src_quality={}\n\
 audio_output_device={}\n\
 auto_play_list_nav={}\n\
+list_click_audition={}\n\
+list_col_widths={}\n\
+inspect_cfg={}\n\
+inspect_naming={}\n\
+loudnorm_target={:.2}\n\
 transcript_ai_opt_in={}\n\
 transcript_language={}\n\
 transcript_task={}\n\
@@ -747,6 +869,9 @@ export_srt={}\n\
 export_mp3_kbps={}\n\
 export_aac_kbps={}\n\
 export_ogg_quality={:.2}\n\
+export_dither={}\n\
+export_dither_mode={}\n\
+export_dither_24bit={}\n\
 zoo_enabled={}\n\
 zoo_walk_enabled={}\n\
 zoo_voice_enabled={}\n\
@@ -760,6 +885,7 @@ zoo_flip_manual={}\n",
             self.zero_cross_epsilon,
             invert_wave_zoom_wheel,
             invert_shift_wheel_pan,
+            editor_wheel_mode,
             horizontal_zoom_anchor,
             editor_pause_resume_mode,
             self.spectro_cfg.fft_size,
@@ -784,6 +910,11 @@ zoo_flip_manual={}\n",
             src_quality,
             audio_output_device,
             auto_play_list_nav,
+            list_click_audition,
+            list_col_widths,
+            inspect_cfg,
+            inspect_naming,
+            self.loudnorm_dialog_target,
             transcript_ai_opt_in,
             self.transcript_ai_cfg.language,
             self.transcript_ai_cfg.task,
@@ -814,6 +945,14 @@ zoo_flip_manual={}\n",
             self.export_cfg.codec.mp3_bitrate_kbps,
             self.export_cfg.codec.aac_bitrate_kbps,
             self.export_cfg.codec.ogg_quality,
+            // Legacy boolean kept for older builds reading the same prefs.
+            if self.export_cfg.codec.dither_mode != crate::wave::DitherMode::Off {
+                "1"
+            } else {
+                "0"
+            },
+            self.export_cfg.codec.dither_mode.prefs_name(),
+            if self.export_cfg.codec.dither_24bit { "1" } else { "0" },
             zoo_enabled,
             zoo_walk_enabled,
             zoo_voice_enabled,
@@ -848,6 +987,38 @@ zoo_flip_manual={}\n",
             let path_text = p.to_string_lossy().replace('\n', " ");
             out.push_str("plugin_search_path=");
             out.push_str(&path_text);
+            out.push('\n');
+        }
+        {
+            out.push_str("watch_folder=");
+            out.push_str(if self.watch_folder_enabled { "1" } else { "0" });
+            out.push('\n');
+        }
+        {
+            out.push_str("list_col_order=");
+            let names: Vec<&str> = self
+                .list_column_order
+                .iter()
+                .map(|c| c.name())
+                .collect();
+            out.push_str(&names.join(","));
+            out.push('\n');
+        }
+        // Sorted for a deterministic file (HashMap iteration order isn't).
+        let mut keymap_lines: Vec<String> = self
+            .keymap_overrides
+            .iter()
+            .map(|(action, &(mods, key))| {
+                format!(
+                    "keymap={}:{}",
+                    action.name(),
+                    crate::app::keymap::chord_text(mods, key)
+                )
+            })
+            .collect();
+        keymap_lines.sort();
+        for line in keymap_lines {
+            out.push_str(&line);
             out.push('\n');
         }
         if let Some(parent) = path.parent() {
@@ -1001,6 +1172,138 @@ mod tests {
         );
         assert!(!menu.contains(&std::fs::canonicalize(&paths[0]).expect("canonical")));
         assert!(!menu.contains(&std::fs::canonicalize(&paths[1]).expect("canonical")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn col_width_prefs_roundtrip() {
+        let dir = temp_dir("col_widths");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.list_col_widths.insert("file".to_string(), 314.5);
+        app.list_col_widths.insert("wave".to_string(), 220.0);
+        app.list_click_audition = false;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.list_col_widths.get("file").copied(), Some(314.5));
+        assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
+        assert!(!loaded.list_click_audition);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn editor_wheel_mode_prefs_roundtrip() {
+        let dir = temp_dir("wheel_mode");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        assert!(!app.editor_wheel_scrolls, "default is zoom mode");
+        app.editor_wheel_scrolls = true;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert!(loaded.editor_wheel_scrolls, "scroll mode must round-trip");
+
+        // Unknown values fall back to zoom mode.
+        std::fs::write(&prefs, "editor_wheel_mode=bogus\n").expect("write prefs");
+        let mut fallback =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        fallback.editor_wheel_scrolls = true;
+        fallback.load_prefs_from_path(&prefs);
+        assert!(!fallback.editor_wheel_scrolls);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn keymap_override_prefs_roundtrip() {
+        use crate::app::keymap::{Action, Mods};
+        let dir = temp_dir("keymap_prefs");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.keymap_overrides
+            .insert(Action::EditorZoomIn, (Mods::Command, egui::Key::Q));
+        app.keymap_overrides
+            .insert(Action::VolumeUp, (Mods::None, egui::Key::F9));
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(
+            loaded.keymap_overrides.get(&Action::EditorZoomIn),
+            Some(&(Mods::Command, egui::Key::Q))
+        );
+        assert_eq!(
+            loaded.keymap_overrides.get(&Action::VolumeUp),
+            Some(&(Mods::None, egui::Key::F9))
+        );
+        assert_eq!(loaded.keymap_overrides.len(), 2);
+
+        // Unknown actions/keys are ignored instead of poisoning the map.
+        std::fs::write(&prefs, "keymap=NoSuchAction:Q\nkeymap=VolumeUp:NoSuchKey\n")
+            .expect("write prefs");
+        let mut bogus =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        bogus.load_prefs_from_path(&prefs);
+        assert!(bogus.keymap_overrides.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn column_order_prefs_roundtrip_and_sanitize() {
+        use crate::app::types::{sanitize_column_order, ColumnId};
+        let dir = temp_dir("col_order");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        // Move Wave to the front.
+        let mut order = ColumnId::ALL.to_vec();
+        let wave = order.pop().unwrap();
+        order.insert(0, wave);
+        app.list_column_order = order.clone();
+        app.save_prefs_to_path(&prefs);
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.list_column_order, order);
+
+        // Unknown names are dropped, missing columns appended, dups removed.
+        std::fs::write(&prefs, "list_col_order=wave,bogus,wave,file\n").expect("write prefs");
+        let mut partial =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        partial.load_prefs_from_path(&prefs);
+        assert_eq!(partial.list_column_order.len(), ColumnId::ALL.len());
+        assert_eq!(partial.list_column_order[0], ColumnId::Wave);
+        assert_eq!(partial.list_column_order[1], ColumnId::File);
+
+        let sane = sanitize_column_order(&[]);
+        assert_eq!(sane, ColumnId::ALL.to_vec());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn col_width_prefs_reject_bogus_values() {
+        let dir = temp_dir("col_widths_bogus");
+        let prefs = dir.join("prefs.txt");
+        std::fs::write(
+            &prefs,
+            "list_col_widths=file:nan,gain:5.0,wave:220.0,:60.0,broken\n",
+        )
+        .expect("write prefs");
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
+        assert!(!loaded.list_col_widths.contains_key("file"));
+        assert!(!loaded.list_col_widths.contains_key("gain"));
+        assert_eq!(loaded.list_col_widths.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

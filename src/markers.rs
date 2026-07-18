@@ -34,6 +34,98 @@ fn sidecar_path(path: &Path) -> PathBuf {
     path.with_extension("markers.json")
 }
 
+// ---- Regions: labeled [start, end) ranges, sidecar-persisted ----
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegionEntry {
+    pub start: usize,
+    pub end: usize,
+    pub label: String,
+}
+
+const REGION_FILE_VERSION: u32 = 1;
+
+#[derive(Serialize, Deserialize)]
+struct RegionFile {
+    version: u32,
+    sample_rate: u32,
+    regions: Vec<RegionRecord>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RegionRecord {
+    start: u64,
+    end: u64,
+    label: String,
+}
+
+fn region_sidecar_path(path: &Path) -> PathBuf {
+    path.with_extension("regions.json")
+}
+
+/// Read the region sidecar (if any), mapped into `out_sr` sample space.
+pub fn read_regions(path: &Path, out_sr: u32, file_sr: u32) -> Result<Vec<RegionEntry>> {
+    let sidecar = region_sidecar_path(path);
+    if !sidecar.is_file() {
+        return Ok(Vec::new());
+    }
+    let bytes = std::fs::read(&sidecar)?;
+    let data: RegionFile = serde_json::from_slice(&bytes)?;
+    let src_sr = if data.sample_rate > 0 {
+        data.sample_rate
+    } else {
+        file_sr.max(1)
+    };
+    let ratio = out_sr.max(1) as f64 / src_sr.max(1) as f64;
+    let mut regions: Vec<RegionEntry> = data
+        .regions
+        .into_iter()
+        .filter(|r| r.end > r.start)
+        .map(|r| RegionEntry {
+            start: ((r.start as f64) * ratio).round().max(0.0) as usize,
+            end: ((r.end as f64) * ratio).round().max(0.0) as usize,
+            label: r.label,
+        })
+        .collect();
+    regions.sort_by_key(|r| (r.start, r.end));
+    Ok(regions)
+}
+
+/// Write the region sidecar in `file_sr` sample space (regions given in
+/// `out_sr` space). An empty list removes the sidecar.
+pub fn write_regions(
+    path: &Path,
+    out_sr: u32,
+    file_sr: u32,
+    regions: &[RegionEntry],
+) -> Result<()> {
+    let sidecar = region_sidecar_path(path);
+    if regions.is_empty() {
+        if sidecar.is_file() {
+            let _ = std::fs::remove_file(&sidecar);
+        }
+        return Ok(());
+    }
+    let src_sr = file_sr.max(1);
+    let ratio = src_sr as f64 / out_sr.max(1) as f64;
+    let stored: Vec<RegionRecord> = regions
+        .iter()
+        .filter(|r| r.end > r.start)
+        .map(|r| RegionRecord {
+            start: ((r.start as f64) * ratio).round().max(0.0) as u64,
+            end: ((r.end as f64) * ratio).round().max(0.0) as u64,
+            label: r.label.clone(),
+        })
+        .collect();
+    let payload = RegionFile {
+        version: REGION_FILE_VERSION,
+        sample_rate: src_sr,
+        regions: stored,
+    };
+    std::fs::write(sidecar, serde_json::to_vec_pretty(&payload)?)?;
+    Ok(())
+}
+
 pub fn read_markers(path: &Path, out_sr: u32, file_sr: u32) -> Result<Vec<MarkerEntry>> {
     if path
         .extension()
@@ -314,4 +406,42 @@ fn write_wav_markers(path: &Path, markers: &[MarkerRecord]) -> Result<()> {
     fs::write(&tmp, out)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::*;
+
+    fn temp_wav_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_region_{tag}_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir.join("audio.wav")
+    }
+
+    #[test]
+    fn region_sidecar_roundtrip_with_sr_mapping() {
+        let path = temp_wav_path("roundtrip");
+        let regions = vec![
+            RegionEntry { start: 100, end: 200, label: "intro".into() },
+            RegionEntry { start: 4_800, end: 9_600, label: "loop".into() },
+        ];
+        // Written from 48k buffer space into a 24k file space...
+        write_regions(&path, 48_000, 24_000, &regions).expect("write regions");
+        // ...and read back into 48k: numbers must round-trip.
+        let back = read_regions(&path, 48_000, 24_000).expect("read regions");
+        assert_eq!(back, regions);
+        // Read into file space halves the positions.
+        let file_space = read_regions(&path, 24_000, 24_000).expect("read file space");
+        assert_eq!(file_space[0].start, 50);
+        assert_eq!(file_space[1].end, 4_800);
+        // Empty list removes the sidecar.
+        write_regions(&path, 48_000, 24_000, &[]).expect("remove sidecar");
+        assert!(read_regions(&path, 48_000, 24_000)
+            .expect("read after remove")
+            .is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

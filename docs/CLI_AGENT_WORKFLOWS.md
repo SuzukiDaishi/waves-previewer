@@ -412,3 +412,13 @@ neowaves --cli plugin session apply --session C:\work\mix.nwsess
 - session `plugin_fx_draft`
 - `preview_overlay_ready`
 - apply result with mutated target
+
+## Batch QA inspection
+
+Run the game-audio QA checks and hand the CSV to a reviewer:
+
+```powershell
+neowaves --cli batch inspect --session .\work.nwsess --query _SE --target-lufs -16 --lufs-tolerance 2 --report .\qa.csv
+```
+
+The JSON result's `counts` object gives a quick pass/fail gate; rows sort errors-first. Combine with `batch loudness apply` to fix loudness findings non-destructively, then re-run `batch inspect` to confirm.

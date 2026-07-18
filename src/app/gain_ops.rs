@@ -69,7 +69,14 @@ impl WavesPreviewer {
                 .map(|tab| tab.samples_len)
                 .unwrap_or(0);
             if len > 0 {
-                self.editor_apply_gain_range(tab_idx, (0, len), delta_db.clamp(-24.0, 24.0));
+                // File-level gain: force all channels even when the tab's
+                // channel view is scoped to a subset.
+                self.editor_apply_gain_range_opts(
+                    tab_idx,
+                    (0, len),
+                    delta_db.clamp(-24.0, 24.0),
+                    false,
+                );
                 self.schedule_lufs_for_path(path.to_path_buf());
                 return true;
             }
@@ -100,11 +107,13 @@ impl WavesPreviewer {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "File Gain");
             let gain = crate::app::helpers::db_to_amp(gain_db);
+            // Editing buffers keep float headroom; clipping happens only at
+            // export/playback boundaries (see notify_if_tab_over_fs).
             for ch in tab.ch_samples.iter_mut() {
                 for v in ch.iter_mut() {
-                    *v = (*v * gain).clamp(-1.0, 1.0);
+                    *v *= gain;
                 }
             }
             tab.dirty = true;
@@ -112,6 +121,7 @@ impl WavesPreviewer {
             undo_state
         };
         self.set_pending_gain_db_for_path(&path, 0.0);
+        self.notify_if_tab_over_fs(tab_idx);
         // Keep playback running: the buffer swap below preserves the
         // position, and the gain layer previously applied at playback time
         // is now part of the samples themselves.

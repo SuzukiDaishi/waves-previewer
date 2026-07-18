@@ -348,8 +348,68 @@ impl CliWorkspace {
                 let len = self.tab_len(tab_idx)?;
                 self.app.editor_apply_reverse_range(tab_idx, (0, len));
             }
+            ToolKind::InvertPolarity => {
+                let len = self.tab_len(tab_idx)?;
+                self.app
+                    .editor_apply_invert_polarity_range(tab_idx, (0, len));
+            }
+            ToolKind::DcOffset => {
+                let len = self.tab_len(tab_idx)?;
+                self.app.editor_apply_remove_dc_range(tab_idx, (0, len));
+            }
+            ToolKind::InsertSilence => {
+                let (pos, ms) = {
+                    let tab = self.app.tabs.get(tab_idx).context("missing target tab")?;
+                    let pos = WavesPreviewer::editor_selected_range(tab)
+                        .map(|(s, _)| s)
+                        .unwrap_or(tab.samples_len);
+                    (pos, tab.tool_state.insert_silence_ms)
+                };
+                if !self.app.editor_insert_silence_at(tab_idx, pos, ms) {
+                    anyhow::bail!("insert silence failed (zero duration?)");
+                }
+            }
             ToolKind::SpectralWarp => {
                 anyhow::bail!("SpectralWarp is interactive-only (warp points live in the editor)")
+            }
+            ToolKind::SpectralBrush => {
+                anyhow::bail!(
+                    "SpectralBrush is interactive-only (brush stamps live in the editor)"
+                )
+            }
+            ToolKind::Pencil => {
+                anyhow::bail!("Pencil is interactive-only (draw on the waveform in the editor)")
+            }
+            ToolKind::DeClick => {
+                let sens = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state.declick_sensitivity)
+                    .unwrap_or(0.5);
+                self.app
+                    .spawn_editor_apply_for_tab_range(tab_idx, ToolKind::DeClick, sens, None);
+                self.wait_for_apply()?;
+            }
+            ToolKind::DeClip => {
+                let sens = self
+                    .app
+                    .tabs
+                    .get(tab_idx)
+                    .map(|tab| tab.tool_state.declip_sensitivity)
+                    .unwrap_or(0.5);
+                self.app
+                    .spawn_editor_apply_for_tab_range(tab_idx, ToolKind::DeClip, sens, None);
+                self.wait_for_apply()?;
+            }
+            ToolKind::DeHum => {
+                self.app.spawn_dehum_apply_for_tab(tab_idx);
+                self.wait_for_apply()?;
+            }
+            ToolKind::DeNoise => {
+                anyhow::bail!(
+                    "DeNoise is interactive-only (the noise profile is learned in the editor)"
+                )
             }
             ToolKind::NoiseGate => {
                 let st = self

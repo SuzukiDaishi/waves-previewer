@@ -285,6 +285,33 @@ Result highlights:
 - `skipped_paths`
 - `failed_paths`
 
+### `batch inspect`
+
+Runs the game-audio QA checks over the session rows matched by the filter: effective true peak over the ceiling, integrated loudness outside the target window, leading/trailing silence over thresholds, and loop-marker validity (end after start, points inside the file). Read-only — the session is never modified.
+
+Inputs:
+
+- `--session <file>` (required)
+- `--query <text>` or `--query-id <id>` (optional filter)
+- `--target-lufs <f>` (default -14) / `--lufs-tolerance <lu>` (default 1)
+- `--tp-ceiling-db <f>` (default -1)
+- `--silence-threshold-dbfs <f>` (default -60) / `--max-leading-silence-ms <f>` (default 100) / `--max-trailing-silence-ms <f>` (default 1000)
+- `--no-loudness` / `--no-true-peak` / `--no-silence` / `--no-loop` to disable checks
+- `--require-loop` flags files without loop markers
+- `--report <path>` writes `.json` / `.csv` / `.md` / `.txt` by extension
+
+Example:
+
+```powershell
+neowaves --cli batch inspect --session .\work.nwsess --query _SE --report .\qa.csv
+```
+
+Result highlights:
+
+- `counts` (`error` / `warning` / `pass`)
+- `rows` (per file: severity, effective LUFS/dBTP, silence ms, loop status, issues)
+- `report_path`
+
 ## editor
 
 ### `editor inspect`

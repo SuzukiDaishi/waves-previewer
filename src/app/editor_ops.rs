@@ -126,6 +126,8 @@ impl crate::app::WavesPreviewer {
         tab.preview_offset_samples = None;
         tab.pending_loop_unwrap = None;
         tab.dragging_marker = None;
+        // Scan markers describe the pre-edit buffer.
+        tab.declick_scan = None;
         Self::editor_clear_selection_anchor(tab);
     }
 
@@ -206,7 +208,7 @@ impl crate::app::WavesPreviewer {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Clear Edit");
             tab.ch_samples = channels;
             tab.buffer_sample_rate = out_sr.max(1);
             Self::editor_clamp_ranges(tab);
@@ -269,7 +271,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Fade In");
             let dur = (e - s).max(1) as f32;
             for ch in tab.ch_samples.iter_mut() {
                 for i in s..e {
@@ -298,7 +300,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Fade Out");
             let dur = (e - s).max(1) as f32;
             for ch in tab.ch_samples.iter_mut() {
                 for i in s..e {
@@ -357,6 +359,13 @@ impl crate::app::WavesPreviewer {
                 None
             };
         }
+        // Regions clamp to the buffer; emptied ones disappear (mirrors how
+        // markers/ranges behave after shrinking edits).
+        for r in tab.regions.iter_mut() {
+            r.start = r.start.min(len);
+            r.end = r.end.min(len);
+        }
+        tab.regions.retain(|r| r.end > r.start);
         clamp_range(&mut tab.ab_loop);
         clamp_range(&mut tab.loop_region);
         clamp_range(&mut tab.trim_range);
@@ -421,7 +430,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Reverse");
             // Sub-range reverse: smooth the joins with a short crossfade so
             // the transition into/out of the reversed span stays click-free.
             let xf = if s > 0 || e < tab.samples_len {
@@ -441,6 +450,957 @@ impl crate::app::WavesPreviewer {
         self.audio.set_loop_crossfade(0, 0);
     }
 
+    /// Insert `insert` (one Vec per channel, equal lengths, matching the
+    /// tab's channel count) at buffer position `pos`. Markers, loop regions,
+    /// selections, and fade ranges at or after `pos` shift right by the
+    /// inserted length so existing annotations keep pointing at the same
+    /// audio. Returns false if the shape doesn't match.
+    pub(super) fn editor_insert_channels_at(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        insert: Vec<Vec<f32>>,
+    ) -> bool {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let ins_len = insert.first().map(|c| c.len()).unwrap_or(0);
+            if ins_len == 0
+                || insert.len() != tab.ch_samples.len()
+                || insert.iter().any(|c| c.len() != ins_len)
+            {
+                return false;
+            }
+            let pos = pos.min(tab.samples_len);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Paste Insert");
+            for (ch, ins) in tab.ch_samples.iter_mut().zip(insert.iter()) {
+                ch.splice(pos..pos, ins.iter().copied());
+            }
+            tab.samples_len += ins_len;
+            let shift_markers = |markers: &mut Vec<crate::markers::MarkerEntry>| {
+                for mk in markers.iter_mut() {
+                    if mk.sample >= pos {
+                        mk.sample += ins_len;
+                    }
+                }
+            };
+            shift_markers(&mut tab.markers);
+            shift_markers(&mut tab.markers_committed);
+            shift_markers(&mut tab.markers_applied);
+            for r in tab.regions.iter_mut() {
+                if r.start >= pos {
+                    r.start += ins_len;
+                }
+                if r.end >= pos {
+                    r.end += ins_len;
+                }
+            }
+            let shift_range = |range: &mut Option<(usize, usize)>| {
+                if let Some((a, b)) = range.as_mut() {
+                    if *a >= pos {
+                        *a += ins_len;
+                    }
+                    if *b >= pos {
+                        *b += ins_len;
+                    }
+                }
+            };
+            shift_range(&mut tab.selection);
+            shift_range(&mut tab.ab_loop);
+            shift_range(&mut tab.loop_region);
+            shift_range(&mut tab.loop_region_applied);
+            shift_range(&mut tab.loop_region_committed);
+            shift_range(&mut tab.loop_markers_saved);
+            shift_range(&mut tab.trim_range);
+            shift_range(&mut tab.fade_in_range);
+            shift_range(&mut tab.fade_out_range);
+            for (a, b) in tab.extra_selections.iter_mut() {
+                if *a >= pos {
+                    *a += ins_len;
+                }
+                if *b >= pos {
+                    *b += ins_len;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        true
+    }
+
+    /// Insert `ms` of silence at `pos` (buffer samples).
+    pub(super) fn editor_insert_silence_at(&mut self, tab_idx: usize, pos: usize, ms: f32) -> bool {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let n = ((f64::from(ms.max(0.0)) / 1000.0) * f64::from(sr)).round() as usize;
+        if n == 0 {
+            return false;
+        }
+        let channels = tab.ch_samples.len().max(1);
+        self.editor_insert_channels_at(tab_idx, pos, vec![vec![0.0f32; n]; channels])
+    }
+
+    /// Silence-insert target: selection start when a selection exists,
+    /// otherwise the current playhead position.
+    pub(super) fn editor_insert_position(&self, tab_idx: usize) -> usize {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return 0;
+        };
+        if let Some((s, _)) = Self::editor_selected_range(tab) {
+            return s;
+        }
+        let play_pos = self
+            .audio
+            .shared
+            .play_pos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.map_audio_to_display_sample(tab, play_pos)
+            .min(tab.samples_len)
+    }
+
+    /// Copy the selected range into the in-app audio clipboard. Returns the
+    /// copied length in samples (0 = nothing copied).
+    pub(super) fn editor_copy_selection_to_audio_clipboard(
+        &mut self,
+        tab_idx: usize,
+        notify: bool,
+    ) -> usize {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return 0;
+        };
+        let Some((s, e)) = Self::editor_selected_range(tab) else {
+            if notify {
+                self.push_toast(
+                    super::types::ToastSeverity::Info,
+                    "Select a range to copy audio",
+                );
+            }
+            return 0;
+        };
+        let sr = tab.buffer_sample_rate.max(1);
+        let channels: Vec<Vec<f32>> = tab
+            .ch_samples
+            .iter()
+            .map(|ch| {
+                let end = e.min(ch.len());
+                let start = s.min(end);
+                ch[start..end].to_vec()
+            })
+            .collect();
+        let len = channels.first().map(|c| c.len()).unwrap_or(0);
+        if len == 0 {
+            return 0;
+        }
+        self.editor_audio_clipboard = Some(super::types::EditorAudioClip {
+            channels,
+            sample_rate: sr,
+        });
+        if notify {
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                format!("Copied {:.2} s of audio", len as f64 / f64::from(sr)),
+            );
+        }
+        len
+    }
+
+    /// Cut = copy selection to the audio clipboard, then delete+join it.
+    pub(super) fn editor_cut_selection_to_audio_clipboard(&mut self, tab_idx: usize) -> bool {
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| Self::editor_selected_range(tab));
+        let Some((s, e)) = range else {
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                "Select a range to cut audio",
+            );
+            return false;
+        };
+        if self.editor_copy_selection_to_audio_clipboard(tab_idx, false) == 0 {
+            return false;
+        }
+        self.editor_delete_range_and_join(tab_idx, (s, e));
+        self.push_toast(
+            super::types::ToastSeverity::Info,
+            "Cut selection (Ctrl+Z to undo)",
+        );
+        true
+    }
+
+    /// Paste-insert the audio clipboard at the selection start / playhead.
+    /// The clip is resampled to the tab's buffer rate when needed and its
+    /// channel layout is adapted (repeat modulo) to the tab's channel count.
+    pub(super) fn editor_paste_insert_from_audio_clipboard(&mut self, tab_idx: usize) -> bool {
+        self.editor_paste_from_audio_clipboard(tab_idx, super::types::PasteMode::Insert)
+    }
+
+    /// Prepare the clipboard contents for pasting into `tab_idx`: resample to
+    /// the buffer rate, adapt the channel layout, trim to rectangular.
+    fn editor_prepared_clipboard_channels(&mut self, tab_idx: usize) -> Option<Vec<Vec<f32>>> {
+        let clip = match self.editor_audio_clipboard.clone() {
+            Some(clip) => clip,
+            None => {
+                self.push_toast(
+                    super::types::ToastSeverity::Info,
+                    "Audio clipboard is empty (Ctrl+C/X in the editor copies audio)",
+                );
+                return None;
+            }
+        };
+        let (target_sr, target_ch) = {
+            let tab = self.tabs.get(tab_idx)?;
+            (tab.buffer_sample_rate.max(1), tab.ch_samples.len().max(1))
+        };
+        let mut channels = clip.channels;
+        if clip.sample_rate != target_sr {
+            channels = crate::wave::resample_channels_quality(
+                &channels,
+                clip.sample_rate,
+                target_sr,
+                crate::wave::ResampleQuality::Best,
+            );
+        }
+        if channels.is_empty() {
+            return None;
+        }
+        if channels.len() != target_ch {
+            channels = (0..target_ch)
+                .map(|i| channels[i % channels.len()].clone())
+                .collect();
+        }
+        // Resamplers can differ by a sample or two across channels; trim to
+        // the shortest so the paste stays rectangular.
+        let min_len = channels.iter().map(|c| c.len()).min().unwrap_or(0);
+        if min_len == 0 {
+            return None;
+        }
+        for ch in channels.iter_mut() {
+            ch.truncate(min_len);
+        }
+        Some(channels)
+    }
+
+    /// Paste the audio clipboard at the selection start / playhead using the
+    /// given mode: Insert (splice in, markers shift), Mix (sum into the
+    /// existing audio, length unchanged), or CrossfadeInsert (insert with
+    /// equal-power crossfaded joins).
+    pub(super) fn editor_paste_from_audio_clipboard(
+        &mut self,
+        tab_idx: usize,
+        mode: super::types::PasteMode,
+    ) -> bool {
+        let Some(channels) = self.editor_prepared_clipboard_channels(tab_idx) else {
+            return false;
+        };
+        let paste_len = channels.first().map(|c| c.len()).unwrap_or(0);
+        let pos = self.editor_insert_position(tab_idx);
+        let sr = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.buffer_sample_rate.max(1))
+            .unwrap_or(1);
+        let ok = match mode {
+            super::types::PasteMode::Insert => {
+                self.editor_insert_channels_at(tab_idx, pos, channels)
+            }
+            super::types::PasteMode::Mix => self.editor_mix_channels_at(tab_idx, pos, &channels),
+            super::types::PasteMode::CrossfadeInsert => {
+                let xfade = crate::wave::splice_xfade_samples(sr, paste_len, paste_len).min(2048);
+                self.editor_insert_channels_at_with_xfade(tab_idx, pos, channels, xfade)
+            }
+        };
+        if ok {
+            let verb = match mode {
+                super::types::PasteMode::Insert => "Pasted",
+                super::types::PasteMode::Mix => "Mix-pasted",
+                super::types::PasteMode::CrossfadeInsert => "Crossfade-pasted",
+            };
+            self.push_toast(
+                super::types::ToastSeverity::Info,
+                format!(
+                    "{verb} {:.2} s of audio (Ctrl+Z to undo)",
+                    paste_len as f64 / f64::from(sr)
+                ),
+            );
+        }
+        ok
+    }
+
+    /// Sum `mix` into the existing audio starting at `pos` (length unchanged;
+    /// samples past the end of the buffer are dropped). No marker shifts.
+    pub(super) fn editor_mix_channels_at(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        mix: &[Vec<f32>],
+    ) -> bool {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let mix_len = mix.first().map(|c| c.len()).unwrap_or(0);
+            if mix_len == 0 || mix.len() != tab.ch_samples.len() || pos >= tab.samples_len {
+                return false;
+            }
+            let undo_state = Self::capture_undo_state_labeled(tab, "Mix Paste");
+            for (ch, add) in tab.ch_samples.iter_mut().zip(mix.iter()) {
+                let end = (pos + add.len()).min(ch.len());
+                for (dst, src) in ch[pos..end].iter_mut().zip(add.iter()) {
+                    *dst += *src;
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        true
+    }
+
+    /// Insert with equal-power crossfaded joins: the first/last `xfade`
+    /// samples of the inserted material blend against the audio that used to
+    /// sit at the insert point (start joins with the preceding samples'
+    /// continuation, end joins into the following samples).
+    pub(super) fn editor_insert_channels_at_with_xfade(
+        &mut self,
+        tab_idx: usize,
+        pos: usize,
+        mut insert: Vec<Vec<f32>>,
+        xfade: usize,
+    ) -> bool {
+        if xfade == 0 {
+            return self.editor_insert_channels_at(tab_idx, pos, insert);
+        }
+        // Blend the insert edges against the neighbouring original audio
+        // BEFORE splicing: the start of the clip fades in over the tail of
+        // what precedes `pos`, the end fades out into what follows `pos`.
+        {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            let ins_len = insert.first().map(|c| c.len()).unwrap_or(0);
+            if ins_len == 0 || insert.len() != tab.ch_samples.len() {
+                return false;
+            }
+            let pos = pos.min(tab.samples_len);
+            let xf = xfade.min(ins_len / 2);
+            for (ci, ins) in insert.iter_mut().enumerate() {
+                let orig = &tab.ch_samples[ci];
+                // Fade-in against the samples immediately before pos.
+                for k in 0..xf {
+                    let t = (k as f32 + 0.5) / xf as f32;
+                    let (win, wout) = ((t * std::f32::consts::FRAC_PI_2).sin(), (t * std::f32::consts::FRAC_PI_2).cos());
+                    let prev = if pos >= xf - k {
+                        orig.get(pos + k - xf).copied().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
+                    ins[k] = ins[k] * win + prev * wout;
+                }
+                // Fade-out into the samples at/after pos.
+                for k in 0..xf {
+                    let t = (k as f32 + 0.5) / xf as f32;
+                    let (wout, win) = ((t * std::f32::consts::FRAC_PI_2).cos(), (t * std::f32::consts::FRAC_PI_2).sin());
+                    let next = orig.get(pos + k).copied().unwrap_or(0.0);
+                    let idx = ins_len - xf + k;
+                    ins[idx] = ins[idx] * wout + next * win;
+                }
+            }
+        }
+        self.editor_insert_channels_at(tab_idx, pos, insert)
+    }
+
+    /// Write a linearly interpolated pencil segment into the target channels.
+    pub(crate) fn editor_pencil_write_segment(
+        tab: &mut super::types::EditorTab,
+        channels: &[usize],
+        from: (usize, f32),
+        to: (usize, f32),
+    ) {
+        let len = tab.samples_len;
+        if len == 0 {
+            return;
+        }
+        let (a, av, b, bv) = if from.0 <= to.0 {
+            (from.0, from.1, to.0, to.1)
+        } else {
+            (to.0, to.1, from.0, from.1)
+        };
+        let a = a.min(len - 1);
+        let b = b.min(len - 1);
+        let n = b - a;
+        for &ci in channels {
+            let Some(ch) = tab.ch_samples.get_mut(ci) else {
+                continue;
+            };
+            for i in a..=b {
+                let t = if n == 0 {
+                    1.0
+                } else {
+                    (i - a) as f32 / n as f32
+                };
+                let v = av + (bv - av) * t;
+                if let Some(s) = ch.get_mut(i) {
+                    // Keep float headroom, but bound runaway values.
+                    *s = v.clamp(-4.0, 4.0);
+                }
+            }
+        }
+    }
+
+    /// Finish a pencil stroke: push the undo state captured at stroke start
+    /// and run the shared destructive-apply pipeline.
+    pub(super) fn editor_pencil_commit(&mut self, tab_idx: usize) {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let Some(undo) = tab.pencil_undo.take() else {
+                return;
+            };
+            tab.pencil_last_point = None;
+            tab.pencil_stroke_channels.clear();
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            *undo
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_stroke(&mut self, from_frac: f32, amp0: f32, to_frac: f32, amp1: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            if tab.samples_len == 0 {
+                return false;
+            }
+            let a = ((tab.samples_len as f32) * from_frac.clamp(0.0, 1.0)) as usize;
+            let b = ((tab.samples_len as f32) * to_frac.clamp(0.0, 1.0)) as usize;
+            tab.pencil_undo = Some(Box::new(Self::capture_undo_state_labeled(tab, "Pencil")));
+            let channels: Vec<usize> = (0..tab.ch_samples.len()).collect();
+            Self::editor_pencil_write_segment(tab, &channels, (a, amp0), (b, amp1));
+        }
+        self.editor_pencil_commit(tab_idx);
+        true
+    }
+
+    /// Mean of a sample slice in f64 (stable for long buffers).
+    pub(super) fn dc_mean_over(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = samples.iter().map(|&v| f64::from(v)).sum();
+        (sum / samples.len() as f64) as f32
+    }
+
+    /// Subtract the mean of `ch[s..e]` from that range in place.
+    pub(super) fn dc_remove_range(ch: &mut [f32], s: usize, e: usize) {
+        let end = e.min(ch.len());
+        let start = s.min(end);
+        if start >= end {
+            return;
+        }
+        let mean = Self::dc_mean_over(&ch[start..end]);
+        if mean == 0.0 {
+            return;
+        }
+        for v in &mut ch[start..end] {
+            *v -= mean;
+        }
+    }
+
+    /// Channels a destructive range edit applies to. A Custom channel view
+    /// scopes edits to its visible channels; Mixdown/All (or a Custom view
+    /// covering every channel) edits all of them, returned as `None`.
+    pub(super) fn editor_channel_mask(tab: &crate::app::types::EditorTab) -> Option<Vec<bool>> {
+        if !matches!(
+            tab.channel_view.mode,
+            crate::app::types::ChannelViewMode::Custom
+        ) {
+            return None;
+        }
+        let total = tab.ch_samples.len();
+        let vis = tab.channel_view.visible_indices(total);
+        if vis.is_empty() || vis.len() >= total {
+            return None;
+        }
+        let mut mask = vec![false; total];
+        for i in vis {
+            mask[i] = true;
+        }
+        Some(mask)
+    }
+
+    /// Inspector caption for the current edit scope ("ch 1, 3"), or `None`
+    /// when edits apply to every channel.
+    pub(super) fn editor_channel_mask_label(tab: &crate::app::types::EditorTab) -> Option<String> {
+        let mask = Self::editor_channel_mask(tab)?;
+        let chans: Vec<String> = mask
+            .iter()
+            .enumerate()
+            .filter(|(_, &on)| on)
+            .map(|(i, _)| (i + 1).to_string())
+            .collect();
+        Some(format!("ch {}", chans.join(", ")))
+    }
+
+    /// Scan for clipped (flat-at-the-rail) runs; results share the de-click
+    /// red-band overlay via `tab.declick_scan`.
+    pub(super) fn editor_declip_scan(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return;
+        }
+        let sens = tab.tool_state.declip_sensitivity.clamp(0.0, 1.0);
+        let range = Self::editor_selected_range(tab);
+        let sr = tab.buffer_sample_rate.max(1);
+        let cfg = crate::app::declip::DeclipConfig {
+            sensitivity: sens,
+            ..Default::default()
+        };
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for ch in &tab.ch_samples {
+            spans.extend(crate::app::declip::detect_clipped(ch, sr, &cfg, range));
+        }
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in spans {
+            match merged.last_mut() {
+                Some((_, pe)) if s <= *pe => *pe = (*pe).max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        tab.declick_scan = Some(crate::app::types::DeclickScan {
+            sensitivity: sens,
+            spans: merged,
+            range,
+        });
+    }
+
+    /// Run the de-click detector over the active selection (or the whole
+    /// file) and store the spans for the red marker overlay. Synchronous:
+    /// the detector is O(n) with a small constant, fine for UI-thread use.
+    pub(super) fn editor_declick_scan(&mut self, tab_idx: usize) {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return;
+        }
+        let sens = tab.tool_state.declick_sensitivity.clamp(0.0, 1.0);
+        let range = Self::editor_selected_range(tab);
+        let sr = tab.buffer_sample_rate.max(1);
+        let cfg = crate::app::declick::DeclickConfig {
+            sensitivity: sens,
+            ..Default::default()
+        };
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for ch in &tab.ch_samples {
+            spans.extend(crate::app::declick::detect_clicks(ch, sr, &cfg, range));
+        }
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::new();
+        for (s, e) in spans {
+            match merged.last_mut() {
+                Some((_, pe)) if s <= *pe => *pe = (*pe).max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        tab.declick_scan = Some(crate::app::types::DeclickScan {
+            sensitivity: sens,
+            spans: merged,
+            range,
+        });
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declick_scan(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.editor_declick_scan(tab_idx);
+        self.tabs
+            .get(tab_idx)
+            .and_then(|t| t.declick_scan.as_ref())
+            .map(|s| s.spans.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declick_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let sens = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.tool_state.declick_sensitivity)
+            .unwrap_or(0.5);
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(Self::editor_selected_range);
+        self.spawn_editor_apply_for_tab_range(
+            tab_idx,
+            crate::app::types::ToolKind::DeClick,
+            sens,
+            range,
+        );
+        self.editor_apply_state.is_some()
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declip_scan(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.editor_declip_scan(tab_idx);
+        self.tabs
+            .get(tab_idx)
+            .and_then(|t| t.declick_scan.as_ref())
+            .map(|s| s.spans.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_declip_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let sens = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| t.tool_state.declip_sensitivity)
+            .unwrap_or(0.5);
+        let range = self
+            .tabs
+            .get(tab_idx)
+            .and_then(Self::editor_selected_range);
+        self.spawn_editor_apply_for_tab_range(
+            tab_idx,
+            crate::app::types::ToolKind::DeClip,
+            sens,
+            range,
+        );
+        self.editor_apply_state.is_some()
+    }
+
+    /// Async de-hum apply: biquad notch cascade at the configured
+    /// fundamental and harmonics. A selection limits the effect via a
+    /// crossfaded splice (the filter itself runs over the whole channel so
+    /// its settling transient never lands inside the spliced region edges).
+    pub(super) fn spawn_dehum_apply_for_tab(&mut self, tab_idx: usize) {
+        use std::sync::mpsc;
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return;
+        }
+        let cfg = crate::app::dehum::DehumConfig {
+            base_hz: tab.tool_state.dehum_hz.clamp(20.0, 400.0),
+            harmonics: tab.tool_state.dehum_harmonics.clamp(1, 16),
+            q: tab.tool_state.dehum_q.clamp(5.0, 100.0),
+            depth_db: tab.tool_state.dehum_depth_db.clamp(3.0, 80.0),
+        };
+        let range = Self::editor_selected_range(tab);
+        let undo = Some(Self::capture_undo_state(tab));
+        let apply_tab_id = tab.tab_id;
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
+        let channels = tab.ch_samples.clone();
+        let buffer_sr = tab.buffer_sample_rate.max(1);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = None;
+            tab.preview_overlay = None;
+        }
+        let (tx, rx) = mpsc::channel::<EditorApplyResult>();
+        std::thread::spawn(move || {
+            let fade = (buffer_sr / 100).max(16) as usize; // ~10 ms splice
+            let out: Vec<Vec<f32>> = channels
+                .iter()
+                .map(|ch| {
+                    let filtered = crate::app::dehum::dehum_channel(ch, buffer_sr, &cfg);
+                    match range {
+                        Some((s, e)) => crate::app::dehum::splice_processed_range(
+                            ch, &filtered, s, e, fade,
+                        ),
+                        None => filtered,
+                    }
+                })
+                .collect();
+            let len = out.get(0).map(Vec::len).unwrap_or(0);
+            let (waveform_minmax, waveform_pyramid) =
+                crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
+            let channels_arc = std::sync::Arc::new(out.clone());
+            let _ = tx.send(EditorApplyResult {
+                channels: out,
+                channels_arc,
+                waveform_minmax,
+                waveform_pyramid,
+                lufs_override: None,
+                selection_after: None,
+            });
+        });
+        self.editor_apply_state = Some(crate::app::types::EditorApplyState {
+            msg: "Removing hum...".to_string(),
+            rx,
+            tab_id: apply_tab_id,
+            undo,
+        });
+    }
+
+    /// Detect the hum fundamental on the active tab (selection when present)
+    /// and store it in the tool state. Returns the frequency when found.
+    pub(super) fn editor_dehum_detect(&mut self, tab_idx: usize) -> Option<f32> {
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return None;
+        };
+        if tab.loading || tab.samples_len == 0 {
+            return None;
+        }
+        let sr = tab.buffer_sample_rate.max(1);
+        let range = Self::editor_selected_range(tab);
+        let found = tab.ch_samples.iter().find_map(|ch| {
+            let slice = match range {
+                Some((s, e)) if e > s && e <= ch.len() => &ch[s..e],
+                _ => &ch[..],
+            };
+            crate::app::dehum::detect_hum_hz(slice, sr)
+        });
+        if let Some(hz) = found {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.tool_state = crate::app::types::ToolState {
+                    dehum_hz: hz,
+                    ..tab.tool_state
+                };
+            }
+        }
+        found
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_dehum_detect(&mut self) -> Option<f32> {
+        let tab_idx = self.active_tab?;
+        self.editor_dehum_detect(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_dehum_apply(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.spawn_dehum_apply_for_tab(tab_idx);
+        self.editor_apply_state.is_some()
+    }
+
+    /// Begin Alt+drag scrubbing: remember the loop atomics and transport
+    /// state so releasing the drag puts everything back.
+    pub(super) fn scrub_begin(&mut self, tab_id: u64) {
+        if self.scrub_state.is_some() {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        let shared = &self.audio.shared;
+        self.scrub_state = Some(crate::app::types::ScrubState {
+            tab_id,
+            was_playing: shared.playing.load(Ordering::Relaxed),
+            prev_loop_enabled: shared.loop_enabled.load(Ordering::Relaxed),
+            prev_loop_start: shared.loop_start.load(Ordering::Relaxed),
+            prev_loop_end: shared.loop_end.load(Ordering::Relaxed),
+        });
+    }
+
+    /// Per-frame scrub tick: loop a ±40 ms window around `center` (audio
+    /// buffer sample space) and keep the engine playing inside it. Only the
+    /// loop atomics are touched — the audio callback is unchanged.
+    pub(super) fn scrub_update(&mut self, center: usize) {
+        if self.scrub_state.is_none() {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        // Loop atomics index the engine buffer, which keeps the tab's buffer
+        // sample rate (native rate on the resample-fallback path) — the
+        // device rate would shrink/stretch the 40 ms window there.
+        let sr = self
+            .scrub_state
+            .as_ref()
+            .and_then(|scrub| self.tabs.iter().find(|t| t.tab_id == scrub.tab_id))
+            .map(|t| t.buffer_sample_rate)
+            .unwrap_or(self.audio.shared.out_sample_rate)
+            .max(1);
+        let half = ((sr as f32) * 0.04).round() as usize; // 40 ms
+        let len = self.audio.current_source_len();
+        if len == 0 {
+            return;
+        }
+        let start = center.saturating_sub(half).min(len.saturating_sub(1));
+        let end = (center + half).clamp(start + 1, len);
+        self.audio.set_loop_region(start, end);
+        self.audio.set_loop_enabled(true);
+        let pos = self.audio.shared.play_pos.load(Ordering::Relaxed);
+        if pos < start || pos >= end {
+            self.audio.seek_to_sample(start);
+        }
+        if !self.audio.shared.playing.load(Ordering::Relaxed) {
+            self.audio.play();
+        }
+    }
+
+    /// End scrubbing: restore the pre-scrub loop window/enable and, when
+    /// playback was originally stopped, stop again.
+    pub(super) fn scrub_end(&mut self) {
+        let Some(state) = self.scrub_state.take() else {
+            return;
+        };
+        self.audio
+            .set_loop_region(state.prev_loop_start, state.prev_loop_end);
+        self.audio.set_loop_enabled(state.prev_loop_enabled);
+        if !state.was_playing {
+            self.audio.stop();
+        }
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_loop_atomics(&self) -> (usize, usize, bool) {
+        use std::sync::atomic::Ordering;
+        (
+            self.audio.shared.loop_start.load(Ordering::Relaxed),
+            self.audio.shared.loop_end.load(Ordering::Relaxed),
+            self.audio.shared.loop_enabled.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_scrub_begin_update(&mut self, tab_id: u64, center: usize) -> (usize, usize, bool) {
+        use std::sync::atomic::Ordering;
+        self.scrub_begin(tab_id);
+        self.scrub_update(center);
+        (
+            self.audio.shared.loop_start.load(Ordering::Relaxed),
+            self.audio.shared.loop_end.load(Ordering::Relaxed),
+            self.audio.shared.loop_enabled.load(Ordering::Relaxed),
+        )
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_scrub_end(&mut self) -> (usize, usize, bool, bool) {
+        use std::sync::atomic::Ordering;
+        self.scrub_end();
+        (
+            self.audio.shared.loop_start.load(Ordering::Relaxed),
+            self.audio.shared.loop_end.load(Ordering::Relaxed),
+            self.audio.shared.loop_enabled.load(Ordering::Relaxed),
+            self.audio.shared.playing.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Remove per-channel DC bias over `range` (subtract the range mean).
+    pub(super) fn editor_apply_remove_dc_range(&mut self, tab_idx: usize, range: (usize, usize)) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state_labeled(tab, "DC Offset");
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
+                Self::dc_remove_range(ch, s, e);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
+    /// Flip waveform polarity over `range` (sample-exact, no smoothing —
+    /// use zero-cross snap for click-free boundaries on partial ranges).
+    /// Invert `[s, e)` of one channel. With `fade > 0`, interior boundaries
+    /// (not touching the buffer edges) ramp the gain 1 -> -1 over `fade`
+    /// samples so the flip doesn't step-discontinue against untouched audio.
+    pub(crate) fn invert_polarity_channel_range(ch: &mut [f32], s: usize, e: usize, fade: usize) {
+        let e = e.min(ch.len());
+        if e <= s {
+            return;
+        }
+        let len = e - s;
+        let fade = fade.min(len / 2);
+        let fade_at_start = fade > 0 && s > 0;
+        let fade_at_end = fade > 0 && e < ch.len();
+        for i in s..e {
+            let rel = i - s;
+            let from_end = e - 1 - i;
+            let g = if fade_at_start && rel < fade {
+                1.0 - 2.0 * ((rel + 1) as f32 / (fade + 1) as f32)
+            } else if fade_at_end && from_end < fade {
+                1.0 - 2.0 * ((from_end + 1) as f32 / (fade + 1) as f32)
+            } else {
+                -1.0
+            };
+            ch[i] *= g;
+        }
+    }
+
+    pub(super) fn editor_apply_invert_polarity_range(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+    ) {
+        let (_channels, undo_state) = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return;
+            };
+            let (s, e) = range;
+            if e <= s || e > tab.samples_len {
+                return;
+            }
+            let undo_state = Self::capture_undo_state_labeled(tab, "Invert Polarity");
+            let mask = Self::editor_channel_mask(tab);
+            let fade = if tab.tool_state.invert_smooth_boundaries {
+                // ~2 ms polarity crossfade at interior boundaries.
+                ((tab.buffer_sample_rate.max(1) as f32) * 0.002).round() as usize
+            } else {
+                0
+            };
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
+                Self::invert_polarity_channel_range(ch, s, e, fade);
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            (tab.ch_samples.clone(), undo_state)
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+    }
+
     pub(super) fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize, usize)) {
         let (_channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
@@ -450,7 +1410,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Trim");
             for ch in tab.ch_samples.iter_mut() {
                 *ch = ch[s..e].to_vec();
             }
@@ -475,6 +1435,19 @@ impl crate::app::WavesPreviewer {
             tab.markers = remap_trim_markers(&tab.markers);
             tab.markers_committed = remap_trim_markers(&tab.markers_committed);
             tab.markers_applied = remap_trim_markers(&tab.markers_applied);
+            tab.regions = tab
+                .regions
+                .iter()
+                .filter_map(|r| {
+                    let rs = r.start.max(s).min(e);
+                    let re = r.end.max(s).min(e);
+                    (re > rs).then(|| crate::markers::RegionEntry {
+                        start: rs - s,
+                        end: re - s,
+                        label: r.label.clone(),
+                    })
+                })
+                .collect();
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
@@ -510,7 +1483,7 @@ impl crate::app::WavesPreviewer {
             if ranges.iter().any(|&(_s, e)| e > tab.samples_len) {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Trim");
             let new_len: usize = ranges.iter().map(|&(s, e)| e - s).sum();
             for ch in tab.ch_samples.iter_mut() {
                 let new_ch: Vec<f32> = ranges
@@ -546,6 +1519,26 @@ impl crate::app::WavesPreviewer {
             tab.markers = remap_markers(&tab.markers);
             tab.markers_committed = remap_markers(&tab.markers_committed);
             tab.markers_applied = remap_markers(&tab.markers_applied);
+            tab.regions = {
+                let mut out = Vec::new();
+                let mut offset = 0usize;
+                for &(s, e) in &ranges {
+                    for r in &tab.regions {
+                        let rs = r.start.max(s).min(e);
+                        let re = r.end.max(s).min(e);
+                        if re > rs {
+                            out.push(crate::markers::RegionEntry {
+                                start: offset + (rs - s),
+                                end: offset + (re - s),
+                                label: r.label.clone(),
+                            });
+                        }
+                    }
+                    offset += e - s;
+                }
+                out.sort_by_key(|r| (r.start, r.end));
+                out
+            };
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
@@ -581,7 +1574,7 @@ impl crate::app::WavesPreviewer {
             if ranges.iter().any(|&(_s, e)| e > tab.samples_len) {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Delete Range");
             let removed: usize = ranges.iter().map(|&(s, e)| e - s).sum();
             for ch in tab.ch_samples.iter_mut() {
                 let mut new_ch: Vec<f32> = Vec::with_capacity(ch.len().saturating_sub(removed));
@@ -1075,6 +2068,18 @@ impl crate::app::WavesPreviewer {
         range: (usize, usize),
         gain_db: f32,
     ) {
+        self.editor_apply_gain_range_opts(tab_idx, range, gain_db, true);
+    }
+
+    /// `respect_channel_view=false` forces all channels regardless of the
+    /// tab's channel view — used by file-level gain (unified list gain).
+    pub(super) fn editor_apply_gain_range_opts(
+        &mut self,
+        tab_idx: usize,
+        range: (usize, usize),
+        gain_db: f32,
+        respect_channel_view: bool,
+    ) {
         let (_channels, undo_state) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
@@ -1083,11 +2088,20 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Gain");
             let g = crate::app::helpers::db_to_amp(gain_db);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = if respect_channel_view {
+                Self::editor_channel_mask(tab)
+            } else {
+                None
+            };
+            // Editing buffers keep float headroom; no clamp here.
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in s..e {
-                    ch[i] = (ch[i] * g).clamp(-1.0, 1.0);
+                    ch[i] *= g;
                 }
             }
             tab.dirty = true;
@@ -1095,6 +2109,7 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.notify_if_tab_over_fs(tab_idx);
     }
 
     pub(super) fn editor_apply_normalize_range(
@@ -1111,8 +2126,14 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
+            // Peak across the edited channels only, so a channel-scoped
+            // normalize hits the target on the channels it changes.
+            let mask = Self::editor_channel_mask(tab);
             let mut peak = 0.0f32;
-            for ch in &tab.ch_samples {
+            for (ci, ch) in tab.ch_samples.iter().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for &v in &ch[s..e] {
                     peak = peak.max(v.abs());
                 }
@@ -1120,11 +2141,15 @@ impl crate::app::WavesPreviewer {
             if peak <= 0.0 {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Normalize");
             let g = crate::app::helpers::db_to_amp(target_db) / peak.max(1e-12);
-            for ch in tab.ch_samples.iter_mut() {
+            // Editing buffers keep float headroom; no clamp here.
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in s..e {
-                    ch[i] = (ch[i] * g).clamp(-1.0, 1.0);
+                    ch[i] *= g;
                 }
             }
             tab.dirty = true;
@@ -1132,6 +2157,7 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.notify_if_tab_over_fs(tab_idx);
     }
 
     pub(super) fn editor_apply_noise_gate_range(
@@ -1150,14 +2176,18 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Noise Gate");
             let sample_rate = tab.buffer_sample_rate.max(1);
             let params = crate::wave::NoiseGateParams {
                 threshold_db,
                 attack_ms,
                 release_ms,
             };
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let processed = crate::wave::process_noise_gate_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
@@ -1182,9 +2212,13 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "EQ");
             let sample_rate = tab.buffer_sample_rate.max(1);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let processed = crate::wave::process_three_band_eq_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
@@ -1209,9 +2243,13 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Compressor");
             let sample_rate = tab.buffer_sample_rate.max(1);
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 let processed = crate::wave::process_compressor_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
@@ -1231,8 +2269,12 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
-            for ch in tab.ch_samples.iter_mut() {
+            let undo_state = Self::capture_undo_state_labeled(tab, "Mute Range");
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in s..e {
                     ch[i] = 0.0;
                 }
@@ -1260,11 +2302,15 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Fade");
             let sr = self.audio.shared.out_sample_rate.max(1) as f32;
             let nin = ((in_ms / 1000.0) * sr) as usize;
             let nout = ((out_ms / 1000.0) * sr) as usize;
-            for ch in tab.ch_samples.iter_mut() {
+            let mask = Self::editor_channel_mask(tab);
+            for (ci, ch) in tab.ch_samples.iter_mut().enumerate() {
+                if mask.as_ref().is_some_and(|m| !m[ci]) {
+                    continue;
+                }
                 for i in 0..nin.min(e - s) {
                     let t = i as f32 / nin.max(1) as f32;
                     let w = Self::fade_weight(crate::app::types::FadeShape::SCurve, t);
@@ -1334,7 +2380,7 @@ impl crate::app::WavesPreviewer {
             if half == 0 {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Loop Crossfade");
             Self::apply_loop_xfade_to_channels(
                 &mut tab.ch_samples,
                 s,
@@ -1448,7 +2494,7 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let shift = loop_len.saturating_mul(repeat_count.saturating_sub(1));
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Loop Unwrap");
             for ch in tab.ch_samples.iter_mut() {
                 let mut out = Vec::with_capacity(ch.len().saturating_add(shift));
                 out.extend_from_slice(&ch[..s]);
@@ -1513,7 +2559,7 @@ impl crate::app::WavesPreviewer {
             if e <= s || e > tab.samples_len {
                 return;
             }
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Delete Range");
             let remove_len = e - s;
             for ch in tab.ch_samples.iter_mut() {
                 ch.drain(s..e);
@@ -1572,7 +2618,7 @@ impl crate::app::WavesPreviewer {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
-            let undo_state = Self::capture_undo_state(tab);
+            let undo_state = Self::capture_undo_state_labeled(tab, "Gain Curve");
             for ch in tab.ch_samples.iter_mut() {
                 crate::wave::apply_gain_envelope_in_place(ch, points, 0.0, true);
             }
@@ -1604,6 +2650,12 @@ impl crate::app::WavesPreviewer {
         range: Option<(usize, usize)>,
     ) {
         use std::sync::mpsc;
+        // Single apply slot: the UI disables further applies on the busy tab;
+        // races (hotkeys, other tabs) refuse with a toast instead of
+        // cancelling the running job.
+        if self.editor_apply_slot_busy_toast() {
+            return;
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
@@ -1615,11 +2667,17 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
-        let undo = Some(Self::capture_undo_state(tab));
-        // Cancel any previous apply job
-        self.editor_apply_state = None;
-        self.audio.stop();
+        let undo = Some(Self::capture_undo_state_labeled(tab, tool.label()));
+        let tab_id = tab.tab_id;
+        // Stop playback only when this tab is the audible source; playback of
+        // other tabs / list previews keeps running during the apply.
+        if matches!(&self.playback_session.source,
+            crate::app::PlaybackSourceKind::EditorTab(p) if *p == tab.path)
+        {
+            self.audio.stop();
+        }
         let ch = tab.ch_samples.clone();
+        let buffer_sr = tab.buffer_sample_rate.max(1);
         let sr = self.audio.shared.out_sample_rate;
         let (tx, rx) = mpsc::channel::<EditorApplyResult>();
         std::thread::spawn(move || {
@@ -1633,6 +2691,28 @@ impl crate::app::WavesPreviewer {
                         out.push(processed);
                     }
                 }
+                ToolKind::DeClick => {
+                    let cfg = crate::app::declick::DeclickConfig {
+                        sensitivity: param.clamp(0.0, 1.0),
+                        ..Default::default()
+                    };
+                    for chan in ch.iter() {
+                        let (processed, _count) =
+                            crate::app::declick::declick_channel(chan, buffer_sr, &cfg, range);
+                        out.push(processed);
+                    }
+                }
+                ToolKind::DeClip => {
+                    let cfg = crate::app::declip::DeclipConfig {
+                        sensitivity: param.clamp(0.0, 1.0),
+                        ..Default::default()
+                    };
+                    for chan in ch.iter() {
+                        let (processed, _count) =
+                            crate::app::declip::declip_channel(chan, buffer_sr, &cfg, range);
+                        out.push(processed);
+                    }
+                }
                 ToolKind::Loudness => {
                     let lufs = crate::wave::lufs_integrated_from_multi(&ch, sr)
                         .unwrap_or(f32::NEG_INFINITY);
@@ -1641,8 +2721,9 @@ impl crate::app::WavesPreviewer {
                         let gain = 10.0f32.powf(gain_db / 20.0);
                         for chan in ch.iter() {
                             let mut processed = chan.clone();
+                            // Editing buffers keep float headroom; no clamp.
                             for v in processed.iter_mut() {
-                                *v = (*v * gain).clamp(-1.0, 1.0);
+                                *v *= gain;
                             }
                             out.push(processed);
                         }
@@ -1684,8 +2765,6 @@ impl crate::app::WavesPreviewer {
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
             let channels_arc = std::sync::Arc::new(out.clone());
             let _ = tx.send(EditorApplyResult {
-                tab_idx,
-                samples: mono,
                 channels: out,
                 channels_arc,
                 waveform_minmax,
@@ -1699,32 +2778,98 @@ impl crate::app::WavesPreviewer {
             ToolKind::TimeStretch => "Applying TimeStretch...".to_string(),
             ToolKind::Speed => "Applying Speed...".to_string(),
             ToolKind::Loudness => "Applying Loudness Normalize...".to_string(),
+            ToolKind::DeClick => "Removing clicks...".to_string(),
+            ToolKind::DeClip => "Repairing clipping...".to_string(),
             _ => "Applying...".to_string(),
         };
         self.editor_apply_state = Some(crate::app::types::EditorApplyState {
             msg,
             rx,
-            tab_idx,
+            tab_id,
             undo,
         });
     }
 
+    /// Whether the in-flight heavy apply (if any) targets `tab_idx`'s tab.
+    /// The single predicate behind UI gating, hotkey guards, and cancels.
+    pub(super) fn editor_apply_busy_for_tab(&self, tab_idx: usize) -> bool {
+        self.editor_apply_state
+            .as_ref()
+            .zip(self.tabs.get(tab_idx))
+            .map(|(state, tab)| state.tab_id == tab.tab_id)
+            .unwrap_or(false)
+    }
+
+    /// Guard for destructive edits on a tab whose heavy apply is running:
+    /// toast + true when the edit must be refused (the async result would
+    /// silently overwrite the concurrent edit on completion).
+    pub(super) fn editor_apply_busy_toast_for_tab(&mut self, tab_idx: usize) -> bool {
+        if self.editor_apply_busy_for_tab(tab_idx) {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "This tab is busy applying — wait for it or cancel it from the topbar",
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Single apply slot: when an apply is already running, toast and return
+    /// true so the caller refuses to spawn a second one (the busy tab's UI is
+    /// disabled, but other tabs' Apply buttons and hotkeys can still race).
+    pub(super) fn editor_apply_slot_busy_toast(&mut self) -> bool {
+        if self.editor_apply_state.is_some() {
+            self.push_toast(
+                crate::app::types::ToastSeverity::Info,
+                "Another apply is still running — wait for it or cancel it from the topbar",
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Cancel the pending heavy apply only when it targets `tab_idx`'s tab.
+    /// Other tabs' jobs keep running (undo/clear in one tab must not kill a
+    /// job started from another).
+    pub(super) fn cancel_editor_apply_for_tab(&mut self, tab_idx: usize) {
+        if self.editor_apply_busy_for_tab(tab_idx) {
+            self.editor_apply_state = None;
+        }
+    }
+
     pub(super) fn drain_editor_apply_jobs(&mut self, ctx: &egui::Context) {
-        let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>)> = None;
+        let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>, u64)> = None;
+        let mut apply_dead = false;
         if let Some(state) = &mut self.editor_apply_state {
-            if let Ok(res) = state.rx.try_recv() {
-                let undo = state.undo.take();
-                apply_done = Some((res, undo));
+            match state.rx.try_recv() {
+                Ok(res) => {
+                    let undo = state.undo.take();
+                    let tab_id = state.tab_id;
+                    apply_done = Some((res, undo, tab_id));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                // Worker died without sending (panic in the DSP): free the
+                // single apply slot or every later apply is refused forever.
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => apply_dead = true,
             }
         }
-        if let Some((mut res, undo)) = apply_done {
+        if apply_dead {
+            self.editor_apply_state = None;
+            self.push_toast(
+                crate::app::types::ToastSeverity::Error,
+                "Apply failed: the processing worker stopped unexpectedly",
+            );
+            ctx.request_repaint();
+            return;
+        }
+        if let Some((mut res, undo, tab_id)) = apply_done {
+            // Resolve identity -> index at completion time; the tab may have
+            // moved (another tab closed) or be gone entirely.
+            let cur_idx = self.tabs.iter().position(|t| t.tab_id == tab_id);
             let mut spectro_reset_path: Option<PathBuf> = None;
-            if res.tab_idx < self.tabs.len() {
-                let mut applied_channels = std::mem::take(&mut res.channels);
-                if applied_channels.is_empty() && !res.samples.is_empty() {
-                    applied_channels = vec![res.samples.clone()];
-                }
-                if let Some(tab) = self.tabs.get_mut(res.tab_idx) {
+            if let Some(cur_idx) = cur_idx {
+                let applied_channels = std::mem::take(&mut res.channels);
+                if let Some(tab) = self.tabs.get_mut(cur_idx) {
                     let old_len = tab.samples_len.max(1);
                     let old_view = tab.view_offset;
                     let old_spp = tab.samples_per_px;
@@ -1733,6 +2878,7 @@ impl crate::app::WavesPreviewer {
                     }
                     tab.preview_audio_tool = None;
                     tab.preview_overlay = None;
+                    tab.declick_scan = None;
                     tab.ch_samples = applied_channels;
                     // Adopt the worker-built mirror + waveform cache instead
                     // of re-cloning and re-scanning the buffers here.
@@ -1780,25 +2926,37 @@ impl crate::app::WavesPreviewer {
                 }
                 self.clear_heavy_preview_state();
                 self.clear_heavy_overlay_state();
-                self.audio.stop();
-                if let Some((path, buffer_sr, channels)) = self.tabs.get(res.tab_idx).map(|tab| {
-                    (
-                        tab.path.clone(),
-                        tab.buffer_sample_rate.max(1),
-                        tab.ch_samples.clone(),
-                    )
-                }) {
-                    self.audio.set_samples_channels(channels);
-                    self.playback_mark_buffer_source(
-                        crate::app::PlaybackSourceKind::EditorTab(path),
-                        buffer_sr,
-                    );
-                    if let Some(tab) = self.tabs.get(res.tab_idx) {
-                        self.apply_loop_mode_for_tab(tab);
+                // Re-target the audio engine only when this tab is what the
+                // user is hearing (or looking at); playback of another tab or
+                // a list preview must survive the apply untouched.
+                let tab_path = self.tabs.get(cur_idx).map(|t| t.path.clone());
+                // "Active tab" alone is not enough: active_tab stays set while
+                // the user works in the list workspace, and adopting there
+                // would stop an unrelated list preview mid-listen.
+                let adopt_audio = matches!(
+                    (&self.playback_session.source, &tab_path),
+                    (crate::app::PlaybackSourceKind::EditorTab(p), Some(tp)) if p == tp
+                ) || (self.active_tab == Some(cur_idx) && self.is_editor_workspace_active());
+                if adopt_audio {
+                    self.audio.stop();
+                    if let Some((path, buffer_sr, channels)) = self.tabs.get(cur_idx).map(|tab| {
+                        (
+                            tab.path.clone(),
+                            tab.buffer_sample_rate.max(1),
+                            tab.ch_samples.clone(),
+                        )
+                    }) {
+                        self.audio.set_samples_channels(channels);
+                        self.playback_mark_buffer_source(
+                            crate::app::PlaybackSourceKind::EditorTab(path),
+                            buffer_sr,
+                        );
+                        if let Some(tab) = self.tabs.get(cur_idx) {
+                            self.apply_loop_mode_for_tab(tab);
+                        }
                     }
-                } else if !res.samples.is_empty() {
-                    self.audio.set_samples_mono(res.samples);
                 }
+                self.notify_if_tab_over_fs(cur_idx);
             }
             if let Some(path) = spectro_reset_path {
                 self.cancel_spectrogram_for_path(&path);
@@ -1821,6 +2979,89 @@ impl crate::app::WavesPreviewer {
             return false;
         };
         self.editor_apply_trim_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_invert_polarity_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_invert_polarity_range(tab_idx, range);
+        true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_copy_selection(&mut self) -> usize {
+        let Some(tab_idx) = self.active_tab else {
+            return 0;
+        };
+        self.editor_copy_selection_to_audio_clipboard(tab_idx, true)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_cut_selection(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_cut_selection_to_audio_clipboard(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_paste_mode(&mut self, mode: super::types::PasteMode) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_paste_from_audio_clipboard(tab_idx, mode)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_paste_insert(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_paste_insert_from_audio_clipboard(tab_idx)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_editor_audio_clipboard_len(&self) -> usize {
+        self.editor_audio_clipboard
+            .as_ref()
+            .and_then(|c| c.channels.first())
+            .map(|c| c.len())
+            .unwrap_or(0)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_insert_silence_at_frac(&mut self, frac: f32, ms: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let pos = ((tab.samples_len as f32) * frac.clamp(0.0, 1.0)).round() as usize;
+        self.editor_insert_silence_at(tab_idx, pos, ms)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_apply_remove_dc_frac(&mut self, start: f32, end: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return false;
+        };
+        let Some(range) = Self::test_range_from_frac(tab, start, end) else {
+            return false;
+        };
+        self.editor_apply_remove_dc_range(tab_idx, range);
         true
     }
 
@@ -2125,5 +3366,35 @@ mod clear_edit_tests {
         assert_ne!(app.tabs[tab_idx].ch_samples[0], before);
         assert!(app.undo_in_tab(tab_idx));
         assert_eq!(app.tabs[tab_idx].ch_samples[0], before);
+    }
+
+    #[test]
+    fn invert_polarity_smoothing_ramps_interior_boundaries_only() {
+        // Hard flip (fade = 0): exact negation.
+        let mut ch: Vec<f32> = (0..100).map(|i| (i as f32 * 0.37).sin()).collect();
+        let orig = ch.clone();
+        crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 10, 90, 0);
+        for i in 10..90 {
+            assert_eq!(ch[i], -orig[i]);
+        }
+        assert_eq!(&ch[..10], &orig[..10]);
+        assert_eq!(&ch[90..], &orig[90..]);
+
+        // Smoothed interior range: gain walks from ~+1 to -1 at the start
+        // edge (no sign step against the untouched neighbor) and back at the
+        // end edge; the middle is fully inverted.
+        let mut ch: Vec<f32> = vec![1.0; 100];
+        crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 10, 90, 8);
+        assert!(ch[9] == 1.0 && ch[10] > 0.0, "start edge must stay continuous");
+        assert!(ch[10] > ch[11], "gain must descend across the start fade");
+        for v in &ch[18..82] {
+            assert_eq!(*v, -1.0);
+        }
+        assert!(ch[89] > 0.0 && ch[90] == 1.0, "end edge must stay continuous");
+
+        // Range touching the buffer edges: no fade there (nothing to join).
+        let mut ch: Vec<f32> = vec![1.0; 50];
+        crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 0, 50, 8);
+        assert!(ch.iter().all(|v| *v == -1.0));
     }
 }

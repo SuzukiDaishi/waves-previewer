@@ -97,6 +97,8 @@ impl WavesPreviewer {
                 | ToolKind::Normalize
                 | ToolKind::Loudness
                 | ToolKind::Reverse
+                | ToolKind::InvertPolarity
+                | ToolKind::DcOffset
         )
     }
 
@@ -158,6 +160,8 @@ impl WavesPreviewer {
             Some(ToolKind::TimeStretch) => "Previewing TimeStretch...".to_string(),
             Some(ToolKind::Speed) => "Previewing Speed...".to_string(),
             Some(ToolKind::SpectralWarp) => "Previewing Spectral Warp...".to_string(),
+            Some(ToolKind::SpectralBrush) => "Previewing Spectral Brush...".to_string(),
+            Some(ToolKind::DeNoise) => "Previewing De-noise...".to_string(),
             _ => "Previewing...".to_string(),
         })
     }
@@ -218,6 +222,32 @@ impl WavesPreviewer {
     ) {
         self.audio.stop();
         self.audio.set_samples_channels(channels);
+        self.playback_mark_buffer_source(
+            super::PlaybackSourceKind::ToolPreview,
+            self.audio.shared.out_sample_rate.max(1),
+        );
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.preview_audio_tool = Some(tool);
+        }
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            self.apply_loop_mode_for_tab(tab);
+        }
+    }
+
+    /// [`Self::set_preview_channels`] without the stop: the buffer is
+    /// swapped in place and the playhead position (and playing state)
+    /// survive — used by the Plugin FX auto preview.
+    pub(super) fn set_preview_channels_keep_pos(
+        &mut self,
+        tab_idx: usize,
+        tool: ToolKind,
+        channels: Vec<Vec<f32>>,
+    ) {
+        // Preview renders are already at the output rate on both sides of
+        // the swap, so the time position maps 1:1.
+        let sr = self.audio.shared.out_sample_rate.max(1);
+        self.audio
+            .set_samples_channels_keep_time_pos(channels, sr, sr);
         self.playback_mark_buffer_source(
             super::PlaybackSourceKind::ToolPreview,
             self.audio.shared.out_sample_rate.max(1),
@@ -673,6 +703,9 @@ impl WavesPreviewer {
         let sr = self.audio.shared.out_sample_rate.max(1) as f32;
         let out_sample_rate = self.audio.shared.out_sample_rate.max(1);
         let decode_failed = self.is_decode_failed_path(&tab.path);
+        // Custom channel view scopes destructive range edits; light previews
+        // apply the same mask so what you hear matches what Apply does.
+        let ch_mask = Self::editor_channel_mask(tab);
         let _ = tab;
 
         match tool {
@@ -710,7 +743,6 @@ impl WavesPreviewer {
                     return;
                 }
                 let mut overlay = ch_samples.clone();
-                let len = samples_len.max(1);
                 let n_in = ((fade_in_ms / 1000.0) * sr).round() as usize;
                 let n_out = ((fade_out_ms / 1000.0) * sr).round() as usize;
                 if !allow_light_preview {
@@ -729,7 +761,10 @@ impl WavesPreviewer {
                     return;
                 }
                 if n_in > 0 {
-                    for ch in overlay.iter_mut() {
+                    for (ci, ch) in overlay.iter_mut().enumerate() {
+                        if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                            continue;
+                        }
                         let nn = n_in.min(ch.len());
                         for i in 0..nn {
                             let t = i as f32 / nn.max(1) as f32;
@@ -739,7 +774,10 @@ impl WavesPreviewer {
                     }
                 }
                 if n_out > 0 {
-                    for ch in overlay.iter_mut() {
+                    for (ci, ch) in overlay.iter_mut().enumerate() {
+                        if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                            continue;
+                        }
                         let len = ch.len();
                         let nn = n_out.min(len);
                         for i in 0..nn {
@@ -750,10 +788,10 @@ impl WavesPreviewer {
                         }
                     }
                 }
-                let mono = Self::mixdown_channels(&overlay, len);
-                if mono.is_empty() {
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                     return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -762,7 +800,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Fade, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Fade, playback);
             }
             ToolKind::Gain => {
                 if !gain_env_active && gain_db.abs() <= 1e-6 {
@@ -796,16 +834,19 @@ impl WavesPreviewer {
                     }
                 } else {
                     let g = db_to_amp(gain_db);
-                    for ch in overlay.iter_mut() {
+                    for (ci, ch) in overlay.iter_mut().enumerate() {
+                        if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                            continue;
+                        }
                         for v in ch.iter_mut() {
                             *v *= g;
                         }
                     }
                 }
-                let mono = Self::mixdown_channels(&overlay, samples_len);
-                if mono.is_empty() {
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                     return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -814,7 +855,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Gain, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Gain, playback);
             }
             ToolKind::Normalize => {
                 const DEFAULT_NORMALIZE_DB: f32 = -6.0;
@@ -833,27 +874,34 @@ impl WavesPreviewer {
                     );
                     return;
                 }
-                let mut mono = Self::mixdown_channels(&ch_samples, samples_len);
-                if mono.is_empty() {
-                    return;
-                }
+                // Peak across the edited channels (matches the destructive
+                // apply), then one uniform gain so balance is preserved.
                 let mut peak = 0.0f32;
-                for &v in &mono {
-                    peak = peak.max(v.abs());
+                for (ci, ch) in ch_samples.iter().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
+                    for &v in ch.iter() {
+                        peak = peak.max(v.abs());
+                    }
                 }
                 if peak <= 0.0 {
                     return;
                 }
                 let g = db_to_amp(normalize_db) / peak.max(1e-12);
                 let mut overlay = ch_samples.clone();
-                for ch in overlay.iter_mut() {
+                for (ci, ch) in overlay.iter_mut().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
                     for v in ch.iter_mut() {
                         *v *= g;
                     }
                 }
-                for v in &mut mono {
-                    *v *= g;
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
+                    return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -862,7 +910,7 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Normalize, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Normalize, playback);
             }
             ToolKind::Loudness => {
                 const DEFAULT_LOUDNESS_LUFS: f32 = -14.0;
@@ -891,15 +939,16 @@ impl WavesPreviewer {
                     let gain_db = st.loudness_target_lufs - lufs;
                     let gain = db_to_amp(gain_db);
                     let mut overlay = ch_samples.clone();
+                    // Match the unclamped destructive apply.
                     for ch in overlay.iter_mut() {
                         for v in ch.iter_mut() {
-                            *v = (*v * gain).clamp(-1.0, 1.0);
+                            *v *= gain;
                         }
                     }
-                    let mono = Self::mixdown_channels(&overlay, samples_len);
-                    if mono.is_empty() {
+                    if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                         return;
                     }
+                    let playback = overlay.clone();
                     let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -908,7 +957,7 @@ impl WavesPreviewer {
                             timeline_len,
                         ));
                     }
-                    self.set_preview_mono(tab_idx, ToolKind::Loudness, mono);
+                    self.set_preview_channels(tab_idx, ToolKind::Loudness, playback);
                 }
             }
             ToolKind::Reverse => {
@@ -933,10 +982,10 @@ impl WavesPreviewer {
                         None => ch.reverse(),
                     }
                 }
-                let mono = Self::mixdown_channels(&overlay, samples_len);
-                if mono.is_empty() {
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
                     return;
                 }
+                let playback = overlay.clone();
                 let timeline_len = overlay.get(0).map(|c| c.len()).unwrap_or(samples_len);
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.preview_overlay = Some(Self::preview_overlay_from_channels(
@@ -945,7 +994,58 @@ impl WavesPreviewer {
                         timeline_len,
                     ));
                 }
-                self.set_preview_mono(tab_idx, ToolKind::Reverse, mono);
+                self.set_preview_channels(tab_idx, ToolKind::Reverse, playback);
+            }
+            ToolKind::InvertPolarity => {
+                // Negation is O(n) with no analysis, so the light path is fine
+                // even for long files (one buffer clone, same as the apply).
+                let mut overlay = ch_samples.clone();
+                let (s, e) = sel_range.unwrap_or((0, samples_len));
+                for (ci, ch) in overlay.iter_mut().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
+                    let end = e.min(ch.len());
+                    for v in &mut ch[s.min(end)..end] {
+                        *v = -*v;
+                    }
+                }
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
+                    return;
+                }
+                let playback = overlay.clone();
+                let timeline_len = overlay.first().map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                        overlay,
+                        ToolKind::InvertPolarity,
+                        timeline_len,
+                    ));
+                }
+                self.set_preview_channels(tab_idx, ToolKind::InvertPolarity, playback);
+            }
+            ToolKind::DcOffset => {
+                let mut overlay = ch_samples.clone();
+                let (s, e) = sel_range.unwrap_or((0, samples_len));
+                for (ci, ch) in overlay.iter_mut().enumerate() {
+                    if ch_mask.as_ref().is_some_and(|m| !m[ci]) {
+                        continue;
+                    }
+                    Self::dc_remove_range(ch, s, e);
+                }
+                if overlay.first().map(|c| c.is_empty()).unwrap_or(true) {
+                    return;
+                }
+                let playback = overlay.clone();
+                let timeline_len = overlay.first().map(|c| c.len()).unwrap_or(samples_len);
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                        overlay,
+                        ToolKind::DcOffset,
+                        timeline_len,
+                    ));
+                }
+                self.set_preview_channels(tab_idx, ToolKind::DcOffset, playback);
             }
             _ => {}
         }
