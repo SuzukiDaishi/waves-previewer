@@ -1567,16 +1567,24 @@ impl crate::app::WavesPreviewer {
             let l_win = &tab.ch_samples[li][end - take..end];
             let r_win = &tab.ch_samples[ri][end - take..end];
             let trace = Color32::from_rgba_unmultiplied(96, 220, 200, 110);
-            let mut last: Option<egui::Pos2> = None;
-            for (x, y) in
-                crate::app::render::mini_meter::goniometer_points(l_win, r_win, 480)
-            {
-                let pt = egui::pos2(center.x + x * radius, center.y - y * radius);
-                if let Some(prev) = last {
-                    painter.line_segment([prev, pt], Stroke::new(1.0, trace));
-                }
-                last = Some(pt);
+            // Same allocation-free scratch pattern as METER_SCRATCH above.
+            thread_local! {
+                static GONIO_SCRATCH: std::cell::RefCell<Vec<(f32, f32)>> =
+                    const { std::cell::RefCell::new(Vec::new()) };
             }
+            GONIO_SCRATCH.with_borrow_mut(|pts| {
+                crate::app::render::mini_meter::goniometer_points_into(
+                    l_win, r_win, 480, pts,
+                );
+                let mut last: Option<egui::Pos2> = None;
+                for &(x, y) in pts.iter() {
+                    let pt = egui::pos2(center.x + x * radius, center.y - y * radius);
+                    if let Some(prev) = last {
+                        painter.line_segment([prev, pt], Stroke::new(1.0, trace));
+                    }
+                    last = Some(pt);
+                }
+            });
 
             // Correlation bar along the bottom (-1 .. +1).
             let target_corr = if n_ch >= 2 {

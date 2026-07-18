@@ -546,8 +546,9 @@ impl AudioEngine {
                 let mut last_data = std::time::Instant::now();
                 let mut buf_l: Vec<f32> = Vec::new();
                 let mut buf_r: Vec<f32> = Vec::new();
+                let mut poll_ms = 50u64;
                 loop {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    std::thread::sleep(std::time::Duration::from_millis(poll_ms));
                     let Some(shared) = weak.upgrade() else {
                         break;
                     };
@@ -569,9 +570,14 @@ impl AudioEngine {
                             tp_l.reset();
                             tp_r.reset();
                             tp_recent.clear();
+                            // Idle backoff: nothing to meter until playback
+                            // resumes, so poll lazily (still well under the
+                            // 400 ms momentary window once data returns).
+                            poll_ms = 250;
                         }
                         continue;
                     }
+                    poll_ms = 50;
                     last_data = std::time::Instant::now();
                     let sr = shared.out_sample_rate.max(1);
                     let meter = loudness

@@ -203,20 +203,34 @@ pub fn smooth_spectrum_db(smoothed: &mut Vec<f32>, target: &[f32], dt: f32) {
 /// vertical axis and anti-phase material onto the horizontal one. Returns an
 /// empty vec for near-silence.
 pub fn goniometer_points(l: &[f32], r: &[f32], max_points: usize) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    goniometer_points_into(l, r, max_points, &mut out);
+    out
+}
+
+/// Allocation-free variant for the per-frame draw path: clears and refills
+/// `out` (a caller-owned scratch buffer) instead of allocating.
+pub fn goniometer_points_into(
+    l: &[f32],
+    r: &[f32],
+    max_points: usize,
+    out: &mut Vec<(f32, f32)>,
+) {
+    out.clear();
     let n = l.len().min(r.len());
     if n == 0 || max_points == 0 {
-        return Vec::new();
+        return;
     }
     let peak = l[..n]
         .iter()
         .chain(r[..n].iter())
         .fold(0.0f32, |a, v| a.max(v.abs()));
     if peak <= 1.0e-4 {
-        return Vec::new();
+        return;
     }
     let gain = (0.9 / peak).min(16.0);
     let step = (n / max_points).max(1);
-    let mut out = Vec::with_capacity(n / step + 1);
+    out.reserve(n / step + 1);
     let mut i = 0usize;
     while i < n {
         let lv = l[i] * gain;
@@ -227,7 +241,6 @@ pub fn goniometer_points(l: &[f32], r: &[f32], max_points: usize) -> Vec<(f32, f
         ));
         i += step;
     }
-    out
 }
 
 /// Zero-lag correlation of two channels in [-1, 1]. Near-silence maps to

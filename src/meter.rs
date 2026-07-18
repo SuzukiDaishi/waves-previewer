@@ -223,7 +223,10 @@ fn tp_filter_bank() -> [[f32; TP_TAPS_PER_PHASE]; TP_PHASES] {
 /// Streaming inter-sample (true) peak detector for one channel.
 pub struct TruePeakChannel {
     bank: [[f32; TP_TAPS_PER_PHASE]; TP_PHASES],
+    // Ring buffer of recent input; `pos` indexes the newest sample so pushing
+    // is a single store instead of shifting the whole array per sample.
     hist: [f32; TP_TAPS_PER_PHASE],
+    pos: usize,
 }
 
 impl TruePeakChannel {
@@ -231,22 +234,33 @@ impl TruePeakChannel {
         Self {
             bank: tp_filter_bank(),
             hist: [0.0; TP_TAPS_PER_PHASE],
+            pos: 0,
         }
     }
 
     pub fn reset(&mut self) {
         self.hist = [0.0; TP_TAPS_PER_PHASE];
+        self.pos = 0;
     }
 
     /// Feed a chunk; returns the maximum oversampled magnitude seen in it.
     pub fn scan(&mut self, chunk: &[f32]) -> f32 {
         let mut max = 0.0f32;
         for &x in chunk {
-            self.hist.rotate_right(1);
-            self.hist[0] = x;
+            self.pos = (self.pos + 1) % TP_TAPS_PER_PHASE;
+            self.hist[self.pos] = x;
+            // Newest-first walk of the ring: hist[pos], hist[pos-1], ...,
+            // wrapping to hist[N-1] ... hist[pos+1] — same tap order the
+            // shifted-array version had.
+            let (older, newer) = self.hist.split_at(self.pos + 1);
             for phase in &self.bank {
                 let mut acc = 0.0f32;
-                for (h, c) in self.hist.iter().zip(phase.iter()) {
+                for (h, c) in older
+                    .iter()
+                    .rev()
+                    .chain(newer.iter().rev())
+                    .zip(phase.iter())
+                {
                     acc += h * c;
                 }
                 max = max.max(acc.abs());
