@@ -37,6 +37,11 @@
 - 列幅はドラッグでリサイズすると prefs に保存され、次回起動時も維持されます。
 - **List > Inspect Files (QA)...**(行コンテキストメニューにも有り)で一括検査(ピーク超過 / LUFS 逸脱 / 無音余白 / ループ不整合)を実行できます。結果ウィンドウは severity フィルタ・行クリックでリスト選択・CSV 保存に対応。
 - **List > Normalize Loudness...** で選択(または全件)のラウドネスを目標 LUFS へ非破壊で揃えられます(pending gain を設定。ファイルは書き換えません。バッチ全体で 1 回の Undo)。
+- **フォルダ監視**: 開いているフォルダを数秒毎にポーリングし、ディスク上の追加/削除/変更をリストへ自動反映します（エディタで開いているファイルは保持、自アプリの書き込みは無視、一括処理中は一時停止。Settings の「Watch folder for changes」で OFF 可）。
+- **列の並べ替え**: Settings > List Columns > **Column Order** で列の表示順を変更できます（↑/↓、Reset Order）。列順と列幅はセッション(.nwsess)にも保存されます。
+- **無音長カラム**: Settings の List Columns で **Sil.Head / Sil.Tail**（先頭/末尾無音 ms、-60 dBFS 基準・フルデコード時に算出）を表示できます。ソート対応。
+- **Find Duplicates のオフセット許容**: 結果ウィンドウの「Match time-shifted copies」（既定 ON）で、先頭無音でパディングされたコピーも検出します（検出オフセット ms を表示、しきい値は +2.5% 厳しめ）。
+- **Edit BWF Metadata の拡張**: RIFF INFO（INAM/IART/ICMT）と iXML（PROJECT/SCENE/TAKE/TAPE/NOTE）も同時に一括書き込みできます（空のままのセクションは既存チャンクを保持）。
 - **List > Play Selected Together**: 選択ファイル(最大 16 件、超過分はトースト通知の上で先頭 16 件)をデコード・SR 整列し、1/√n の等パワーで合算して 1 回再生します(レイヤリングの当たり確認用)。
 - **List > Audition Selection (Round-robin / Random)**: 2 件以上選択した状態で、選択ファイルを順番（またはランダム、同一ファイル連続なし）に連続試聴します。各ファイルの自然終了で次へ進み、停止（Space / 別の行を選択 / topbar の「Audition n/m」の Cancel）で終了します。
 - **List > Find Duplicates...**: 選択(または全件)を指紋化して、完全一致(exact)と知覚的に近い(similar、音量違いも検出)ファイルをグループ表示します。行クリックでリスト選択、CSV 保存対応。

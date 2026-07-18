@@ -4,6 +4,14 @@ All notable changes in this repository (hand-written).
 
 ## Unreleased (current)
 
+### List & Pipeline (P7)
+- **Folder watch**: the open folder is polled every ~3 s (low-priority thread, scan filters shared); files added/removed/changed on disk merge into, leave, or refresh the list automatically with a summary toast. Files open in an editor tab are never touched, the app's own writes are suppressed via a 5 s registry, and bulk operations pause polling. Settings toggle, default on.
+- **Column reorder + per-project layout**: list columns can be reordered (Settings > List Columns > Column Order, up/down per column); the order is a stable ColumnId permutation driving definitions, headers, and cells from one loop. Sessions (.nwsess) now store per-project column order and widths (serde-defaulted; old files unchanged).
+- **Silence columns**: optional Sil.Head / Sil.Tail columns (leading/trailing silence ms at -60 dBFS, full-decode metadata), sortable, session/CLI aware.
+- **Offset-tolerant duplicates**: fingerprints are content-aligned (leading silence trimmed and recorded), so silence-padded copies match frame-for-frame; offset matches need +2.5% similarity, groups show the offset, and O(1) duration/centroid gates skip hopeless comparisons. Toggleable per scan (default on).
+- **RIFF INFO + iXML batch write**: the BWF dialog also writes INAM/IART/ICMT and PROJECT/SCENE/TAKE/TAPE/NOTE via dependency-free chunk builders (round-trip tested; empty sections leave existing chunks alone).
+- **Meta backlog progress**: a "Meta n/m" topbar item appears when more than 200 metadata jobs are queued (visible rows were already prioritized to the queue front).
+
 ### Playback & Metering (P6)
 - **Realtime LUFS + true peak**: the audio callback feeds a lock-free tap ring; a low-priority thread runs BS.1770 K-weighting (recomputed for the device sample rate and pinned to the ITU 48 kHz table by test), publishes momentary (400 ms) / short-term (3 s) LUFS and 4x-oversampled true peak, shown as a compact "M / S / TP" readout next to the topbar output meter. Readings invalidate ~500 ms after playback stops.
 - **Goniometer polish**: the STEREO pane's Lissajous mapping is now a unit-tested pure function (mono collapses to the mid axis, L = -R to the side axis) and the smoothed correlation value is shown numerically beside the pane title.
