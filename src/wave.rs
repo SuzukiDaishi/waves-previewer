@@ -3202,6 +3202,11 @@ pub fn export_channels_audio_with_depth(
     dst: &Path,
     wav_depth: Option<WavBitDepth>,
 ) -> Result<()> {
+    // A zero-channel buffer (e.g. from a failed decode) must fail here with a
+    // real error — hound panics on a zero block align otherwise.
+    if chans.is_empty() {
+        anyhow::bail!("no audio channels to export: {}", dst.display());
+    }
     crate::app::watch::note_self_write(dst);
     let ext = dst
         .extension()

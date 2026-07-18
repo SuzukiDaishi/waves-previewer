@@ -439,6 +439,15 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
 }
 
 fn emit_envelope(envelope: CliEnvelope) -> Result<()> {
+    // stdout carries the machine-readable JSON envelope; mirror warnings and
+    // errors to stderr as the human-readable diagnostics the --cli help
+    // promises, so scripted callers piping stdout still see failures.
+    for warning in &envelope.warnings {
+        eprintln!("warning: {warning}");
+    }
+    for error in &envelope.errors {
+        eprintln!("error: {error}");
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&envelope).context("serialize CLI envelope")?
@@ -910,7 +919,8 @@ fn list_query(args: ListQueryArgs) -> Result<CliCommandOutput> {
     let filter = resolve_query_filter(&args.filter)?;
     let columns = parse_list_column_keys(&args.columns)?;
     let source = load_list_source(&args.source)?;
-    let mut rows = list_rows_from_source(&source, args.include_overlays)?;
+    let mut warnings = Vec::new();
+    let mut rows = list_rows_from_source(&source, args.include_overlays, &mut warnings)?;
     apply_list_query_filter_sort(
         &mut rows,
         filter.query.as_deref(),
@@ -928,7 +938,7 @@ fn list_query(args: ListQueryArgs) -> Result<CliCommandOutput> {
             "columns": columns,
             "rows": rows.into_iter().map(Value::Object).collect::<Vec<_>>(),
         }),
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -990,7 +1000,7 @@ fn list_select(args: ListSelectArgs) -> Result<CliCommandOutput> {
             .context("list select requires --path or --query")?;
         let mut rows = entries
             .iter()
-            .map(|entry| list_row_for_entry(entry, Some(&session), false))
+            .map(|entry| list_row_for_entry(entry, Some(&session), false, &mut Vec::new()))
             .collect::<Result<Vec<_>>>()?;
         apply_list_query_filter_sort(&mut rows, Some(query), None, None);
         let row = rows
@@ -1123,6 +1133,10 @@ fn batch_loudness_plan(args: BatchLoudnessPlanArgs) -> Result<CliCommandOutput> 
     if let Some(report) = args.report.as_deref() {
         write_batch_loudness_report(report, &rows, args.target_lufs, false)?;
     }
+    let warnings = rows
+        .iter()
+        .filter_map(|row| row.warning.as_ref().map(|w| format!("{}: {w}", row.path)))
+        .collect();
     Ok(CliCommandOutput {
         result: json!({
             "query_id": filter.query_id,
@@ -1131,7 +1145,7 @@ fn batch_loudness_plan(args: BatchLoudnessPlanArgs) -> Result<CliCommandOutput> 
             "rows": rows,
             "report_path": args.report.as_deref().map(absolute_string).transpose()?,
         }),
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -1161,6 +1175,14 @@ fn batch_loudness_apply(args: BatchLoudnessApplyArgs) -> Result<CliCommandOutput
             })),
         }
     }
+    let warnings = failed_path_warnings(&failed_paths);
+    if !failed_paths.is_empty() && updated_paths.is_empty() && unchanged_paths.is_empty() {
+        bail!(
+            "all {} matched files failed the loudness plan: {}",
+            failed_paths.len(),
+            warnings.join("; ")
+        );
+    }
     save_session(&session)?;
     let after = session_pending_gain_map(&session);
     if let Some(report) = args.report.as_deref() {
@@ -1179,7 +1201,7 @@ fn batch_loudness_apply(args: BatchLoudnessApplyArgs) -> Result<CliCommandOutput
             "session_dirty": true,
             "report_path": args.report.as_deref().map(absolute_string).transpose()?,
         }),
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
@@ -1241,6 +1263,14 @@ fn batch_export(args: BatchExportArgs) -> Result<CliCommandOutput> {
             })),
         }
     }
+    let warnings = failed_path_warnings(&failed_paths);
+    if !failed_paths.is_empty() && mutated_paths.is_empty() {
+        bail!(
+            "all {} attempted files failed to export: {}",
+            failed_paths.len(),
+            warnings.join("; ")
+        );
+    }
     if args.overwrite {
         workspace.save()?;
     }
@@ -1259,8 +1289,22 @@ fn batch_export(args: BatchExportArgs) -> Result<CliCommandOutput> {
             "failed_paths": failed_paths,
             "report_path": args.report.as_deref().map(absolute_string).transpose()?,
         }),
-        warnings: Vec::new(),
+        warnings,
     })
+}
+
+/// One human-readable warning line per `{path, error}` failure entry.
+fn failed_path_warnings(failed_paths: &[Value]) -> Vec<String> {
+    failed_paths
+        .iter()
+        .map(|f| {
+            format!(
+                "{}: {}",
+                f.get("path").and_then(Value::as_str).unwrap_or("?"),
+                f.get("error").and_then(Value::as_str).unwrap_or("unknown error"),
+            )
+        })
+        .collect()
 }
 
 fn effect_graph_list(_args: EffectGraphListArgs) -> Result<CliCommandOutput> {
@@ -2852,15 +2896,16 @@ fn render_source_json_for_list(source: &ListSourceArgs) -> Result<Value> {
 fn list_rows_from_source(
     source: &ListSourceLoaded,
     include_overlays: bool,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<Map<String, Value>>> {
     match source {
         ListSourceLoaded::Session(session) => session_list_entries(session)
             .into_iter()
-            .map(|entry| list_row_for_entry(&entry, Some(session), include_overlays))
+            .map(|entry| list_row_for_entry(&entry, Some(session), include_overlays, warnings))
             .collect(),
         ListSourceLoaded::Folder(entries, _) => entries
             .iter()
-            .map(|entry| list_row_for_entry(entry, None, include_overlays))
+            .map(|entry| list_row_for_entry(entry, None, include_overlays, warnings))
             .collect(),
     }
 }
@@ -2869,9 +2914,18 @@ fn list_row_for_entry(
     entry: &SessionListEntry,
     session: Option<&LoadedSession>,
     include_overlays: bool,
+    warnings: &mut Vec<String>,
 ) -> Result<Map<String, Value>> {
     let path = absolute_output_path(&entry.path)?;
-    let info = read_audio_info(&path).ok();
+    // An unreadable file still gets a row (with blank metadata columns), but
+    // the failure must surface instead of being silently dropped.
+    let info = match read_audio_info(&path) {
+        Ok(info) => Some(info),
+        Err(err) => {
+            warnings.push(format!("{}: read audio info failed: {err}", path.display()));
+            None
+        }
+    };
     let mut row = Map::new();
     row.insert("row_id".to_string(), json!(stable_row_id_for_path(&path)));
     row.insert("path".to_string(), Value::String(pathbuf_to_string(&path)));
@@ -3255,9 +3309,11 @@ fn matched_session_entries(
     filter: &ResolvedQueryFilter,
 ) -> Result<Vec<SessionListEntry>> {
     let entries = session_list_entries(session);
+    // Decode warnings are discarded here: batch commands report per-file
+    // failures through their own failed_paths accounting.
     let mut rows = entries
         .iter()
-        .map(|entry| list_row_for_entry(entry, Some(session), false))
+        .map(|entry| list_row_for_entry(entry, Some(session), false, &mut Vec::new()))
         .collect::<Result<Vec<_>>>()?;
     apply_list_query_filter_sort(
         &mut rows,
