@@ -38,7 +38,11 @@ impl super::WavesPreviewer {
         (waveform_minmax, Some(waveform_pyramid))
     }
 
-    pub(super) fn option_num_order_f64(a: Option<f64>, b: Option<f64>, dir: SortDir) -> std::cmp::Ordering {
+    pub(super) fn option_num_order_f64(
+        a: Option<f64>,
+        b: Option<f64>,
+        dir: SortDir,
+    ) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (a, b) {
             (Some(va), Some(vb)) => {
@@ -720,6 +724,20 @@ impl super::WavesPreviewer {
                 self.audio.stop();
                 self.playback_return_editor_to_last_start_if_needed();
             } else {
+                if let Some(tab_idx) = self.active_tab {
+                    // A visible green waveform is an audition contract: make
+                    // sure Play uses the exact buffer that produced it even
+                    // if another activation/transport path restored source
+                    // audio after the preview was rendered.
+                    let activated_visible_preview =
+                        self.activate_visible_preview_audio_for_tab(tab_idx);
+                    if !activated_visible_preview
+                        && self.defer_play_until_pending_preview_is_ready(tab_idx)
+                    {
+                        self.playback_sync_state_snapshot();
+                        return;
+                    }
+                }
                 self.playback_capture_editor_start_display_sample();
                 if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
                     self.playback_sync_state_snapshot();
@@ -1112,6 +1130,7 @@ impl super::WavesPreviewer {
                     loop_markers_saved: tab.loop_markers_saved,
                     loop_markers_dirty: tab.loop_markers_dirty,
                     markers: tab.markers.clone(),
+                    regions: tab.regions.clone(),
                     markers_committed: tab.markers_committed.clone(),
                     markers_saved: tab.markers_saved.clone(),
                     markers_applied: tab.markers_applied.clone(),
@@ -1480,6 +1499,8 @@ impl super::WavesPreviewer {
                     | SortKey::TruePeak
                     | SortKey::LufsShort
                     | SortKey::LufsMomentary
+                    | SortKey::SilenceLead
+                    | SortKey::SilenceTail
                     | SortKey::Bpm
                     | SortKey::CreatedAt
                     | SortKey::ModifiedAt
@@ -1530,37 +1551,11 @@ impl super::WavesPreviewer {
         tab.selection_anchor_sample = None;
         tab.right_drag_mode = None;
         tab.active_tool = crate::app::types::ToolKind::LoopEdit;
-        tab.tool_state = crate::app::types::ToolState {
-            fade_in_ms: 0.0,
-            fade_out_ms: 0.0,
-            gain_db: 0.0,
-            normalize_target_db: -6.0,
-            loudness_target_lufs: -14.0,
-            pitch_semitones: 0.0,
-            stretch_rate: 1.0,
-            speed_rate: 1.0,
-            warp_time_radius_ms: 150.0,
-            warp_freq_radius_hz: 300.0,
-            loop_repeat: 2,
-            noise_gate_threshold_db: -40.0,
-            noise_gate_attack_ms: 2.0,
-            noise_gate_release_ms: 100.0,
-            eq_low_shelf_freq_hz: 120.0,
-            eq_low_shelf_gain_db: 0.0,
-            eq_mid_freq_hz: 1000.0,
-            eq_mid_gain_db: 0.0,
-            eq_mid_q: 1.0,
-            eq_high_shelf_freq_hz: 8000.0,
-            eq_high_shelf_gain_db: 0.0,
-            compressor_threshold_db: -18.0,
-            compressor_ratio: 3.0,
-            compressor_attack_ms: 10.0,
-            compressor_release_ms: 150.0,
-            compressor_makeup_db: 0.0,
-        };
+        tab.tool_state = crate::app::types::ToolState::default_values();
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
         tab.preview_audio_tool = None;
+        tab.preview_audio_buffer = None;
         tab.active_tool_last = None;
         tab.preview_offset_samples = None;
         tab.preview_overlay = None;
@@ -1818,6 +1813,20 @@ impl super::WavesPreviewer {
                 tab.markers_dirty = false;
             }
         }
+        match crate::markers::read_regions(path, out_sr, file_sr) {
+            Ok(mut regions) => {
+                for r in regions.iter_mut() {
+                    r.end = r.end.min(tab.samples_len);
+                    r.start = r.start.min(r.end);
+                }
+                regions.retain(|r| r.end > r.start);
+                tab.regions = regions;
+            }
+            Err(err) => {
+                eprintln!("read regions failed {}: {err:?}", path.display());
+                tab.regions.clear();
+            }
+        }
     }
 
     pub(super) fn write_markers_for_tab(&mut self, tab_idx: usize) -> bool {
@@ -1921,6 +1930,11 @@ impl super::WavesPreviewer {
     pub(super) fn select_and_load(&mut self, row_idx: usize, auto_scroll: bool) {
         if row_idx >= self.files.len() {
             return;
+        }
+        // A manual row change ends a running variation audition (the
+        // audition's own advances set the guard flag).
+        if self.variation_audition.is_some() && !self.variation_audition_advancing {
+            self.variation_audition = None;
         }
         self.list_play_pending = false;
         self.selected = Some(row_idx);
@@ -2459,7 +2473,10 @@ impl super::WavesPreviewer {
         } else {
             // Invalid regexes fall back to case-insensitive substring matching.
             let regex = if self.search_use_regex {
-                RegexBuilder::new(&query).case_insensitive(true).build().ok()
+                RegexBuilder::new(&query)
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
             } else {
                 None
             };
@@ -2500,9 +2517,11 @@ impl super::WavesPreviewer {
                 .files
                 .iter()
                 .map(|&id| match self.item_for_id(id) {
-                    Some(item) => {
-                        (self.owned_sort_key(item, key), item.display_name.clone(), id)
-                    }
+                    Some(item) => (
+                        self.owned_sort_key(item, key),
+                        item.display_name.clone(),
+                        id,
+                    ),
                     None => (OwnedKey::Missing, String::new(), id),
                 })
                 .collect();
@@ -2729,14 +2748,14 @@ impl super::WavesPreviewer {
                 let samples = Self::mixdown_channels_mono(&channels, len);
                 let mut waveform = Vec::new();
                 crate::wave::build_minmax(&mut waveform, &samples, 2048);
-                let editor_waveform =
-                    if matches!(target_for_thread, ProcessingTarget::EditorTab(_)) {
-                        Some(crate::app::WavesPreviewer::build_editor_waveform_cache(
-                            &channels, len,
-                        ))
-                    } else {
-                        None
-                    };
+                let editor_waveform = if matches!(target_for_thread, ProcessingTarget::EditorTab(_))
+                {
+                    Some(crate::app::WavesPreviewer::build_editor_waveform_cache(
+                        &channels, len,
+                    ))
+                } else {
+                    None
+                };
                 let _ = tx.send(ProcessingResult {
                     path: path_for_thread.clone(),
                     job_id,

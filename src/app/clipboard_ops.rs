@@ -209,9 +209,9 @@ impl super::WavesPreviewer {
                         resample_quality,
                     );
                     sample_rate = new_sr;
-                    audio = Some(std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
-                        channels,
-                    )));
+                    audio = Some(std::sync::Arc::new(
+                        crate::audio::AudioBuffer::from_channels(channels),
+                    ));
                 }
             }
 
@@ -221,11 +221,10 @@ impl super::WavesPreviewer {
             let needs_temp_export = was_ready || has_override;
             if needs_temp_export {
                 if let Some(audio_ref) = audio.as_ref().filter(|a| a.len() > 0) {
-                    if let Some(tmp) =
-                        crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
-                            "clipboard", "wav",
-                        )
-                    {
+                    if let Some(tmp) = crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
+                        "clipboard",
+                        "wav",
+                    ) {
                         let range = (0, audio_ref.len());
                         if crate::wave::export_selection_wav(
                             &audio_ref.channels,
@@ -517,9 +516,142 @@ impl super::WavesPreviewer {
         }
     }
 
+    /// Editor-workspace audio clipboard: Ctrl+C copies the selection,
+    /// Ctrl+X cuts it, Ctrl+V paste-inserts at the selection start /
+    /// playhead. Mirrors the list handler's triple trigger (Event::Copy/
+    /// Cut/Paste, consume_key, and key-down edge) because egui-winit turns
+    /// the chords into events on some platforms.
+    fn handle_editor_audio_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
+        let Some(tab_idx) = self.active_tab else {
+            return;
+        };
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.command);
+        let down_c = ctx.input(|i| i.key_down(egui::Key::C));
+        let down_x = ctx.input(|i| i.key_down(egui::Key::X));
+        let down_v = ctx.input(|i| i.key_down(egui::Key::V));
+        let mut event_copy = false;
+        let mut event_cut = false;
+        let mut event_paste = false;
+        ctx.input_mut(|i| {
+            let mut idx = 0;
+            while idx < i.events.len() {
+                match &i.events[idx] {
+                    egui::Event::Copy => {
+                        event_copy = true;
+                        i.events.remove(idx);
+                        continue;
+                    }
+                    egui::Event::Cut => {
+                        event_cut = true;
+                        i.events.remove(idx);
+                        continue;
+                    }
+                    egui::Event::Paste(_) => {
+                        event_paste = true;
+                        i.events.remove(idx);
+                        continue;
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+        });
+        let consumed_copy =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
+        let consumed_cut = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X));
+        let consumed_paste_mix = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                egui::Key::V,
+            )
+        });
+        let consumed_paste_xf = ctx.input_mut(|i| {
+            i.consume_key(
+                egui::Modifiers::COMMAND | egui::Modifiers::ALT,
+                egui::Key::V,
+            )
+        });
+        let consumed_paste =
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V));
+        let edge_c = ctrl && down_c && !self.editor_clip_c_was_down;
+        let edge_x = ctrl && down_x && !self.editor_clip_x_was_down;
+        let edge_v = ctrl && down_v && !self.editor_clip_v_was_down;
+        self.editor_clip_c_was_down = ctrl && down_c;
+        self.editor_clip_x_was_down = ctrl && down_x;
+        self.editor_clip_v_was_down = ctrl && down_v;
+        // Modifier held at trigger time picks the paste mode (Shift = mix,
+        // Alt = crossfade insert) for the event/edge paths, where the chord
+        // itself is not visible.
+        let mods = ctx.input(|i| i.modifiers);
+        let modifier_mode = if mods.shift {
+            super::types::PasteMode::Mix
+        } else if mods.alt {
+            super::types::PasteMode::CrossfadeInsert
+        } else {
+            super::types::PasteMode::Insert
+        };
+        // Spec/Log view with a frequency selection: Ctrl+C/V operate on the
+        // spectral-region clipboard instead of the audio clipboard
+        // (Shift+V adds instead of replacing). Cut stays audio-domain.
+        let spectral_target = self
+            .tabs
+            .get(tab_idx)
+            .map(|t| {
+                matches!(
+                    t.leaf_view_mode(),
+                    super::types::ViewMode::Spectrogram | super::types::ViewMode::Log
+                ) && t.freq_selection.is_some()
+            })
+            .unwrap_or(false);
+        if spectral_target {
+            if event_copy || consumed_copy || edge_c {
+                self.editor_spectral_copy(tab_idx);
+            } else if consumed_paste_mix {
+                self.editor_spectral_paste(tab_idx, true);
+            } else if event_paste || consumed_paste || consumed_paste_xf || edge_v {
+                self.editor_spectral_paste(tab_idx, mods.shift);
+            } else if event_cut || consumed_cut || edge_x {
+                self.editor_cut_selection_to_audio_clipboard(tab_idx);
+            }
+            return;
+        }
+        let destructive = event_cut
+            || consumed_cut
+            || edge_x
+            || consumed_paste_mix
+            || consumed_paste_xf
+            || event_paste
+            || consumed_paste
+            || edge_v;
+        if destructive && self.editor_apply_busy_toast_for_tab(tab_idx) {
+            return;
+        }
+        if event_cut || consumed_cut || edge_x {
+            self.editor_cut_selection_to_audio_clipboard(tab_idx);
+        } else if event_copy || consumed_copy || edge_c {
+            self.editor_copy_selection_to_audio_clipboard(tab_idx, true);
+        } else if consumed_paste_mix {
+            self.editor_paste_from_audio_clipboard(tab_idx, super::types::PasteMode::Mix);
+        } else if consumed_paste_xf {
+            self.editor_paste_from_audio_clipboard(
+                tab_idx,
+                super::types::PasteMode::CrossfadeInsert,
+            );
+        } else if event_paste || consumed_paste || edge_v {
+            self.editor_paste_from_audio_clipboard(tab_idx, modifier_mode);
+        }
+    }
+
     pub(super) fn handle_clipboard_hotkeys(&mut self, ctx: &egui::Context) {
         if self.is_effect_graph_workspace_active() {
             self.handle_effect_graph_clipboard_hotkeys(ctx);
+            return;
+        }
+        if self.is_editor_workspace_active() {
+            self.handle_editor_audio_clipboard_hotkeys(ctx);
             return;
         }
         if !self.is_list_workspace_active() {
@@ -754,7 +886,7 @@ mod tests {
 
     #[test]
     fn clipboard_win_formats_accessible() {
-        use clipboard_win::formats::{CF_UNICODETEXT, FileList, Unicode};
+        use clipboard_win::formats::{FileList, Unicode, CF_UNICODETEXT};
         // Just verify these types are importable and constructable
         let _ = FileList;
         let _ = Unicode;
@@ -765,7 +897,8 @@ mod tests {
     fn clipboard_win_clipboard_new_attempts_api_exists() {
         // Verify Clipboard::new_attempts exists with the expected signature
         // (does not actually open the clipboard in this test)
-        let _ = clipboard_win::Clipboard::new_attempts as fn(usize) -> clipboard_win::SysResult<clipboard_win::Clipboard>;
+        let _ = clipboard_win::Clipboard::new_attempts
+            as fn(usize) -> clipboard_win::SysResult<clipboard_win::Clipboard>;
     }
 
     #[test]
@@ -781,9 +914,8 @@ mod tests {
         let marker = "neowaves_paste\0";
         let mut utf16: Vec<u16> = marker.encode_utf16().collect();
         utf16.push(0);
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2)
-        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2) };
         // Decode back and verify
         let decoded: Vec<u16> = bytes
             .chunks_exact(2)

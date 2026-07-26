@@ -1,6 +1,6 @@
 ﻿[package]
 name = "neowaves"
-version = "0.20260709.0"
+version = "0.20260726.0"
 edition = "2021"
 default-run = "neowaves"
 build = "build.rs"
@@ -102,6 +102,7 @@ drag = "2.1.1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",

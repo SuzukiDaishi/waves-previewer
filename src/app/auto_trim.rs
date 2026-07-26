@@ -353,7 +353,10 @@ fn db_of(rms: f32) -> f32 {
 
 /// Compute the level stats the UI shows next to the threshold controls.
 /// Cheap (single pass) and side-effect free; `None` for empty/silent audio.
-pub fn analyze_levels(ch_samples: &[Vec<f32>], config: &AutoTrimConfig) -> Option<AutoTrimLevelStats> {
+pub fn analyze_levels(
+    ch_samples: &[Vec<f32>],
+    config: &AutoTrimConfig,
+) -> Option<AutoTrimLevelStats> {
     if ch_samples.is_empty() || ch_samples[0].is_empty() {
         return None;
     }

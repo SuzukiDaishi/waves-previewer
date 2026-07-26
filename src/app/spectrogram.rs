@@ -154,9 +154,11 @@ impl super::WavesPreviewer {
                     let len = end.saturating_sub(base);
                     if len > 0 {
                         spec.values_db[base..base + len].copy_from_slice(&tile.values_db[..len]);
-                        spec.values_max_db = spec.values_max_db.max(
-                            crate::app::types::spectrogram_values_max_db(&tile.values_db[..len]),
-                        );
+                        spec.values_max_db =
+                            spec.values_max_db
+                                .max(crate::app::types::spectrogram_values_max_db(
+                                    &tile.values_db[..len],
+                                ));
                     }
                 }
                 if let Some(progress) = self.spectro_progress.get_mut(&tile.path) {

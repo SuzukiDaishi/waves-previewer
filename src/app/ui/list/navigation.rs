@@ -169,6 +169,11 @@ impl WavesPreviewer {
         } else {
             false
         };
+        let pressed_f2 = if allow_list_keys {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2))
+        } else {
+            false
+        };
 
         if self.is_list_workspace_active() && !self.files.is_empty() && allow_list_keys {
             if pressed_ctrl_a
@@ -244,6 +249,12 @@ impl WavesPreviewer {
                     self.remove_paths_from_list_with_undo(&selected);
                 }
             }
+            if pressed_f2 {
+                let renameable = self.selected_renameable_paths();
+                if renameable.len() == 1 {
+                    self.begin_inline_rename(renameable[0].clone());
+                }
+            }
             if key_moved && self.auto_play_list_nav {
                 self.request_list_autoplay();
             }
@@ -279,5 +290,6 @@ impl WavesPreviewer {
             || self.show_leave_prompt
             || self.show_external_dialog
             || self.show_list_art_window
+            || self.inline_rename_path.is_some()
     }
 }

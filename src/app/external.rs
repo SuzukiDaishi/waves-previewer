@@ -416,7 +416,6 @@ mod tests {
     #[test]
     fn build_table_empty_input_returns_empty() {
         use super::build_table_from_rows;
-        use crate::app::project::ProjectExternalSource;
         let cfg = super::ExternalLoadConfig {
             path: std::path::PathBuf::new(),
             sheet_name: None,

@@ -1077,12 +1077,28 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn drain_export_results(&mut self, ctx: &egui::Context) {
-        let Some(state) = &self.export_state else {
-            return;
+        let received = {
+            let Some(state) = &self.export_state else {
+                return;
+            };
+            state
+                .rx
+                .try_recv()
+                .ok()
+                .map(|res| (res, state.msg.starts_with("Saving")))
         };
-        if let Ok(res) = state.rx.try_recv() {
+        if let Some((res, msg_is_saving)) = received {
             eprintln!("save/export done: ok={}, failed={}", res.ok, res.failed);
-            if state.msg.starts_with("Saving") {
+            if res.failed > 0 {
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Error,
+                    format!(
+                        "Export finished with {} failure(s) ({} ok) — see debug log",
+                        res.failed, res.ok
+                    ),
+                );
+            }
+            if msg_is_saving {
                 let sources = self.saving_sources.clone();
                 let edit_sources = self.saving_edit_sources.clone();
                 for p in &sources {

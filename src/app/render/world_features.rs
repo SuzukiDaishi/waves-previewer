@@ -172,11 +172,9 @@ pub fn analyze_world_with_options(
         }
         // Harvest refines candidates by instantaneous frequency itself, so no
         // StoneMask pass follows (matches the reference tool chain).
-        WorldF0Estimator::Harvest => {
-            harvest_f0(&x, fs, &temporal_positions, &mut planner, &|p| {
-                report(0.01 + p * 0.54)
-            })
-        }
+        WorldF0Estimator::Harvest => harvest_f0(&x, fs, &temporal_positions, &mut planner, &|p| {
+            report(0.01 + p * 0.54)
+        }),
     };
     report(0.55);
     let envelope_db = cheaptrick(
@@ -291,11 +289,7 @@ fn interp1q(x0: f64, dx: f64, y: &[f64], xi: &[f64], yi: &mut [f64]) {
 }
 
 /// Forward real FFT of `time` zero-padded to `fft_size`.
-fn real_fft(
-    planner: &mut RealFftPlanner<f64>,
-    time: &[f64],
-    fft_size: usize,
-) -> Vec<Complex<f64>> {
+fn real_fft(planner: &mut RealFftPlanner<f64>, time: &[f64], fft_size: usize) -> Vec<Complex<f64>> {
     let r2c = planner.plan_fft_forward(fft_size);
     let mut input = vec![0.0f64; fft_size];
     let n = time.len().min(fft_size);
@@ -470,8 +464,7 @@ fn decimate(x: &[f64], ratio: usize, planner: &mut RealFftPlanner<f64>) -> Vec<f
         let gain = if kf >= pass_end {
             0.0
         } else {
-            0.5 * (1.0
-                + (std::f64::consts::PI * (kf - pass_start) / (pass_end - pass_start)).cos())
+            0.5 * (1.0 + (std::f64::consts::PI * (kf - pass_start) / (pass_end - pass_start)).cos())
         };
         *bin *= gain;
     }
@@ -516,7 +509,8 @@ fn spectrum_for_estimation(
 fn design_low_cut_filter(n: usize, fft_size: usize) -> Vec<f64> {
     let mut filter = vec![0.0f64; fft_size];
     for i in 1..=n {
-        filter[i - 1] = 0.5 - 0.5 * (i as f64 * 2.0 * std::f64::consts::PI / (n as f64 + 1.0)).cos();
+        filter[i - 1] =
+            0.5 - 0.5 * (i as f64 * 2.0 * std::f64::consts::PI / (n as f64 + 1.0)).cos();
     }
     let sum: f64 = filter[..n].iter().sum();
     for v in filter[..n].iter_mut() {
@@ -598,7 +592,12 @@ fn get_four_zero_crossing_intervals(mut signal: Vec<f64>, fs: f64) -> [ZeroCross
     }
     let positives = zero_crossing_engine(&signal, fs);
     if y_length < 3 {
-        return [negatives, positives, (Vec::new(), Vec::new()), (Vec::new(), Vec::new())];
+        return [
+            negatives,
+            positives,
+            (Vec::new(), Vec::new()),
+            (Vec::new(), Vec::new()),
+        ];
     }
     for i in 0..y_length - 1 {
         signal[i] -= signal[i + 1];
@@ -687,8 +686,7 @@ fn fix_f0_contour(
     f0_candidates: &[Vec<f64>],
     best_f0_contour: &[f64],
 ) -> Vec<f64> {
-    let voice_range_minimum =
-        ((0.5 + 1000.0 / frame_period_ms / F0_FLOOR_HZ) as usize) * 2 + 1;
+    let voice_range_minimum = ((0.5 + 1000.0 / frame_period_ms / F0_FLOOR_HZ) as usize) * 2 + 1;
     let f0_step1 = fix_step_1(best_f0_contour, voice_range_minimum);
     let f0_step2 = fix_step_2(&f0_step1, voice_range_minimum);
     let (positive_index, negative_index) = get_voiced_section_edges(&f0_step2);
@@ -707,7 +705,11 @@ fn fix_step_1(best_f0_contour: &[f64], voice_range_minimum: usize) -> Vec<f64> {
     let mut f0_step1 = vec![0.0f64; n];
     for i in voice_range_minimum..n {
         let jump = ((f0_base[i] - f0_base[i - 1]) / (SAFE_GUARD_MINIMUM + f0_base[i])).abs();
-        f0_step1[i] = if jump < ALLOWED_RANGE { f0_base[i] } else { 0.0 };
+        f0_step1[i] = if jump < ALLOWED_RANGE {
+            f0_base[i]
+        } else {
+            0.0
+        };
     }
     f0_step1
 }
@@ -774,11 +776,7 @@ fn select_best_f0(
 }
 
 /// Step 3: extend voiced sections forward through candidate continuity.
-fn fix_step_3(
-    f0_step2: &[f64],
-    f0_candidates: &[Vec<f64>],
-    negative_index: &[usize],
-) -> Vec<f64> {
+fn fix_step_3(f0_step2: &[f64], f0_candidates: &[Vec<f64>], negative_index: &[usize]) -> Vec<f64> {
     let n = f0_step2.len();
     let mut f0_step3 = f0_step2.to_vec();
     for (i, &start) in negative_index.iter().enumerate() {
@@ -791,8 +789,7 @@ fn fix_step_3(
             if j < 1 || j + 1 >= n {
                 break;
             }
-            f0_step3[j + 1] =
-                select_best_f0(f0_step3[j], f0_step3[j - 1], f0_candidates, j + 1);
+            f0_step3[j + 1] = select_best_f0(f0_step3[j], f0_step3[j - 1], f0_candidates, j + 1);
             if f0_step3[j + 1] == 0.0 {
                 break;
             }
@@ -802,11 +799,7 @@ fn fix_step_3(
 }
 
 /// Step 4: extend voiced sections backward through candidate continuity.
-fn fix_step_4(
-    f0_step3: &[f64],
-    f0_candidates: &[Vec<f64>],
-    positive_index: &[usize],
-) -> Vec<f64> {
+fn fix_step_4(f0_step3: &[f64], f0_candidates: &[Vec<f64>], positive_index: &[usize]) -> Vec<f64> {
     let n = f0_step3.len();
     let mut f0_step4 = f0_step3.to_vec();
     for i in (0..positive_index.len()).rev() {
@@ -816,8 +809,7 @@ fn fix_step_4(
             if j + 1 >= n {
                 break;
             }
-            f0_step4[j - 1] =
-                select_best_f0(f0_step4[j], f0_step4[j + 1], f0_candidates, j - 1);
+            f0_step4[j - 1] = select_best_f0(f0_step4[j], f0_step4[j + 1], f0_candidates, j - 1);
             if f0_step4[j - 1] == 0.0 {
                 break;
             }
@@ -971,8 +963,7 @@ fn fix_f0(
             0.0
         } else {
             index as f64 * fs / fft_size as f64
-                + numerator_i[index] / power_spectrum[index] * fs
-                    / (2.0 * std::f64::consts::PI)
+                + numerator_i[index] / power_spectrum[index] * fs / (2.0 * std::f64::consts::PI)
         };
         let amplitude = power_spectrum[index].sqrt();
         numerator += amplitude * instantaneous_frequency;
@@ -1026,8 +1017,8 @@ fn harvest_general_body(
     }
     let adjusted_f0_floor = F0_FLOOR_HZ * 0.9;
     let adjusted_f0_ceil = F0_CEIL_HZ * 1.1;
-    let number_of_channels = 1
-        + ((adjusted_f0_ceil / adjusted_f0_floor).log2() * HARVEST_CHANNELS_IN_OCTAVE) as usize;
+    let number_of_channels =
+        1 + ((adjusted_f0_ceil / adjusted_f0_floor).log2() * HARVEST_CHANNELS_IN_OCTAVE) as usize;
     let boundary_f0_list: Vec<f64> = (0..number_of_channels)
         .map(|i| adjusted_f0_floor * 2f64.powf((i as f64 + 1.0) / HARVEST_CHANNELS_IN_OCTAVE))
         .collect();
@@ -1035,9 +1026,8 @@ fn harvest_general_body(
     let decimation_ratio = matlab_round(fs / HARVEST_TARGET_FS).clamp(1, 12) as usize;
     let y_length = (x.len() as f64 / decimation_ratio as f64).ceil() as usize;
     let actual_fs = fs / decimation_ratio as f64;
-    let fft_size = get_suitable_fft_size(
-        y_length + 5 + 2 * (2.0 * actual_fs / boundary_f0_list[0]) as usize,
-    );
+    let fft_size =
+        get_suitable_fft_size(y_length + 5 + 2 * (2.0 * actual_fs / boundary_f0_list[0]) as usize);
 
     // Downsampled waveform and its spectrum (GetWaveformAndSpectrum). Unlike
     // DIO there is no low-cut filter, only DC removal; the DC-removed signal
@@ -1155,7 +1145,8 @@ fn harvest_f0_candidate_from_raw_event(
     f0_candidate: &mut [f64],
     planner: &mut RealFftPlanner<f64>,
 ) {
-    let filtered = harvest_filtered_signal(boundary_f0, fft_size, fs, y_spectrum, y_length, planner);
+    let filtered =
+        harvest_filtered_signal(boundary_f0, fft_size, fs, y_spectrum, y_length, planner);
     let events = harvest_four_zero_crossing_intervals(filtered, fs);
     harvest_f0_candidate_contour(&events, boundary_f0, temporal_positions, f0_candidate);
 }
@@ -1449,9 +1440,10 @@ fn harvest_refined_f0(
         score += ((instantaneous_frequency / harmonic as f64 - current_f0) / current_f0).abs();
     }
     let refined_f0 = numerator / (denominator + SAFE_GUARD_MINIMUM);
-    let refined_score =
-        1.0 / (score / number_of_harmonics as f64 + SAFE_GUARD_MINIMUM);
-    if refined_f0 < F0_FLOOR_HZ || refined_f0 > F0_CEIL_HZ || refined_score < HARVEST_SCORE_THRESHOLD
+    let refined_score = 1.0 / (score / number_of_harmonics as f64 + SAFE_GUARD_MINIMUM);
+    if refined_f0 < F0_FLOOR_HZ
+        || refined_f0 > F0_CEIL_HZ
+        || refined_score < HARVEST_SCORE_THRESHOLD
     {
         (0.0, 0.0)
     } else {
@@ -1498,16 +1490,10 @@ fn harvest_remove_unreliable_candidates(
             if reference_f0 == 0.0 {
                 continue;
             }
-            let (_, error1) = harvest_select_best_f0(
-                reference_f0,
-                &snapshot[i + 1][..number_of_candidates],
-                1.0,
-            );
-            let (_, error2) = harvest_select_best_f0(
-                reference_f0,
-                &snapshot[i - 1][..number_of_candidates],
-                1.0,
-            );
+            let (_, error1) =
+                harvest_select_best_f0(reference_f0, &snapshot[i + 1][..number_of_candidates], 1.0);
+            let (_, error2) =
+                harvest_select_best_f0(reference_f0, &snapshot[i - 1][..number_of_candidates], 1.0);
             if error1.min(error2) > threshold {
                 f0_candidates[i][j] = 0.0;
                 f0_scores[i][j] = 0.0;
@@ -1982,7 +1968,11 @@ fn cheaptrick(
         if i % 128 == 0 {
             progress(i as f32 / total as f32);
         }
-        let current_f0 = if frame_f0 <= f0_floor { DEFAULT_F0_HZ } else { frame_f0 };
+        let current_f0 = if frame_f0 <= f0_floor {
+            DEFAULT_F0_HZ
+        } else {
+            frame_f0
+        };
         cheaptrick_general_body(
             x,
             fs,
@@ -2031,7 +2021,14 @@ fn cheaptrick_general_body(
     }
 
     // Fourth step: cepstral smoothing and recovery liftering.
-    smoothing_with_recovery(&power_spectrum, current_f0, fs, fft_size, planner, envelope_log);
+    smoothing_with_recovery(
+        &power_spectrum,
+        current_f0,
+        fs,
+        fft_size,
+        planner,
+        envelope_log,
+    );
 }
 
 /// Hanning window over 3 periods around `current_position`, RMS-normalized
@@ -2064,8 +2061,8 @@ fn get_windowed_waveform(
     let mut tmp_weight1 = 0.0f64;
     let mut tmp_weight2 = 0.0f64;
     for i in 0..length {
-        let safe_index = (origin + i as i64 - half_window_length as i64)
-            .clamp(0, x.len() as i64 - 1) as usize;
+        let safe_index =
+            (origin + i as i64 - half_window_length as i64).clamp(0, x.len() as i64 - 1) as usize;
         waveform[i] = x[safe_index] * window[i] + rng.randn() * SAFE_GUARD_MINIMUM;
         tmp_weight1 += waveform[i];
         tmp_weight2 += window[i];
@@ -2092,10 +2089,7 @@ fn dc_correction(power_spectrum: &mut [f64], f0: f64, fs: f64, fft_size: usize) 
         &low_frequency_axis,
         &mut low_frequency_replica,
     );
-    for (v, replica) in power_spectrum
-        .iter_mut()
-        .zip(low_frequency_replica.iter())
-    {
+    for (v, replica) in power_spectrum.iter_mut().zip(low_frequency_replica.iter()) {
         *v += replica;
     }
 }
@@ -2184,8 +2178,8 @@ fn smoothing_with_recovery(
     liftered.push(Complex::new(cepstrum[0].re, 0.0));
     for i in 1..bins {
         let quefrency = i as f64 / fs;
-        let smoothing_lifter = (std::f64::consts::PI * f0 * quefrency).sin()
-            / (std::f64::consts::PI * f0 * quefrency);
+        let smoothing_lifter =
+            (std::f64::consts::PI * f0 * quefrency).sin() / (std::f64::consts::PI * f0 * quefrency);
         let compensation_lifter = (1.0 - 2.0 * CHEAPTRICK_Q1)
             + 2.0 * CHEAPTRICK_Q1 * (2.0 * std::f64::consts::PI * quefrency * f0).cos();
         liftered.push(Complex::new(
@@ -2228,12 +2222,10 @@ fn d4c(
     let mut rng = WorldRandn::new();
     let fft_size_d4c = d4c_fft_size(fs);
 
-    let number_of_aperiodicities = (D4C_UPPER_LIMIT_HZ
-        .min(fs / 2.0 - D4C_FREQUENCY_INTERVAL_HZ)
+    let number_of_aperiodicities = (D4C_UPPER_LIMIT_HZ.min(fs / 2.0 - D4C_FREQUENCY_INTERVAL_HZ)
         / D4C_FREQUENCY_INTERVAL_HZ) as usize;
     // The Nuttall window is common to every frame, so it is designed once.
-    let window_length =
-        (D4C_FREQUENCY_INTERVAL_HZ * fft_size_d4c as f64 / fs) as usize * 2 + 1;
+    let window_length = (D4C_FREQUENCY_INTERVAL_HZ * fft_size_d4c as f64 / fs) as usize * 2 + 1;
     let mut window = vec![0.0f64; window_length];
     nuttall_window(window_length, &mut window);
 
@@ -2266,8 +2258,7 @@ fn d4c(
         }
         if frame_f0 == 0.0 || love_train <= D4C_THRESHOLD {
             // d4c.cpp InitializeAperiodicity: everything is aperiodic.
-            aperiodicity
-                .extend(std::iter::repeat((1.0 - SAFE_GUARD_MINIMUM) as f32).take(bins));
+            aperiodicity.extend(std::iter::repeat((1.0 - SAFE_GUARD_MINIMUM) as f32).take(bins));
             continue;
         }
         d4c_general_body(
@@ -2304,8 +2295,7 @@ fn d4c_love_train(
     planner: &mut RealFftPlanner<f64>,
     rng: &mut WorldRandn,
 ) -> Vec<f64> {
-    let fft_size =
-        1usize << (1 + (3.0 * fs / D4C_LOVE_TRAIN_LOWEST_F0_HZ + 1.0).log2() as usize);
+    let fft_size = 1usize << (1 + (3.0 * fs / D4C_LOVE_TRAIN_LOWEST_F0_HZ + 1.0).log2() as usize);
     // Cumulative powers at 100, 4000 and 7900 Hz are used for VUV
     // identification (clamped to Nyquist for very low sample rates).
     let boundary0 = ((100.0 * fft_size as f64 / fs).ceil() as usize).min(fft_size / 2);
@@ -2403,8 +2393,8 @@ fn get_windowed_waveform_d4c(
     let mut tmp_weight1 = 0.0f64;
     let mut tmp_weight2 = 0.0f64;
     for i in 0..length {
-        let safe_index = (origin + i as i64 - half_window_length as i64)
-            .clamp(0, x.len() as i64 - 1) as usize;
+        let safe_index =
+            (origin + i as i64 - half_window_length as i64).clamp(0, x.len() as i64 - 1) as usize;
         waveform[i] = x[safe_index] * window[i] + rng.randn() * SAFE_GUARD_MINIMUM;
         tmp_weight1 += waveform[i];
         tmp_weight2 += window[i];
@@ -2514,8 +2504,10 @@ fn get_smoothed_power_spectrum(
         rng,
     );
     let spectrum = real_fft(planner, &waveform, fft_size);
-    let mut power_spectrum: Vec<f64> =
-        spectrum[..fft_size / 2 + 1].iter().map(|c| c.norm_sqr()).collect();
+    let mut power_spectrum: Vec<f64> = spectrum[..fft_size / 2 + 1]
+        .iter()
+        .map(|c| c.norm_sqr())
+        .collect();
     dc_correction(&mut power_spectrum, current_f0, fs, fft_size);
     linear_smoothing(&mut power_spectrum, current_f0, fs, fft_size);
     power_spectrum
@@ -2564,8 +2556,8 @@ fn get_coarse_aperiodicity(
     let half_window_length = window.len() / 2;
     let mut segment = vec![0.0f64; window.len()];
     for (band, out) in coarse_aperiodicity.iter_mut().enumerate() {
-        let center = (D4C_FREQUENCY_INTERVAL_HZ * (band + 1) as f64 * fft_size as f64 / fs)
-            as usize;
+        let center =
+            (D4C_FREQUENCY_INTERVAL_HZ * (band + 1) as f64 * fft_size as f64 / fs) as usize;
         for (j, seg) in segment.iter_mut().enumerate() {
             *seg = static_group_delay[center - half_window_length + j] * window[j];
         }
@@ -2673,8 +2665,18 @@ fn get_time_base(
 
     let mut interpolated_f0 = vec![0.0f64; y_length];
     let mut interpolated_vuv = vec![0.0f64; y_length];
-    interp1(&coarse_time_axis, &coarse_f0, &time_axis, &mut interpolated_f0);
-    interp1(&coarse_time_axis, &coarse_vuv, &time_axis, &mut interpolated_vuv);
+    interp1(
+        &coarse_time_axis,
+        &coarse_f0,
+        &time_axis,
+        &mut interpolated_f0,
+    );
+    interp1(
+        &coarse_time_axis,
+        &coarse_vuv,
+        &time_axis,
+        &mut interpolated_vuv,
+    );
     for i in 0..y_length {
         interpolated_vuv[i] = if interpolated_vuv[i] > 0.5 { 1.0 } else { 0.0 };
         if interpolated_vuv[i] == 0.0 {
@@ -2722,9 +2724,7 @@ fn get_dc_remover(fft_size: usize) -> Vec<f64> {
     let mut dc_component = 0.0f64;
     for i in 0..fft_size / 2 {
         let v = 0.5
-            - 0.5
-                * (2.0 * std::f64::consts::PI * (i as f64 + 1.0) / (1.0 + fft_size as f64))
-                    .cos();
+            - 0.5 * (2.0 * std::f64::consts::PI * (i as f64 + 1.0) / (1.0 + fft_size as f64)).cos();
         dc_remover[i] = v;
         dc_remover[fft_size - i - 1] = v;
         dc_component += v * 2.0;
@@ -2772,10 +2772,8 @@ fn get_minimum_phase_spectrum(
 ) -> Vec<Complex<f64>> {
     // The log spectrum is real and even, so its inverse FFT (the cepstrum)
     // is real; realize the mirrored transform with the real FFT pair.
-    let mut spectrum: Vec<Complex<f64>> = log_spectrum
-        .iter()
-        .map(|&v| Complex::new(v, 0.0))
-        .collect();
+    let mut spectrum: Vec<Complex<f64>> =
+        log_spectrum.iter().map(|&v| Complex::new(v, 0.0)).collect();
     let mut cepstrum = real_ifft(planner, &mut spectrum, fft_size);
     // Fold the anticausal part onto the causal part.
     for v in cepstrum[1..fft_size / 2].iter_mut() {
@@ -2818,8 +2816,7 @@ fn get_periodic_response(
     // Fractional time delay as a linear phase shift (synthesis.cpp
     // GetSpectrumWithFractionalTimeShift); the shift is < 1/fs, so the phase
     // stays within [0, pi] and sin can be recovered from cos.
-    let coefficient =
-        2.0 * std::f64::consts::PI * fractional_time_shift * fs / fft_size as f64;
+    let coefficient = 2.0 * std::f64::consts::PI * fractional_time_shift * fs / fft_size as f64;
     for (i, c) in spectrum.iter_mut().enumerate() {
         let re2 = (coefficient * i as f64).cos();
         let im2 = (1.0 - re2 * re2).max(0.0).sqrt();
@@ -2905,8 +2902,7 @@ fn get_spectral_envelope(
     } else {
         let row_ceil = &spectrogram[frame_ceil * bins..frame_ceil * bins + bins];
         for i in 0..bins {
-            out[i] =
-                (1.0 - interpolation) * row_floor[i].abs() + interpolation * row_ceil[i].abs();
+            out[i] = (1.0 - interpolation) * row_floor[i].abs() + interpolation * row_ceil[i].abs();
         }
     }
 }
@@ -3008,8 +3004,7 @@ pub fn synthesize_world(
     let mut aperiodic_ratio = vec![0.0f64; bins];
     let number_of_pulses = time_base.pulse_locations.len();
     for i in 0..number_of_pulses {
-        let noise_size = time_base.pulse_locations_index
-            [(i + 1).min(number_of_pulses - 1)]
+        let noise_size = time_base.pulse_locations_index[(i + 1).min(number_of_pulses - 1)]
             - time_base.pulse_locations_index[i];
         let current_vuv = time_base.interpolated_vuv[time_base.pulse_locations_index[i]];
         let current_time = time_base.pulse_locations[i];
@@ -3083,9 +3078,7 @@ mod tests {
     fn sine_amp(freq: f64, amp: f32, secs: f64, fs: u32) -> Vec<f32> {
         let n = (secs * fs as f64) as usize;
         (0..n)
-            .map(|i| {
-                (2.0 * std::f64::consts::PI * freq * i as f64 / fs as f64).sin() as f32 * amp
-            })
+            .map(|i| (2.0 * std::f64::consts::PI * freq * i as f64 / fs as f64).sin() as f32 * amp)
             .collect()
     }
 
@@ -3290,8 +3283,7 @@ mod tests {
     fn noise_is_mostly_unvoiced() {
         let signal = lcg_noise(TEST_FS as usize);
         let features = analyze_world(&signal, TEST_FS, FRAME_PERIOD_MS);
-        let voiced_ratio =
-            voiced_values(&features.f0).len() as f64 / features.frames as f64;
+        let voiced_ratio = voiced_values(&features.f0).len() as f64 / features.frames as f64;
         assert!(
             voiced_ratio < 0.35,
             "expected mostly unvoiced frames for noise, got {:.1}% voiced",

@@ -243,34 +243,44 @@ pub fn open_in_file_explorer(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-#[allow(dead_code)]
-pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::Result<()> {
+/// Program + args used to reveal `file_path` in the OS file browser.
+/// Windows: `explorer /select,` opens the folder with the file selected;
+/// macOS: `open -R`; Linux: the parent folder via `xdg-open` (file
+/// selection is generally unsupported there). `None` when there is no
+/// usable target (a Linux path with no parent).
+pub fn reveal_in_folder_command(
+    file_path: &std::path::Path,
+) -> Option<(&'static str, Vec<std::ffi::OsString>)> {
     #[cfg(target_os = "windows")]
     {
-        use std::process::Command;
-        // Windows: /select parameter opens folder and selects the file.
-        Command::new("explorer")
-            .arg("/select,")
-            .arg(file_path)
-            .spawn()?;
-        Ok(())
+        Some((
+            "explorer",
+            vec!["/select,".into(), file_path.as_os_str().to_os_string()],
+        ))
     }
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
-        // macOS: -R opens Finder with the file selected.
-        Command::new("open").arg("-R").arg(file_path).spawn()?;
-        Ok(())
+        Some((
+            "open",
+            vec!["-R".into(), file_path.as_os_str().to_os_string()],
+        ))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        use std::process::Command;
-        // Linux: open parent folder in file manager (file selection is generally unsupported).
-        if let Some(parent) = file_path.parent() {
-            Command::new("xdg-open").arg(parent).spawn()?;
-        }
-        Ok(())
+        file_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| ("xdg-open", vec![p.as_os_str().to_os_string()]))
     }
+}
+
+#[allow(dead_code)]
+pub fn open_folder_with_file_selected(file_path: &std::path::Path) -> std::io::Result<()> {
+    use std::process::Command;
+    if let Some((program, args)) = reveal_in_folder_command(file_path) {
+        Command::new(program).args(args).spawn()?;
+    }
+    Ok(())
 }
 
 // Sanitize a filename component for Windows: replace forbidden chars
@@ -300,4 +310,37 @@ pub fn sanitize_filename_component(name: &str) -> String {
         s.push('_');
     }
     s
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use super::reveal_in_folder_command;
+    use std::path::Path;
+
+    #[test]
+    fn reveal_command_is_well_formed() {
+        let cmd = reveal_in_folder_command(Path::new("/tmp/somewhere/file.wav"));
+        let (program, args) = cmd.expect("command for a normal path");
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            assert_eq!(program, "xdg-open");
+            assert_eq!(args, vec![std::ffi::OsString::from("/tmp/somewhere")]);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(program, "open");
+            assert_eq!(args[0], std::ffi::OsString::from("-R"));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(program, "explorer");
+            assert_eq!(args[0], std::ffi::OsString::from("/select,"));
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn reveal_command_none_without_parent() {
+        assert!(reveal_in_folder_command(Path::new("/")).is_none());
+    }
 }

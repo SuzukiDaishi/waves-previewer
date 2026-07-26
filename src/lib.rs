@@ -8,6 +8,7 @@ pub mod flac_meta;
 pub mod ipc;
 pub mod loop_markers;
 pub mod markers;
+pub mod meter;
 pub mod plugin;
 pub mod wave;
 

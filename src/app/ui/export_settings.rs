@@ -160,6 +160,54 @@ impl crate::app::WavesPreviewer {
                                         .small(),
                                 );
                             });
+                            ui.horizontal(|ui| {
+                                ui.label("Dither (16-bit export):");
+                                let mode = &mut self.export_cfg.codec.dither_mode;
+                                egui::ComboBox::new("export_dither_mode", "")
+                                    .selected_text(match mode {
+                                        crate::wave::DitherMode::Off => "Off",
+                                        crate::wave::DitherMode::Tpdf => "TPDF",
+                                        crate::wave::DitherMode::TpdfNoiseShaped => {
+                                            "TPDF + noise shaping"
+                                        }
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for (value, label) in [
+                                            (crate::wave::DitherMode::Off, "Off"),
+                                            (crate::wave::DitherMode::Tpdf, "TPDF"),
+                                            (
+                                                crate::wave::DitherMode::TpdfNoiseShaped,
+                                                "TPDF + noise shaping",
+                                            ),
+                                        ] {
+                                            if ui
+                                                .selectable_value(mode, value, label)
+                                                .changed()
+                                            {
+                                                codec_changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+                            ui.label(
+                                RichText::new(
+                                    "TPDF decorrelates 16-bit quantization error; noise shaping                                      additionally pushes the noise out of the most audible band                                      (2nd-order highpass).",
+                                )
+                                .weak()
+                                .small(),
+                            );
+                            if ui
+                                .checkbox(
+                                    &mut self.export_cfg.codec.dither_24bit,
+                                    "Also dither 24-bit exports",
+                                )
+                                .on_hover_text(
+                                    "Apply the same dither mode when quantizing to 24-bit integer                                      PCM. Usually unnecessary: the 24-bit floor is below any                                      analog chain.",
+                                )
+                                .changed()
+                            {
+                                codec_changed = true;
+                            }
                             if codec_changed {
                                 self.save_prefs();
                             }
@@ -292,6 +340,35 @@ impl crate::app::WavesPreviewer {
                                 }
                             });
                             ui.separator();
+                            if ui
+                                .checkbox(
+                                    &mut self.list_click_audition,
+                                    "Single click auditions (select + load/play)",
+                                )
+                                .on_hover_text(
+                                    "Off: single click only selects; play the selection with \
+                                     Space or keyboard navigation.",
+                                )
+                                .changed()
+                            {
+                                self.save_prefs();
+                            }
+                            {
+                                let mut watch = self.watch_folder_enabled;
+                                if ui
+                                    .checkbox(&mut watch, "Watch folder for changes")
+                                    .on_hover_text(
+                                        "Poll the open folder every few seconds and apply files \
+                                         added/removed/changed on disk (files open in the editor \
+                                         are never touched)",
+                                    )
+                                    .changed()
+                                {
+                                    self.watch_folder_enabled = watch;
+                                    self.save_prefs();
+                                }
+                            }
+                            ui.separator();
                             ui.label("List Columns:");
                             let mut next_cols = self.list_columns;
                             ui.horizontal_wrapped(|ui| {
@@ -324,6 +401,14 @@ impl crate::app::WavesPreviewer {
                                 ui.checkbox(&mut next_cols.created_at, "Created");
                                 ui.checkbox(&mut next_cols.modified_at, "Modified");
                                 ui.checkbox(&mut next_cols.gain, "Gain");
+                                ui.checkbox(&mut next_cols.silence_lead, "Sil.Head")
+                                    .on_hover_text(
+                                        "Leading silence (ms, -60 dBFS threshold); computed on full decode",
+                                    );
+                                ui.checkbox(&mut next_cols.silence_tail, "Sil.Tail")
+                                    .on_hover_text(
+                                        "Trailing silence (ms, -60 dBFS threshold); computed on full decode",
+                                    );
                                 ui.checkbox(&mut next_cols.wave, "Wave");
                             });
                             let external_available = !self.external_visible_columns.is_empty();
@@ -349,7 +434,9 @@ impl crate::app::WavesPreviewer {
                                 || next_cols.created_at
                                 || next_cols.modified_at
                                 || next_cols.gain
-                                || next_cols.wave;
+                                || next_cols.wave
+                                || next_cols.silence_lead
+                                || next_cols.silence_tail;
                             if !any_visible {
                                 next_cols.file = true;
                             }
@@ -358,6 +445,47 @@ impl crate::app::WavesPreviewer {
                                 self.ensure_sort_key_visible();
                                 self.request_sort();
                             }
+                            ui.collapsing("Column Order", |ui| {
+                                ui.label(
+                                    RichText::new(
+                                        "Move columns up (left) / down (right). Hidden columns keep \
+                                         their slot for when they're re-enabled.",
+                                    )
+                                    .weak(),
+                                );
+                                let order = self.list_column_order.clone();
+                                let mut moved: Option<(usize, isize)> = None;
+                                for (i, col) in order.iter().enumerate() {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_enabled(i > 0, egui::Button::new("^").small())
+                                            .clicked()
+                                        {
+                                            moved = Some((i, -1));
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                i + 1 < order.len(),
+                                                egui::Button::new("v").small(),
+                                            )
+                                            .clicked()
+                                        {
+                                            moved = Some((i, 1));
+                                        }
+                                        ui.label(col.label());
+                                    });
+                                }
+                                if let Some((i, d)) = moved {
+                                    let j = (i as isize + d) as usize;
+                                    self.list_column_order.swap(i, j);
+                                    self.save_prefs();
+                                }
+                                if ui.button("Reset Order").clicked() {
+                                    self.list_column_order =
+                                        crate::app::types::ColumnId::ALL.to_vec();
+                                    self.save_prefs();
+                                }
+                            });
                             ui.separator();
                             ui.label("Editor:");
                             let mut eps = self.zero_cross_epsilon;
@@ -390,6 +518,21 @@ impl crate::app::WavesPreviewer {
                                 .changed()
                             {
                                 self.invert_shift_wheel_pan = invert_shift_pan;
+                                self.save_prefs();
+                            }
+                            let mut wheel_scrolls = self.editor_wheel_scrolls;
+                            if ui
+                                .checkbox(
+                                    &mut wheel_scrolls,
+                                    "Wheel scrolls the view (Ctrl+wheel zooms)",
+                                )
+                                .on_hover_text(
+                                    "Off: wheel zooms (current default). On: a plain wheel pans \
+                                     horizontally and zooming needs Ctrl+wheel or a pinch gesture.",
+                                )
+                                .changed()
+                            {
+                                self.editor_wheel_scrolls = wheel_scrolls;
                                 self.save_prefs();
                             }
                             ui.horizontal_wrapped(|ui| {

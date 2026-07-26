@@ -64,18 +64,31 @@ fn assert_freq_preserved(sig: &[f32], out_sr: u32, freq_hz: f32, duration_secs: 
 // ── sample-rate conversion matrix ────────────────────────────────────────────
 
 const CONVERSIONS: &[(u32, u32)] = &[
-    (44100, 48000),   // slight upsample (common DAW pair)
-    (48000, 44100),   // slight downsample
-    (44100, 22050),   // 2× downsample
-    (22050, 44100),   // 2× upsample
-    (48000, 96000),   // 2× upsample
-    (96000, 44100),   // non-integer downsample
-    (44100, 44100),   // identity (no-op path)
-    (8000, 44100),    // large upsample (telephony → audio)
-    (44100, 8000),    // large downsample
-    (32000, 48000),   // broadcast upsample
-    (192000, 44100),  // high-res downsample
+    (44100, 48000),  // slight upsample (common DAW pair)
+    (48000, 44100),  // slight downsample
+    (44100, 22050),  // 2× downsample
+    (22050, 44100),  // 2× upsample
+    (48000, 96000),  // 2× upsample
+    (96000, 44100),  // non-integer downsample
+    (44100, 44100),  // identity (no-op path)
+    (8000, 44100),   // large upsample (telephony → audio)
+    (44100, 8000),   // large downsample
+    (32000, 48000),  // broadcast upsample
+    (192000, 44100), // high-res downsample
 ];
+
+#[test]
+fn test_resample_conversion_matrix_lengths() {
+    for &(in_sr, out_sr) in CONVERSIONS {
+        let src = sine_wave(in_sr, 440.0, 0.02);
+        let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
+        assert_len_approx(
+            out.len(),
+            expected_len(src.len(), in_sr, out_sr),
+            &format!("{in_sr}->{out_sr}"),
+        );
+    }
+}
 
 // ── mono resampling: output length ───────────────────────────────────────────
 
@@ -84,7 +97,11 @@ fn test_resample_length_44100_to_48000() {
     let (in_sr, out_sr) = (44100, 48000);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "44100→48000");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "44100→48000",
+    );
 }
 
 #[test]
@@ -92,7 +109,11 @@ fn test_resample_length_48000_to_44100() {
     let (in_sr, out_sr) = (48000, 44100);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "48000→44100");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "48000→44100",
+    );
 }
 
 #[test]
@@ -100,7 +121,11 @@ fn test_resample_length_44100_to_22050() {
     let (in_sr, out_sr) = (44100, 22050);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "44100→22050");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "44100→22050",
+    );
 }
 
 #[test]
@@ -108,7 +133,11 @@ fn test_resample_length_22050_to_44100() {
     let (in_sr, out_sr) = (22050, 44100);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "22050→44100");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "22050→44100",
+    );
 }
 
 #[test]
@@ -116,7 +145,11 @@ fn test_resample_length_48000_to_96000() {
     let (in_sr, out_sr) = (48000, 96000);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "48000→96000");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "48000→96000",
+    );
 }
 
 #[test]
@@ -124,7 +157,11 @@ fn test_resample_length_96000_to_44100() {
     let (in_sr, out_sr) = (96000, 44100);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "96000→44100");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "96000→44100",
+    );
 }
 
 #[test]
@@ -132,7 +169,11 @@ fn test_resample_length_8000_to_44100() {
     let (in_sr, out_sr) = (8000, 44100);
     let src = sine_wave(in_sr, 300.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "8000→44100");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "8000→44100",
+    );
 }
 
 #[test]
@@ -140,7 +181,11 @@ fn test_resample_length_44100_to_8000() {
     let (in_sr, out_sr) = (44100, 8000);
     let src = sine_wave(in_sr, 300.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "44100→8000");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "44100→8000",
+    );
 }
 
 #[test]
@@ -148,7 +193,11 @@ fn test_resample_length_32000_to_48000() {
     let (in_sr, out_sr) = (32000, 48000);
     let src = sine_wave(in_sr, 440.0, 1.0);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "32000→48000");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "32000→48000",
+    );
 }
 
 #[test]
@@ -156,7 +205,11 @@ fn test_resample_length_192000_to_44100() {
     let (in_sr, out_sr) = (192000, 44100);
     let src = sine_wave(in_sr, 440.0, 0.5);
     let out = resample_quality(&src, in_sr, out_sr, ResampleQuality::Fast);
-    assert_len_approx(out.len(), expected_len(src.len(), in_sr, out_sr), "192000→44100");
+    assert_len_approx(
+        out.len(),
+        expected_len(src.len(), in_sr, out_sr),
+        "192000→44100",
+    );
 }
 
 // ── identity (no-op) ─────────────────────────────────────────────────────────
@@ -313,7 +366,9 @@ fn test_resample_stereo_channels_independent() {
 
 #[test]
 fn test_resample_quad_channel_44100_to_48000() {
-    let chans: Vec<Vec<f32>> = (0..4).map(|i| sine_wave(44100, 220.0 * (i + 1) as f32, 0.5)).collect();
+    let chans: Vec<Vec<f32>> = (0..4)
+        .map(|i| sine_wave(44100, 220.0 * (i + 1) as f32, 0.5))
+        .collect();
     let out = resample_channels_quality(&chans, 44100, 48000, ResampleQuality::Fast);
     assert_eq!(out.len(), 4, "quad must remain 4 channels");
     let exp = expected_len(chans[0].len(), 44100, 48000);
@@ -328,7 +383,11 @@ fn test_resample_channels_identity() {
     let out = resample_channels_quality(&chans, 44100, 44100, ResampleQuality::Fast);
     assert_eq!(out.len(), chans.len());
     for (i, (orig, resampled)) in chans.iter().zip(out.iter()).enumerate() {
-        assert_eq!(orig.len(), resampled.len(), "ch{i} length changed in identity");
+        assert_eq!(
+            orig.len(),
+            resampled.len(),
+            "ch{i} length changed in identity"
+        );
     }
 }
 
@@ -339,7 +398,10 @@ fn test_resample_channels_silence() {
     assert_eq!(out.len(), 2);
     for (ch, sig) in out.iter().enumerate() {
         let max_abs = sig.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        assert!(max_abs < 1e-4, "ch{ch} silence not preserved: max_abs={max_abs}");
+        assert!(
+            max_abs < 1e-4,
+            "ch{ch} silence not preserved: max_abs={max_abs}"
+        );
     }
 }
 
@@ -367,7 +429,11 @@ fn test_resample_single_sample_does_not_panic() {
 fn test_resample_all_quality_levels_44100_to_48000() {
     let src = sine_wave(44100, 440.0, 0.2);
     let exp = expected_len(src.len(), 44100, 48000);
-    for quality in [ResampleQuality::Fast, ResampleQuality::Good, ResampleQuality::Best] {
+    for quality in [
+        ResampleQuality::Fast,
+        ResampleQuality::Good,
+        ResampleQuality::Best,
+    ] {
         let out = resample_quality(&src, 44100, 48000, quality);
         assert_len_approx(out.len(), exp, &format!("{quality:?} 44100→48000"));
     }
@@ -376,7 +442,11 @@ fn test_resample_all_quality_levels_44100_to_48000() {
 #[test]
 fn test_resample_all_quality_levels_silence() {
     let src = silence(44100);
-    for quality in [ResampleQuality::Fast, ResampleQuality::Good, ResampleQuality::Best] {
+    for quality in [
+        ResampleQuality::Fast,
+        ResampleQuality::Good,
+        ResampleQuality::Best,
+    ] {
         let out = resample_quality(&src, 44100, 48000, quality);
         let max_abs = out.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
         assert!(max_abs < 1e-4, "{quality:?} silence got max_abs={max_abs}");
@@ -426,6 +496,12 @@ fn test_resample_good_quality_better_frequency_accuracy_than_fast() {
 
     // Both should be within 20% of expected
     let tolerance = (expected_zc as f64 * 0.20) as usize;
-    assert!(fast_zc.abs_diff(expected_zc) <= tolerance, "Fast ZC {fast_zc} vs {expected_zc} at 440Hz/{duration}s");
-    assert!(good_zc.abs_diff(expected_zc) <= tolerance, "Good ZC {good_zc} vs {expected_zc} at 440Hz/{duration}s");
+    assert!(
+        fast_zc.abs_diff(expected_zc) <= tolerance,
+        "Fast ZC {fast_zc} vs {expected_zc} at 440Hz/{duration}s"
+    );
+    assert!(
+        good_zc.abs_diff(expected_zc) <= tolerance,
+        "Good ZC {good_zc} vs {expected_zc} at 440Hz/{duration}s"
+    );
 }

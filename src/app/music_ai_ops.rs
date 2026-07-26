@@ -748,6 +748,7 @@ impl crate::app::WavesPreviewer {
         }
         self.music_preview_state = None;
         if let Some(path) = tab_path {
+            self.cancel_pending_preview_autoplay_for(path.as_path(), ToolKind::MusicAnalyze);
             if let Some(tab_idx) = self.tabs.iter().position(|t| t.path == path) {
                 if let Some(tab) = self.tabs.get_mut(tab_idx) {
                     tab.music_analysis_draft.preview_inflight = false;
@@ -782,11 +783,19 @@ impl crate::app::WavesPreviewer {
                 if result_generation != self.music_preview_expected_generation
                     || result_generation != state_generation
                 {
+                    self.cancel_pending_preview_autoplay_for(
+                        completed_path.as_path(),
+                        ToolKind::MusicAnalyze,
+                    );
                     ctx.request_repaint();
                     return;
                 }
 
                 let Some(tab_idx) = self.tabs.iter().position(|t| t.path == completed_path) else {
+                    self.cancel_pending_preview_autoplay_for(
+                        completed_path.as_path(),
+                        ToolKind::MusicAnalyze,
+                    );
                     ctx.request_repaint();
                     return;
                 };
@@ -795,6 +804,10 @@ impl crate::app::WavesPreviewer {
                     tab.music_analysis_draft.preview_generation = result_generation;
                 }
                 if let Some(err) = result.error {
+                    self.cancel_pending_preview_autoplay_for(
+                        completed_path.as_path(),
+                        ToolKind::MusicAnalyze,
+                    );
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.music_analysis_draft.preview_error = Some(err);
                         tab.music_analysis_draft.preview_active = false;
@@ -803,6 +816,10 @@ impl crate::app::WavesPreviewer {
                     return;
                 }
                 let (Some(overlay), Some(mono)) = (result.overlay, result.mono) else {
+                    self.cancel_pending_preview_autoplay_for(
+                        completed_path.as_path(),
+                        ToolKind::MusicAnalyze,
+                    );
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.music_analysis_draft.preview_error =
                             Some("preview result missing audio".to_string());
@@ -816,6 +833,7 @@ impl crate::app::WavesPreviewer {
                     .map(|c| c.len())
                     .unwrap_or_else(|| self.tabs[tab_idx].samples_len)
                     .max(1);
+                let playback = overlay.clone();
                 if let Some(tab_mut) = self.tabs.get_mut(tab_idx) {
                     tab_mut.preview_overlay = Some(Self::preview_overlay_from_channels(
                         overlay,
@@ -827,7 +845,16 @@ impl crate::app::WavesPreviewer {
                     tab_mut.music_analysis_draft.preview_clip_applied = result.clip_applied;
                     tab_mut.music_analysis_draft.preview_error = None;
                 }
-                self.set_preview_mono(tab_idx, ToolKind::MusicAnalyze, mono);
+                if playback.first().map(|c| !c.is_empty()).unwrap_or(false) {
+                    self.set_preview_channels(tab_idx, ToolKind::MusicAnalyze, playback);
+                } else {
+                    self.set_preview_mono(tab_idx, ToolKind::MusicAnalyze, mono);
+                }
+                self.finish_pending_preview_autoplay(
+                    tab_idx,
+                    completed_path.as_path(),
+                    ToolKind::MusicAnalyze,
+                );
                 ctx.request_repaint();
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -836,6 +863,7 @@ impl crate::app::WavesPreviewer {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 let path = state.tab_path.clone();
                 self.music_preview_state = None;
+                self.cancel_pending_preview_autoplay_for(path.as_path(), ToolKind::MusicAnalyze);
                 if let Some(tab_idx) = self.tabs.iter().position(|t| t.path == path) {
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         tab.music_analysis_draft.preview_inflight = false;

@@ -39,7 +39,8 @@ impl WavesPreviewer {
         if self.fs_exists_cache.len() >= 100_000 {
             self.fs_exists_cache.clear();
         }
-        self.fs_exists_cache.insert(path.to_path_buf(), (exists, now));
+        self.fs_exists_cache
+            .insert(path.to_path_buf(), (exists, now));
         exists
     }
 
@@ -90,7 +91,10 @@ impl WavesPreviewer {
         self.edited_cache
             .get(path)
             .and_then(|cached| cached.display_meta.as_ref())
-            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_deref()))
+            .or_else(|| {
+                self.item_for_path(path)
+                    .and_then(|item| item.meta.as_deref())
+            })
     }
 
     pub(super) fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {
@@ -322,6 +326,24 @@ impl WavesPreviewer {
             .collect()
     }
 
+    /// Select every visible row (multi-selection over the filtered list).
+    pub(super) fn list_select_all(&mut self) {
+        self.selected_multi.clear();
+        for row in 0..self.files.len() {
+            self.selected_multi.insert(row);
+        }
+        if self.selected.is_none() && !self.files.is_empty() {
+            self.selected = Some(0);
+        }
+        self.select_anchor = self.selected;
+    }
+
+    /// Drop the multi-selection (the focused row stays).
+    pub(super) fn list_clear_selection(&mut self) {
+        self.selected_multi.clear();
+        self.select_anchor = None;
+    }
+
     pub(super) fn selected_real_paths(&self) -> Vec<PathBuf> {
         self.selected_paths()
             .into_iter()
@@ -374,6 +396,8 @@ impl WavesPreviewer {
             SortKey::LufsShort => cols.lufs_s,
             SortKey::LufsMomentary => cols.lufs_m,
             SortKey::Bpm => cols.bpm,
+            SortKey::SilenceLead => cols.silence_lead,
+            SortKey::SilenceTail => cols.silence_tail,
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),

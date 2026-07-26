@@ -83,9 +83,7 @@ impl WavesPreviewer {
                     .filter(|v| v.is_finite())
                     .map(|v| v as f64),
             ),
-            SortKey::Channels => {
-                OwnedKey::Num(m.map(|m| m.channels as f64).filter(|v| *v > 0.0))
-            }
+            SortKey::Channels => OwnedKey::Num(m.map(|m| m.channels as f64).filter(|v| *v > 0.0)),
             SortKey::SampleRate => OwnedKey::Num(
                 self.sample_rate_override
                     .get(&item.path)
@@ -141,6 +139,16 @@ impl WavesPreviewer {
             SortKey::Bpm => OwnedKey::Num(
                 m.and_then(|m| m.bpm)
                     .filter(|v| v.is_finite() && *v > 0.0)
+                    .map(|v| v as f64),
+            ),
+            SortKey::SilenceLead => OwnedKey::Num(
+                m.and_then(|m| m.silence_lead_ms)
+                    .filter(|v| v.is_finite())
+                    .map(|v| v as f64),
+            ),
+            SortKey::SilenceTail => OwnedKey::Num(
+                m.and_then(|m| m.silence_tail_ms)
+                    .filter(|v| v.is_finite())
                     .map(|v| v as f64),
             ),
             SortKey::CreatedAt => OwnedKey::Num(

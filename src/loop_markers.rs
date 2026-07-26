@@ -16,7 +16,9 @@ pub fn read_loop_markers(path: &Path) -> Option<(u64, u64)> {
         "aiff" | "aif" => {
             crate::wave::read_aiff_loop_markers(path).map(|(s, e)| (s as u64, e as u64))
         }
-        "flac" => crate::flac_meta::read_flac_loop_markers(path).ok().flatten(),
+        "flac" => crate::flac_meta::read_flac_loop_markers(path)
+            .ok()
+            .flatten(),
         "mp3" => read_mp3_loop_markers(path).ok().flatten(),
         "m4a" => read_m4a_loop_markers(path).ok().flatten(),
         // Formats without in-file loop support (ogg): JSON sidecar.

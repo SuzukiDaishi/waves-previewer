@@ -39,8 +39,8 @@ fn plot_frame(ui: &mut egui::Ui, height: f32) -> (egui::Response, egui::Painter,
 }
 
 fn freq_to_x(rect: Rect, hz: f32) -> f32 {
-    let t = (hz.clamp(EQ_FREQ_MIN, EQ_FREQ_MAX) / EQ_FREQ_MIN).ln()
-        / (EQ_FREQ_MAX / EQ_FREQ_MIN).ln();
+    let t =
+        (hz.clamp(EQ_FREQ_MIN, EQ_FREQ_MAX) / EQ_FREQ_MIN).ln() / (EQ_FREQ_MAX / EQ_FREQ_MIN).ln();
     rect.left() + t * rect.width()
 }
 
@@ -250,7 +250,9 @@ pub(crate) fn eq_response_plot(
     ] {
         let hp = Pos2::new(freq_to_x(inner, hz), db_to_y(inner, db, EQ_DB_RANGE));
         let active = dragging == Some(h)
-            || hover.map(|p| hp.distance(p) <= HANDLE_HIT_RADIUS).unwrap_or(false);
+            || hover
+                .map(|p| hp.distance(p) <= HANDLE_HIT_RADIUS)
+                .unwrap_or(false);
         draw_handle(&painter, hp, color, active);
         if active {
             let text = if h == EqHandle::Mid {
@@ -353,7 +355,10 @@ pub(crate) fn compressor_transfer_plot(
     // Handles: knee (threshold) and ceiling endpoint (ratio).
     let knee = Pos2::new(
         dyn_to_x(inner, params.threshold_db),
-        dyn_to_y(inner, out_db(params.threshold_db, params).clamp(DYN_DB_MIN, 0.0)),
+        dyn_to_y(
+            inner,
+            out_db(params.threshold_db, params).clamp(DYN_DB_MIN, 0.0),
+        ),
     );
     let top = Pos2::new(
         dyn_to_x(inner, 0.0),
@@ -384,9 +389,9 @@ pub(crate) fn compressor_transfer_plot(
                 _ => {
                     // Top endpoint: out(0) = thr - thr/ratio + makeup.
                     // Solve ratio from the dragged output level.
-                    let target_out =
-                        (DYN_DB_MIN + ((inner.bottom() - pos.y) / inner.height().max(1.0)) * -DYN_DB_MIN)
-                            .clamp(DYN_DB_MIN, 0.0);
+                    let target_out = (DYN_DB_MIN
+                        + ((inner.bottom() - pos.y) / inner.height().max(1.0)) * -DYN_DB_MIN)
+                        .clamp(DYN_DB_MIN, 0.0);
                     let reduced = target_out - params.makeup_db - params.threshold_db;
                     let over = -params.threshold_db;
                     if over > 0.5 {
@@ -404,9 +409,13 @@ pub(crate) fn compressor_transfer_plot(
     ui.data_mut(|d| d.insert_temp(drag_id, dragging));
 
     let knee_active = dragging == Some(0)
-        || hover.map(|p| knee.distance(p) <= HANDLE_HIT_RADIUS).unwrap_or(false);
+        || hover
+            .map(|p| knee.distance(p) <= HANDLE_HIT_RADIUS)
+            .unwrap_or(false);
     let top_active = dragging == Some(1)
-        || hover.map(|p| top.distance(p) <= HANDLE_HIT_RADIUS).unwrap_or(false);
+        || hover
+            .map(|p| top.distance(p) <= HANDLE_HIT_RADIUS)
+            .unwrap_or(false);
     draw_handle(&painter, knee, HANDLE_LOW, knee_active);
     draw_handle(&painter, top, HANDLE_MID, top_active);
     if knee_active {
@@ -460,13 +469,14 @@ pub(crate) fn noise_gate_plot(
         Pos2::new(thr_x, dyn_to_y(inner, thr)),
         Pos2::new(dyn_to_x(inner, 0.0), dyn_to_y(inner, 0.0)),
     ];
-    painter.add(egui::Shape::line(std::mem::take(&mut pts), Stroke::new(2.0, PLOT_CURVE)));
+    painter.add(egui::Shape::line(
+        std::mem::take(&mut pts),
+        Stroke::new(2.0, PLOT_CURVE),
+    ));
 
     let handle = Pos2::new(thr_x, dyn_to_y(inner, thr));
     let drag_id = id.with("gate_drag");
-    let mut dragging: bool = ui
-        .data_mut(|d| d.get_temp(drag_id))
-        .unwrap_or(false);
+    let mut dragging: bool = ui.data_mut(|d| d.get_temp(drag_id)).unwrap_or(false);
     let hover = resp.hover_pos();
     let mut changed = false;
     if resp.drag_started() && !dragging {
@@ -488,7 +498,9 @@ pub(crate) fn noise_gate_plot(
     ui.data_mut(|d| d.insert_temp(drag_id, dragging));
 
     let active = dragging
-        || hover.map(|p| handle.distance(p) <= HANDLE_HIT_RADIUS).unwrap_or(false);
+        || hover
+            .map(|p| handle.distance(p) <= HANDLE_HIT_RADIUS)
+            .unwrap_or(false);
     draw_handle(&painter, handle, HANDLE_LOW, active);
     if active {
         handle_label(

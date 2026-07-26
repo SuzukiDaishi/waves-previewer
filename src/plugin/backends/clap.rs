@@ -815,13 +815,15 @@ mod native {
     }
 
     #[cfg(windows)]
-    fn create_clap_host_window(title: &str, width: u32, height: u32) -> Option<windows_sys::Win32::Foundation::HWND> {
+    fn create_clap_host_window(
+        title: &str,
+        width: u32,
+        height: u32,
+    ) -> Option<windows_sys::Win32::Foundation::HWND> {
         use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows_sys::Win32::UI::WindowsAndMessaging::*;
         unsafe {
-            let class_name: Vec<u16> = "NeoWavesClapGuiHostWindow\0"
-                .encode_utf16()
-                .collect();
+            let class_name: Vec<u16> = "NeoWavesClapGuiHostWindow\0".encode_utf16().collect();
             let hinstance = GetModuleHandleW(std::ptr::null());
             let wc = WNDCLASSEXW {
                 cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -865,7 +867,11 @@ mod native {
                 hinstance,
                 std::ptr::null(),
             );
-            if hwnd.is_null() { None } else { Some(hwnd) }
+            if hwnd.is_null() {
+                None
+            } else {
+                Some(hwnd)
+            }
         }
     }
 
@@ -932,12 +938,18 @@ mod native {
         //   floating: suggest_title() → show()
         #[cfg(windows)]
         let host_hwnd: Option<windows_sys::Win32::Foundation::HWND> = if !config.is_floating {
-            let preferred_size = gui_ext.get_size(&mut handle).unwrap_or(
-                clack_extensions::gui::GuiSize { width: 640, height: 420 }
-            );
-            let hwnd = create_clap_host_window(&plugin_title, preferred_size.width, preferred_size.height);
+            let preferred_size =
+                gui_ext
+                    .get_size(&mut handle)
+                    .unwrap_or(clack_extensions::gui::GuiSize {
+                        width: 640,
+                        height: 420,
+                    });
+            let hwnd =
+                create_clap_host_window(&plugin_title, preferred_size.width, preferred_size.height);
             if let Some(hwnd) = hwnd {
-                let parent_window = clack_extensions::gui::Window::from_win32_hwnd(hwnd as *mut std::ffi::c_void);
+                let parent_window =
+                    clack_extensions::gui::Window::from_win32_hwnd(hwnd as *mut std::ffi::c_void);
                 if let Err(e) = unsafe { gui_ext.set_parent(&mut handle, parent_window) } {
                     eprintln!("[clap] gui set_parent failed: {e:?}");
                 }
@@ -945,7 +957,9 @@ mod native {
                 gui_ext.show(&mut handle).ok();
                 Some(hwnd)
             } else {
-                eprintln!("[clap] create_clap_host_window failed, falling back to show without parent");
+                eprintln!(
+                    "[clap] create_clap_host_window failed, falling back to show without parent"
+                );
                 gui_ext.show(&mut handle).ok();
                 None
             }
@@ -953,7 +967,9 @@ mod native {
             if let Ok(title) = CString::new(plugin_title.as_str()) {
                 gui_ext.suggest_title(&mut handle, title.as_c_str());
             }
-            gui_ext.show(&mut handle).map_err(|e| format!("gui show failed: {e}"))?;
+            gui_ext
+                .show(&mut handle)
+                .map_err(|e| format!("gui show failed: {e}"))?;
             None
         };
 
@@ -962,7 +978,9 @@ mod native {
             if let Ok(title) = CString::new(plugin_title.as_str()) {
                 gui_ext.suggest_title(&mut handle, title.as_c_str());
             }
-            gui_ext.show(&mut handle).map_err(|e| format!("gui show failed: {e}"))?;
+            gui_ext
+                .show(&mut handle)
+                .map_err(|e| format!("gui show failed: {e}"))?;
         }
 
         let snapshot = read_snapshot(&mut instance, params_ext, &specs);
@@ -1031,9 +1049,9 @@ mod native {
         }
 
         // プラグインが再初期化を要求している場合はセッション終了を通知する
-        let restart_requested = session.instance.access_shared_handler(|shared| {
-            shared.restart_requested.swap(false, Ordering::AcqRel)
-        });
+        let restart_requested = session
+            .instance
+            .access_shared_handler(|shared| shared.restart_requested.swap(false, Ordering::AcqRel));
         if restart_requested {
             let snapshot = read_snapshot(
                 &mut session.instance,

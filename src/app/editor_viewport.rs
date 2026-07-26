@@ -1017,12 +1017,6 @@ impl super::WavesPreviewer {
                 continue;
             }
             let frame_step = spec.frame_step.max(1);
-            let f0 = (start / frame_step).min(spec.frames.saturating_sub(1));
-            let mut f1 = (end / frame_step).min(spec.frames);
-            if f1 <= f0 {
-                f1 = (f0 + 1).min(spec.frames);
-            }
-            let frame_count = f1.saturating_sub(f0).max(1);
             let max_bin = spec.bins.saturating_sub(1).max(1);
             // librosa-style `ref=max`: shift the ramp so the loudest bin of
             // the file maps to the top color, keeping harmonic contrast on
@@ -1049,7 +1043,14 @@ impl super::WavesPreviewer {
             let mel_min = 1.0_f32;
             let lane_y0 = lane_idx.saturating_mul(target_lane_h);
             for x in 0..target_w.max(1) {
-                let frame_idx = f0 + ((x * frame_count) / target_w.max(1)).min(frame_count - 1);
+                let frame_idx = Self::feature_frame_for_column(
+                    spec.frames,
+                    frame_step,
+                    start,
+                    end,
+                    x,
+                    target_w,
+                );
                 let base = frame_idx * spec.bins;
                 for y in 0..target_lane_h.max(1) {
                     let frac_local =
@@ -1086,12 +1087,7 @@ impl super::WavesPreviewer {
                         _ => 0,
                     };
                     let idx = base + bin.min(max_bin);
-                    let db_raw = (spec
-                        .values_db
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(-120.0)
-                        - ref_db)
+                    let db_raw = (spec.values_db.get(idx).copied().unwrap_or(-120.0) - ref_db)
                         .clamp(cfg.db_floor, 0.0);
                     let norm = if (0.0 - cfg.db_floor).abs() < f32::EPSILON {
                         0.0
@@ -1126,6 +1122,25 @@ impl super::WavesPreviewer {
             EditorViewportRenderQuality::Fine => lane_height_px.clamp(64, 1_024),
         };
         (target_w.max(1), target_lane_h.max(1))
+    }
+
+    /// Analysis frame for output column `x` (of `target_w`) over the visible
+    /// sample range [start, end): the frame containing the column's center
+    /// sample. Fractional mapping keeps sub-hop alignment with the waveform
+    /// lane at high zoom, unlike the old `start / frame_step` truncation
+    /// which drifted by up to one hop.
+    fn feature_frame_for_column(
+        frames: usize,
+        frame_step: usize,
+        start: usize,
+        end: usize,
+        x: usize,
+        target_w: usize,
+    ) -> usize {
+        let frame_step = frame_step.max(1) as f64;
+        let span = end.saturating_sub(start).max(1) as f64;
+        let sample_pos = start as f64 + ((x as f64 + 0.5) * span) / target_w.max(1) as f64;
+        ((sample_pos / frame_step).floor() as usize).min(frames.saturating_sub(1))
     }
 
     fn visible_feature_frame_range(
@@ -1163,15 +1178,12 @@ impl super::WavesPreviewer {
             Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
         let mut image = ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
-        let Some((f0, f1)) =
-            Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
-        else {
+        if Self::visible_feature_frame_range(data.frames, data.frame_step, start, end).is_none() {
             return image;
-        };
+        }
         if data.tempo_bins == 0 || data.values.is_empty() {
             return image;
         }
-        let frame_count = f1.saturating_sub(f0).max(1);
         let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
             view_mode,
             vertical_zoom,
@@ -1183,7 +1195,14 @@ impl super::WavesPreviewer {
         for lane_idx in 0..lane_count.max(1) {
             let lane_y0 = lane_idx.saturating_mul(target_lane_h);
             for x in 0..target_w {
-                let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+                let frame_idx = Self::feature_frame_for_column(
+                    data.frames,
+                    data.frame_step,
+                    start,
+                    end,
+                    x,
+                    target_w,
+                );
                 let base = frame_idx * data.tempo_bins;
                 for y in 0..target_lane_h {
                     let frac_local =
@@ -1222,15 +1241,12 @@ impl super::WavesPreviewer {
             Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
         let mut image = ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
-        let Some((f0, f1)) =
-            Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
-        else {
+        if Self::visible_feature_frame_range(data.frames, data.frame_step, start, end).is_none() {
             return image;
-        };
+        }
         if data.bins == 0 || data.values.is_empty() {
             return image;
         }
-        let frame_count = f1.saturating_sub(f0).max(1);
         let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
             view_mode,
             vertical_zoom,
@@ -1240,7 +1256,14 @@ impl super::WavesPreviewer {
         for lane_idx in 0..lane_count.max(1) {
             let lane_y0 = lane_idx.saturating_mul(target_lane_h);
             for x in 0..target_w {
-                let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+                let frame_idx = Self::feature_frame_for_column(
+                    data.frames,
+                    data.frame_step,
+                    start,
+                    end,
+                    x,
+                    target_w,
+                );
                 let base = frame_idx * data.bins;
                 for y in 0..target_lane_h {
                     let frac_local =
@@ -1317,15 +1340,12 @@ impl super::WavesPreviewer {
             Self::feature_viewport_target_size(wave_width_px, lane_height_px, quality);
         let total_h = target_lane_h.saturating_mul(lane_count.max(1)).max(1);
         let mut image = ColorImage::filled([target_w, total_h], Color32::from_rgb(12, 14, 18));
-        let Some((f0, f1)) =
-            Self::visible_feature_frame_range(data.frames, data.frame_step, start, end)
-        else {
+        if Self::visible_feature_frame_range(data.frames, data.frame_step, start, end).is_none() {
             return image;
-        };
+        }
         if data.bins == 0 || data.env_db.is_empty() {
             return image;
         }
-        let frame_count = f1.saturating_sub(f0).max(1);
         let (visible_min, visible_max) = Self::editor_vertical_range_for_view(
             view_mode,
             vertical_zoom,
@@ -1344,7 +1364,14 @@ impl super::WavesPreviewer {
         for lane_idx in 0..lane_count.max(1) {
             let lane_y0 = lane_idx.saturating_mul(target_lane_h);
             for x in 0..target_w {
-                let frame_idx = f0 + ((x * frame_count) / target_w).min(frame_count - 1);
+                let frame_idx = Self::feature_frame_for_column(
+                    data.frames,
+                    data.frame_step,
+                    start,
+                    end,
+                    x,
+                    target_w,
+                );
                 let base = frame_idx.min(data.frames.saturating_sub(1)) * data.bins;
                 for y in 0..target_lane_h {
                     let frac_local =
@@ -1354,7 +1381,11 @@ impl super::WavesPreviewer {
                     let pos = (freq / bin_hz).clamp(0.0, data.bins.saturating_sub(1) as f32);
                     let b0 = pos.floor() as usize;
                     let tfrac = pos - b0 as f32;
-                    let v0 = data.env_db.get(base + b0).copied().unwrap_or(vmax - range_db);
+                    let v0 = data
+                        .env_db
+                        .get(base + b0)
+                        .copied()
+                        .unwrap_or(vmax - range_db);
                     let v1 = data
                         .env_db
                         .get(base + (b0 + 1).min(data.bins.saturating_sub(1)))
@@ -1480,9 +1511,7 @@ impl super::WavesPreviewer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::types::{
-        SpectrogramConfig, SpectrogramData, SpectrogramDbRef, ViewMode,
-    };
+    use super::super::types::{SpectrogramConfig, SpectrogramData, SpectrogramDbRef, ViewMode};
     use super::super::WavesPreviewer;
     use crate::app::types::EditorViewportRenderQuality;
 

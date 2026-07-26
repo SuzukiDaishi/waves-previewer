@@ -29,6 +29,8 @@ impl super::WavesPreviewer {
                 | crate::app::types::SortKey::TruePeak
                 | crate::app::types::SortKey::LufsShort
                 | crate::app::types::SortKey::LufsMomentary
+                | crate::app::types::SortKey::SilenceLead
+                | crate::app::types::SortKey::SilenceTail
         )
     }
 
@@ -347,8 +349,7 @@ impl super::WavesPreviewer {
                 .meta_sort_last_applied
                 .map(|last| now.duration_since(last))
                 .unwrap_or_default();
-            let interval =
-                std::time::Duration::from_millis(self.meta_sort_min_interval_ms());
+            let interval = std::time::Duration::from_millis(self.meta_sort_min_interval_ms());
             ctx.request_repaint_after(interval.saturating_sub(elapsed));
         }
     }
@@ -396,6 +397,7 @@ impl super::WavesPreviewer {
                         meta_sort_dirty = true;
                     }
                     self.update_csv_export_progress_for_path(&p);
+                    self.update_loudnorm_progress_for_path(&p);
                 }
                 meta::MetaUpdate::Full(p, m) => {
                     self.meta_inflight.remove(&p);
@@ -403,6 +405,7 @@ impl super::WavesPreviewer {
                         meta_sort_dirty = true;
                     }
                     self.update_csv_export_progress_for_path(&p);
+                    self.update_loudnorm_progress_for_path(&p);
                 }
                 meta::MetaUpdate::Transcript(p, t) => {
                     self.transcript_inflight.remove(&p);
@@ -428,9 +431,8 @@ impl super::WavesPreviewer {
                 // Match the sort debounce: on huge lists each refilter walks
                 // every item, so let transcripts accumulate longer per pass.
                 let debounce_ms = self.meta_sort_min_interval_ms().max(300);
-                self.search_deadline = Some(
-                    std::time::Instant::now() + std::time::Duration::from_millis(debounce_ms),
-                );
+                self.search_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(debounce_ms));
             }
             ctx.request_repaint();
         } else {

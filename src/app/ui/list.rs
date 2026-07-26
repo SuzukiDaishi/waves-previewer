@@ -159,15 +159,16 @@ impl crate::app::WavesPreviewer {
         if let Some((start_frac, end_frac)) = overlay.loop_frac {
             let start_x = wave_rect.left() + start_frac.clamp(0.0, 1.0) * wave_rect.width();
             let end_x = wave_rect.left() + end_frac.clamp(0.0, 1.0) * wave_rect.width();
+            let palette = self.palette();
             let band_fill = if overlay.dirty {
-                Color32::from_rgba_unmultiplied(70, 170, 235, 40)
+                palette.selection_fill
             } else {
-                Color32::from_rgba_unmultiplied(70, 170, 235, 24)
+                palette.selection_fill_weak
             };
             let band_line = if overlay.dirty {
-                Color32::from_rgba_unmultiplied(110, 205, 255, 180)
+                palette.selection_stroke
             } else {
-                Color32::from_rgba_unmultiplied(110, 205, 255, 128)
+                palette.selection_stroke_weak
             };
             if start_x != end_x {
                 ui.painter().rect_filled(
@@ -197,9 +198,9 @@ impl crate::app::WavesPreviewer {
         let marker_fracs =
             Self::coalesce_list_wave_marker_fracs(&overlay.marker_fracs, wave_rect.width());
         let marker_color = if overlay.dirty {
-            Color32::from_rgba_unmultiplied(255, 210, 100, 220)
+            self.palette().attention_fill
         } else {
-            Color32::from_rgba_unmultiplied(255, 210, 100, 180)
+            self.palette().attention_fill_weak
         };
         for frac in marker_fracs {
             let x = wave_rect.left() + frac.clamp(0.0, 1.0) * wave_rect.width();
@@ -213,11 +214,68 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    /// First-run empty state: no folder open and nothing loaded. Shows a
+    /// centered onboarding panel instead of an empty table. Returns true
+    /// when the panel was rendered (the table is skipped).
+    fn ui_list_empty_state(&mut self, ui: &mut egui::Ui) -> bool {
+        if self.root.is_some() || !self.items.is_empty() {
+            return false;
+        }
+        let mut open_folder = false;
+        let mut open_session: Option<PathBuf> = None;
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.25);
+            ui.heading("NeoWaves");
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "Open a folder of audio files, or drop files / folders anywhere in this window.",
+                )
+                .weak(),
+            );
+            ui.add_space(12.0);
+            if ui.button("Open Folder...").clicked() {
+                open_folder = true;
+            }
+            let recents = self.recent_session_paths_for_menu();
+            if !recents.is_empty() {
+                ui.add_space(16.0);
+                ui.label(egui::RichText::new("Recent sessions").strong());
+                for path in recents.iter().take(5) {
+                    let name = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("session.nwsess");
+                    if ui
+                        .link(name)
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                    {
+                        open_session = Some(path.clone());
+                    }
+                }
+            }
+        });
+        if open_folder {
+            if let Some(dir) = self.pick_folder_dialog() {
+                self.root = Some(dir);
+                self.rescan();
+            }
+        }
+        if let Some(path) = open_session {
+            self.queue_project_open(path);
+        }
+        true
+    }
+
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
             amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
             highlight_text_job_with_regex,
         };
+        if self.ui_list_empty_state(ui) {
+            return;
+        }
         let cols = self.list_columns;
         // Compile the search highlight regex once per frame instead of per row.
         let highlight_re = self.cached_highlight_regex();
@@ -239,6 +297,9 @@ impl crate::app::WavesPreviewer {
         let allow_auto_scroll = self.list_allow_auto_scroll(ctx, &metrics, key_moved);
         self.update_list_scroll_state(ctx, &metrics, allow_auto_scroll);
         let (table, filler_cols, header_dirty) = self.build_list_table(ui, &metrics);
+        // One copy per frame; the per-row closure below borrows self mutably,
+        // and the order cannot change mid-frame.
+        let column_order = self.list_column_order.clone();
 
         table
             .header(metrics.header_h, |mut header| {
@@ -339,6 +400,12 @@ impl crate::app::WavesPreviewer {
                                         .meta
                                         .as_ref()
                                         .and_then(|m| m.lufs_m_max)
+                                        .is_none())
+                                || ((cols.silence_lead || cols.silence_tail)
+                                    && item
+                                        .meta
+                                        .as_ref()
+                                        .and_then(|m| m.silence_lead_ms)
                                         .is_none()));
                             (
                                 needs_bg_full,
@@ -395,60 +462,360 @@ impl crate::app::WavesPreviewer {
                         let mut clicked_to_load = false;
                         let mut clicked_to_select = false;
                         let is_dirty = self.has_edits_for_path(&path_owned);
-                        if cols.edited {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                if is_dirty {
-                                    ui.label(
-                                        RichText::new("\u{25CF}")
-                                            .color(Color32::from_rgb(255, 180, 60))
-                                            .size(text_height * 1.05),
-                                    );
-                                }
-                            });
+                        for sorted_col in column_order.iter().copied() {
+                        use crate::app::types::ColumnId as C;
+                        if !sorted_col.enabled(&cols) {
+                            continue;
                         }
-                        if cols.cover_art {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let art = cover_art.clone();
-                                let (label, tooltip, fill, stroke) = badge.clone();
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                let tile_side = (rect2.height() - 4.0).clamp(28.0, 56.0);
-                                let tile_rect = egui::Rect::from_center_size(
-                                    rect2.center(),
-                                    egui::vec2(tile_side, tile_side),
-                                );
-                                if let Some(art) = art {
-                                    let texture =
-                                        self.list_art_texture_for_path(ctx, &path_owned, art);
-                                    let mut tex_size = texture.size_vec2();
-                                    tex_size.x = tex_size.x.max(1.0);
-                                    tex_size.y = tex_size.y.max(1.0);
-                                    let scale =
-                                        (tile_rect.width() / tex_size.x).min(tile_rect.height() / tex_size.y);
-                                    let draw_rect = egui::Rect::from_center_size(
-                                        tile_rect.center(),
-                                        tex_size * scale,
+                        match sorted_col {
+                            C::Edited => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    if is_dirty {
+                                        ui.label(
+                                            RichText::new("\u{25CF}")
+                                                .color(self.palette().warning_text)
+                                                .size(text_height * 1.05),
+                                        );
+                                    }
+                                });
+                            }
+                            C::CoverArt => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let art = cover_art.clone();
+                                    let (label, tooltip, fill, stroke) = badge.clone();
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
                                     );
-                                    ui.painter().image(
-                                        texture.id(),
-                                        draw_rect,
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(0.0, 0.0),
-                                            egui::pos2(1.0, 1.0),
+                                    let tile_side = (rect2.height() - 4.0).clamp(28.0, 56.0);
+                                    let tile_rect = egui::Rect::from_center_size(
+                                        rect2.center(),
+                                        egui::vec2(tile_side, tile_side),
+                                    );
+                                    if let Some(art) = art {
+                                        let texture =
+                                            self.list_art_texture_for_path(ctx, &path_owned, art);
+                                        let mut tex_size = texture.size_vec2();
+                                        tex_size.x = tex_size.x.max(1.0);
+                                        tex_size.y = tex_size.y.max(1.0);
+                                        let scale =
+                                            (tile_rect.width() / tex_size.x).min(tile_rect.height() / tex_size.y);
+                                        let draw_rect = egui::Rect::from_center_size(
+                                            tile_rect.center(),
+                                            tex_size * scale,
+                                        );
+                                        ui.painter().image(
+                                            texture.id(),
+                                            draw_rect,
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(0.0, 0.0),
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        let badge_rect = egui::Rect::from_center_size(
+                                            rect2.center(),
+                                            egui::vec2(
+                                                (rect2.width() - 8.0).clamp(28.0, 50.0),
+                                                (rect2.height() - 6.0).clamp(16.0, 24.0),
+                                            ),
+                                        );
+                                        Self::paint_list_type_badge(
+                                            ui,
+                                            badge_rect,
+                                            text_height,
+                                            &label,
+                                            fill,
+                                            stroke,
+                                        );
+                                    }
+                                    let resp2 = self
+                                        .attach_row_context_menu(resp2, row_idx, ctx)
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text(if cover_art.is_some() {
+                                            "Embedded artwork".to_string()
+                                        } else {
+                                            tooltip
+                                        });
+                                    if resp2.double_clicked() && cover_art.is_some() {
+                                        self.open_list_art_window(ctx, &path_owned);
+                                    } else if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::File => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    if self.inline_rename_path.as_deref()
+                                        == Some(path_owned.as_path())
+                                    {
+                                        self.ui_inline_rename_cell(ui, &path_owned);
+                                        return;
+                                    }
+                                    let cell_resp = self.attach_row_context_menu(
+                                        ui.interact(
+                                            ui.max_rect(),
+                                            ui.id().with(("list_cell_file", row_idx)),
+                                            Sense::click(),
                                         ),
-                                        Color32::WHITE,
+                                        row_idx,
+                                        ctx,
                                     );
-                                } else {
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            let display = file_name.clone();
+                                            let label_resp = ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        RichText::new(display)
+                                                            .monospace()
+                                                            .size(text_height * 1.0),
+                                                    )
+                                                    .sense(Sense::click())
+                                                    .truncate()
+                                                    .show_tooltip_when_elided(false),
+                                                )
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                            let label_resp =
+                                                self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                            if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                                || label_resp.clicked_by(egui::PointerButton::Primary))
+                                                && !(cell_resp.double_clicked()
+                                                    || label_resp.double_clicked())
+                                            {
+                                                clicked_to_load = true;
+                                            }
+                                            if cell_resp.double_clicked() || label_resp.double_clicked() {
+                                                clicked_to_select = true;
+                                                to_open = Some(path_owned.clone());
+                                            }
+                                            if label_resp.hovered() {
+                                                label_resp.on_hover_text(&file_name);
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                            C::Folder => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let cell_resp = self.attach_row_context_menu(
+                                        ui.interact(
+                                            ui.max_rect(),
+                                            ui.id().with(("list_cell_folder", row_idx)),
+                                            Sense::click(),
+                                        ),
+                                        row_idx,
+                                        ctx,
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            let label_resp = ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        RichText::new(parent.as_ref())
+                                                            .monospace()
+                                                            .size(text_height * 1.0),
+                                                    )
+                                                    .sense(Sense::click())
+                                                    .truncate()
+                                                    .show_tooltip_when_elided(false),
+                                                )
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                            let label_resp =
+                                                self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                            if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                                || label_resp.clicked_by(egui::PointerButton::Primary))
+                                                && !(cell_resp.double_clicked()
+                                                    || label_resp.double_clicked())
+                                            {
+                                                clicked_to_load = true;
+                                            }
+                                            if cell_resp.double_clicked() || label_resp.double_clicked() {
+                                                clicked_to_select = true;
+                                                if !is_virtual {
+                                                    let _ = crate::app::helpers::open_folder_with_file_selected(
+                                                        &path_owned,
+                                                    );
+                                                }
+                                            }
+                                            if label_resp.hovered() {
+                                                label_resp.on_hover_text(parent.as_ref());
+                                            }
+                                        },
+                                    );
+                                });
+                            }
+                            C::Transcript => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let cell_resp = self.attach_row_context_menu(
+                                        ui.interact(
+                                            ui.max_rect(),
+                                            ui.id().with(("list_cell_transcript", row_idx)),
+                                            Sense::click(),
+                                        ),
+                                        row_idx,
+                                        ctx,
+                                    );
+                                    let transcript_text = row_transcript
+                                        .as_ref()
+                                        .map(|t| t.full_text.as_str())
+                                        .unwrap_or("");
+                                    let inflight = self.transcript_ai_inflight.contains(&path_owned);
+                                    let queued = self
+                                        .transcript_ai_state
+                                        .as_ref()
+                                        .map(|s| s.pending.contains(&path_owned))
+                                        .unwrap_or(false);
+                                    let display = if transcript_text.is_empty() {
+                                        if inflight {
+                                            "[Transcribing...]"
+                                        } else if queued {
+                                            "[Queued...]"
+                                        } else {
+                                            ""
+                                        }
+                                    } else {
+                                        transcript_text
+                                    };
+                                    let label = if let Some(job) = highlight_re
+                                        .as_ref()
+                                        .and_then(|re| highlight_text_job_with_regex(display, re, ui.style()))
+                                    {
+                                        egui::Label::new(job).sense(Sense::click()).truncate()
+                                    } else {
+                                        egui::Label::new(
+                                            RichText::new(display).size(text_height * 0.95),
+                                        )
+                                        .sense(Sense::click())
+                                        .truncate()
+                                    };
+                                    let label_resp = ui
+                                        .add(label.show_tooltip_when_elided(false))
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let label_resp =
+                                        self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                    if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                        || label_resp.clicked_by(egui::PointerButton::Primary))
+                                        && !(cell_resp.double_clicked()
+                                            || label_resp.double_clicked())
+                                    {
+                                        clicked_to_load = true;
+                                    }
+                                    if label_resp.hovered() && !transcript_text.is_empty() {
+                                        label_resp.on_hover_text(transcript_text);
+                                    }
+                                });
+                            }
+                            C::TranscriptLanguage => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let lang = row_transcript_language
+                                        .as_deref()
+                                        .filter(|v: &&str| !v.is_empty())
+                                        .unwrap_or("-");
+                                    ui.label(
+                                        RichText::new(lang)
+                                            .monospace()
+                                            .size(text_height * 0.98),
+                                    );
+                                });
+                            }
+                            C::External => {
+                                for name in external_cols.iter() {
+                                    row.col(|ui| {
+                                        if let Some(bg) = row_bg {
+                                            ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                        }
+                                        ui.visuals_mut().override_text_color = row_fg;
+                                        let cell_resp = self.attach_row_context_menu(
+                                            ui.interact(
+                                                ui.max_rect(),
+                                                ui.id().with(("list_cell_external", row_idx, name)),
+                                                Sense::click(),
+                                            ),
+                                            row_idx,
+                                            ctx,
+                                        );
+                                        // Build the label inside a short borrow so
+                                        // no per-frame String is allocated here;
+                                        // egui copies the text into the widget once
+                                        // (unavoidable), and the hover tooltip
+                                        // re-reads the value only while hovered.
+                                        let label_widget = {
+                                            let value = self
+                                                .item_for_id(id)
+                                                .and_then(|it| it.external_value(name))
+                                                .map(|v| v.as_str())
+                                                .unwrap_or("");
+                                            egui::Label::new(
+                                                RichText::new(value).size(text_height * 0.95),
+                                            )
+                                            .sense(Sense::click())
+                                            .truncate()
+                                            .show_tooltip_when_elided(false)
+                                        };
+                                        let label_resp = ui
+                                            .add(label_widget)
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                        let label_resp =
+                                            self.attach_row_context_menu(label_resp, row_idx, ctx);
+                                        if (cell_resp.clicked_by(egui::PointerButton::Primary)
+                                            || label_resp.clicked_by(egui::PointerButton::Primary))
+                                            && !(cell_resp.double_clicked()
+                                                || label_resp.double_clicked())
+                                        {
+                                            clicked_to_load = true;
+                                        }
+                                        if label_resp.hovered() {
+                                            let hover_value = self
+                                                .item_for_id(id)
+                                                .and_then(|it| it.external_value(name))
+                                                .filter(|v| !v.is_empty())
+                                                .cloned();
+                                            if let Some(hover_value) = hover_value {
+                                                label_resp.on_hover_text(hover_value);
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            C::TypeBadge => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let (label, tooltip, fill, stroke) = badge.clone();
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
                                     let badge_rect = egui::Rect::from_center_size(
                                         rect2.center(),
                                         egui::vec2(
@@ -464,829 +831,574 @@ impl crate::app::WavesPreviewer {
                                         fill,
                                         stroke,
                                     );
-                                }
-                                let resp2 = self
-                                    .attach_row_context_menu(resp2, row_idx, ctx)
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .on_hover_text(if cover_art.is_some() {
-                                        "Embedded artwork".to_string()
-                                    } else {
-                                        tooltip
-                                    });
-                                if resp2.double_clicked() && cover_art.is_some() {
-                                    self.open_list_art_window(ctx, &path_owned);
-                                } else if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.file {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let cell_resp = self.attach_row_context_menu(
-                                    ui.interact(
-                                        ui.max_rect(),
-                                        ui.id().with(("list_cell_file", row_idx)),
-                                        Sense::click(),
-                                    ),
-                                    row_idx,
-                                    ctx,
-                                );
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        let display = file_name.clone();
-                                        let label_resp = ui
-                                            .add(
-                                                egui::Label::new(
-                                                    RichText::new(display)
-                                                        .monospace()
-                                                        .size(text_height * 1.0),
-                                                )
-                                                .sense(Sense::click())
-                                                .truncate()
-                                                .show_tooltip_when_elided(false),
-                                            )
-                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        let label_resp =
-                                            self.attach_row_context_menu(label_resp, row_idx, ctx);
-                                        if (cell_resp.clicked_by(egui::PointerButton::Primary)
-                                            || label_resp.clicked_by(egui::PointerButton::Primary))
-                                            && !(cell_resp.double_clicked()
-                                                || label_resp.double_clicked())
-                                        {
-                                            clicked_to_load = true;
-                                        }
-                                        if cell_resp.double_clicked() || label_resp.double_clicked() {
-                                            clicked_to_select = true;
-                                            to_open = Some(path_owned.clone());
-                                        }
-                                        if label_resp.hovered() {
-                                            label_resp.on_hover_text(&file_name);
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                        if cols.folder {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let cell_resp = self.attach_row_context_menu(
-                                    ui.interact(
-                                        ui.max_rect(),
-                                        ui.id().with(("list_cell_folder", row_idx)),
-                                        Sense::click(),
-                                    ),
-                                    row_idx,
-                                    ctx,
-                                );
-                                ui.with_layout(
-                                    egui::Layout::left_to_right(egui::Align::Center),
-                                    |ui| {
-                                        let label_resp = ui
-                                            .add(
-                                                egui::Label::new(
-                                                    RichText::new(parent.as_ref())
-                                                        .monospace()
-                                                        .size(text_height * 1.0),
-                                                )
-                                                .sense(Sense::click())
-                                                .truncate()
-                                                .show_tooltip_when_elided(false),
-                                            )
-                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        let label_resp =
-                                            self.attach_row_context_menu(label_resp, row_idx, ctx);
-                                        if (cell_resp.clicked_by(egui::PointerButton::Primary)
-                                            || label_resp.clicked_by(egui::PointerButton::Primary))
-                                            && !(cell_resp.double_clicked()
-                                                || label_resp.double_clicked())
-                                        {
-                                            clicked_to_load = true;
-                                        }
-                                        if cell_resp.double_clicked() || label_resp.double_clicked() {
-                                            clicked_to_select = true;
-                                            if !is_virtual {
-                                                let _ = crate::app::helpers::open_folder_with_file_selected(
-                                                    &path_owned,
-                                                );
-                                            }
-                                        }
-                                        if label_resp.hovered() {
-                                            label_resp.on_hover_text(parent.as_ref());
-                                        }
-                                    },
-                                );
-                            });
-                        }
-                        if cols.transcript {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let cell_resp = self.attach_row_context_menu(
-                                    ui.interact(
-                                        ui.max_rect(),
-                                        ui.id().with(("list_cell_transcript", row_idx)),
-                                        Sense::click(),
-                                    ),
-                                    row_idx,
-                                    ctx,
-                                );
-                                let transcript_text = row_transcript
-                                    .as_ref()
-                                    .map(|t| t.full_text.as_str())
-                                    .unwrap_or("");
-                                let inflight = self.transcript_ai_inflight.contains(&path_owned);
-                                let queued = self
-                                    .transcript_ai_state
-                                    .as_ref()
-                                    .map(|s| s.pending.contains(&path_owned))
-                                    .unwrap_or(false);
-                                let display = if transcript_text.is_empty() {
-                                    if inflight {
-                                        "[Transcribing...]"
-                                    } else if queued {
-                                        "[Queued...]"
-                                    } else {
-                                        ""
+                                    let resp2 = self
+                                        .attach_row_context_menu(resp2, row_idx, ctx)
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text(tooltip);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
                                     }
-                                } else {
-                                    transcript_text
-                                };
-                                let label = if let Some(job) = highlight_re
-                                    .as_ref()
-                                    .and_then(|re| highlight_text_job_with_regex(display, re, ui.style()))
-                                {
-                                    egui::Label::new(job).sense(Sense::click()).truncate()
-                                } else {
-                                    egui::Label::new(
-                                        RichText::new(display).size(text_height * 0.95),
-                                    )
-                                    .sense(Sense::click())
-                                    .truncate()
-                                };
-                                let label_resp = ui
-                                    .add(label.show_tooltip_when_elided(false))
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let label_resp =
-                                    self.attach_row_context_menu(label_resp, row_idx, ctx);
-                                if (cell_resp.clicked_by(egui::PointerButton::Primary)
-                                    || label_resp.clicked_by(egui::PointerButton::Primary))
-                                    && !(cell_resp.double_clicked()
-                                        || label_resp.double_clicked())
-                                {
-                                    clicked_to_load = true;
-                                }
-                                if label_resp.hovered() && !transcript_text.is_empty() {
-                                    label_resp.on_hover_text(transcript_text);
-                                }
-                            });
-                        }
-                        if cols.transcript_language {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let lang = row_transcript_language
-                                    .as_deref()
-                                    .filter(|v: &&str| !v.is_empty())
-                                    .unwrap_or("-");
-                                ui.label(
-                                    RichText::new(lang)
-                                        .monospace()
-                                        .size(text_height * 0.98),
-                                );
-                            });
-                        }
-                        if cols.external {
-                            for name in external_cols.iter() {
+                                });
+                            }
+                            C::Length => {
                                 row.col(|ui| {
                                     if let Some(bg) = row_bg {
                                         ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
                                     }
                                     ui.visuals_mut().override_text_color = row_fg;
-                                    let cell_resp = self.attach_row_context_menu(
-                                        ui.interact(
-                                            ui.max_rect(),
-                                            ui.id().with(("list_cell_external", row_idx, name)),
-                                            Sense::click(),
-                                        ),
-                                        row_idx,
-                                        ctx,
-                                    );
-                                    // Build the label inside a short borrow so
-                                    // no per-frame String is allocated here;
-                                    // egui copies the text into the widget once
-                                    // (unavoidable), and the hover tooltip
-                                    // re-reads the value only while hovered.
-                                    let label_widget = {
-                                        let value = self
-                                            .item_for_id(id)
-                                            .and_then(|it| it.external_value(name))
-                                            .map(|v| v.as_str())
-                                            .unwrap_or("");
-                                        egui::Label::new(
-                                            RichText::new(value).size(text_height * 0.95),
-                                        )
-                                        .sense(Sense::click())
-                                        .truncate()
-                                        .show_tooltip_when_elided(false)
+                                    let secs = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.duration_secs)
+                                        .unwrap_or(f32::NAN);
+                                    let text = if secs.is_finite() {
+                                        format_duration(secs)
+                                    } else {
+                                        "...".into()
                                     };
-                                    let label_resp = ui
-                                        .add(label_widget)
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(RichText::new(text).monospace())
+                                                .sense(Sense::click()),
+                                        )
                                         .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                    let label_resp =
-                                        self.attach_row_context_menu(label_resp, row_idx, ctx);
-                                    if (cell_resp.clicked_by(egui::PointerButton::Primary)
-                                        || label_resp.clicked_by(egui::PointerButton::Primary))
-                                        && !(cell_resp.double_clicked()
-                                            || label_resp.double_clicked())
-                                    {
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
                                         clicked_to_load = true;
                                     }
-                                    if label_resp.hovered() {
-                                        let hover_value = self
-                                            .item_for_id(id)
-                                            .and_then(|it| it.external_value(name))
-                                            .filter(|v| !v.is_empty())
-                                            .cloned();
-                                        if let Some(hover_value) = hover_value {
-                                            label_resp.on_hover_text(hover_value);
+                                });
+                            }
+                            C::Channels => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let ch = self
+                                        .meta_for_path(&path_owned)
+                                        .map(|m| m.channels)
+                                        .filter(|v| *v > 0);
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    ch.map(|v| format!("{v}"))
+                                                        .unwrap_or_else(|| "-".into()),
+                                                )
+                                                .monospace(),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::SampleRate => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let sr = self.effective_sample_rate_for_path(&path_owned);
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    sr.map(|v| format!("{v}"))
+                                                        .unwrap_or_else(|| "-".into()),
+                                                )
+                                                .monospace(),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::Bits => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let bits = self.effective_bits_label_for_path(&path_owned);
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    bits
+                                                        .unwrap_or_else(|| "-".into()),
+                                                )
+                                                .monospace(),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::BitRate => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let br = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.bit_rate_bps)
+                                        .filter(|v| *v > 0);
+                                    let text = br
+                                        .map(|v| format!("{:.0}k", (v as f32) / 1000.0))
+                                        .unwrap_or_else(|| "-".into());
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(RichText::new(text).monospace())
+                                                .sense(Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::Peak => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let (orig, is_estimate) = self
+                                        .meta_for_path(&path_owned)
+                                        .map(|m| (m.peak_db, m.peak_db_estimate))
+                                        .unwrap_or((None, false));
+                                    let adj = orig.map(|db| db + gain_db);
+                                    if let Some(db) = adj {
+                                        ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                    }
+                                    let text = adj
+                                        .map(|db| {
+                                            if is_estimate {
+                                                format!("~{:.1}", db)
+                                            } else {
+                                                format!("{:.1}", db)
+                                            }
+                                        })
+                                        .unwrap_or_else(|| "...".into());
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    ui.painter().text(
+                                        rect2.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        text,
+                                        fid,
+                                        egui::Color32::WHITE,
+                                    );
+                                    let resp2 = if is_estimate && adj.is_some() {
+                                        resp2.on_hover_text("Estimated from the first 0.25 s")
+                                    } else {
+                                        resp2
+                                    };
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::Lufs => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let base = self.meta_for_path(&path_owned).and_then(|m| m.lufs_i);
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
+                                        Some(*v)
+                                    } else {
+                                        base.map(|v| v + gain_db)
+                                    };
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    if let Some(db) = eff {
+                                        ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                    }
+                                    let text = eff
+                                        .map(|v| format!("{:.1}", v))
+                                        .unwrap_or_else(|| "...".into());
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    ui.painter().text(
+                                        rect2.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        text,
+                                        fid,
+                                        egui::Color32::WHITE,
+                                    );
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::Dbtp => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let eff = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.true_peak_db)
+                                        .map(|v| v + gain_db);
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    if let Some(db) = eff {
+                                        ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                    }
+                                    let text = eff
+                                        .map(|v| format!("{:.1}", v))
+                                        .unwrap_or_else(|| "...".into());
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    ui.painter().text(
+                                        rect2.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        text,
+                                        fid,
+                                        egui::Color32::WHITE,
+                                    );
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::LufsS => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let eff = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.lufs_s_max)
+                                        .map(|v| v + gain_db);
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    if let Some(db) = eff {
+                                        ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                    }
+                                    let text = eff
+                                        .map(|v| format!("{:.1}", v))
+                                        .unwrap_or_else(|| "...".into());
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    ui.painter().text(
+                                        rect2.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        text,
+                                        fid,
+                                        egui::Color32::WHITE,
+                                    );
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::LufsM => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                    let eff = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.lufs_m_max)
+                                        .map(|v| v + gain_db);
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    if let Some(db) = eff {
+                                        ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
+                                    }
+                                    let text = eff
+                                        .map(|v| format!("{:.1}", v))
+                                        .unwrap_or_else(|| "...".into());
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    ui.painter().text(
+                                        rect2.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        text,
+                                        fid,
+                                        egui::Color32::WHITE,
+                                    );
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::SilenceLead | C::SilenceTail => {
+                                let lead = sorted_col == C::SilenceLead;
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let ms = self.meta_for_path(&path_owned).and_then(|m| {
+                                        if lead {
+                                            m.silence_lead_ms
+                                        } else {
+                                            m.silence_tail_ms
+                                        }
+                                    });
+                                    let resp = ui.add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                ms.map(|v| format!("{:.0} ms", v))
+                                                    .unwrap_or_else(|| "...".into()),
+                                            )
+                                            .monospace(),
+                                        )
+                                        .sense(Sense::click()),
+                                    );
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::Bpm => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let bpm = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.bpm)
+                                        .filter(|v| v.is_finite() && *v > 0.0);
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    bpm.map(|v| format!("{:.2}", v))
+                                                        .unwrap_or_else(|| "-".into()),
+                                                )
+                                                .monospace(),
+                                            )
+                                            .sense(Sense::click()),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::CreatedAt => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let text = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.created_at)
+                                        .map(format_system_time_local)
+                                        .unwrap_or_else(|| "-".into());
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(RichText::new(text).monospace())
+                                                .sense(Sense::click())
+                                                .truncate(),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::ModifiedAt => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let text = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.modified_at)
+                                        .map(format_system_time_local)
+                                        .unwrap_or_else(|| "-".into());
+                                    let resp = ui
+                                        .add(
+                                            egui::Label::new(RichText::new(text).monospace())
+                                                .sense(Sense::click())
+                                                .truncate(),
+                                        )
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            C::Gain => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let old = self.pending_gain_db_for_path(&path_owned);
+                                    let mut g = old;
+                                    let resp = ui.add(
+                                        egui::DragValue::new(&mut g)
+                                            .range(-24.0..=24.0)
+                                            .speed(0.1)
+                                            .fixed_decimals(1)
+                                            .suffix(" dB"),
+                                    );
+                                    let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.changed() {
+                                        let new = crate::app::WavesPreviewer::clamp_gain_db(g);
+                                        let delta = new - old;
+                                        if self.selected_multi.len() > 1
+                                            && self.selected_multi.contains(&row_idx)
+                                        {
+                                            let indices = self.selected_multi.clone();
+                                            self.adjust_gain_for_indices(&indices, delta);
+                                        } else {
+                                            let path_list = vec![path_owned.clone()];
+                                            let before = self.capture_list_selection_snapshot();
+                                            let before_items =
+                                                self.capture_list_undo_items_by_paths(&path_list);
+                                            // Unified gain framework: with an open
+                                            // editor tab the change is a destructive
+                                            // editor edit (delta), else pending gain.
+                                            let routed_to_editor =
+                                                self.apply_file_gain_delta_unified(&path_owned, delta);
+                                            if !routed_to_editor
+                                                && self.playing_path.as_ref() == Some(&path_owned)
+                                            {
+                                                self.apply_effective_volume();
+                                            }
+                                            self.schedule_lufs_for_path(path_owned.clone());
+                                            self.record_list_update_from_paths(
+                                                &path_list,
+                                                before_items,
+                                                before,
+                                            );
                                         }
                                     }
                                 });
                             }
-                        }
-                        if cols.type_badge {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let (label, tooltip, fill, stroke) = badge.clone();
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                let badge_rect = egui::Rect::from_center_size(
-                                    rect2.center(),
-                                    egui::vec2(
-                                        (rect2.width() - 8.0).clamp(28.0, 50.0),
-                                        (rect2.height() - 6.0).clamp(16.0, 24.0),
-                                    ),
-                                );
-                                Self::paint_list_type_badge(
-                                    ui,
-                                    badge_rect,
-                                    text_height,
-                                    &label,
-                                    fill,
-                                    stroke,
-                                );
-                                let resp2 = self
-                                    .attach_row_context_menu(resp2, row_idx, ctx)
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .on_hover_text(tooltip);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.length {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let secs = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.duration_secs)
-                                    .unwrap_or(f32::NAN);
-                                let text = if secs.is_finite() {
-                                    format_duration(secs)
-                                } else {
-                                    "...".into()
-                                };
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(RichText::new(text).monospace())
-                                            .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.channels {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let ch = self
-                                    .meta_for_path(&path_owned)
-                                    .map(|m| m.channels)
-                                    .filter(|v| *v > 0);
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(
-                                                ch.map(|v| format!("{v}"))
-                                                    .unwrap_or_else(|| "-".into()),
-                                            )
-                                            .monospace(),
-                                        )
-                                        .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.sample_rate {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let sr = self.effective_sample_rate_for_path(&path_owned);
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(
-                                                sr.map(|v| format!("{v}"))
-                                                    .unwrap_or_else(|| "-".into()),
-                                            )
-                                            .monospace(),
-                                        )
-                                        .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.bits {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let bits = self.effective_bits_label_for_path(&path_owned);
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(
-                                                bits
-                                                    .unwrap_or_else(|| "-".into()),
-                                            )
-                                            .monospace(),
-                                        )
-                                        .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.bit_rate {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let br = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.bit_rate_bps)
-                                    .filter(|v| *v > 0);
-                                let text = br
-                                    .map(|v| format!("{:.0}k", (v as f32) / 1000.0))
-                                    .unwrap_or_else(|| "-".into());
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(RichText::new(text).monospace())
-                                            .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.peak {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let (orig, is_estimate) = self
-                                    .meta_for_path(&path_owned)
-                                    .map(|m| (m.peak_db, m.peak_db_estimate))
-                                    .unwrap_or((None, false));
-                                let adj = orig.map(|db| db + gain_db);
-                                if let Some(db) = adj {
-                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                                }
-                                let text = adj
-                                    .map(|db| {
-                                        if is_estimate {
-                                            format!("~{:.1}", db)
-                                        } else {
-                                            format!("{:.1}", db)
+                            C::Wave => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    let error_text = self
+                                        .meta_for_path(&path_owned)
+                                        .and_then(|m| m.decode_error.as_deref());
+                                    let (wave_rect, error_rect) = if error_text.is_some() {
+                                        let err_max = (rect2.height() * 0.45).max(8.0);
+                                        let mut err_h = (row_h * 0.36).max(8.0);
+                                        if err_h > err_max {
+                                            err_h = err_max;
                                         }
-                                    })
-                                    .unwrap_or_else(|| "...".into());
-                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                                ui.painter().text(
-                                    rect2.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    text,
-                                    fid,
-                                    egui::Color32::WHITE,
-                                );
-                                let resp2 = if is_estimate && adj.is_some() {
-                                    resp2.on_hover_text("Estimated from the first 0.25 s")
-                                } else {
-                                    resp2
-                                };
-                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.lufs {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let base = self.meta_for_path(&path_owned).and_then(|m| m.lufs_i);
-                                let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let eff = if let Some(v) = self.lufs_override.get(&path_owned) {
-                                    Some(*v)
-                                } else {
-                                    base.map(|v| v + gain_db)
-                                };
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                if let Some(db) = eff {
-                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                                }
-                                let text = eff
-                                    .map(|v| format!("{:.1}", v))
-                                    .unwrap_or_else(|| "...".into());
-                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                                ui.painter().text(
-                                    rect2.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    text,
-                                    fid,
-                                    egui::Color32::WHITE,
-                                );
-                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                                                if cols.dbtp {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let eff = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.true_peak_db)
-                                    .map(|v| v + gain_db);
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                if let Some(db) = eff {
-                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                                }
-                                let text = eff
-                                    .map(|v| format!("{:.1}", v))
-                                    .unwrap_or_else(|| "...".into());
-                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                                ui.painter().text(
-                                    rect2.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    text,
-                                    fid,
-                                    egui::Color32::WHITE,
-                                );
-                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.lufs_s {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let eff = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.lufs_s_max)
-                                    .map(|v| v + gain_db);
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                if let Some(db) = eff {
-                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                                }
-                                let text = eff
-                                    .map(|v| format!("{:.1}", v))
-                                    .unwrap_or_else(|| "...".into());
-                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                                ui.painter().text(
-                                    rect2.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    text,
-                                    fid,
-                                    egui::Color32::WHITE,
-                                );
-                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.lufs_m {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                let eff = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.lufs_m_max)
-                                    .map(|v| v + gain_db);
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                if let Some(db) = eff {
-                                    ui.painter().rect_filled(rect2, 4.0, db_to_color(db));
-                                }
-                                let text = eff
-                                    .map(|v| format!("{:.1}", v))
-                                    .unwrap_or_else(|| "...".into());
-                                let fid = egui::TextStyle::Monospace.resolve(ui.style());
-                                ui.painter().text(
-                                    rect2.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    text,
-                                    fid,
-                                    egui::Color32::WHITE,
-                                );
-                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.bpm {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let bpm = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.bpm)
-                                    .filter(|v| v.is_finite() && *v > 0.0);
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(
-                                            RichText::new(
-                                                bpm.map(|v| format!("{:.2}", v))
-                                                    .unwrap_or_else(|| "-".into()),
-                                            )
-                                            .monospace(),
-                                        )
-                                        .sense(Sense::click()),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.created_at {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let text = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.created_at)
-                                    .map(format_system_time_local)
-                                    .unwrap_or_else(|| "-".into());
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(RichText::new(text).monospace())
-                                            .sense(Sense::click())
-                                            .truncate(),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.modified_at {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let text = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.modified_at)
-                                    .map(format_system_time_local)
-                                    .unwrap_or_else(|| "-".into());
-                                let resp = ui
-                                    .add(
-                                        egui::Label::new(RichText::new(text).monospace())
-                                            .sense(Sense::click())
-                                            .truncate(),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
-                        }
-                        if cols.gain {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let old = self.pending_gain_db_for_path(&path_owned);
-                                let mut g = old;
-                                let resp = ui.add(
-                                    egui::DragValue::new(&mut g)
-                                        .range(-24.0..=24.0)
-                                        .speed(0.1)
-                                        .fixed_decimals(1)
-                                        .suffix(" dB"),
-                                );
-                                let resp = self.attach_row_context_menu(resp, row_idx, ctx);
-                                if resp.changed() {
-                                    let new = crate::app::WavesPreviewer::clamp_gain_db(g);
-                                    let delta = new - old;
-                                    if self.selected_multi.len() > 1
-                                        && self.selected_multi.contains(&row_idx)
-                                    {
-                                        let indices = self.selected_multi.clone();
-                                        self.adjust_gain_for_indices(&indices, delta);
+                                        let wave_h = (rect2.height() - err_h).max(1.0);
+                                        let wave_rect = egui::Rect::from_min_size(
+                                            rect2.min,
+                                            egui::vec2(rect2.width(), wave_h),
+                                        );
+                                        let error_rect = egui::Rect::from_min_size(
+                                            egui::pos2(rect2.min.x, rect2.max.y - err_h),
+                                            egui::vec2(rect2.width(), err_h),
+                                        );
+                                        (wave_rect, Some(error_rect))
                                     } else {
-                                        let path_list = vec![path_owned.clone()];
-                                        let before = self.capture_list_selection_snapshot();
-                                        let before_items =
-                                            self.capture_list_undo_items_by_paths(&path_list);
-                                        // Unified gain framework: with an open
-                                        // editor tab the change is a destructive
-                                        // editor edit (delta), else pending gain.
-                                        let routed_to_editor =
-                                            self.apply_file_gain_delta_unified(&path_owned, delta);
-                                        if !routed_to_editor
-                                            && self.playing_path.as_ref() == Some(&path_owned)
-                                        {
-                                            self.apply_effective_volume();
+                                        (rect2, None)
+                                    };
+                                    if let Some(m) = self.meta_for_path(&path_owned) {
+                                        let w = wave_rect.width();
+                                        let h = wave_rect.height();
+                                        let n = m.thumb.len().max(1) as f32;
+                                        let gain_db = self.pending_gain_db_for_path(&path_owned);
+                                        let scale = db_to_amp(gain_db);
+                                        for (idx, &(mn0, mx0)) in m.thumb.iter().enumerate() {
+                                            let mn = (mn0 * scale).clamp(-1.0, 1.0);
+                                            let mx = (mx0 * scale).clamp(-1.0, 1.0);
+                                            let x = wave_rect.left() + (idx as f32 / n) * w;
+                                            let y0 = wave_rect.center().y - mx * (h * 0.45);
+                                            let y1 = wave_rect.center().y - mn * (h * 0.45);
+                                            let a = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
+                                            let col = amp_to_color(a);
+                                            ui.painter().line_segment(
+                                                [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
+                                                egui::Stroke::new(1.0, col),
+                                            );
                                         }
-                                        self.schedule_lufs_for_path(path_owned.clone());
-                                        self.record_list_update_from_paths(
-                                            &path_list,
-                                            before_items,
-                                            before,
+                                    }
+                                    if let Some(overlay) =
+                                        self.resolve_list_wave_overlay_info(&path_owned)
+                                    {
+                                        self.paint_list_wave_overlay(ui, wave_rect, &overlay);
+                                    }
+                                    if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
+                                        let text_pos =
+                                            egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
+                                        let mut font_size = text_height * 0.85;
+                                        if font_size < 10.0 {
+                                            font_size = 10.0;
+                                        }
+                                        if font_size > err_rect.height() {
+                                            font_size = err_rect.height();
+                                        }
+                                        let font = egui::FontId::proportional(font_size);
+                                        ui.painter().text(
+                                            text_pos,
+                                            egui::Align2::LEFT_CENTER,
+                                            text,
+                                            font,
+                                            self.palette().error_text,
                                         );
                                     }
-                                }
-                            });
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
                         }
-                        if cols.wave {
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let (rect2, resp2) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_h * 0.9),
-                                    Sense::click(),
-                                );
-                                let error_text = self
-                                    .meta_for_path(&path_owned)
-                                    .and_then(|m| m.decode_error.as_deref());
-                                let (wave_rect, error_rect) = if error_text.is_some() {
-                                    let err_max = (rect2.height() * 0.45).max(8.0);
-                                    let mut err_h = (row_h * 0.36).max(8.0);
-                                    if err_h > err_max {
-                                        err_h = err_max;
-                                    }
-                                    let wave_h = (rect2.height() - err_h).max(1.0);
-                                    let wave_rect = egui::Rect::from_min_size(
-                                        rect2.min,
-                                        egui::vec2(rect2.width(), wave_h),
-                                    );
-                                    let error_rect = egui::Rect::from_min_size(
-                                        egui::pos2(rect2.min.x, rect2.max.y - err_h),
-                                        egui::vec2(rect2.width(), err_h),
-                                    );
-                                    (wave_rect, Some(error_rect))
-                                } else {
-                                    (rect2, None)
-                                };
-                                if let Some(m) = self.meta_for_path(&path_owned) {
-                                    let w = wave_rect.width();
-                                    let h = wave_rect.height();
-                                    let n = m.thumb.len().max(1) as f32;
-                                    let gain_db = self.pending_gain_db_for_path(&path_owned);
-                                    let scale = db_to_amp(gain_db);
-                                    for (idx, &(mn0, mx0)) in m.thumb.iter().enumerate() {
-                                        let mn = (mn0 * scale).clamp(-1.0, 1.0);
-                                        let mx = (mx0 * scale).clamp(-1.0, 1.0);
-                                        let x = wave_rect.left() + (idx as f32 / n) * w;
-                                        let y0 = wave_rect.center().y - mx * (h * 0.45);
-                                        let y1 = wave_rect.center().y - mn * (h * 0.45);
-                                        let a = (mn.abs().max(mx.abs())).clamp(0.0, 1.0);
-                                        let col = amp_to_color(a);
-                                        ui.painter().line_segment(
-                                            [egui::pos2(x, y0.min(y1)), egui::pos2(x, y0.max(y1))],
-                                            egui::Stroke::new(1.0, col),
-                                        );
-                                    }
-                                }
-                                if let Some(overlay) =
-                                    self.resolve_list_wave_overlay_info(&path_owned)
-                                {
-                                    self.paint_list_wave_overlay(ui, wave_rect, &overlay);
-                                }
-                                if let (Some(text), Some(err_rect)) = (error_text, error_rect) {
-                                    let text_pos =
-                                        egui::pos2(err_rect.left() + 4.0, err_rect.center().y);
-                                    let mut font_size = text_height * 0.85;
-                                    if font_size < 10.0 {
-                                        font_size = 10.0;
-                                    }
-                                    if font_size > err_rect.height() {
-                                        font_size = err_rect.height();
-                                    }
-                                    let font = egui::FontId::proportional(font_size);
-                                    ui.painter().text(
-                                        text_pos,
-                                        egui::Align2::LEFT_CENTER,
-                                        text,
-                                        font,
-                                        egui::Color32::from_rgb(220, 90, 90),
-                                    );
-                                }
-                                let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
-                                if resp2.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
                         }
+
                         row.col(|ui| {
                             if let Some(bg) = row_bg {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1317,9 +1429,11 @@ impl crate::app::WavesPreviewer {
                         } else if clicked_any {
                             let mods = ctx.input(|i| i.modifiers);
                             self.update_selection_on_click(row_idx, mods);
-                            self.select_and_load(row_idx, false);
-                            if self.auto_play_list_nav {
-                                self.request_list_autoplay();
+                            if self.list_click_audition {
+                                self.select_and_load(row_idx, false);
+                                if self.auto_play_list_nav {
+                                    self.request_list_autoplay();
+                                }
                             }
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;
@@ -1340,6 +1454,7 @@ impl crate::app::WavesPreviewer {
             });
 
         self.ui_list_scrollbar(ui, &metrics);
+        self.commit_list_col_widths(ctx);
 
         interaction.list_has_focus = list_has_focus;
         self.finish_list_view(
@@ -1352,5 +1467,42 @@ impl crate::app::WavesPreviewer {
             },
             interaction,
         );
+    }
+
+    /// In-cell rename editor shown in the file column while
+    /// `inline_rename_path` targets this row. Enter commits, Escape or
+    /// clicking elsewhere cancels; a failed commit keeps editing.
+    fn ui_inline_rename_cell(&mut self, ui: &mut egui::Ui, path: &std::path::PathBuf) {
+        let edit_id = egui::Id::new("list_inline_rename_edit");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.inline_rename_buffer)
+                .id(edit_id)
+                .font(egui::TextStyle::Monospace)
+                .desired_width(ui.available_width().max(60.0)),
+        );
+        if self.inline_rename_focus_next {
+            self.inline_rename_focus_next = false;
+            resp.request_focus();
+        }
+        if resp.lost_focus() {
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let new_name = self.inline_rename_buffer.clone();
+                match self.rename_file_path(path, &new_name) {
+                    Ok(_) => {
+                        self.inline_rename_path = None;
+                    }
+                    Err(err) => {
+                        self.push_toast(
+                            crate::app::types::ToastSeverity::Error,
+                            format!("Rename failed: {err}"),
+                        );
+                        // Keep the editor open so the name can be fixed.
+                        self.inline_rename_focus_next = true;
+                    }
+                }
+            } else {
+                self.inline_rename_path = None;
+            }
+        }
     }
 }

@@ -209,7 +209,9 @@ fn recording_trim_save_then_volume_save_again() {
     harness.state_mut().test_switch_to_list();
     assert!(harness.state_mut().test_select_path(&virtual_path));
     harness.state_mut().test_set_export_first_prompt(false);
-    harness.state_mut().test_set_export_save_mode_overwrite(false);
+    harness
+        .state_mut()
+        .test_set_export_save_mode_overwrite(false);
     harness.state_mut().test_set_export_conflict("rename");
     harness
         .state_mut()
@@ -286,7 +288,9 @@ fn recording_trim_save_overwrite_then_volume_overwrite() {
     harness.state_mut().test_switch_to_list();
     assert!(harness.state_mut().test_select_path(&virtual_path));
     harness.state_mut().test_set_export_first_prompt(false);
-    harness.state_mut().test_set_export_save_mode_overwrite(true);
+    harness
+        .state_mut()
+        .test_set_export_save_mode_overwrite(true);
     harness.state_mut().test_set_export_conflict("overwrite");
     harness
         .state_mut()
@@ -377,7 +381,9 @@ fn virtual_trim_from_16bit_source_exports_16bit() {
         .expect("virtual item selected");
     assert!(harness.state_mut().test_select_path(&virtual_path));
     harness.state_mut().test_set_export_first_prompt(false);
-    harness.state_mut().test_set_export_save_mode_overwrite(false);
+    harness
+        .state_mut()
+        .test_set_export_save_mode_overwrite(false);
     harness.state_mut().test_set_export_conflict("rename");
     harness
         .state_mut()
@@ -429,7 +435,9 @@ fn recording_save_leaves_clean_editor_tab() {
     harness.state_mut().test_switch_to_list();
     assert!(harness.state_mut().test_select_path(&virtual_path));
     harness.state_mut().test_set_export_first_prompt(false);
-    harness.state_mut().test_set_export_save_mode_overwrite(false);
+    harness
+        .state_mut()
+        .test_set_export_save_mode_overwrite(false);
     harness.state_mut().test_set_export_conflict("rename");
     harness
         .state_mut()
@@ -479,7 +487,9 @@ fn recording_save_without_dest_goes_to_open_folder_not_temp() {
     harness.state_mut().test_switch_to_list();
     assert!(harness.state_mut().test_select_path(&virtual_path));
     harness.state_mut().test_set_export_first_prompt(false);
-    harness.state_mut().test_set_export_save_mode_overwrite(false);
+    harness
+        .state_mut()
+        .test_set_export_save_mode_overwrite(false);
     harness.state_mut().test_set_export_conflict("rename");
     harness.state_mut().test_set_export_dest_folder(None); // no explicit dest
     harness.state_mut().test_set_export_name_template("my_take");
@@ -531,7 +541,9 @@ fn recording_save_persists_markers_and_loop() {
     harness.state_mut().test_switch_to_list();
     assert!(harness.state_mut().test_select_path(&virtual_path));
     harness.state_mut().test_set_export_first_prompt(false);
-    harness.state_mut().test_set_export_save_mode_overwrite(false);
+    harness
+        .state_mut()
+        .test_set_export_save_mode_overwrite(false);
     harness.state_mut().test_set_export_conflict("rename");
     harness
         .state_mut()

@@ -12,15 +12,15 @@ use super::types::{
     AppliedEffectGraphStamp, CachedEdit, EffectGraphApplyPostprocessJob,
     EffectGraphApplyPostprocessResult, EffectGraphAudioBus, EffectGraphBitDepth,
     EffectGraphChannelFlowHint, EffectGraphChannelLayout, EffectGraphChannelLayoutEntry,
-    EffectGraphCombineMode, EffectGraphResampleQuality,
-    EffectGraphDebugPreview, EffectGraphDebugViewState, EffectGraphDocument, EffectGraphEdge,
-    EffectGraphInputPreviewResult, EffectGraphLibraryEntry, EffectGraphNode, EffectGraphNodeData,
-    EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphNodeRunStatus,
-    EffectGraphPendingAction, EffectGraphPlaybackTarget, EffectGraphPluginNodeRuntimeState,
-    EffectGraphPortKey, EffectGraphPredictedFormat, EffectGraphPredictionCacheEntry,
-    EffectGraphRunMode, EffectGraphSeverity, EffectGraphSpectrumMode, EffectGraphTemplateFile,
-    EffectGraphUndoState, EffectGraphValidationIssue, EffectGraphWorkerEvent, MediaSource,
-    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, UndoScope, WorkspaceView,
+    EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphDebugViewState,
+    EffectGraphDocument, EffectGraphEdge, EffectGraphInputPreviewResult, EffectGraphLibraryEntry,
+    EffectGraphNode, EffectGraphNodeData, EffectGraphNodeKind, EffectGraphNodeRunPhase,
+    EffectGraphNodeRunStatus, EffectGraphPendingAction, EffectGraphPlaybackTarget,
+    EffectGraphPluginNodeRuntimeState, EffectGraphPortKey, EffectGraphPredictedFormat,
+    EffectGraphPredictionCacheEntry, EffectGraphResampleQuality, EffectGraphRunMode,
+    EffectGraphSeverity, EffectGraphSpectrumMode, EffectGraphTemplateFile, EffectGraphUndoState,
+    EffectGraphValidationIssue, EffectGraphWorkerEvent, MediaSource, SpectrogramConfig,
+    SpectrogramScale, ToolKind, ToolState, UndoScope, WorkspaceView,
 };
 use super::WavesPreviewer;
 use crate::audio::AudioBuffer;
@@ -118,34 +118,7 @@ fn embedded_effect_graph_sample_channels() -> Result<(Vec<Vec<f32>>, u32), Strin
 }
 
 fn default_tool_state() -> ToolState {
-    ToolState {
-        fade_in_ms: 0.0,
-        fade_out_ms: 0.0,
-        gain_db: 0.0,
-        normalize_target_db: -6.0,
-        loudness_target_lufs: -14.0,
-        pitch_semitones: 0.0,
-        stretch_rate: 1.0,
-        speed_rate: 1.0,
-        warp_time_radius_ms: 150.0,
-        warp_freq_radius_hz: 300.0,
-        loop_repeat: 2,
-        noise_gate_threshold_db: -40.0,
-        noise_gate_attack_ms: 2.0,
-        noise_gate_release_ms: 100.0,
-        eq_low_shelf_freq_hz: 120.0,
-        eq_low_shelf_gain_db: 0.0,
-        eq_mid_freq_hz: 1000.0,
-        eq_mid_gain_db: 0.0,
-        eq_mid_q: 1.0,
-        eq_high_shelf_freq_hz: 8000.0,
-        eq_high_shelf_gain_db: 0.0,
-        compressor_threshold_db: -18.0,
-        compressor_ratio: 3.0,
-        compressor_attack_ms: 10.0,
-        compressor_release_ms: 150.0,
-        compressor_makeup_db: 0.0,
-    }
+    ToolState::default_values()
 }
 
 fn effect_graph_build_rough_waveform(channels: &[Vec<f32>]) -> Vec<(f32, f32)> {
@@ -1047,7 +1020,11 @@ fn node_parameter_summary(data: &EffectGraphNodeData) -> String {
             ratio,
             ..
         } => format!("{ratio:.1}:1 @ {threshold_db:.1} dB"),
-        EffectGraphNodeData::Trim { pre_roll_ms, post_roll_ms, .. } => {
+        EffectGraphNodeData::Trim {
+            pre_roll_ms,
+            post_roll_ms,
+            ..
+        } => {
             format!("Silence trim / {pre_roll_ms:.0}ms pre / {post_roll_ms:.0}ms post")
         }
         EffectGraphNodeData::BitDepth { depth } => match depth {
@@ -1636,6 +1613,28 @@ fn remap_range(
     }
 }
 
+fn remap_regions(
+    regions: &[crate::markers::RegionEntry],
+    old_len: usize,
+    new_len: usize,
+) -> Vec<crate::markers::RegionEntry> {
+    if old_len == 0 || new_len == 0 {
+        return Vec::new();
+    }
+    let ratio = new_len as f64 / old_len as f64;
+    let mut out: Vec<crate::markers::RegionEntry> = regions
+        .iter()
+        .map(|r| crate::markers::RegionEntry {
+            start: ((r.start as f64) * ratio).round().max(0.0) as usize,
+            end: (((r.end as f64) * ratio).round().max(0.0) as usize).min(new_len),
+            label: r.label.clone(),
+        })
+        .filter(|r| r.end > r.start)
+        .collect();
+    out.sort_by_key(|r| (r.start, r.end));
+    out
+}
+
 fn remap_markers(markers: &[MarkerEntry], old_len: usize, new_len: usize) -> Vec<MarkerEntry> {
     markers
         .iter()
@@ -1981,8 +1980,9 @@ fn validate_effect_graph_document(
                 issues.push(EffectGraphValidationIssue {
                     severity: EffectGraphSeverity::Warning,
                     code: "noise_gate_threshold_out_of_range".to_string(),
-                    message: "Noise Gate threshold is outside -80..0 dB and will be clamped on save"
-                        .to_string(),
+                    message:
+                        "Noise Gate threshold is outside -80..0 dB and will be clamped on save"
+                            .to_string(),
                     node_id: Some(node.id.clone()),
                 });
             }
@@ -2393,10 +2393,7 @@ fn validate_effect_graph_document(
                     issues.push(EffectGraphValidationIssue {
                         severity: EffectGraphSeverity::Error,
                         code: "split_incoming".to_string(),
-                        message: format!(
-                            "{} requires exactly one input",
-                            node.data.display_name()
-                        ),
+                        message: format!("{} requires exactly one input", node.data.display_name()),
                         node_id: Some(node.id.clone()),
                     });
                 }
@@ -3008,12 +3005,8 @@ where
                 );
             }
             EffectGraphNodeData::MsJoin => {
-                let mid_bus = effect_graph_input_bus_for_port(
-                    &node.id,
-                    "mid",
-                    &input_sources,
-                    &output_buses,
-                );
+                let mid_bus =
+                    effect_graph_input_bus_for_port(&node.id, "mid", &input_sources, &output_buses);
                 let side_bus = effect_graph_input_bus_for_port(
                     &node.id,
                     "side",
@@ -3261,7 +3254,9 @@ where
                 let channels = bus
                     .channels
                     .iter()
-                    .map(|channel| crate::wave::process_noise_gate_offline(channel, bus.sample_rate, &params))
+                    .map(|channel| {
+                        crate::wave::process_noise_gate_offline(channel, bus.sample_rate, &params)
+                    })
                     .collect::<Vec<_>>();
                 output_buses.insert(
                     make_port_key(&node.id, "out"),
@@ -3301,7 +3296,13 @@ where
                 let channels = bus
                     .channels
                     .iter()
-                    .map(|channel| crate::wave::process_three_band_eq_offline(channel, bus.sample_rate, &params))
+                    .map(|channel| {
+                        crate::wave::process_three_band_eq_offline(
+                            channel,
+                            bus.sample_rate,
+                            &params,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 output_buses.insert(
                     make_port_key(&node.id, "out"),
@@ -3337,7 +3338,9 @@ where
                 let channels = bus
                     .channels
                     .iter()
-                    .map(|channel| crate::wave::process_compressor_offline(channel, bus.sample_rate, &params))
+                    .map(|channel| {
+                        crate::wave::process_compressor_offline(channel, bus.sample_rate, &params)
+                    })
                     .collect::<Vec<_>>();
                 output_buses.insert(
                     make_port_key(&node.id, "out"),
@@ -3409,7 +3412,10 @@ where
                                 format!("{} input is missing", node.id),
                             )
                         })?;
-                crate::wave::quantize_channels_in_place(&mut bus.channels, depth.to_wave_bit_depth());
+                crate::wave::quantize_channels_in_place(
+                    &mut bus.channels,
+                    depth.to_wave_bit_depth(),
+                );
                 output_buses.insert(make_port_key(&node.id, "out"), bus);
             }
             EffectGraphNodeData::Resampler {
@@ -5091,6 +5097,7 @@ impl WavesPreviewer {
                 loop_markers_saved: tab.loop_markers_saved,
                 loop_markers_dirty: tab.loop_markers_dirty,
                 markers: tab.markers.clone(),
+                regions: tab.regions.clone(),
                 markers_saved: tab.markers_saved.clone(),
                 markers_committed: tab.markers_committed.clone(),
                 markers_applied: tab.markers_applied.clone(),
@@ -5137,6 +5144,7 @@ impl WavesPreviewer {
                 loop_markers_saved: remap_range(existing.loop_markers_saved, old_len, new_len),
                 loop_markers_dirty: existing.loop_markers_dirty,
                 markers: remap_markers(&existing.markers, old_len, new_len),
+                regions: remap_regions(&existing.regions, old_len, new_len),
                 markers_saved: remap_markers(&existing.markers_saved, old_len, new_len),
                 markers_committed: remap_markers(&existing.markers_committed, old_len, new_len),
                 markers_applied: remap_markers(&existing.markers_applied, old_len, new_len),
@@ -5178,6 +5186,7 @@ impl WavesPreviewer {
                 loop_markers_saved: None,
                 loop_markers_dirty: false,
                 markers: Vec::new(),
+                regions: Vec::new(),
                 markers_saved: Vec::new(),
                 markers_committed: Vec::new(),
                 markers_applied: Vec::new(),
@@ -6860,7 +6869,9 @@ mod tests {
     #[test]
     fn effect_graph_runtime_resampler_changes_sample_rate_and_length() {
         let sr = 48_000u32;
-        let channel: Vec<f32> = (0..sr as usize).map(|i| (i as f32 / sr as f32).sin()).collect();
+        let channel: Vec<f32> = (0..sr as usize)
+            .map(|i| (i as f32 / sr as f32).sin())
+            .collect();
         let doc = doc_with_nodes(
             vec![
                 EffectGraphNode {
@@ -6899,7 +6910,10 @@ mod tests {
         )
         .expect("runtime ok");
         assert_eq!(out.sample_rate, 24_000);
-        assert!((out.channels[0].len() as f32 - (channel.len() as f32 / 2.0)).abs() < channel.len() as f32 * 0.02);
+        assert!(
+            (out.channels[0].len() as f32 - (channel.len() as f32 / 2.0)).abs()
+                < channel.len() as f32 * 0.02
+        );
     }
 
     #[test]

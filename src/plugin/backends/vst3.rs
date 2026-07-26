@@ -17,24 +17,24 @@ mod native {
 
     use crate::plugin::backends::plugin_display_name;
     use crate::plugin::PluginFormat;
+    use base64::Engine;
     use libloading::Library;
+    use vst3::Steinberg::IPlugView;
+    #[cfg(windows)]
+    use vst3::Steinberg::IPlugViewTrait;
     use vst3::Steinberg::Vst::{
         AudioBusBuffers, AudioBusBuffers__type0, IAudioProcessor, IAudioProcessorTrait, IComponent,
         IComponentHandler, IComponentHandlerTrait, IComponentTrait, IConnectionPoint,
         IConnectionPointTrait, IEditController, IEditControllerTrait, IHostApplication,
-        IHostApplicationTrait, IParameterChanges, IParameterChangesTrait, IParamValueQueue,
-        IParamValueQueueTrait, ParameterInfo, ParamID, ParamValue, ProcessContext, ProcessData,
+        IHostApplicationTrait, IParamValueQueue, IParamValueQueueTrait, IParameterChanges,
+        IParameterChangesTrait, ParamID, ParamValue, ParameterInfo, ProcessContext, ProcessData,
         ProcessSetup, TChar,
     };
     use vst3::Steinberg::{IBStream, IBStreamTrait};
-    use vst3::Steinberg::IPlugView;
-    #[cfg(windows)]
-    use vst3::Steinberg::IPlugViewTrait;
     #[cfg(windows)]
     use vst3::Steinberg::{IPlugFrame, IPlugFrameTrait};
     use vst3::Steinberg::{IPluginBaseTrait, IPluginFactory2Trait, IPluginFactoryTrait};
     use vst3::{Class, ComPtr, ComWrapper, Interface, Steinberg};
-    use base64::Engine;
     #[cfg(windows)]
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     #[cfg(windows)]
@@ -274,7 +274,10 @@ mod native {
             self.ptrs.len() as Steinberg::int32
         }
         unsafe fn getParameterData(&self, index: Steinberg::int32) -> *mut IParamValueQueue {
-            self.ptrs.get(index as usize).copied().unwrap_or(ptr::null_mut())
+            self.ptrs
+                .get(index as usize)
+                .copied()
+                .unwrap_or(ptr::null_mut())
         }
         unsafe fn addParameterData(
             &self,
@@ -304,9 +307,16 @@ mod native {
             }
             let ptrs: Vec<*mut IParamValueQueue> = wrappers
                 .iter()
-                .map(|w| w.to_com_ptr::<IParamValueQueue>().map(|p| p.as_ptr()).unwrap_or(ptr::null_mut()))
+                .map(|w| {
+                    w.to_com_ptr::<IParamValueQueue>()
+                        .map(|p| p.as_ptr())
+                        .unwrap_or(ptr::null_mut())
+                })
                 .collect();
-            let changes_wrapper = ComWrapper::new(HostParameterChanges { _wrappers: wrappers, ptrs });
+            let changes_wrapper = ComWrapper::new(HostParameterChanges {
+                _wrappers: wrappers,
+                ptrs,
+            });
             let changes_ptr = changes_wrapper.to_com_ptr::<IParameterChanges>()?;
             Some((changes_wrapper, changes_ptr))
         }
@@ -320,7 +330,10 @@ mod native {
     unsafe impl Sync for MemoryStream {}
     impl MemoryStream {
         fn new(buf: Arc<Mutex<Vec<u8>>>) -> Self {
-            Self { buf, pos: std::cell::UnsafeCell::new(0) }
+            Self {
+                buf,
+                pos: std::cell::UnsafeCell::new(0),
+            }
         }
     }
     impl Class for MemoryStream {
@@ -336,7 +349,7 @@ mod native {
             if buffer.is_null() || num_bytes < 0 {
                 return Steinberg::kInvalidArgument;
             }
-            let guard = self.buf.lock().unwrap();
+            let guard = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             let pos = &mut *self.pos.get();
             let available = guard.len().saturating_sub(*pos);
             let to_read = (num_bytes as usize).min(available);
@@ -358,14 +371,18 @@ mod native {
             if buffer.is_null() || num_bytes < 0 {
                 return Steinberg::kInvalidArgument;
             }
-            let mut guard = self.buf.lock().unwrap();
+            let mut guard = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             let pos = &mut *self.pos.get();
             let to_write = num_bytes as usize;
             let end = *pos + to_write;
             if end > guard.len() {
                 guard.resize(end, 0);
             }
-            std::ptr::copy_nonoverlapping(buffer as *const u8, guard[*pos..].as_mut_ptr(), to_write);
+            std::ptr::copy_nonoverlapping(
+                buffer as *const u8,
+                guard[*pos..].as_mut_ptr(),
+                to_write,
+            );
             *pos = end;
             if !num_bytes_written.is_null() {
                 *num_bytes_written = to_write as Steinberg::int32;
@@ -378,12 +395,12 @@ mod native {
             mode: Steinberg::int32,
             result: *mut Steinberg::int64,
         ) -> Steinberg::tresult {
-            let guard = self.buf.lock().unwrap();
+            let guard = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             let cur = &mut *self.pos.get();
             let new_pos: i64 = match mode {
-                0 => pos,                          // kIBSeekSet
-                1 => (*cur as i64) + pos,          // kIBSeekCur
-                2 => (guard.len() as i64) + pos,   // kIBSeekEnd
+                0 => pos,                        // kIBSeekSet
+                1 => (*cur as i64) + pos,        // kIBSeekCur
+                2 => (guard.len() as i64) + pos, // kIBSeekEnd
                 _ => return Steinberg::kInvalidArgument,
             };
             if new_pos < 0 {
@@ -446,7 +463,7 @@ mod native {
         if let Some(stream_ptr) = stream_wrapper.to_com_ptr::<IBStream>() {
             let save_r = component.getState(stream_ptr.as_ptr());
             if save_r == Steinberg::kResultOk || save_r == Steinberg::kResultTrue {
-                let data = save_buf.lock().unwrap().clone();
+                let data = save_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 if !data.is_empty() {
                     out = Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode(&data));
                 }
@@ -1137,11 +1154,15 @@ mod native {
 
             let active_r = component.setActive(1);
             if active_r != Steinberg::kResultOk && active_r != Steinberg::kResultTrue {
-                eprintln!("[vst3] component.setActive(1) returned {active_r} (non-fatal, continuing)");
+                eprintln!(
+                    "[vst3] component.setActive(1) returned {active_r} (non-fatal, continuing)"
+                );
             }
             let proc_r = processor.setProcessing(1);
             if proc_r != Steinberg::kResultOk && proc_r != Steinberg::kResultTrue {
-                eprintln!("[vst3] processor.setProcessing(1) returned {proc_r} (non-fatal, continuing)");
+                eprintln!(
+                    "[vst3] processor.setProcessing(1) returned {proc_r} (non-fatal, continuing)"
+                );
             }
 
             let _param_changes_holder = HostParameterChanges::from_params(params);
@@ -1195,9 +1216,16 @@ mod native {
                     tempo: 120.0,
                     timeSigNumerator: 4,
                     timeSigDenominator: 4,
-                    chord: Steinberg::Vst::Chord { keyNote: 0, rootNote: 0, chordMask: 0 },
+                    chord: Steinberg::Vst::Chord {
+                        keyNote: 0,
+                        rootNote: 0,
+                        chordMask: 0,
+                    },
                     smpteOffsetSubframes: 0,
-                    frameRate: Steinberg::Vst::FrameRate { framesPerSecond: 30, flags: 0 },
+                    frameRate: Steinberg::Vst::FrameRate {
+                        framesPerSecond: 30,
+                        flags: 0,
+                    },
                     samplesToNextClock: 0,
                 };
                 let mut data = ProcessData {
@@ -1208,7 +1236,11 @@ mod native {
                     numOutputs: 1,
                     inputs: &mut in_bus,
                     outputs: &mut out_bus,
-                    inputParameterChanges: if cursor == 0 { param_changes_raw } else { ptr::null_mut() },
+                    inputParameterChanges: if cursor == 0 {
+                        param_changes_raw
+                    } else {
+                        ptr::null_mut()
+                    },
                     outputParameterChanges: ptr::null_mut(),
                     inputEvents: ptr::null_mut(),
                     outputEvents: ptr::null_mut(),
