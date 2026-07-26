@@ -413,10 +413,8 @@ mod region_tests {
     use super::*;
 
     fn temp_wav_path(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "neowaves_region_{tag}_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("neowaves_region_{tag}_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir.join("audio.wav")
     }
@@ -425,8 +423,16 @@ mod region_tests {
     fn region_sidecar_roundtrip_with_sr_mapping() {
         let path = temp_wav_path("roundtrip");
         let regions = vec![
-            RegionEntry { start: 100, end: 200, label: "intro".into() },
-            RegionEntry { start: 4_800, end: 9_600, label: "loop".into() },
+            RegionEntry {
+                start: 100,
+                end: 200,
+                label: "intro".into(),
+            },
+            RegionEntry {
+                start: 4_800,
+                end: 9_600,
+                label: "loop".into(),
+            },
         ];
         // Written from 48k buffer space into a 24k file space...
         write_regions(&path, 48_000, 24_000, &regions).expect("write regions");

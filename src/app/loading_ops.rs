@@ -90,16 +90,15 @@ impl super::WavesPreviewer {
             } = res;
             // The worker prebuilds the editor waveform cache; only rebuild
             // here (UI thread) if a legacy result arrived without one.
-            let rebuilt_cache = if matches!(target, ProcessingTarget::EditorTab(_))
-                && !channels.is_empty()
-            {
-                editor_waveform.or_else(|| {
-                    let samples_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
-                    Some(Self::build_editor_waveform_cache(&channels, samples_len))
-                })
-            } else {
-                None
-            };
+            let rebuilt_cache =
+                if matches!(target, ProcessingTarget::EditorTab(_)) && !channels.is_empty() {
+                    editor_waveform.or_else(|| {
+                        let samples_len = channels.get(0).map(|channel| channel.len()).unwrap_or(0);
+                        Some(Self::build_editor_waveform_cache(&channels, samples_len))
+                    })
+                } else {
+                    None
+                };
             if matches!(target, ProcessingTarget::EditorTab(_)) {
                 if let Some(idx) = self.tabs.iter().position(|t| t.path == path) {
                     if let Some(tab) = self.tabs.get_mut(idx) {

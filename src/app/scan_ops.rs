@@ -34,7 +34,14 @@ impl WavesPreviewer {
         if items.len() > 50_000 {
             std::thread::spawn(move || {
                 crate::app::threading::lower_current_thread_priority();
-                drop((items, path_index, item_index, files, original_files, folder_intern));
+                drop((
+                    items,
+                    path_index,
+                    item_index,
+                    files,
+                    original_files,
+                    folder_intern,
+                ));
             });
         }
     }
@@ -135,9 +142,8 @@ impl WavesPreviewer {
         target_kind: Option<PendingListLoadTargetKind>,
         auto_scroll: bool,
     ) {
-        let pending_target = target_kind.and_then(|kind| {
-            self.resolve_pending_list_load_target(&paths, kind, auto_scroll)
-        });
+        let pending_target = target_kind
+            .and_then(|kind| self.resolve_pending_list_load_target(&paths, kind, auto_scroll));
         self.start_list_load(
             ScanRequestKind::Explicit { paths },
             ListLoadKind::Files,
@@ -208,7 +214,11 @@ impl WavesPreviewer {
         }
         let trace = std::env::var_os("NEOWAVES_BENCH_TRACE").is_some();
         let t0 = std::time::Instant::now();
-        let before = (self.items.capacity(), self.path_index.capacity(), self.items.len());
+        let before = (
+            self.items.capacity(),
+            self.path_index.capacity(),
+            self.items.len(),
+        );
         if self.items.capacity() < target {
             self.items.reserve(target - self.items.len());
         }
@@ -216,7 +226,8 @@ impl WavesPreviewer {
             self.files.reserve(target - self.files.len());
         }
         if self.original_files.capacity() < target {
-            self.original_files.reserve(target - self.original_files.len());
+            self.original_files
+                .reserve(target - self.original_files.len());
         }
         if self.path_index.capacity() < target {
             self.path_index.reserve(target - self.path_index.len());
@@ -285,7 +296,8 @@ impl WavesPreviewer {
     }
 
     pub(super) fn process_scan_messages(&mut self) {
-        if self.scan_rx.is_none() && self.scan_pending_batches.is_empty() && !self.scan_worker_done {
+        if self.scan_rx.is_none() && self.scan_pending_batches.is_empty() && !self.scan_worker_done
+        {
             return;
         }
 

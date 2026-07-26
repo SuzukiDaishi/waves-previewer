@@ -69,10 +69,8 @@ impl PathIndex {
                         Some(std::mem::replace(existing, id))
                     } else {
                         // Genuine 64-bit hash collision: widen the slot.
-                        let prev = std::mem::replace(
-                            e.get_mut(),
-                            PathSlot::Many(Vec::with_capacity(2)),
-                        );
+                        let prev =
+                            std::mem::replace(e.get_mut(), PathSlot::Many(Vec::with_capacity(2)));
                         if let (PathSlot::Many(v), PathSlot::One(p0, id0)) = (e.get_mut(), prev) {
                             v.push((p0, id0));
                             v.push((path, id));
@@ -142,7 +140,6 @@ impl PathIndex {
         self.len = 0;
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub enum MediaStatus {
@@ -227,7 +224,6 @@ impl MediaItem {
         self.external = None;
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct ExternalSource {
@@ -498,11 +494,7 @@ impl ColumnId {
 /// columns missing from it (new builds add columns old files never saw).
 pub fn sanitize_column_order(order: &[ColumnId]) -> Vec<ColumnId> {
     let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<ColumnId> = order
-        .iter()
-        .copied()
-        .filter(|c| seen.insert(*c))
-        .collect();
+    let mut out: Vec<ColumnId> = order.iter().copied().filter(|c| seen.insert(*c)).collect();
     for c in ColumnId::ALL {
         if seen.insert(*c) {
             out.push(*c);
@@ -772,7 +764,7 @@ pub struct SpectrogramConfig {
     pub max_frames: usize,
     pub scale: SpectrogramScale,
     pub mel_scale: SpectrogramScale,
-    pub db_floor: f32,    // negative dB relative to `db_ref`
+    pub db_floor: f32, // negative dB relative to `db_ref`
     pub db_ref: SpectrogramDbRef,
     pub max_freq_hz: f32, // 0 = Nyquist
     pub show_note_labels: bool,
@@ -1003,7 +995,6 @@ pub struct InspectionRunState {
 pub struct InspectionReportState {
     pub rows: Vec<crate::app::inspection::InspectionRow>,
     pub cfg: crate::app::inspection::InspectionConfig,
-    pub generated_at: std::time::SystemTime,
     pub cancelled: bool,
 }
 
@@ -1356,7 +1347,6 @@ pub struct PluginProcessState {
     pub started_at: Instant,
     pub tab_idx: usize,
     pub is_apply: bool,
-    pub is_auto: bool,
     pub rx: std::sync::mpsc::Receiver<PluginProcessResult>,
     pub undo: Option<EditorUndoState>,
 }
@@ -1547,6 +1537,57 @@ pub struct WorldF0Draft {
     pub last_drag_frame: Option<(usize, f32)>, // pencil interpolation anchor (frame, freq)
 }
 
+/// The samples changed by one Pencil stroke. Only the affected range is kept,
+/// so draft Undo/Redo does not duplicate an entire long clip per stroke.
+#[derive(Clone, Debug)]
+pub struct PencilStrokeEdit {
+    pub channels: Vec<usize>,
+    pub start: usize,
+    pub before: Vec<Vec<f32>>,
+    pub after: Vec<Vec<f32>>,
+}
+
+/// Patch capture while a Pencil stroke is still being dragged.
+#[derive(Clone, Debug)]
+pub struct PencilActiveStroke {
+    pub channels: Vec<usize>,
+    pub start: usize,
+    pub end: usize,
+    pub before: Vec<Vec<f32>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PencilPointSelection {
+    /// Inclusive start sample.
+    pub start: usize,
+    /// Exclusive end sample.
+    pub end: usize,
+    pub channels: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PencilDragState {
+    Draw,
+    Move {
+        origin_amp: f32,
+    },
+    Select {
+        anchor_sample: usize,
+        channels: Vec<usize>,
+    },
+}
+
+/// Pencil edits live in the green PreviewOverlay until Apply. The committed
+/// editor samples and their Arc worker mirror therefore remain synchronized.
+#[derive(Clone, Debug, Default)]
+pub struct PencilDraft {
+    pub undo: Vec<PencilStrokeEdit>,
+    pub redo: Vec<PencilStrokeEdit>,
+    pub active: Option<PencilActiveStroke>,
+    pub selection: Option<PencilPointSelection>,
+    pub drag: Option<PencilDragState>,
+}
+
 pub struct EditorTab {
     /// Stable identity across index shifts (tab close/reorder); async jobs
     /// target tabs by id so a result never lands on the wrong tab.
@@ -1559,9 +1600,8 @@ pub struct EditorTab {
     pub loop_enabled: bool,
     pub loading: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
-    // Pencil-stroke transient state: undo snapshot captured at stroke start,
-    // last drawn point for interpolation, and the stroke's target channels.
-    pub pencil_undo: Option<Box<EditorUndoState>>,
+    // Pencil edits are held separately from committed audio until Apply.
+    pub pencil_draft: Option<PencilDraft>,
     pub pencil_last_point: Option<(usize, f32)>,
     pub pencil_stroke_channels: Vec<usize>,
     // Monitoring-only channel mute/solo (indexed by source channel). Not part
@@ -1603,13 +1643,13 @@ pub struct EditorTab {
     pub freq_selection: Option<(f32, f32)>,
     // Transient drag state for spectral selection: (lane index, anchor Hz)
     pub freq_selection_drag: Option<(usize, f32)>,
-    pub markers: Vec<MarkerEntry>,         // marker positions in samples (device SR)
+    pub markers: Vec<MarkerEntry>, // marker positions in samples (device SR)
     /// Labeled [start, end) ranges (buffer sample space). Undo-snapshotted
     /// and remapped by destructive edits alongside the markers.
     pub regions: Vec<crate::markers::RegionEntry>,
-    pub markers_saved: Vec<MarkerEntry>,   // last saved markers
+    pub markers_saved: Vec<MarkerEntry>,     // last saved markers
     pub markers_committed: Vec<MarkerEntry>, // New field
-    pub markers_applied: Vec<MarkerEntry>, // last applied markers
+    pub markers_applied: Vec<MarkerEntry>,   // last applied markers
     pub markers_dirty: bool,
     // Deprecated: ab_loop (A/B) is no longer used as loop region; kept for transition
     pub ab_loop: Option<(usize, usize)>,
@@ -1650,6 +1690,10 @@ pub struct EditorTab {
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
+    /// Audition buffer that produced the visible green preview waveform.
+    /// Kept on the tab so switching playback sources cannot leave the
+    /// waveform visible while silently reverting playback to the source.
+    pub preview_audio_buffer: Option<(ToolKind, std::sync::Arc<crate::audio::AudioBuffer>)>,
     pub active_tool_last: Option<ToolKind>,
     pub preview_offset_samples: Option<usize>,
     // Per-channel non-destructive preview overlay (green waveform)
@@ -1668,14 +1712,18 @@ pub struct EditorTab {
     pub mini_meter: MiniMeterState, // transient bottom meter strip state
     pub world_f0_draft: Option<WorldF0Draft>, // WORLD F0 edit draft (transient)
     pub world_ap_draft: Option<WorldApDraft>, // WORLD aperiodicity draft (transient)
-    pub world_f0_focus: bool, // WORLD view: zoom the freq axis onto the F0 range
-    pub world_formant_ratio: f32, // WORLD resynthesis: spectral-envelope warp (1.0 = off)
+    pub world_f0_focus: bool,       // WORLD view: zoom the freq axis onto the F0 range
+    pub world_formant_ratio: f32,   // WORLD resynthesis: spectral-envelope warp (1.0 = off)
     // --- Gain automation curve (DAW-style breakpoint envelope, transient) ---
     pub gain_env_enabled: bool, // Gain tool: edit the curve on the waveform canvas
     pub gain_env_points: Vec<(usize, f32)>, // (sample, dB) breakpoints, kept sorted by sample
     pub gain_env_drag: Option<usize>, // index of the breakpoint being dragged (transient)
+    // --- Pitch automation curve (semitone breakpoint envelope, transient) ---
+    pub pitch_env_enabled: bool, // Pitch Shift tool: edit the curve on the waveform canvas
+    pub pitch_env_points: Vec<(usize, f32)>, // (sample, semitones), sorted by sample
+    pub pitch_env_drag: Option<usize>, // index of the breakpoint being dragged
     // --- Canvas gesture state for PitchShift / Speed / TimeStretch (transient) ---
-    pub pitch_drag_active: bool, // dragging the pitch line up/down
+    pub pitch_drag_active: bool, // dragging the static pitch line up/down
     pub stretch_drag_target: Option<usize>, // dragged selection-end target while stretching
     // --- Spectral warp (image-like frequency warp on Spec/Log views, transient) ---
     pub spectral_warp_edit: bool, // canvas warp editing enabled (owns the pointer)
@@ -1784,7 +1832,7 @@ impl EditorTab {
             loop_enabled: false,
             loading: true,
             ch_samples: Vec::new(),
-            pencil_undo: None,
+            pencil_draft: None,
             pencil_last_point: None,
             pencil_stroke_channels: Vec::new(),
             ch_muted: Vec::new(),
@@ -1858,6 +1906,7 @@ impl EditorTab {
             loop_mode: crate::app::types::LoopMode::Off,
             dragging_marker: None,
             preview_audio_tool: None,
+            preview_audio_buffer: None,
             active_tool_last: None,
             preview_offset_samples: None,
             preview_overlay: None,
@@ -1879,6 +1928,9 @@ impl EditorTab {
             gain_env_enabled: false,
             gain_env_points: Vec::new(),
             gain_env_drag: None,
+            pitch_env_enabled: false,
+            pitch_env_points: Vec::new(),
+            pitch_env_drag: None,
             pitch_drag_active: false,
             stretch_drag_target: None,
             spectral_warp_edit: false,
@@ -2091,9 +2143,9 @@ pub struct WorldFeatureData {
     pub fft_size: usize,
     pub f0_floor: f32,
     pub f0_ceil: f32,
-    pub f0_values: Vec<f32>,  // per frame, 0.0 = unvoiced
-    pub env_db: Vec<f32>,     // frames * bins, power dB
-    pub env_max_db: f32,      // precomputed max of env_db (render normalization)
+    pub f0_values: Vec<f32>,    // per frame, 0.0 = unvoiced
+    pub env_db: Vec<f32>,       // frames * bins, power dB
+    pub env_max_db: f32,        // precomputed max of env_db (render normalization)
     pub aperiodicity: Vec<f32>, // frames * bins, linear 0..1 (1 = noise)
     pub median_f0: Option<f32>,
     pub voiced_ratio: f32,

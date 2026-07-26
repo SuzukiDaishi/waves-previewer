@@ -39,7 +39,8 @@ impl WavesPreviewer {
         if self.fs_exists_cache.len() >= 100_000 {
             self.fs_exists_cache.clear();
         }
-        self.fs_exists_cache.insert(path.to_path_buf(), (exists, now));
+        self.fs_exists_cache
+            .insert(path.to_path_buf(), (exists, now));
         exists
     }
 
@@ -90,7 +91,10 @@ impl WavesPreviewer {
         self.edited_cache
             .get(path)
             .and_then(|cached| cached.display_meta.as_ref())
-            .or_else(|| self.item_for_path(path).and_then(|item| item.meta.as_deref()))
+            .or_else(|| {
+                self.item_for_path(path)
+                    .and_then(|item| item.meta.as_deref())
+            })
     }
 
     pub(super) fn meta_for_path(&self, path: &Path) -> Option<&FileMeta> {

@@ -38,7 +38,11 @@ impl super::WavesPreviewer {
         (waveform_minmax, Some(waveform_pyramid))
     }
 
-    pub(super) fn option_num_order_f64(a: Option<f64>, b: Option<f64>, dir: SortDir) -> std::cmp::Ordering {
+    pub(super) fn option_num_order_f64(
+        a: Option<f64>,
+        b: Option<f64>,
+        dir: SortDir,
+    ) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         match (a, b) {
             (Some(va), Some(vb)) => {
@@ -720,6 +724,20 @@ impl super::WavesPreviewer {
                 self.audio.stop();
                 self.playback_return_editor_to_last_start_if_needed();
             } else {
+                if let Some(tab_idx) = self.active_tab {
+                    // A visible green waveform is an audition contract: make
+                    // sure Play uses the exact buffer that produced it even
+                    // if another activation/transport path restored source
+                    // audio after the preview was rendered.
+                    let activated_visible_preview =
+                        self.activate_visible_preview_audio_for_tab(tab_idx);
+                    if !activated_visible_preview
+                        && self.defer_play_until_pending_preview_is_ready(tab_idx)
+                    {
+                        self.playback_sync_state_snapshot();
+                        return;
+                    }
+                }
                 self.playback_capture_editor_start_display_sample();
                 if self.playback_mode_needs_fx_buffer() && !self.spawn_playback_fx_render(true) {
                     self.playback_sync_state_snapshot();
@@ -1537,6 +1555,7 @@ impl super::WavesPreviewer {
         tab.loop_mode = crate::app::types::LoopMode::Off;
         tab.dragging_marker = None;
         tab.preview_audio_tool = None;
+        tab.preview_audio_buffer = None;
         tab.active_tool_last = None;
         tab.preview_offset_samples = None;
         tab.preview_overlay = None;
@@ -2454,7 +2473,10 @@ impl super::WavesPreviewer {
         } else {
             // Invalid regexes fall back to case-insensitive substring matching.
             let regex = if self.search_use_regex {
-                RegexBuilder::new(&query).case_insensitive(true).build().ok()
+                RegexBuilder::new(&query)
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
             } else {
                 None
             };
@@ -2495,9 +2517,11 @@ impl super::WavesPreviewer {
                 .files
                 .iter()
                 .map(|&id| match self.item_for_id(id) {
-                    Some(item) => {
-                        (self.owned_sort_key(item, key), item.display_name.clone(), id)
-                    }
+                    Some(item) => (
+                        self.owned_sort_key(item, key),
+                        item.display_name.clone(),
+                        id,
+                    ),
                     None => (OwnedKey::Missing, String::new(), id),
                 })
                 .collect();
@@ -2724,14 +2748,14 @@ impl super::WavesPreviewer {
                 let samples = Self::mixdown_channels_mono(&channels, len);
                 let mut waveform = Vec::new();
                 crate::wave::build_minmax(&mut waveform, &samples, 2048);
-                let editor_waveform =
-                    if matches!(target_for_thread, ProcessingTarget::EditorTab(_)) {
-                        Some(crate::app::WavesPreviewer::build_editor_waveform_cache(
-                            &channels, len,
-                        ))
-                    } else {
-                        None
-                    };
+                let editor_waveform = if matches!(target_for_thread, ProcessingTarget::EditorTab(_))
+                {
+                    Some(crate::app::WavesPreviewer::build_editor_waveform_cache(
+                        &channels, len,
+                    ))
+                } else {
+                    None
+                };
                 let _ = tx.send(ProcessingResult {
                     path: path_for_thread.clone(),
                     job_id,

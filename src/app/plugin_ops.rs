@@ -1301,6 +1301,14 @@ impl crate::app::WavesPreviewer {
             None
         };
         if self.plugin_process_state.is_some() {
+            if let Some((path, tool)) = self.plugin_process_state.as_ref().and_then(|state| {
+                (!state.is_apply)
+                    .then(|| self.tabs.get(state.tab_idx).map(|tab| tab.path.clone()))
+                    .flatten()
+                    .map(|path| (path, ToolKind::PluginFx))
+            }) {
+                self.cancel_pending_preview_autoplay_for(path.as_path(), tool);
+            }
             self.debug.plugin_stale_drop_count =
                 self.debug.plugin_stale_drop_count.saturating_add(1);
             self.plugin_process_state = None;
@@ -1413,7 +1421,6 @@ impl crate::app::WavesPreviewer {
             started_at: Instant::now(),
             tab_idx,
             is_apply,
-            is_auto,
             rx,
             undo,
         });
@@ -1441,7 +1448,8 @@ impl crate::app::WavesPreviewer {
     ) -> bool {
         match dirty_at {
             Some(t) if !busy => {
-                now.saturating_duration_since(t).as_millis() >= Self::PLUGIN_AUTO_PREVIEW_DEBOUNCE_MS
+                now.saturating_duration_since(t).as_millis()
+                    >= Self::PLUGIN_AUTO_PREVIEW_DEBOUNCE_MS
             }
             _ => false,
         }
@@ -1481,6 +1489,13 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn cancel_plugin_process(&mut self) {
+        if let Some(path) = self.plugin_process_state.as_ref().and_then(|state| {
+            (!state.is_apply)
+                .then(|| self.tabs.get(state.tab_idx).map(|tab| tab.path.clone()))
+                .flatten()
+        }) {
+            self.cancel_pending_preview_autoplay_for(path.as_path(), ToolKind::PluginFx);
+        }
         if self.plugin_process_state.is_some() {
             self.debug.plugin_stale_drop_count =
                 self.debug.plugin_stale_drop_count.saturating_add(1);
@@ -1588,8 +1603,7 @@ impl crate::app::WavesPreviewer {
                     }
                     if let Some(tab) = self.tabs.get_mut(tab_idx) {
                         let applied = Self::apply_gui_param_delta(tab, &params);
-                        if (applied > 0 || state_blob.is_some())
-                            && tab.plugin_fx_draft.auto_preview
+                        if (applied > 0 || state_blob.is_some()) && tab.plugin_fx_draft.auto_preview
                         {
                             tab.plugin_fx_param_dirty_at = Some(Instant::now());
                         }
@@ -1935,8 +1949,7 @@ impl crate::app::WavesPreviewer {
                                 tab.plugin_fx_draft.enabled = true;
                                 tab.plugin_fx_draft.bypass = false;
                                 tab.plugin_fx_draft.last_error = fallback_hint;
-                                tab.plugin_fx_draft.last_backend_note =
-                                    result.backend_note.clone();
+                                tab.plugin_fx_draft.last_backend_note = result.backend_note.clone();
                                 let mut lines = vec![format!(
                                     "Probe: {:?}, params={}, {:.1} ms",
                                     result.backend,
@@ -2068,12 +2081,18 @@ impl crate::app::WavesPreviewer {
         }
 
         if let Some(mut state) = self.plugin_process_state.take() {
+            let preview_path = (!state.is_apply)
+                .then(|| self.tabs.get(state.tab_idx).map(|tab| tab.path.clone()))
+                .flatten();
             match state.rx.try_recv() {
                 Ok(result) => {
                     if result.job_id != state.job_id
                         || result.tab_idx != state.tab_idx
                         || result.is_apply != state.is_apply
                     {
+                        if let Some(path) = preview_path.as_deref() {
+                            self.cancel_pending_preview_autoplay_for(path, ToolKind::PluginFx);
+                        }
                         self.debug.plugin_stale_drop_count =
                             self.debug.plugin_stale_drop_count.saturating_add(1);
                         ctx.request_repaint();
@@ -2081,6 +2100,9 @@ impl crate::app::WavesPreviewer {
                     }
                     let elapsed_ms = state.started_at.elapsed().as_secs_f32() * 1000.0;
                     if let Some(err) = result.error {
+                        if let Some(path) = preview_path.as_deref() {
+                            self.cancel_pending_preview_autoplay_for(path, ToolKind::PluginFx);
+                        }
                         if let Some(tab) = self.tabs.get_mut(result.tab_idx) {
                             let phase = if result.is_apply { "Apply" } else { "Preview" };
                             tab.plugin_fx_draft.last_backend_log =
@@ -2096,6 +2118,9 @@ impl crate::app::WavesPreviewer {
                         return;
                     }
                     if result.channels.is_empty() {
+                        if let Some(path) = preview_path.as_deref() {
+                            self.cancel_pending_preview_autoplay_for(path, ToolKind::PluginFx);
+                        }
                         if let Some(tab) = self.tabs.get_mut(result.tab_idx) {
                             let phase = if result.is_apply { "Apply" } else { "Preview" };
                             tab.plugin_fx_draft.last_backend_log =
@@ -2303,6 +2328,13 @@ impl crate::app::WavesPreviewer {
                                     preview_channels,
                                 );
                             }
+                            if let Some(path) = preview_path.as_deref() {
+                                self.finish_pending_preview_autoplay(
+                                    result.tab_idx,
+                                    path,
+                                    ToolKind::PluginFx,
+                                );
+                            }
                         }
                         Self::plugin_push_metric(&mut self.debug.plugin_preview_ms, elapsed_ms);
                     }
@@ -2311,7 +2343,11 @@ impl crate::app::WavesPreviewer {
                 Err(mpsc::TryRecvError::Empty) => {
                     self.plugin_process_state = Some(state);
                 }
-                Err(mpsc::TryRecvError::Disconnected) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if let Some(path) = preview_path.as_deref() {
+                        self.cancel_pending_preview_autoplay_for(path, ToolKind::PluginFx);
+                    }
+                }
             }
         }
         self.drain_plugin_gui_events(ctx);
@@ -2396,6 +2432,10 @@ mod load_from_file_tests {
             .expect("first add");
         app.add_plugin_catalog_entry_from_path(path)
             .expect("second add");
-        assert_eq!(app.plugin_catalog.len(), 1, "same path should not duplicate");
+        assert_eq!(
+            app.plugin_catalog.len(),
+            1,
+            "same path should not duplicate"
+        );
     }
 }

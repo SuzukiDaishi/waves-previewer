@@ -78,8 +78,9 @@ pub fn detect_clicks(
         scratch.clear();
         scratch.extend(resid[start..end].iter().map(|v| v.abs()));
         let mid = scratch.len() / 2;
-        let (_, med, _) =
-            scratch.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let (_, med, _) = scratch.select_nth_unstable_by(mid, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
         let thr = (1.4826 * *med * k).max(RESIDUAL_FLOOR);
         for i in start..end {
             if resid[i].abs() > thr {
@@ -155,8 +156,16 @@ pub fn repair_spans_hermite(ch: &mut [f32], spans: &[(usize, usize)]) {
         } else {
             0.0
         };
-        let m0 = if s >= 4 { (ch[s - 1] - ch[s - 4]) / 3.0 } else { 0.0 };
-        let m1 = if e + 4 <= n { (ch[e + 3] - ch[e]) / 3.0 } else { 0.0 };
+        let m0 = if s >= 4 {
+            (ch[s - 1] - ch[s - 4]) / 3.0
+        } else {
+            0.0
+        };
+        let m1 = if e + 4 <= n {
+            (ch[e + 3] - ch[e]) / 3.0
+        } else {
+            0.0
+        };
         // Bridge from the sample before the span to the one after it.
         let span_len = (e - s + 1) as f32;
         for i in s..e {
@@ -208,7 +217,9 @@ mod tests {
         let mut state = seed.max(1);
         (0..len)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((state >> 33) as f32 / (u32::MAX >> 1) as f32) * 2.0 - 1.0
             })
             .collect()
@@ -311,7 +322,10 @@ mod tests {
         let cfg = DeclickConfig::default();
         let (out, count) = declick_channel(&damaged, SR, &cfg, Some((5_000, 20_000)));
         assert_eq!(count, 1);
-        assert!((out[10_000] - clean[10_000]).abs() < 0.05, "in-range click kept");
+        assert!(
+            (out[10_000] - clean[10_000]).abs() < 0.05,
+            "in-range click kept"
+        );
         assert_eq!(out[40_000], 1.0, "out-of-range click must stay untouched");
         assert_eq!(&out[20_000..], &damaged[20_000..]);
     }

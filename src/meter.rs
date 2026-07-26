@@ -149,8 +149,7 @@ impl LoudnessMeter {
             self.cur_sum += yl * yl + yr * yr;
             self.cur_count += 1;
             if self.cur_count >= self.samples_per_block {
-                self.blocks
-                    .push_back(self.cur_sum / self.cur_count as f64);
+                self.blocks.push_back(self.cur_sum / self.cur_count as f64);
                 if self.blocks.len() > SHORT_TERM_BLOCKS {
                     self.blocks.pop_front();
                 }
@@ -164,8 +163,7 @@ impl LoudnessMeter {
         if self.blocks.len() < blocks {
             return None;
         }
-        let mean: f64 =
-            self.blocks.iter().rev().take(blocks).sum::<f64>() / blocks as f64;
+        let mean: f64 = self.blocks.iter().rev().take(blocks).sum::<f64>() / blocks as f64;
         if mean <= 0.0 {
             return Some(f32::NEG_INFINITY);
         }
@@ -202,8 +200,7 @@ fn tp_filter_bank() -> [[f32; TP_TAPS_PER_PHASE]; TP_PHASES] {
         // wave.rs uses, so the realtime TP readout and the list's dBTP
         // column measure inter-sample peaks with one filter, not two
         // slightly different ones.
-        let w = 0.5
-            * (1.0 - (2.0 * std::f64::consts::PI * n as f64 / (total - 1) as f64).cos());
+        let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * n as f64 / (total - 1) as f64).cos());
         // Interleaved prototype -> polyphase decomposition. Each phase keeps
         // unity DC gain because the prototype is a 4x interpolator.
         bank[n % TP_PHASES][n / TP_PHASES] = (sinc * w) as f32;
@@ -295,10 +292,19 @@ mod tests {
         // coefficient table. The offline path (wave.rs) shares this function,
         // so this also pins offline/realtime agreement.
         let c = k_weight_coeffs(48_000);
-        let expect_shelf = [1.535_124_9, -2.691_696_2, 1.198_392_9, -1.690_659_3, 0.732_480_76];
+        let expect_shelf = [
+            1.535_124_9,
+            -2.691_696_2,
+            1.198_392_9,
+            -1.690_659_3,
+            0.732_480_76,
+        ];
         let got_shelf = [c.shelf.b0, c.shelf.b1, c.shelf.b2, c.shelf.a1, c.shelf.a2];
         for (g, e) in got_shelf.iter().zip(expect_shelf.iter()) {
-            assert!((g - e).abs() < 2e-4, "shelf {got_shelf:?} vs {expect_shelf:?}");
+            assert!(
+                (g - e).abs() < 2e-4,
+                "shelf {got_shelf:?} vs {expect_shelf:?}"
+            );
         }
         let expect_hp = [1.0, -2.0, 1.0, -1.990_047_5, 0.990_072_25];
         let got_hp = [

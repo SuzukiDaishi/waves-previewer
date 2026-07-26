@@ -102,7 +102,10 @@ pub fn save_plugin_preset_in(dir: &Path, preset: &PluginPreset) -> Result<PathBu
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("create preset dir: {e}"))?;
     let mut path = dir.to_path_buf();
-    path.push(format!("{}.json", sanitize_preset_component(preset.name.trim())));
+    path.push(format!(
+        "{}.json",
+        sanitize_preset_component(preset.name.trim())
+    ));
     let json =
         serde_json::to_string_pretty(preset).map_err(|e| format!("serialize preset: {e}"))?;
     std::fs::write(&path, json).map_err(|e| format!("write preset: {e}"))?;
@@ -120,7 +123,10 @@ pub fn delete_plugin_preset_file(path: &Path) -> Result<(), String> {
 
 /// Editor-draft params (UI state) -> preset params.
 pub fn preset_params_from_ui(params: &[PluginParamUiState]) -> Vec<EffectGraphPluginParamState> {
-    params.iter().map(EffectGraphPluginParamState::from_ui).collect()
+    params
+        .iter()
+        .map(EffectGraphPluginParamState::from_ui)
+        .collect()
 }
 
 /// Preset params -> editor-draft params (UI state).
@@ -152,7 +158,10 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn plugin_presets_dir_for_key(plugin_key: &str) -> Option<PathBuf> {
-        Some(plugin_presets_dir_in(&Self::plugin_presets_root()?, plugin_key))
+        Some(plugin_presets_dir_in(
+            &Self::plugin_presets_root()?,
+            plugin_key,
+        ))
     }
 
     pub(super) fn list_plugin_presets_for_key(plugin_key: &str) -> Vec<(String, PathBuf)> {

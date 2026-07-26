@@ -8,17 +8,16 @@ use super::external_ops;
 use super::project::{
     describe_missing, deserialize_project, fade_shape_from_str, load_sidecar_audio,
     loop_mode_from_str, loop_shape_from_str, marker_entry_to_project, missing_file_meta,
-    project_region_to_entry, region_entry_to_project,
     primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
     project_music_analysis_to_draft, project_plugin_fx_draft_from_draft,
-    project_plugin_fx_draft_to_draft, project_spectrogram_from_cfg, project_tab_from_tab,
-    project_tool_state_to_tool_state, rel_path, resolve_path, serialize_project,
-    sidecar_audio_dst,
-    spectro_config_from_project, tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph,
-    ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy,
-    ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
-    ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectToolState,
-    ProjectTranscriptLanguage, ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
+    project_plugin_fx_draft_to_draft, project_region_to_entry, project_spectrogram_from_cfg,
+    project_tab_from_tab, project_tool_state_to_tool_state, region_entry_to_project, rel_path,
+    resolve_path, serialize_project, sidecar_audio_dst, spectro_config_from_project,
+    tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph, ProjectBitDepthOverride,
+    ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy, ProjectExternalSource,
+    ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns,
+    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage,
+    ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -375,7 +374,14 @@ impl super::WavesPreviewer {
     fn build_session_save_plan(
         &mut self,
         path: PathBuf,
-    ) -> Result<(PathBuf, ProjectFile, Vec<crate::app::types::SessionSidecarJob>), String> {
+    ) -> Result<
+        (
+            PathBuf,
+            ProjectFile,
+            Vec<crate::app::types::SessionSidecarJob>,
+        ),
+        String,
+    > {
         use crate::app::types::{SessionSidecarJob, SessionSidecarSource};
         let path = if path
             .extension()
@@ -1101,9 +1107,8 @@ impl super::WavesPreviewer {
                                 sample_rate = sr.max(1);
                             }
                             Err(err) => {
-                                missing_errors.push(format!(
-                                    "Virtual sidecar decode failed: {raw} ({err})"
-                                ));
+                                missing_errors
+                                    .push(format!("Virtual sidecar decode failed: {raw} ({err})"));
                             }
                         }
                     }
@@ -1167,9 +1172,8 @@ impl super::WavesPreviewer {
                                         channels_opt = Some(channels);
                                         sample_rate = sr.max(1);
                                     } else {
-                                        missing_errors.push(format!(
-                                            "Virtual sidecar decode failed: {raw}"
-                                        ));
+                                        missing_errors
+                                            .push(format!("Virtual sidecar decode failed: {raw}"));
                                     }
                                 }
                             }
@@ -1409,11 +1413,7 @@ impl super::WavesPreviewer {
                     loop_markers_saved: edit.loop_markers_saved.map(|v| (v[0], v[1])),
                     loop_markers_dirty: edit.loop_markers_dirty,
                     markers: edit.markers.iter().map(project_marker_to_entry).collect(),
-                    regions: edit
-                        .regions
-                        .iter()
-                        .map(project_region_to_entry)
-                        .collect(),
+                    regions: edit.regions.iter().map(project_region_to_entry).collect(),
                     markers_committed: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_applied: edit.markers.iter().map(project_marker_to_entry).collect(),
                     markers_saved: edit

@@ -165,8 +165,8 @@ pub fn spectrum_columns(mono: &[f32], sample_rate: u32, cols: usize, out_db: &mu
             } else {
                 let lo_db = amp_to_db(band_level(&mags_low, nyquist, f0, f1));
                 let hi_db = amp_to_db(band_level(&mags_high, nyquist, f0, f1));
-                let t = (f_center / CROSSOVER_LO_HZ).ln()
-                    / (CROSSOVER_HI_HZ / CROSSOVER_LO_HZ).ln();
+                let t =
+                    (f_center / CROSSOVER_LO_HZ).ln() / (CROSSOVER_HI_HZ / CROSSOVER_LO_HZ).ln();
                 lo_db + (hi_db - lo_db) * t.clamp(0.0, 1.0)
             };
             *slot = db.max(SPECTRUM_DB_FLOOR);
@@ -202,7 +202,8 @@ pub fn smooth_spectrum_db(smoothed: &mut Vec<f32>, target: &[f32], dt: f32) {
 /// (side), y = (L+R)/sqrt2 (mid). Mono material therefore collapses onto the
 /// vertical axis and anti-phase material onto the horizontal one. Returns an
 /// empty vec for near-silence.
-pub fn goniometer_points(l: &[f32], r: &[f32], max_points: usize) -> Vec<(f32, f32)> {
+#[cfg(test)]
+fn goniometer_points(l: &[f32], r: &[f32], max_points: usize) -> Vec<(f32, f32)> {
     let mut out = Vec::new();
     goniometer_points_into(l, r, max_points, &mut out);
     out
@@ -210,12 +211,7 @@ pub fn goniometer_points(l: &[f32], r: &[f32], max_points: usize) -> Vec<(f32, f
 
 /// Allocation-free variant for the per-frame draw path: clears and refills
 /// `out` (a caller-owned scratch buffer) instead of allocating.
-pub fn goniometer_points_into(
-    l: &[f32],
-    r: &[f32],
-    max_points: usize,
-    out: &mut Vec<(f32, f32)>,
-) {
+pub fn goniometer_points_into(l: &[f32], r: &[f32], max_points: usize, out: &mut Vec<(f32, f32)>) {
     out.clear();
     let n = l.len().min(r.len());
     if n == 0 || max_points == 0 {
@@ -363,8 +359,14 @@ mod tests {
         let l = sine(440.0, 48_000, 0.1, 0.5);
         let pts = goniometer_points(&l, &l, 480);
         assert!(!pts.is_empty());
-        assert!(pts.iter().all(|(x, _)| x.abs() < 1e-6), "mono must sit on the vertical axis");
-        assert!(pts.iter().any(|(_, y)| y.abs() > 0.5), "and actually deflect along it");
+        assert!(
+            pts.iter().all(|(x, _)| x.abs() < 1e-6),
+            "mono must sit on the vertical axis"
+        );
+        assert!(
+            pts.iter().any(|(_, y)| y.abs() > 0.5),
+            "and actually deflect along it"
+        );
     }
 
     #[test]
@@ -373,7 +375,10 @@ mod tests {
         let r: Vec<f32> = l.iter().map(|v| -v).collect();
         let pts = goniometer_points(&l, &r, 480);
         assert!(!pts.is_empty());
-        assert!(pts.iter().all(|(_, y)| y.abs() < 1e-6), "L = -R must sit on the horizontal axis");
+        assert!(
+            pts.iter().all(|(_, y)| y.abs() < 1e-6),
+            "L = -R must sit on the horizontal axis"
+        );
         assert!(pts.iter().any(|(x, _)| x.abs() > 0.5));
     }
 

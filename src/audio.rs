@@ -559,8 +559,12 @@ impl AudioEngine {
                         // Silence/stopped: hold the last reading briefly, then
                         // invalidate and reset so the next playback starts clean.
                         if last_data.elapsed() > std::time::Duration::from_millis(500) {
-                            shared.lufs_m_milli.store(METER_VALUE_INVALID, Ordering::Relaxed);
-                            shared.lufs_s_milli.store(METER_VALUE_INVALID, Ordering::Relaxed);
+                            shared
+                                .lufs_m_milli
+                                .store(METER_VALUE_INVALID, Ordering::Relaxed);
+                            shared
+                                .lufs_s_milli
+                                .store(METER_VALUE_INVALID, Ordering::Relaxed);
                             shared
                                 .true_peak_db_milli
                                 .store(METER_VALUE_INVALID, Ordering::Relaxed);
@@ -580,8 +584,8 @@ impl AudioEngine {
                     poll_ms = 50;
                     last_data = std::time::Instant::now();
                     let sr = shared.out_sample_rate.max(1);
-                    let meter = loudness
-                        .get_or_insert_with(|| crate::meter::LoudnessMeter::new(sr));
+                    let meter =
+                        loudness.get_or_insert_with(|| crate::meter::LoudnessMeter::new(sr));
                     meter.push(&buf_l, &buf_r);
                     let chunk_max = tp_l.scan(&buf_l).max(tp_r.scan(&buf_r));
                     let now = std::time::Instant::now();
@@ -795,7 +799,11 @@ impl AudioEngine {
                 let solo_mask = shared
                     .chan_solo_mask
                     .load(std::sync::atomic::Ordering::Relaxed);
-                let audible_mask: u64 = if solo_mask != 0 { solo_mask } else { !mute_mask };
+                let audible_mask: u64 = if solo_mask != 0 {
+                    solo_mask
+                } else {
+                    !mute_mask
+                };
                 let rate = shared
                     .rate
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -918,7 +926,11 @@ impl AudioEngine {
                         }
                         shared.meter_tap.push_frame(
                             tap_frame[0],
-                            if channels >= 2 { tap_frame[1] } else { tap_frame[0] },
+                            if channels >= 2 {
+                                tap_frame[1]
+                            } else {
+                                tap_frame[0]
+                            },
                         );
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
@@ -941,9 +953,7 @@ impl AudioEngine {
                         },
                         std::sync::atomic::Ordering::Relaxed,
                     );
-                    Self::store_channel_meters(
-                        &shared, &ch_sum_sq, &ch_peak, &ch_counts, channels,
-                    );
+                    Self::store_channel_meters(&shared, &ch_sum_sq, &ch_peak, &ch_counts, channels);
                     return;
                 }
 
@@ -1048,7 +1058,11 @@ impl AudioEngine {
                         }
                         shared.meter_tap.push_frame(
                             tap_frame[0],
-                            if channels >= 2 { tap_frame[1] } else { tap_frame[0] },
+                            if channels >= 2 {
+                                tap_frame[1]
+                            } else {
+                                tap_frame[0]
+                            },
                         );
                         pos_f += rate;
                         if valid_loop && pos_f >= loop_end as f64 {
@@ -1071,9 +1085,7 @@ impl AudioEngine {
                         },
                         std::sync::atomic::Ordering::Relaxed,
                     );
-                    Self::store_channel_meters(
-                        &shared, &ch_sum_sq, &ch_peak, &ch_counts, channels,
-                    );
+                    Self::store_channel_meters(&shared, &ch_sum_sq, &ch_peak, &ch_counts, channels);
                     return;
                 }
 
@@ -1330,9 +1342,7 @@ impl AudioEngine {
 
     /// Snapshot of the per-output-channel playback meters: channel count in
     /// use plus linear RMS/peak per slot (post-volume).
-    pub fn channel_meter_snapshot(
-        &self,
-    ) -> (usize, [f32; METER_CH_SLOTS], [f32; METER_CH_SLOTS]) {
+    pub fn channel_meter_snapshot(&self) -> (usize, [f32; METER_CH_SLOTS], [f32; METER_CH_SLOTS]) {
         let count = self
             .shared
             .meter_ch_count
@@ -1519,11 +1529,19 @@ impl AudioEngine {
     ) -> f32 {
         let is_audible = |c: usize| c >= 64 || (audible >> c) & 1 == 1;
         if src_channels <= 1 {
-            return if is_audible(0) { sample_at(0, pos) } else { 0.0 };
+            return if is_audible(0) {
+                sample_at(0, pos)
+            } else {
+                0.0
+            };
         }
         if src_channels <= out_channels {
             let c = out_ch.min(src_channels - 1);
-            return if is_audible(c) { sample_at(c, pos) } else { 0.0 };
+            return if is_audible(c) {
+                sample_at(c, pos)
+            } else {
+                0.0
+            };
         }
         let step = out_channels.max(1);
         let mut sum = 0.0f32;

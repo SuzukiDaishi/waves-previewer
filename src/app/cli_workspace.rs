@@ -373,9 +373,7 @@ impl CliWorkspace {
                 anyhow::bail!("SpectralWarp is interactive-only (warp points live in the editor)")
             }
             ToolKind::SpectralBrush => {
-                anyhow::bail!(
-                    "SpectralBrush is interactive-only (brush stamps live in the editor)"
-                )
+                anyhow::bail!("SpectralBrush is interactive-only (brush stamps live in the editor)")
             }
             ToolKind::Pencil => {
                 anyhow::bail!("Pencil is interactive-only (draw on the waveform in the editor)")

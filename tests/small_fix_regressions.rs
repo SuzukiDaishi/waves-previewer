@@ -1108,7 +1108,7 @@ mod small_fix_regressions {
     }
 
     #[test]
-    fn long_gain_preview_uses_overview_overlay_and_no_preview_audio() {
+    fn long_gain_preview_uses_overview_overlay_and_preview_audio() {
         let dir = make_temp_dir("long_gain_preview_overview");
         let src = dir.join("long_gain.wav");
         write_wav_32_float(&src, 48_000, 42.5);
@@ -1124,7 +1124,11 @@ mod small_fix_regressions {
         wait_for_preview_overlay_tool(&mut harness, ToolKind::Gain);
         wait_for_preview_idle(&mut harness);
 
-        assert_eq!(harness.state().test_preview_audio_tool(), None);
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::Gain),
+            "long-clip Gain Preview must remain audible while using an overview overlay"
+        );
         assert_eq!(
             harness.state().test_preview_overlay_tool(),
             Some(ToolKind::Gain)
@@ -2228,11 +2232,9 @@ mod small_fix_regressions {
             assert!(harness.state_mut().test_mark_latest_crash_report_reviewed());
             assert_eq!(harness.state().test_crash_report_count(), 0);
             assert!(!harness.state().test_crash_report_window_open());
-            assert!(
-                neowaves::crash_report::list_unacknowledged_reports()
-                    .expect("list crash reports")
-                    .is_empty()
-            );
+            assert!(neowaves::crash_report::list_unacknowledged_reports()
+                .expect("list crash reports")
+                .is_empty());
         });
     }
 

@@ -4,8 +4,8 @@
 //! consumes the draft lives here too.
 
 use super::types::{
-    EditorAnalysisKey, EditorAnalysisKind, EditorApplyResult, EditorApplyState, EditorTab,
-    EditorFeatureAnalysisData, WorldF0Draft, WorldFeatureData,
+    EditorAnalysisKey, EditorAnalysisKind, EditorApplyResult, EditorApplyState,
+    EditorFeatureAnalysisData, EditorTab, WorldF0Draft, WorldFeatureData,
 };
 
 /// Lowest F0 the editor lets you paint, in Hz.
@@ -170,8 +170,7 @@ impl super::WavesPreviewer {
         }
         (0..dst_frames)
             .map(|i| {
-                let t = i as f64 / (dst_frames - 1).max(1) as f64
-                    * (values.len() - 1) as f64;
+                let t = i as f64 / (dst_frames - 1).max(1) as f64 * (values.len() - 1) as f64;
                 let lo = t.floor() as usize;
                 let hi = (lo + 1).min(values.len() - 1);
                 let frac = (t - lo as f64) as f32;
@@ -278,10 +277,8 @@ impl super::WavesPreviewer {
             super::threading::lower_current_thread_priority();
             let data = job_data;
             let mono = if fine_reanalysis {
-                let source = crate::app::WavesPreviewer::mixdown_channels(
-                    &source_channels,
-                    out_len,
-                );
+                let source =
+                    crate::app::WavesPreviewer::mixdown_channels(&source_channels, out_len);
                 let fine = crate::app::render::world_features::analyze_world_with_options(
                     &source,
                     data.sample_rate,
@@ -289,14 +286,9 @@ impl super::WavesPreviewer {
                     f0_method.estimator(),
                     None,
                 );
-                let fine_step =
-                    data.sample_rate as f64 * RESYNTH_FRAME_PERIOD_MS / 1_000.0;
-                let fine_f0 = Self::resample_f0_curve(
-                    &f0,
-                    data.frame_step.max(1),
-                    fine.frames,
-                    fine_step,
-                );
+                let fine_step = data.sample_rate as f64 * RESYNTH_FRAME_PERIOD_MS / 1_000.0;
+                let fine_f0 =
+                    Self::resample_f0_curve(&f0, data.frame_step.max(1), fine.frames, fine_step);
                 let env = if formant_active {
                     Self::world_env_warp(&fine.envelope_db, fine.frames, fine.bins, formant_ratio)
                 } else {
@@ -465,8 +457,14 @@ mod ap_edit_tests {
         let ap = vec![0.6f32; 3 * 4];
         let out = WavesPreviewer::world_ap_apply(&ap, 3, 4, &[0.0, 0.5, 2.0]);
         assert!(out[0..4].iter().all(|v| *v == 0.0), "frame 0 zeroed");
-        assert!(out[4..8].iter().all(|v| (*v - 0.3).abs() < 1e-6), "frame 1 halved");
-        assert!(out[8..12].iter().all(|v| *v == 1.0), "frame 2 clamps at 1.0");
+        assert!(
+            out[4..8].iter().all(|v| (*v - 0.3).abs() < 1e-6),
+            "frame 1 halved"
+        );
+        assert!(
+            out[8..12].iter().all(|v| *v == 1.0),
+            "frame 2 clamps at 1.0"
+        );
     }
 
     #[test]
@@ -478,7 +476,10 @@ mod ap_edit_tests {
         assert!((out[4] - 1.0).abs() < 1e-6);
         // Degenerate inputs stay safe.
         assert_eq!(WavesPreviewer::resample_scalar_curve(&[], 3), vec![1.0; 3]);
-        assert_eq!(WavesPreviewer::resample_scalar_curve(&[0.7], 3), vec![0.7; 3]);
+        assert_eq!(
+            WavesPreviewer::resample_scalar_curve(&[0.7], 3),
+            vec![0.7; 3]
+        );
     }
 }
 
@@ -490,7 +491,9 @@ mod env_warp_tests {
     fn ratio_one_is_identity_and_shape_is_preserved() {
         let frames = 3usize;
         let bins = 64usize;
-        let env: Vec<f32> = (0..frames * bins).map(|i| (i % bins) as f32 * 0.5).collect();
+        let env: Vec<f32> = (0..frames * bins)
+            .map(|i| (i % bins) as f32 * 0.5)
+            .collect();
         let out = WavesPreviewer::world_env_warp(&env, frames, bins, 1.0);
         assert_eq!(out, env);
         let out = WavesPreviewer::world_env_warp(&env, frames, bins, 1.5);
@@ -762,8 +765,7 @@ mod tests {
         let n = sr as usize;
         let out = synthesize_world(&f0, &env_db, &ap, bins, fft_size, sr, 5.0, n);
         let core = &out[n / 8..n - n / 8];
-        let rms = (core.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>()
-            / core.len() as f64)
+        let rms = (core.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / core.len() as f64)
             .sqrt();
         let db = 20.0 * rms.log10();
         assert!(

@@ -523,10 +523,7 @@ fn batch_engine_export(args: crate::cli::BatchEngineExportArgs) -> Result<CliCom
             "entries": rows.len(),
             "skipped": skipped,
         }),
-        warnings: skipped
-            .iter()
-            .map(|s| format!("skipped {s}"))
-            .collect(),
+        warnings: skipped.iter().map(|s| format!("skipped {s}")).collect(),
     })
 }
 
@@ -1301,7 +1298,9 @@ fn failed_path_warnings(failed_paths: &[Value]) -> Vec<String> {
             format!(
                 "{}: {}",
                 f.get("path").and_then(Value::as_str).unwrap_or("?"),
-                f.get("error").and_then(Value::as_str).unwrap_or("unknown error"),
+                f.get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown error"),
             )
         })
         .collect()

@@ -153,8 +153,7 @@ impl crate::app::WavesPreviewer {
                     continue;
                 }
                 let bext_ok = crate::wave::write_wav_bext(&path, &fields).is_ok();
-                let extra_ok =
-                    crate::wave::write_wav_info_ixml(&path, &info, &ixml).is_ok();
+                let extra_ok = crate::wave::write_wav_info_ixml(&path, &info, &ixml).is_ok();
                 if bext_ok && extra_ok {
                     written += 1;
                 } else {

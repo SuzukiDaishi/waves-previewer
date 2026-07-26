@@ -394,6 +394,7 @@ impl WavesPreviewer {
             pending_activate_kind: None,
             pending_activate_ready: false,
             pending_editor_autoplay_path: None,
+            pending_preview_autoplay: None,
             heavy_preview_rx: None,
             heavy_preview_gen_counter: 0,
             heavy_preview_expected_gen: 0,

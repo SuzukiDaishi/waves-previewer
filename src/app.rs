@@ -8,7 +8,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 // use walkdir::WalkDir; // unused here (used in logic.rs)
 
-type HeavyPreviewMessage = (std::path::PathBuf, ToolKind, Vec<f32>, u64);
+enum HeavyPreviewAudio {
+    Mono(Vec<f32>),
+    Channels(Vec<Vec<f32>>),
+}
+
+type HeavyPreviewMessage = (std::path::PathBuf, ToolKind, HeavyPreviewAudio, u64);
 type HeavyOverlayMessage = (
     std::path::PathBuf,
     ToolKind,
@@ -21,8 +26,8 @@ mod app_init;
 mod audio_ops;
 mod audition_ops;
 mod auto_trim;
-mod bwf_ops;
 mod auto_trim_ops;
+mod bwf_ops;
 mod capture;
 mod cli_ops;
 mod cli_workspace;
@@ -33,26 +38,25 @@ pub mod declick;
 pub mod declip;
 pub mod dehum;
 mod dialogs;
+mod duplicate_ops;
 mod editor_decode_ops;
 mod editor_features;
 mod editor_ops;
-mod duplicate_ops;
 mod editor_viewport;
-pub mod engine_export;
 mod effect_graph_ops;
-pub mod fingerprint;
+pub mod engine_export;
 mod export_ops;
 mod external;
 mod external_load_jobs;
 mod external_load_ops;
 mod external_ops;
+pub mod fingerprint;
 mod frame_ops;
 mod gain_ops;
 mod helpers;
 mod hf_cache;
 mod input_ops;
 mod inspect_ops;
-mod loudnorm_batch_ops;
 pub mod inspection;
 pub mod keymap;
 #[cfg(feature = "kittest")]
@@ -65,10 +69,10 @@ mod loading_ops;
 mod logic;
 mod loop_detect;
 mod loop_detect_ops;
+mod loudnorm_batch_ops;
 mod loudnorm_ops;
 mod meta;
 mod meta_ops;
-mod sort_filter_jobs;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
@@ -84,6 +88,7 @@ mod resample_ops;
 mod scan_ops;
 mod search_ops;
 mod session_ops;
+mod sort_filter_jobs;
 mod spectral_ops;
 mod spectrogram;
 mod spectrogram_jobs;
@@ -92,7 +97,6 @@ mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
 mod threading;
-pub mod watch;
 mod toast_ops;
 mod tool_ops;
 mod tooling;
@@ -102,6 +106,7 @@ mod transcript_onnx;
 mod transcript_ops;
 mod types;
 mod ui;
+pub mod watch;
 mod world_edit_ops;
 mod zoo_assets;
 mod zoo_ops;
@@ -114,9 +119,8 @@ use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
     ColumnId, ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode,
-    RateMode,
-    StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant, TranscriptPerfMode,
-    ViewMode, WorkspaceView,
+    RateMode, StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant,
+    TranscriptPerfMode, ViewMode, WorkspaceView,
 };
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
@@ -394,6 +398,12 @@ struct PlaybackFxResult {
     pitch_semitones: f32,
     buffer_sr: u32,
     audio: Arc<AudioBuffer>,
+}
+
+struct PendingPreviewAutoplay {
+    path: PathBuf,
+    tool: ToolKind,
+    display_sample: usize,
 }
 
 #[derive(Default)]
@@ -879,6 +889,7 @@ pub struct WavesPreviewer {
     pending_activate_kind: Option<PendingTabActivationKind>,
     pending_activate_ready: bool,
     pending_editor_autoplay_path: Option<PathBuf>,
+    pending_preview_autoplay: Option<PendingPreviewAutoplay>,
     // Heavy preview worker for Pitch/Stretch (mono) with path/generation guard
     heavy_preview_rx: Option<std::sync::mpsc::Receiver<HeavyPreviewMessage>>,
     heavy_preview_gen_counter: u64,
@@ -1665,9 +1676,9 @@ impl WavesPreviewer {
         if let Some(existing) = self.folder_intern.get(parent) {
             return existing.clone();
         }
-        let folder: std::sync::Arc<str> =
-            std::sync::Arc::from(Self::display_folder_for_path(path));
-        self.folder_intern.insert(parent.to_path_buf(), folder.clone());
+        let folder: std::sync::Arc<str> = std::sync::Arc::from(Self::display_folder_for_path(path));
+        self.folder_intern
+            .insert(parent.to_path_buf(), folder.clone());
         folder
     }
 
@@ -2530,16 +2541,18 @@ impl WavesPreviewer {
         // snapshot is a free Arc clone. Length checks (plus a deep compare
         // in debug builds) guard the invariant; on mismatch fall back to a
         // fresh deep copy.
-        let mirror_matches = tab.ch_samples_arc.len() == tab.ch_samples.len()
+        let mirror_shape_matches = tab.ch_samples_arc.len() == tab.ch_samples.len()
             && tab
                 .ch_samples_arc
                 .iter()
                 .zip(tab.ch_samples.iter())
                 .all(|(a, b)| a.len() == b.len());
-        debug_assert!(
-            !mirror_matches || *tab.ch_samples_arc == tab.ch_samples,
-            "ch_samples_arc mirror out of sync with ch_samples at undo capture"
-        );
+        // Debug builds also verify sample contents. A stale mirror must fall
+        // back to a safe owned snapshot; it must never crash the editor.
+        #[cfg(debug_assertions)]
+        let mirror_matches = mirror_shape_matches && *tab.ch_samples_arc == tab.ch_samples;
+        #[cfg(not(debug_assertions))]
+        let mirror_matches = mirror_shape_matches;
         let ch_samples = if mirror_matches {
             tab.ch_samples_arc.clone()
         } else {
@@ -2645,7 +2658,11 @@ impl WavesPreviewer {
                 return false;
             };
             tab.preview_audio_tool = None;
+            tab.preview_audio_buffer = None;
             tab.preview_overlay = None;
+            tab.pencil_draft = None;
+            tab.pencil_last_point = None;
+            tab.pencil_stroke_channels.clear();
             // Share the snapshot with the worker mirror (free), then take
             // one owned copy for the mutable tab buffers.
             tab.ch_samples = (*state.ch_samples).clone();

@@ -33,6 +33,7 @@ enum TopbarActivityCancel {
     MixAudition,
     DuplicateScan,
     EditorAnalysis,
+    VirtualTrim,
 }
 
 struct TopbarActivityItem {
@@ -142,8 +143,8 @@ impl WavesPreviewer {
                         .show_tooltip_when_elided(true),
                 );
                 if let Some(progress) = item.progress {
-                    let mut bar = egui::ProgressBar::new(progress.clamp(0.0, 1.0))
-                        .desired_width(96.0);
+                    let mut bar =
+                        egui::ProgressBar::new(progress.clamp(0.0, 1.0)).desired_width(96.0);
                     if item.show_percentage {
                         bar = bar.show_percentage();
                     }
@@ -212,6 +213,17 @@ impl WavesPreviewer {
                 progress: None,
                 show_percentage: false,
                 cancel: Some(TopbarActivityCancel::EditorApply),
+            });
+        }
+        if let Some((label, progress)) = self
+            .active_tab
+            .and_then(|tab_idx| self.virtual_trim_status_for_tab(tab_idx))
+        {
+            items.push(TopbarActivityItem {
+                label,
+                progress: Some(progress),
+                show_percentage: true,
+                cancel: Some(TopbarActivityCancel::VirtualTrim),
             });
         }
         if let Some(state) = &self.mix_audition_state {
@@ -479,6 +491,7 @@ impl WavesPreviewer {
             TopbarActivityCancel::HeavyPreview => self.cancel_heavy_preview(),
             TopbarActivityCancel::MusicPreview => self.cancel_music_preview_run(),
             TopbarActivityCancel::EditorApply => self.cancel_editor_apply(),
+            TopbarActivityCancel::VirtualTrim => self.cancel_virtual_trim_job(),
             TopbarActivityCancel::PluginProcess => self.cancel_plugin_process(),
             TopbarActivityCancel::BulkResample => {
                 if let Some(state) = &mut self.bulk_resample_state {
@@ -561,9 +574,7 @@ impl WavesPreviewer {
     /// Realtime BS.1770 readout fed by the metering thread: momentary /
     /// short-term LUFS and 4x-oversampled true peak. "-" while idle.
     fn ui_topbar_loudness_readout(&mut self, ui: &mut egui::Ui) {
-        let decode = |v: i32| {
-            (v != crate::audio::METER_VALUE_INVALID).then(|| v as f32 / 100.0)
-        };
+        let decode = |v: i32| (v != crate::audio::METER_VALUE_INVALID).then(|| v as f32 / 100.0);
         let m = decode(
             self.audio
                 .shared
@@ -589,7 +600,8 @@ impl WavesPreviewer {
                  S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled)",
             );
         if m.is_some() || s.is_some() || tp.is_some() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(120));
         }
     }
 
@@ -602,10 +614,7 @@ impl WavesPreviewer {
         }
         let total = peak.max(inflight).max(1);
         let done = total - inflight;
-        Some((
-            format!("Meta {done}/{total}"),
-            done as f32 / total as f32,
-        ))
+        Some((format!("Meta {done}/{total}"), done as f32 / total as f32))
     }
 
     pub(crate) fn format_loudness_readout(
@@ -651,12 +660,10 @@ impl WavesPreviewer {
             }
         }
         if response.has_focus() {
-            let left = ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
-            });
-            let right = ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
-            });
+            let left =
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft));
+            let right =
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight));
             if left || right {
                 let delta = if right { 1.0 } else { -1.0 };
                 let next = (self.volume_db + delta).clamp(-80.0, 6.0);
@@ -701,7 +708,10 @@ impl WavesPreviewer {
         let t = ((self.volume_db + 80.0) / 86.0).clamp(0.0, 1.0);
         let fill_rect = egui::Rect::from_min_max(
             track_rect.min,
-            egui::pos2(track_rect.left() + track_rect.width() * t, track_rect.bottom()),
+            egui::pos2(
+                track_rect.left() + track_rect.width() * t,
+                track_rect.bottom(),
+            ),
         );
         painter.rect_filled(fill_rect, 3.0, palette.slider_fill);
         let stroke_col = if response.has_focus() {

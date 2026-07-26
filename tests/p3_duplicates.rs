@@ -58,8 +58,7 @@ mod p3_duplicates {
         // original + exact copy + gain variant + unrelated file
         neowaves::wave::export_channels_audio(&base, sr, &dir.join("a_orig.wav")).unwrap();
         neowaves::wave::export_channels_audio(&base, sr, &dir.join("b_copy.wav")).unwrap();
-        let quieter: Vec<Vec<f32>> =
-            vec![base[0].iter().map(|v| v * 0.6).collect::<Vec<f32>>()];
+        let quieter: Vec<Vec<f32>> = vec![base[0].iter().map(|v| v * 0.6).collect::<Vec<f32>>()];
         neowaves::wave::export_channels_audio(&quieter, sr, &dir.join("c_quiet.wav")).unwrap();
         neowaves::wave::export_channels_audio(&content(sr, 11, 1.0), sr, &dir.join("d_other.wav"))
             .unwrap();

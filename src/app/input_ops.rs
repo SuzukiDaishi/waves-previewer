@@ -160,11 +160,7 @@ impl super::WavesPreviewer {
             if self.is_effect_graph_workspace_active() {
                 self.request_close_effect_graph_workspace();
             } else if let Some(active_idx) = self.active_tab {
-                let dirty = self
-                    .tabs
-                    .get(active_idx)
-                    .map(|t| t.dirty)
-                    .unwrap_or(false);
+                let dirty = self.tabs.get(active_idx).map(|t| t.dirty).unwrap_or(false);
                 if dirty {
                     self.leave_intent = Some(crate::app::LeaveIntent::CloseTab(active_idx));
                     self.show_leave_prompt = true;
@@ -206,7 +202,8 @@ impl super::WavesPreviewer {
                         let s = pos_now.min(end);
                         let e = end.max(s);
                         if tab.loop_region != Some((s, e)) {
-                            undo_state = Some(Self::capture_undo_state_labeled(tab, "Set Loop Start"));
+                            undo_state =
+                                Some(Self::capture_undo_state_labeled(tab, "Set Loop Start"));
                         }
                         tab.loop_region = Some((s, e));
                         Self::update_loop_markers_dirty(tab);
@@ -233,7 +230,8 @@ impl super::WavesPreviewer {
                         let s = start.min(pos_now);
                         let e = pos_now.max(start);
                         if tab.loop_region != Some((s, e)) {
-                            undo_state = Some(Self::capture_undo_state_labeled(tab, "Set Loop End"));
+                            undo_state =
+                                Some(Self::capture_undo_state_labeled(tab, "Set Loop End"));
                         }
                         tab.loop_region = Some((s, e));
                         Self::update_loop_markers_dirty(tab);
@@ -394,9 +392,8 @@ impl super::WavesPreviewer {
                     // keys, and a pending rebind capture must swallow it.
                     let zoom_in_fallback = self.keymap_capture.is_none()
                         && !self.keymap_overrides.contains_key(&Action::EditorZoomIn)
-                        && ctx.input_mut(|i| {
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::Equals)
-                        });
+                        && ctx
+                            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Equals));
                     if self.keymap_consume(ctx, Action::EditorZoomIn) || zoom_in_fallback {
                         self.editor_zoom_step_at_playhead(tab_idx, true);
                     }
@@ -415,7 +412,15 @@ impl super::WavesPreviewer {
                         .map(|t| t.preview_audio_tool.is_some() || t.preview_overlay.is_some())
                         .unwrap_or(false);
                     if has_preview && self.keymap_consume(ctx, Action::EditorCancelPreview) {
-                        self.clear_preview_if_any(tab_idx);
+                        let pencil_draft = self
+                            .tabs
+                            .get(tab_idx)
+                            .is_some_and(|tab| tab.pencil_draft.is_some());
+                        if pencil_draft {
+                            self.editor_pencil_cancel_draft(tab_idx);
+                        } else {
+                            self.clear_preview_if_any(tab_idx);
+                        }
                     }
                 }
             }
@@ -725,6 +730,22 @@ impl super::WavesPreviewer {
         }
         if !handled {
             if let Some(tab_idx) = self.active_tab {
+                let pencil_draft_active = self
+                    .tabs
+                    .get(tab_idx)
+                    .is_some_and(|tab| tab.pencil_draft.is_some());
+                if pencil_draft_active {
+                    let _changed = if redo {
+                        self.editor_pencil_redo_draft(tab_idx)
+                    } else {
+                        self.editor_pencil_undo_draft(tab_idx)
+                    };
+                    self.last_undo_scope = UndoScope::Editor;
+                    // While a Pencil draft exists, Ctrl+Z/Y belongs only to
+                    // its stroke history. Do not leak through to committed
+                    // editor history when the local stack reaches an end.
+                    return true;
+                }
                 self.clear_preview_if_any(tab_idx);
                 self.cancel_editor_apply_for_tab(tab_idx);
                 let changed = if redo {

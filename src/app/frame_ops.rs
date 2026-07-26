@@ -146,8 +146,14 @@ impl WavesPreviewer {
         self.run_startup_actions(ctx);
         self.debug_tick(ctx);
         self.drain_heavy_preview_results();
-        trace_stage!("drain_list_preview_results", self.drain_list_preview_results());
-        trace_stage!("drain_list_preview_prefetch_results", self.drain_list_preview_prefetch_results());
+        trace_stage!(
+            "drain_list_preview_results",
+            self.drain_list_preview_results()
+        );
+        trace_stage!(
+            "drain_list_preview_prefetch_results",
+            self.drain_list_preview_prefetch_results()
+        );
         self.drain_editor_decode();
         self.drain_heavy_overlay_results();
         self.drain_auto_trim_results();
@@ -388,7 +394,11 @@ impl WavesPreviewer {
                 self.pending_activate_kind = None;
                 self.pending_activate_ready = false;
                 self.playing_path = Some(p.clone());
-                if !self.apply_dirty_tab_audio_with_mode(&p) {
+                let visible_preview_activated = self
+                    .active_tab
+                    .filter(|&idx| self.tabs.get(idx).is_some_and(|tab| tab.path == p))
+                    .is_some_and(|idx| self.activate_visible_preview_audio_for_tab(idx));
+                if !visible_preview_activated && !self.apply_dirty_tab_audio_with_mode(&p) {
                     let mut used_tab_transport = false;
                     let source_time_sec = self.playback_current_source_time_sec();
                     if let Some(idx) = self.active_tab {

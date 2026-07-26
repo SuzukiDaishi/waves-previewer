@@ -831,7 +831,7 @@ impl crate::app::WavesPreviewer {
                 let _ = preview_tx.send((
                     path,
                     crate::app::types::ToolKind::SpectralWarp,
-                    mono,
+                    super::HeavyPreviewAudio::Mono(mono),
                     preview_gen,
                 ));
             }
@@ -964,7 +964,7 @@ impl crate::app::WavesPreviewer {
                 let _ = preview_tx.send((
                     path,
                     crate::app::types::ToolKind::SpectralBrush,
-                    mono,
+                    super::HeavyPreviewAudio::Mono(mono),
                     preview_gen,
                 ));
             }
@@ -1062,10 +1062,7 @@ impl crate::app::WavesPreviewer {
             fft_size: SPECTRAL_FFT_SIZE,
             sample_rate: sr,
             mag_per_channel,
-            learned_from_ms: (
-                s as f32 * 1000.0 / sr as f32,
-                e as f32 * 1000.0 / sr as f32,
-            ),
+            learned_from_ms: (s as f32 * 1000.0 / sr as f32, e as f32 * 1000.0 / sr as f32),
         };
         if let Some(tab) = self.tabs.get_mut(tab_idx) {
             tab.noise_profile = Some(profile);
@@ -1150,8 +1147,13 @@ impl crate::app::WavesPreviewer {
         let (preview_tx, preview_rx) = mpsc::channel::<super::HeavyPreviewMessage>();
         let (overlay_tx, overlay_rx) = mpsc::channel::<super::HeavyOverlayMessage>();
         std::thread::spawn(move || {
-            let processed =
-                Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
+            let processed = Self::denoise_processed_channels(
+                &channels,
+                &profile,
+                reduction_db,
+                strength,
+                range,
+            );
             let mono = crate::app::WavesPreviewer::mixdown_channels(&processed, samples_len);
             let timeline_len = processed.get(0).map(Vec::len).unwrap_or(samples_len).max(1);
             let overlay = crate::app::WavesPreviewer::preview_overlay_from_channels(
@@ -1170,7 +1172,7 @@ impl crate::app::WavesPreviewer {
                 let _ = preview_tx.send((
                     path,
                     crate::app::types::ToolKind::DeNoise,
-                    mono,
+                    super::HeavyPreviewAudio::Mono(mono),
                     preview_gen,
                 ));
             }
@@ -1211,8 +1213,13 @@ impl crate::app::WavesPreviewer {
         }
         let (tx, rx) = mpsc::channel::<crate::app::types::EditorApplyResult>();
         std::thread::spawn(move || {
-            let out =
-                Self::denoise_processed_channels(&channels, &profile, reduction_db, strength, range);
+            let out = Self::denoise_processed_channels(
+                &channels,
+                &profile,
+                reduction_db,
+                strength,
+                range,
+            );
             let len = out.get(0).map(Vec::len).unwrap_or(0);
             let (waveform_minmax, waveform_pyramid) =
                 crate::app::WavesPreviewer::build_editor_waveform_cache(&out, len);
@@ -1781,8 +1788,16 @@ mod tests {
         let reach = (sigma * 3.0).ceil() as usize + SPECTRAL_FFT_SIZE * 2;
         let seg_s = len / 2 - reach;
         let seg_e = len / 2 + reach;
-        assert_eq!(&out[..seg_s], &sig[..seg_s], "audio before the stamp changed");
-        assert_eq!(&out[seg_e..], &sig[seg_e..], "audio after the stamp changed");
+        assert_eq!(
+            &out[..seg_s],
+            &sig[..seg_s],
+            "audio before the stamp changed"
+        );
+        assert_eq!(
+            &out[seg_e..],
+            &sig[seg_e..],
+            "audio after the stamp changed"
+        );
     }
 
     #[test]
@@ -1800,9 +1815,14 @@ mod tests {
         let probe = len / 2 - 1_000..len / 2 + 1_000;
         let m1 = goertzel(&out1[probe.clone()], sr, 1_000.0);
         let m2 = goertzel(&out2[probe.clone()], sr, 1_000.0);
-        assert!(m2 < m1 * 0.7, "stacked stamps did not deepen the cut: {m2} vs {m1}");
+        assert!(
+            m2 < m1 * 0.7,
+            "stacked stamps did not deepen the cut: {m2} vs {m1}"
+        );
         // A huge stack clamps at MAX_BRUSH_CUT_DB instead of denormals.
-        let many: Vec<_> = (0..20).map(|_| brush_stamp(len / 2, 1_000.0, 40.0)).collect();
+        let many: Vec<_> = (0..20)
+            .map(|_| brush_stamp(len / 2, 1_000.0, 40.0))
+            .collect();
         let out_many = brush_channel_with_stamps(&sig, sr, &many);
         assert!(out_many.iter().all(|v| v.is_finite()));
     }
@@ -1830,8 +1850,8 @@ mod tests {
         // First half: noise only. Second half: noise + tone.
         let mut sig = noise.clone();
         for i in len / 2..len {
-            sig[i] += (2.0 * core::f32::consts::PI * 1_000.0 * i as f32 / sr as f32).sin()
-                * tone_amp;
+            sig[i] +=
+                (2.0 * core::f32::consts::PI * 1_000.0 * i as f32 / sr as f32).sin() * tone_amp;
         }
         // Learn on the noise-only first half.
         let profile = learn_noise_profile_channel(&sig, 4_800, len / 2 - 4_800);
@@ -1957,7 +1977,7 @@ mod tests {
         let mut damaged = clean.clone();
         let s = len / 2;
         let e = s + 4_800; // 100 ms
-        // Scatter hard clicks through the region.
+                           // Scatter hard clicks through the region.
         let mut i = s + 37;
         while i < e {
             damaged[i] = 1.0;
@@ -2052,12 +2072,7 @@ impl crate::app::WavesPreviewer {
             }
             let mut frames: Vec<Vec<realfft::num_complex::Complex<f32>>> = Vec::new();
             let _ = stft_process_frames(&ch[s..end], |_t, spec| {
-                frames.push(
-                    spec.iter()
-                        .zip(gains.iter())
-                        .map(|(c, g)| c * *g)
-                        .collect(),
-                );
+                frames.push(spec.iter().zip(gains.iter()).map(|(c, g)| c * *g).collect());
             });
             frames_per_ch.push(frames);
         }
@@ -2125,7 +2140,11 @@ impl crate::app::WavesPreviewer {
             }
             let undo_state = Self::capture_undo_state_labeled(
                 tab,
-                if add { "Spectral Paste (Add)" } else { "Spectral Paste" },
+                if add {
+                    "Spectral Paste (Add)"
+                } else {
+                    "Spectral Paste"
+                },
             );
             let sr = tab.buffer_sample_rate.max(1);
             let (lo, hi) = clip.freq_range;
@@ -2254,7 +2273,9 @@ pub(super) fn refine_peak_frequency(
     if ch.len() < 8 || sr == 0 || !clicked_hz.is_finite() || clicked_hz <= 0.0 {
         return None;
     }
-    let start = sample.saturating_sub(win / 2).min(ch.len().saturating_sub(1));
+    let start = sample
+        .saturating_sub(win / 2)
+        .min(ch.len().saturating_sub(1));
     let mut frame = vec![0.0f32; win];
     for (i, v) in frame.iter_mut().enumerate() {
         let idx = start + i;
@@ -2333,8 +2354,7 @@ impl crate::app::WavesPreviewer {
             if tab.tab_id != action.tab_id || tab.loading || tab.samples_len == 0 {
                 return false;
             }
-            let (s, e) =
-                Self::editor_valid_selection(tab).unwrap_or((0, tab.samples_len));
+            let (s, e) = Self::editor_valid_selection(tab).unwrap_or((0, tab.samples_len));
             let sr = tab.buffer_sample_rate.max(1);
             let undo_state = Self::capture_undo_state_labeled(
                 tab,
@@ -2344,9 +2364,7 @@ impl crate::app::WavesPreviewer {
                     "Harmonic Mute"
                 },
             );
-            let atten_lin = atten_db
-                .map(|d| 10f32.powf(-d.abs() / 20.0))
-                .unwrap_or(0.0);
+            let atten_lin = atten_db.map(|d| 10f32.powf(-d.abs() / 20.0)).unwrap_or(0.0);
             let gains = harmonic_band_gains(
                 SPECTRAL_FFT_SIZE,
                 sr,

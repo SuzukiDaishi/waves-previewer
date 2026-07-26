@@ -131,9 +131,17 @@ pub fn render_engine_export(profile: EngineProfile, entries: &[EngineExportEntry
                     "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{}\n",
                     e.stem,
                     e.path.display(),
-                    if e.loop_points.is_some() { "true" } else { "false" },
-                    e.loop_points.map(|(s, _)| s.to_string()).unwrap_or_default(),
-                    e.loop_points.map(|(_, en)| en.to_string()).unwrap_or_default(),
+                    if e.loop_points.is_some() {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                    e.loop_points
+                        .map(|(s, _)| s.to_string())
+                        .unwrap_or_default(),
+                    e.loop_points
+                        .map(|(_, en)| en.to_string())
+                        .unwrap_or_default(),
                     e.sample_rate,
                     e.channels,
                     e.length_sec,
@@ -184,10 +192,7 @@ impl crate::app::WavesPreviewer {
         if do_export {
             let profile = self.engine_export_profile;
             let Some(out_path) = rfd::FileDialog::new()
-                .set_file_name(format!(
-                    "engine_metadata.{}",
-                    profile.default_extension()
-                ))
+                .set_file_name(format!("engine_metadata.{}", profile.default_extension()))
                 .add_filter(profile.default_extension(), &[profile.default_extension()])
                 .save_file()
             else {
@@ -308,9 +313,18 @@ mod tests {
 
     #[test]
     fn cli_profile_names_resolve() {
-        assert_eq!(EngineProfile::from_cli_name("unity"), Some(EngineProfile::Unity));
-        assert_eq!(EngineProfile::from_cli_name("Wwise"), Some(EngineProfile::Wwise));
-        assert_eq!(EngineProfile::from_cli_name("FMOD"), Some(EngineProfile::Fmod));
+        assert_eq!(
+            EngineProfile::from_cli_name("unity"),
+            Some(EngineProfile::Unity)
+        );
+        assert_eq!(
+            EngineProfile::from_cli_name("Wwise"),
+            Some(EngineProfile::Wwise)
+        );
+        assert_eq!(
+            EngineProfile::from_cli_name("FMOD"),
+            Some(EngineProfile::Fmod)
+        );
         assert_eq!(EngineProfile::from_cli_name("unreal"), None);
     }
 }

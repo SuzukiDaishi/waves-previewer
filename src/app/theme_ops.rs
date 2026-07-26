@@ -952,7 +952,11 @@ zoo_flip_manual={}\n",
                 "0"
             },
             self.export_cfg.codec.dither_mode.prefs_name(),
-            if self.export_cfg.codec.dither_24bit { "1" } else { "0" },
+            if self.export_cfg.codec.dither_24bit {
+                "1"
+            } else {
+                "0"
+            },
             zoo_enabled,
             zoo_walk_enabled,
             zoo_voice_enabled,
@@ -996,11 +1000,7 @@ zoo_flip_manual={}\n",
         }
         {
             out.push_str("list_col_order=");
-            let names: Vec<&str> = self
-                .list_column_order
-                .iter()
-                .map(|c| c.name())
-                .collect();
+            let names: Vec<&str> = self.list_column_order.iter().map(|c| c.name()).collect();
             out.push_str(&names.join(","));
             out.push('\n');
         }

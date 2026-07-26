@@ -127,7 +127,11 @@ pub struct CachedAudioFacts {
 /// silence columns, so both features report the same numbers.
 pub const DEFAULT_SILENCE_THRESHOLD_DBFS: f32 = -60.0;
 
-pub fn scan_silence_ms(ch_samples: &[Vec<f32>], sample_rate: u32, threshold_dbfs: f32) -> (f32, f32) {
+pub fn scan_silence_ms(
+    ch_samples: &[Vec<f32>],
+    sample_rate: u32,
+    threshold_dbfs: f32,
+) -> (f32, f32) {
     let frames = ch_samples.iter().map(|c| c.len()).max().unwrap_or(0);
     let sr = sample_rate.max(1) as f32;
     if frames == 0 {
@@ -190,7 +194,11 @@ pub fn evaluate_checks(
     if cfg.check_true_peak {
         if let Some(tp) = effective_tp_db {
             if tp > cfg.tp_ceiling_db {
-                let kind_note = if tp_is_sample_peak { " (sample peak)" } else { "" };
+                let kind_note = if tp_is_sample_peak {
+                    " (sample peak)"
+                } else {
+                    ""
+                };
                 issues.push(InspectionIssue {
                     kind: InspectionIssueKind::TruePeakOver,
                     severity: IssueSeverity::Warning,
@@ -319,7 +327,7 @@ pub fn inspect_file(
         .unwrap_or_default();
 
     let mut lufs = cached.lufs_i;
-    let mut tp_db = cached.true_peak_db;
+    let tp_db = cached.true_peak_db;
     let mut sample_peak_db = cached.peak_db;
     let mut total_frames = cached.total_frames;
     let mut leading_ms = None;
@@ -483,8 +491,12 @@ pub fn write_batch_inspection_report(
                     fmt_opt(row.leading_silence_ms),
                     fmt_opt(row.trailing_silence_ms),
                     row.loop_status,
-                    row.loop_points.map(|(s, _)| s.to_string()).unwrap_or_default(),
-                    row.loop_points.map(|(_, e)| e.to_string()).unwrap_or_default(),
+                    row.loop_points
+                        .map(|(s, _)| s.to_string())
+                        .unwrap_or_default(),
+                    row.loop_points
+                        .map(|(_, e)| e.to_string())
+                        .unwrap_or_default(),
                     row.total_frames.map(|v| v.to_string()).unwrap_or_default(),
                     quote(&issues_summary(row)),
                 ));

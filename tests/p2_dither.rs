@@ -70,7 +70,13 @@ fn goertzel_power(x: &[f32], sr: f32, freq: f32) -> f64 {
 
 #[test]
 fn quantizer_off_matches_plain_symmetric_rounding() {
-    let mut q = Quantizer::new(32768.0, i16::MIN as f64, i16::MAX as f64, 2, DitherMode::Off);
+    let mut q = Quantizer::new(
+        32768.0,
+        i16::MIN as f64,
+        i16::MAX as f64,
+        2,
+        DitherMode::Off,
+    );
     for i in 0..20_000 {
         let v = ((i as f32) / 9_999.5 - 1.0) * 1.001; // sweep past full scale
         let expected = f32_to_i16_sym(v.clamp(-1.0, 1.0)) as i32;
@@ -164,7 +170,10 @@ fn noise_shaped_flac_two_pass_md5_stays_consistent() {
     }
     // Shaped noise has a higher peak than flat TPDF; allow a wider (but
     // still tiny) bound.
-    assert!(max_err < 8.0 * lsb, "flac roundtrip error too large: {max_err}");
+    assert!(
+        max_err < 8.0 * lsb,
+        "flac roundtrip error too large: {max_err}"
+    );
 
     set_codec_export_options(Default::default());
     let _ = std::fs::remove_dir_all(&dir);
@@ -249,7 +258,10 @@ fn dithered_flac_16bit_roundtrip_decodes_consistently() {
     for k in 0..n {
         max_err = max_err.max((decoded.0[0][k] - chans[0][k]).abs());
     }
-    assert!(max_err < 2.5 * lsb, "flac roundtrip error too large: {max_err}");
+    assert!(
+        max_err < 2.5 * lsb,
+        "flac roundtrip error too large: {max_err}"
+    );
 
     set_codec_export_options(Default::default());
     let _ = std::fs::remove_dir_all(&dir);

@@ -121,10 +121,7 @@ fn scan_snapshot(root: &Path, skip_dotfiles: bool) -> WatchSnapshot {
         let Ok(meta) = entry.metadata() else {
             continue;
         };
-        snap.insert(
-            entry.into_path(),
-            (meta.modified().ok(), meta.len()),
-        );
+        snap.insert(entry.into_path(), (meta.modified().ok(), meta.len()));
     }
     snap
 }
@@ -188,8 +185,7 @@ pub fn spawn_folder_watch(root: PathBuf, interval_ms: u64, skip_dotfiles: bool) 
                         .map(|t| t.elapsed() >= max_pending_age)
                         .unwrap_or(false);
                     if !pending.is_empty() && (quiet || overdue) {
-                        let mut batch: Vec<WatchEvent> =
-                            pending.drain().map(|(_, e)| e).collect();
+                        let mut batch: Vec<WatchEvent> = pending.drain().map(|(_, e)| e).collect();
                         batch.sort_by(|a, b| a.path().cmp(b.path()));
                         pending_since = None;
                         if tx.send(batch).is_err() {
@@ -258,9 +254,7 @@ impl crate::app::WavesPreviewer {
             (None, _) => !desired_active,
             (Some(_), None) => false,
             (Some(w), Some(root)) => {
-                desired_active
-                    && &w.root == root
-                    && w.interval_ms == self.watch_poll_interval_ms
+                desired_active && &w.root == root && w.interval_ms == self.watch_poll_interval_ms
             }
         };
         if !matches {
@@ -290,7 +284,9 @@ impl crate::app::WavesPreviewer {
             || self.bulk_resample_state.is_some()
             || self.batch_loudnorm_state.is_some()
             || self.inspection_run_state.is_some();
-        watch.suspend.store(busy, std::sync::atomic::Ordering::Relaxed);
+        watch
+            .suspend
+            .store(busy, std::sync::atomic::Ordering::Relaxed);
 
         let mut batches: Vec<Vec<WatchEvent>> = Vec::new();
         while let Ok(batch) = watch.rx.try_recv() {

@@ -237,7 +237,6 @@ pub fn similarity_with_offset(
     (frames_agreement(&a.frames, &b.frames), offset_ms)
 }
 
-
 /// Frame-hash similarity in [0, 1]: mean per-bit agreement over the
 /// overlapping frames. 0 when either fingerprint is empty, when the
 /// content-aligned hashes start at different times (differing lead trims),
@@ -344,9 +343,7 @@ pub fn cluster_duplicates_with_options(
             {
                 continue;
             }
-            if (fps[i].mean_band_centroid - fps[j].mean_band_centroid).abs()
-                > CENTROID_GATE_BANDS
-            {
+            if (fps[i].mean_band_centroid - fps[j].mean_band_centroid).abs() > CENTROID_GATE_BANDS {
                 continue;
             }
             let (sim, offset_ms) = if allow_offset {
@@ -409,11 +406,7 @@ pub fn cluster_duplicates_with_options(
     for g in &mut out {
         g.members.sort_unstable();
     }
-    out.sort_by(|a, b| {
-        b.exact
-            .cmp(&a.exact)
-            .then(a.members[0].cmp(&b.members[0]))
-    });
+    out.sort_by(|a, b| b.exact.cmp(&a.exact).then(a.members[0].cmp(&b.members[0])));
     out
 }
 
@@ -535,14 +528,21 @@ mod tests {
         // Clustering with offsets groups them and reports the offset.
         let unrelated = fingerprint_channels(&[content(99, (SR as f32 * 1.2) as usize)], SR);
         let fps = vec![fp_a.clone(), fp_b.clone(), unrelated];
-        let groups =
-            cluster_duplicates_with_options(&fps, SIMILARITY_THRESHOLD, true, MAX_SIMILAR_OFFSET_MS);
+        let groups = cluster_duplicates_with_options(
+            &fps,
+            SIMILARITY_THRESHOLD,
+            true,
+            MAX_SIMILAR_OFFSET_MS,
+        );
         assert_eq!(groups.len(), 1, "one similar group expected");
         assert_eq!(groups[0].members, vec![0, 1]);
         assert!(groups[0].max_offset_ms >= 200.0);
         // Without offsets the pair is not grouped.
         let plain = cluster_duplicates(&fps, SIMILARITY_THRESHOLD);
-        assert!(plain.is_empty(), "aligned clustering must miss the padded copy");
+        assert!(
+            plain.is_empty(),
+            "aligned clustering must miss the padded copy"
+        );
     }
 
     #[test]
@@ -559,5 +559,4 @@ mod tests {
         let copy = fingerprint_channels(&[sine(120.0, SR as usize, 0.5)], SR);
         assert!((copy.mean_band_centroid - low.mean_band_centroid).abs() < 1e-3);
     }
-
 }

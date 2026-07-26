@@ -105,12 +105,7 @@ impl WavesPreviewer {
                             if toast.count > 1 {
                                 text.push_str(&format!(" (x{})", toast.count));
                             }
-                            ui.label(
-                                egui::RichText::new(title)
-                                    .color(accent)
-                                    .small()
-                                    .strong(),
-                            );
+                            ui.label(egui::RichText::new(title).color(accent).small().strong());
                             ui.label(egui::RichText::new(text).small());
                         })
                         .response;

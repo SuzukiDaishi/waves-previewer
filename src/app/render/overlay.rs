@@ -52,8 +52,8 @@ pub fn waveform_amp_from_y(
     );
     let visible_half = visible_half_amplitude(zoom).max(f32::EPSILON);
     let center = clamped_vertical_view_center(zoom, vertical_view_center);
-    let normalized =
-        ((lane_rect.center().y - y) / (lane_rect.height() * 0.48).max(f32::EPSILON)).clamp(-1.0, 1.0);
+    let normalized = ((lane_rect.center().y - y) / (lane_rect.height() * 0.48).max(f32::EPSILON))
+        .clamp(-1.0, 1.0);
     center + normalized * visible_half
 }
 

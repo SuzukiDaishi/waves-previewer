@@ -109,25 +109,25 @@ mod list_id_clash_probe {
         }
     }
 
-
     #[test]
     fn detector_sanity_finds_intentional_clash() {
-        let mut harness = egui_kittest::Harness::new(|ctx| {
-            ctx.options_mut(|o| o.warn_on_id_clash = true);
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let id = egui::Id::new("dup");
-                let r1 = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(50.0, 20.0));
-                let r2 = egui::Rect::from_min_size(egui::pos2(10.0, 60.0), egui::vec2(50.0, 20.0));
-                let _ = ui.interact(r1, id, egui::Sense::click());
-                let _ = ui.interact(r2, id, egui::Sense::click());
-            });
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            ui.ctx().options_mut(|o| o.warn_on_id_clash = true);
+            let id = egui::Id::new("dup");
+            let r1 = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(50.0, 20.0));
+            let r2 = egui::Rect::from_min_size(egui::pos2(10.0, 60.0), egui::vec2(50.0, 20.0));
+            let _ = ui.interact(r1, id, egui::Sense::click());
+            let _ = ui.interact(r2, id, egui::Sense::click());
         });
         harness.run_steps(3);
         let mut out = Vec::new();
         for cs in &harness.output().shapes {
             collect_clash_text(&cs.shape, &mut out);
         }
-        assert!(!out.is_empty(), "detector failed to see an intentional id clash");
+        assert!(
+            !out.is_empty(),
+            "detector failed to see an intentional id clash"
+        );
     }
 
     // Regression for the "list turns red" bug: egui keeps separate
@@ -172,11 +172,7 @@ mod list_id_clash_probe {
         }
 
         // The debug heuristic must stay off in whatever slot is active.
-        let warn_flag = harness
-            .ctx
-            .global_style()
-            .debug
-            .warn_if_rect_changes_id;
+        let warn_flag = harness.ctx.global_style().debug.warn_if_rect_changes_id;
         assert!(
             !warn_flag,
             "warn_if_rect_changes_id re-enabled after a system theme flip \

@@ -1268,9 +1268,8 @@ mod tests {
         for i in 0..burst_len {
             let t = i as f32 / burst_len as f32;
             let idx = n - burst_len + i;
-            mismatched[idx] = (mismatched[idx] * (1.0 - t)
-                + 0.9 * t * ((i as f32 * 0.5).sin()))
-            .clamp(-1.0, 1.0);
+            mismatched[idx] =
+                (mismatched[idx] * (1.0 - t) + 0.9 * t * ((i as f32 * 0.5).sin())).clamp(-1.0, 1.0);
         }
         let mismatch_score = score_loop_boundary(&mismatched, 0, mismatched.len(), sr / 10, sr);
         assert!(

@@ -72,4 +72,3 @@ fn format_timestamp_ms(ms: u64) -> String {
     let ms = total_ms % 1000;
     format!("{m}:{s:02}.{ms:03}")
 }
-

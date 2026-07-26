@@ -119,7 +119,8 @@ fn encode_flac_file(path: &Path, meta: &FlacMeta) -> Result<()> {
             out.write_all(&block.payload)?;
         }
         // Stream-copy audio frames from the original file (never buffered whole).
-        let src = File::open(path).with_context(|| format!("open flac audio: {}", path.display()))?;
+        let src =
+            File::open(path).with_context(|| format!("open flac audio: {}", path.display()))?;
         let mut src = BufReader::new(src);
         src.seek(SeekFrom::Start(meta.audio_offset))?;
         std::io::copy(&mut src, &mut out)

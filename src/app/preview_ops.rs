@@ -2,10 +2,11 @@ impl super::WavesPreviewer {
     pub(super) fn drain_heavy_preview_results(&mut self) {
         if let Some(rx) = &self.heavy_preview_rx {
             match rx.try_recv() {
-                Ok((path, tool, mono, gen)) => {
+                Ok((path, tool, audio, gen)) => {
                     let expected_path = self.heavy_preview_expected_path.clone();
                     let expected_tool = self.heavy_preview_expected_tool;
                     let expected_gen = self.heavy_preview_expected_gen;
+                    let mut installed_tab = None;
                     if gen == expected_gen
                         && expected_tool == Some(tool)
                         && expected_path.as_deref() == Some(path.as_path())
@@ -24,9 +25,20 @@ impl super::WavesPreviewer {
                                 })
                                 .unwrap_or(false)
                             {
-                                self.set_preview_mono(idx, tool, mono);
+                                match audio {
+                                    super::HeavyPreviewAudio::Mono(mono) => {
+                                        self.set_preview_mono(idx, tool, mono);
+                                    }
+                                    super::HeavyPreviewAudio::Channels(channels) => {
+                                        self.set_preview_channels(idx, tool, channels);
+                                    }
+                                }
+                                installed_tab = Some(idx);
                             }
                         }
+                    }
+                    if let Some(idx) = installed_tab {
+                        self.finish_pending_preview_autoplay(idx, path.as_path(), tool);
                     }
                     self.clear_heavy_preview_state();
                 }

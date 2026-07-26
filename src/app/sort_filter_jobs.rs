@@ -83,9 +83,7 @@ impl WavesPreviewer {
                     .filter(|v| v.is_finite())
                     .map(|v| v as f64),
             ),
-            SortKey::Channels => {
-                OwnedKey::Num(m.map(|m| m.channels as f64).filter(|v| *v > 0.0))
-            }
+            SortKey::Channels => OwnedKey::Num(m.map(|m| m.channels as f64).filter(|v| *v > 0.0)),
             SortKey::SampleRate => OwnedKey::Num(
                 self.sample_rate_override
                     .get(&item.path)

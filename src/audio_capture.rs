@@ -138,8 +138,7 @@ fn build_input_stream(
             device.build_input_stream(
                 cfg,
                 move |data: &[i16], _| {
-                    let floats: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / 32768.0).collect();
+                    let floats: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
                     if t.try_send(floats).is_err() {
                         overruns.fetch_add(1, Ordering::Relaxed);
                     }

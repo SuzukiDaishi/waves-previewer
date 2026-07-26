@@ -86,8 +86,7 @@ impl WavesPreviewer {
                     self.list_scroll_residual -= whole;
                     let delta = whole as i64;
                     let cur = self.list_scroll_row as i64;
-                    self.list_scroll_row =
-                        (cur + delta).clamp(0, max_start as i64) as usize;
+                    self.list_scroll_row = (cur + delta).clamp(0, max_start as i64) as usize;
                 }
             }
         }
@@ -105,11 +104,7 @@ impl WavesPreviewer {
     /// Custom index-based scrollbar for the list. The thumb maps directly to
     /// `list_scroll_row` in f64, so it stays pixel-accurate at 1M rows where
     /// egui's own f32 scroll offsets quantize.
-    pub(super) fn ui_list_scrollbar(
-        &mut self,
-        ui: &mut egui::Ui,
-        metrics: &ListViewMetrics,
-    ) {
+    pub(super) fn ui_list_scrollbar(&mut self, ui: &mut egui::Ui, metrics: &ListViewMetrics) {
         let total = self.files.len();
         let visible = metrics.visible_rows.max(1);
         if total <= visible {
@@ -118,7 +113,10 @@ impl WavesPreviewer {
         const BAR_W: f32 = 12.0;
         let list_rect = metrics.list_rect;
         let bar_rect = egui::Rect::from_min_max(
-            egui::pos2(list_rect.right() - BAR_W, list_rect.top() + metrics.header_h),
+            egui::pos2(
+                list_rect.right() - BAR_W,
+                list_rect.top() + metrics.header_h,
+            ),
             list_rect.right_bottom(),
         );
         let id = ui.id().with("list_vscroll_custom");
@@ -129,8 +127,8 @@ impl WavesPreviewer {
         let denom = (total - visible) as f64;
         if (resp.dragged() || resp.clicked()) && denom > 0.0 {
             if let Some(pos) = resp.interact_pointer_pos() {
-                let frac = ((pos.y - bar_rect.top() - thumb_h * 0.5)
-                    / (track_h - thumb_h).max(1.0)) as f64;
+                let frac = ((pos.y - bar_rect.top() - thumb_h * 0.5) / (track_h - thumb_h).max(1.0))
+                    as f64;
                 let row = (frac.clamp(0.0, 1.0) * denom).round() as usize;
                 self.list_scroll_row = row.min(total - visible);
                 self.last_list_scroll_at = Some(std::time::Instant::now());
@@ -143,11 +141,8 @@ impl WavesPreviewer {
         };
         let thumb_top = bar_rect.top() + frac as f32 * (track_h - thumb_h).max(0.0);
         let visuals = ui.style().visuals.clone();
-        ui.painter().rect_filled(
-            bar_rect,
-            0.0,
-            visuals.extreme_bg_color.gamma_multiply(0.5),
-        );
+        ui.painter()
+            .rect_filled(bar_rect, 0.0, visuals.extreme_bg_color.gamma_multiply(0.5));
         let thumb_rect = egui::Rect::from_min_max(
             egui::pos2(bar_rect.left() + 2.0, thumb_top),
             egui::pos2(bar_rect.right() - 2.0, thumb_top + thumb_h),
@@ -198,8 +193,7 @@ impl WavesPreviewer {
                 }
                 C::External => {
                     for _ in 0..metrics.external_cols.len() {
-                        table =
-                            table.column(egui_extras::Column::initial(140.0).resizable(true));
+                        table = table.column(egui_extras::Column::initial(140.0).resizable(true));
                         filler_cols += 1;
                     }
                 }

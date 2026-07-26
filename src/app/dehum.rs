@@ -229,8 +229,7 @@ mod tests {
             let drop = db(goertzel_power(a, SR, hum)) - db(goertzel_power(b, SR, hum));
             assert!(drop >= 30.0, "{hum} Hz only dropped {drop:.1} dB");
         }
-        let content_change =
-            db(goertzel_power(a, SR, 1000.0)) - db(goertzel_power(b, SR, 1000.0));
+        let content_change = db(goertzel_power(a, SR, 1000.0)) - db(goertzel_power(b, SR, 1000.0));
         assert!(
             content_change.abs() < 0.5,
             "1 kHz content moved {content_change:.2} dB"

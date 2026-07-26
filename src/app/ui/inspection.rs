@@ -164,10 +164,9 @@ impl crate::app::WavesPreviewer {
                         ToastSeverity::Info,
                         format!("Inspection report saved: {}", path.display()),
                     ),
-                    Err(err) => self.push_toast(
-                        ToastSeverity::Error,
-                        format!("Report save failed: {err}"),
-                    ),
+                    Err(err) => {
+                        self.push_toast(ToastSeverity::Error, format!("Report save failed: {err}"))
+                    }
                 }
             }
         }
@@ -185,7 +184,12 @@ impl crate::app::WavesPreviewer {
         };
         let mut clicked = false;
         let resp = ui.horizontal(|ui| {
-            ui.label(RichText::new(sev_text).color(sev_color).monospace().strong());
+            ui.label(
+                RichText::new(sev_text)
+                    .color(sev_color)
+                    .monospace()
+                    .strong(),
+            );
             let name = ui.add(
                 egui::Label::new(RichText::new(&row.file).monospace())
                     .sense(egui::Sense::click())

@@ -310,6 +310,18 @@ mod kittest_suite {
         harness_with_folder(dir)
     }
 
+    fn harness_with_long_editor_fixture() -> Harness<'static, WavesPreviewer> {
+        let dir = make_temp_dir("long_editor_fixture");
+        let sr = 48_000;
+        // Keep this just above LIVE_PREVIEW_SAMPLE_LIMIT so the simplified
+        // long-clip preview path is exercised without a needlessly large file.
+        let chans = synth_stereo(sr, 42.0);
+        let path = dir.join("long_editor_fixture.wav");
+        neowaves::wave::export_channels_audio(&chans, sr, &path)
+            .unwrap_or_else(|e| panic!("export long editor fixture failed: {e}"));
+        harness_with_folder(dir)
+    }
+
     fn harness_with_auto_trim_sections_fixture() -> Harness<'static, WavesPreviewer> {
         let dir = make_temp_dir("auto_trim_sections_fixture");
         let sr = 48_000;
@@ -329,6 +341,33 @@ mod kittest_suite {
             .as_ref()
             .map(|b| b.len())
             .unwrap_or(0)
+    }
+
+    fn audio_buffer_peak(state: &WavesPreviewer) -> f32 {
+        state
+            .audio
+            .shared
+            .samples
+            .load_full()
+            .map(|buffer| {
+                buffer
+                    .channels
+                    .iter()
+                    .flat_map(|channel| channel.iter())
+                    .fold(0.0_f32, |peak, &sample| peak.max(sample.abs()))
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn active_tab_peak(state: &WavesPreviewer) -> f32 {
+        let Some(tab_idx) = state.active_tab else {
+            return 0.0;
+        };
+        state.tabs[tab_idx]
+            .ch_samples
+            .iter()
+            .flat_map(|channel| channel.iter())
+            .fold(0.0_f32, |peak, &sample| peak.max(sample.abs()))
     }
 
     fn harness_empty() -> Harness<'static, WavesPreviewer> {
@@ -409,6 +448,27 @@ mod kittest_suite {
             }
             if start.elapsed() > TAB_READY_TIMEOUT {
                 panic!("tab decode timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_tab_fully_loaded(harness: &mut Harness<'static, WavesPreviewer>) {
+        let start = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if let Some(idx) = harness.state().active_tab {
+                if harness
+                    .state()
+                    .tabs
+                    .get(idx)
+                    .is_some_and(|tab| !tab.loading && tab.samples_len > 0)
+                {
+                    break;
+                }
+            }
+            if start.elapsed() > TAB_READY_TIMEOUT {
+                panic!("full tab decode timeout");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -694,6 +754,63 @@ mod kittest_suite {
         (wave_right - wave_w + 8.0).max(8.0)
     }
 
+    fn editor_wave_lane_rect(
+        harness: &Harness<'static, WavesPreviewer>,
+        lane_index: usize,
+        lane_count: usize,
+    ) -> egui::Rect {
+        let nav = harness
+            .state()
+            .test_tab_amplitude_nav_rect()
+            .expect("amplitude navigator for Pencil lane");
+        let top = nav.top() - 10.0;
+        let bottom = nav.bottom() + 10.0;
+        let lane_h = (bottom - top) / lane_count.max(1) as f32;
+        egui::Rect::from_min_max(
+            egui::pos2(editor_wave_left(harness), top + lane_h * lane_index as f32),
+            egui::pos2(
+                editor_wave_left(harness) + editor_wave_width(harness),
+                top + lane_h * (lane_index + 1) as f32,
+            ),
+        )
+    }
+
+    fn editor_pencil_point_pos(
+        harness: &Harness<'static, WavesPreviewer>,
+        sample: usize,
+        channel: usize,
+        lane_index: usize,
+        lane_count: usize,
+    ) -> egui::Pos2 {
+        let tab_idx = harness.state().active_tab.expect("active Pencil tab");
+        let tab = &harness.state().tabs[tab_idx];
+        let lane = editor_wave_lane_rect(harness, lane_index, lane_count);
+        let overlay = tab
+            .preview_overlay
+            .as_ref()
+            .expect("Pencil preview overlay");
+        let amp = overlay.channels[channel][sample];
+        let gain_scale = 10.0f32.powf(harness.state().test_pending_gain_db(&tab.path) / 20.0);
+        let zoom = tab.vertical_zoom.max(1.0);
+        let visible_half = 1.0 / zoom;
+        let center_limit = (1.0 - visible_half).max(0.0);
+        let center = if zoom <= 1.0 {
+            0.0
+        } else {
+            tab.vertical_view_center.clamp(-center_limit, center_limit)
+        };
+        let normalized =
+            (((amp * gain_scale).clamp(-1.0, 1.0) - center) / visible_half).clamp(-1.0, 1.0);
+        let x_offset = harness
+            .state()
+            .test_editor_display_sample_x_offset(sample)
+            .expect("Pencil sample x offset");
+        egui::pos2(
+            editor_wave_left(harness) + x_offset,
+            lane.center().y - normalized * lane.height() * 0.48,
+        )
+    }
+
     fn editor_canvas_pos_at_x_offset(
         harness: &Harness<'static, WavesPreviewer>,
         x_offset: f32,
@@ -937,6 +1054,36 @@ mod kittest_suite {
         harness.run_steps(2);
     }
 
+    fn editor_pointer_drag_with_modifiers(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        start: egui::Pos2,
+        end: egui::Pos2,
+        modifiers: Modifiers,
+    ) {
+        harness.hover_at(start);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers,
+            },
+            modifiers,
+        );
+        harness.event_modifiers(egui::Event::PointerMoved(end), modifiers);
+        harness.run_steps(2);
+        harness.event_modifiers(
+            egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            },
+            modifiers,
+        );
+        harness.run_steps(2);
+    }
+
     fn editor_amplitude_nav_center_drag(harness: &mut Harness<'static, WavesPreviewer>, dy: f32) {
         let start = editor_amplitude_nav_viewport_rect(harness).center();
         let end = egui::pos2(start.x, start.y + dy);
@@ -998,6 +1145,27 @@ mod kittest_suite {
         harness.run_steps(2);
     }
 
+    fn editor_primary_click_at_pos(
+        harness: &mut Harness<'static, WavesPreviewer>,
+        pos: egui::Pos2,
+    ) {
+        harness.hover_at(pos);
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(2);
+    }
+
     fn top_menu_button<'a>(
         harness: &'a Harness<'static, WavesPreviewer>,
         label: &'a str,
@@ -1014,6 +1182,22 @@ mod kittest_suite {
             })
             .unwrap_or_else(|| panic!("Top menu button '{label}' not found"));
         node
+    }
+
+    fn rightmost_labeled_control<'a>(
+        harness: &'a Harness<'static, WavesPreviewer>,
+        label: &'a str,
+    ) -> egui_kittest::Node<'a> {
+        harness
+            .query_all_by_label(label)
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|| panic!("rightmost control '{label}' not found"))
     }
 
     fn first_label_rect(harness: &Harness<'static, WavesPreviewer>, label: &str) -> egui::Rect {
@@ -1540,30 +1724,76 @@ mod kittest_suite {
     }
 
     #[test]
-    fn inspector_activity_slot_does_not_move_range_or_tool_picker() {
+    fn inspector_controls_stay_fixed_when_activity_changes() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::Normalize));
         harness.run_steps(3);
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "inspector_controls_idle.png");
+        let inspector = first_label_rect(&harness, "Inspector");
+        let undo = first_label_rect(&harness, "Undo");
         let range_before = first_label_rect(&harness, "Range: -");
         let tool_before = first_label_rect(&harness, "🔁");
+        let preview_before = first_label_rect(&harness, "Preview");
+        let apply_before = first_label_rect(&harness, "Apply");
+        assert!(
+            undo.top() - inspector.bottom() < 40.0,
+            "idle inspector should not reserve an empty activity slot: inspector={inspector:?} undo={undo:?}"
+        );
 
         assert!(harness
             .state_mut()
             .test_set_mock_active_tab_processing("Rendering preview..."));
         harness.run_steps(3);
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "inspector_controls_processing.png");
 
         assert_rect_nearly_same(
             range_before,
             first_label_rect(&harness, "Range: -"),
-            "range row",
+            "range row during processing",
         );
         assert_rect_nearly_same(
             tool_before,
             first_label_rect(&harness, "🔁"),
-            "tool picker",
+            "tool picker during processing",
+        );
+        assert_rect_nearly_same(
+            preview_before,
+            first_label_rect(&harness, "Preview"),
+            "Preview button during processing",
+        );
+        assert_rect_nearly_same(
+            apply_before,
+            first_label_rect(&harness, "Apply"),
+            "Apply button during processing",
         );
         harness.state_mut().test_clear_mock_processing();
+        harness.run_steps(3);
+        assert_rect_nearly_same(
+            range_before,
+            first_label_rect(&harness, "Range: -"),
+            "range row after processing",
+        );
+        assert_rect_nearly_same(
+            tool_before,
+            first_label_rect(&harness, "🔁"),
+            "tool picker after processing",
+        );
+        assert_rect_nearly_same(
+            preview_before,
+            first_label_rect(&harness, "Preview"),
+            "Preview button after processing",
+        );
+        assert_rect_nearly_same(
+            apply_before,
+            first_label_rect(&harness, "Apply"),
+            "Apply button after processing",
+        );
     }
 
     #[test]
@@ -2720,7 +2950,10 @@ mod kittest_suite {
             peak_channels, n_ch,
             "peak meter should track one bar per channel"
         );
-        assert!((-1.0..=1.0).contains(&corr), "correlation must stay in [-1, 1]");
+        assert!(
+            (-1.0..=1.0).contains(&corr),
+            "correlation must stay in [-1, 1]"
+        );
     }
 
     #[test]
@@ -3099,6 +3332,27 @@ mod kittest_suite {
         assert!(harness.state().test_marker_count() >= 2);
         assert!(harness.state_mut().test_clear_markers());
         assert_eq!(harness.state().test_marker_count(), 0);
+    }
+
+    #[test]
+    fn marker_inspector_is_apply_only_without_preview() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Markers));
+        harness.run_steps(3);
+
+        assert!(
+            harness.query_all_by_label("Preview").next().is_none(),
+            "Markers are metadata edits and must not expose Preview"
+        );
+        assert!(
+            harness.query_all_by_label("Apply").next().is_some(),
+            "Markers must retain Apply"
+        );
+
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "markers_apply_only.png");
     }
 
     #[test]
@@ -4438,11 +4692,17 @@ mod kittest_suite {
             .state()
             .test_tab_samples_per_px()
             .expect("spp equals");
-        assert!(spp_eq < spp_in, "= should also zoom in: in={spp_in} eq={spp_eq}");
+        assert!(
+            spp_eq < spp_in,
+            "= should also zoom in: in={spp_in} eq={spp_eq}"
+        );
         harness.key_press(Key::Minus);
         harness.run_steps(3);
         let spp_out = harness.state().test_tab_samples_per_px().expect("spp out");
-        assert!(spp_out > spp_eq, "- should zoom out: eq={spp_eq} out={spp_out}");
+        assert!(
+            spp_out > spp_eq,
+            "- should zoom out: eq={spp_eq} out={spp_out}"
+        );
         // Page keys shift the view one visible width at a time.
         for _ in 0..8 {
             harness.key_press(Key::Plus);
@@ -4856,7 +5116,6 @@ mod kittest_suite {
 
     #[test]
     fn editor_apply_gain_rebuilds_waveform_cache() {
-
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
@@ -5049,7 +5308,7 @@ mod kittest_suite {
         assert!(harness.state_mut().test_set_selection_frac(0.20, 0.60));
         harness.run_steps(2);
 
-        harness.get_by_label("Set").click();
+        harness.get_by_label("Preview").click();
         harness.run_steps(2);
         assert_eq!(
             harness.state().tabs[tab_idx].preview_audio_tool,
@@ -5412,7 +5671,7 @@ mod kittest_suite {
     }
 
     #[test]
-    fn editor_normalize_preview_button_restores_overlay() {
+    fn editor_normalize_preview_and_apply_buttons_hit_target_peak() {
         let mut harness = harness_with_editor_fixture();
         wait_for_scan(&mut harness);
         ensure_editor_ready(&mut harness);
@@ -5420,8 +5679,48 @@ mod kittest_suite {
         assert!(harness
             .state_mut()
             .test_set_active_tool(ToolKind::Normalize));
-        assert!(harness.state_mut().test_set_tool_normalize_target_db(-3.0));
-        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        harness.run_steps(2);
+
+        let source_peak = active_tab_peak(harness.state());
+        assert!(
+            (source_peak - 0.30).abs() < 0.01,
+            "fixture peak should make normalization observable: {source_peak}"
+        );
+
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_buffer_transport(48_000));
+        let source_meter_pos = audio_buffer_len(harness.state()) / 2;
+        harness
+            .state_mut()
+            .test_audio_seek_to_sample(source_meter_pos);
+        harness.state_mut().test_set_audio_playing_flag(true);
+        harness.run_steps(3);
+        let source_audio_pos = harness.state().test_audio_play_pos();
+        let source_display_pos = harness
+            .state()
+            .test_audio_play_pos_display()
+            .expect("source display playhead");
+        assert!(
+            source_audio_pos > source_meter_pos / 2 && source_display_pos > source_meter_pos / 2,
+            "source playhead should stay near the meter fixture midpoint: audio={source_audio_pos} display={source_display_pos}"
+        );
+        let tab_idx = harness.state().active_tab.expect("active editor tab");
+        let source_meter_peak = harness.state().tabs[tab_idx]
+            .mini_meter
+            .peak_hold_db
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (source_meter_peak - 20.0 * source_peak.log10()).abs() < 0.5,
+            "source Mini Meter should follow the editor samples: {source_meter_peak} dB"
+        );
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "normalize_meter_source.png");
+        harness.state_mut().test_set_audio_playing_flag(false);
+
+        harness.get_by_label("Preview").click();
         wait_for_preview_tool(&mut harness, ToolKind::Normalize, true);
 
         assert_eq!(
@@ -5432,6 +5731,414 @@ mod kittest_suite {
             harness.state().test_preview_overlay_tool(),
             Some(ToolKind::Normalize)
         );
+        let target_peak = 10.0_f32.powf(-6.0 / 20.0);
+        assert!(
+            (audio_buffer_peak(harness.state()) - target_peak).abs() < 0.002,
+            "Preview audio should peak at -6 dBFS"
+        );
+        let preview_meter_pos = audio_buffer_len(harness.state()) / 2;
+        harness
+            .state_mut()
+            .test_audio_seek_to_sample(preview_meter_pos);
+        harness.state_mut().test_set_audio_playing_flag(true);
+        harness.run_steps(3);
+        let preview_meter_peak = harness.state().tabs[tab_idx]
+            .mini_meter
+            .peak_hold_db
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (preview_meter_peak + 6.0).abs() < 0.5,
+            "Preview Mini Meter should analyze the normalized audition buffer: {preview_meter_peak} dB"
+        );
+        assert!(
+            preview_meter_peak > source_meter_peak + 3.5,
+            "Preview Mini Meter must visibly differ from the source: source={source_meter_peak} preview={preview_meter_peak}"
+        );
+
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "normalize_preview.png");
+        harness.state_mut().test_set_audio_playing_flag(false);
+
+        harness.get_by_label("Apply").click();
+        harness.run_steps(3);
+
+        assert!(harness.state().test_tab_dirty());
+        assert_eq!(harness.state().test_preview_audio_tool(), None);
+        assert_eq!(harness.state().test_preview_overlay_tool(), None);
+        assert!(
+            (active_tab_peak(harness.state()) - target_peak).abs() < 0.002,
+            "Apply should write -6 dBFS samples into the editor tab"
+        );
+        assert!(
+            (audio_buffer_peak(harness.state()) - target_peak).abs() < 0.002,
+            "Apply should update the playback buffer"
+        );
+
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "normalize_applied.png");
+    }
+
+    #[test]
+    fn editor_play_uses_visible_green_preview_audio_after_source_restore() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::Normalize));
+        harness.run_steps(2);
+        harness.get_by_label("Preview").click();
+        wait_for_preview_tool(&mut harness, ToolKind::Normalize, true);
+        assert!(harness.state().test_visible_preview_audio_is_retained());
+
+        // Simulate a later transport/tab activation restoring source audio
+        // while the green Preview overlay remains visible.
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_buffer_transport(48_000));
+        harness.state_mut().test_set_audio_playing_flag(false);
+        harness.run_steps(2);
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Normalize)
+        );
+        assert!(!harness.state().test_playback_source_is_tool_preview());
+        let source_peak = audio_buffer_peak(harness.state());
+        assert!(
+            (source_peak - 0.30).abs() < 0.01,
+            "fixture source should be active before Play: {source_peak}"
+        );
+
+        #[cfg(feature = "kittest_render")]
+        {
+            let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("debug")
+                .join("screenshot_verify")
+                .join("preview_playback");
+            std::fs::create_dir_all(&out_dir).expect("create preview playback screenshot dir");
+            harness
+                .render()
+                .expect("render stopped green preview")
+                .save(out_dir.join("green_preview_source_stopped.png"))
+                .expect("save stopped green preview");
+        }
+
+        harness.state_mut().test_request_workspace_play_toggle();
+        harness.run_steps(3);
+
+        assert!(harness.state().test_audio_is_playing());
+        assert!(harness.state().test_playback_source_is_tool_preview());
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Normalize)
+        );
+        let target_peak = 10.0_f32.powf(-6.0 / 20.0);
+        assert!(
+            (audio_buffer_peak(harness.state()) - target_peak).abs() < 0.002,
+            "Play must reactivate the normalized buffer represented by the green waveform"
+        );
+
+        #[cfg(feature = "kittest_render")]
+        {
+            harness.get_by_label("Playing");
+            let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("debug")
+                .join("screenshot_verify")
+                .join("preview_playback");
+            harness
+                .render()
+                .expect("render playing green preview")
+                .save(out_dir.join("green_preview_playing.png"))
+                .expect("save playing green preview");
+        }
+    }
+
+    #[test]
+    fn editor_long_normalize_default_target_builds_simplified_preview() {
+        let mut harness = harness_with_long_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        wait_for_tab_fully_loaded(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::Normalize));
+        harness.run_steps(2);
+        harness.get_by_label("Preview").click();
+        for frame in 0..12 {
+            harness.run_steps(1);
+            if harness.state().test_preview_busy_for_active_tab() {
+                assert!(
+                    harness.state().test_preview_audio_tool() == Some(ToolKind::Normalize)
+                        || harness.state().test_preview_overlay_tool() == Some(ToolKind::Normalize),
+                    "Normalize preview disappeared while rebuilding on frame {frame}"
+                );
+            }
+        }
+        wait_for_preview_tool(&mut harness, ToolKind::Normalize, true);
+
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Normalize),
+            "the default -6 dB target must not be treated as a no-op"
+        );
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+        let target_peak = 10.0_f32.powf(-6.0 / 20.0);
+        assert!(
+            (audio_buffer_peak(harness.state()) - target_peak).abs() < 0.002,
+            "long-clip Preview should provide normalized audition audio"
+        );
+
+        assert!(harness.state_mut().test_set_tool_normalize_target_db(-9.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        for frame in 0..12 {
+            assert_eq!(
+                harness.state().test_preview_overlay_tool(),
+                Some(ToolKind::Normalize),
+                "the previous Normalize overlay must remain visible during rebuild frame {frame}"
+            );
+            harness.run_steps(1);
+        }
+        wait_for_preview_idle(&mut harness);
+        let rebuilt_peak = 10.0_f32.powf(-9.0 / 20.0);
+        assert!(
+            (audio_buffer_peak(harness.state()) - rebuilt_peak).abs() < 0.002,
+            "replacement Normalize preview should adopt the new target"
+        );
+
+        assert!(harness.state_mut().test_set_tool_normalize_target_db(-6.0));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Normalize),
+            "the replacement overlay must stay visible while restoring the target"
+        );
+        wait_for_preview_idle(&mut harness);
+        #[cfg(feature = "kittest_render")]
+        render_ui_stability_png(&mut harness, "normalize_long_preview.png");
+
+        harness.get_by_label("Apply").click();
+        harness.run_steps(3);
+        assert!(harness.state().test_tab_dirty());
+        assert!(
+            (active_tab_peak(harness.state()) - target_peak).abs() < 0.002,
+            "long-clip Apply should write -6 dBFS samples into the editor tab"
+        );
+        assert!(
+            (audio_buffer_peak(harness.state()) - target_peak).abs() < 0.002,
+            "long-clip Apply should update the playback buffer"
+        );
+    }
+
+    #[test]
+    fn editor_long_gain_curve_green_preview_has_matching_audio() {
+        let mut harness = harness_with_long_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        wait_for_tab_fully_loaded(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness
+            .state_mut()
+            .test_set_gain_curve(true, &[(0.0, -12.0), (1.0, 6.0)]));
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
+        wait_for_preview_idle(&mut harness);
+
+        assert!(harness.state().test_preview_overlay_is_overview_only());
+        assert!(harness.state().test_visible_preview_audio_is_retained());
+        assert!(harness.state().test_playback_source_is_tool_preview());
+        assert!(
+            audio_buffer_peak(harness.state()) > 0.5,
+            "long Gain-curve Preview audio should follow the +6 dB end of the visible curve"
+        );
+    }
+
+    #[test]
+    fn editor_long_gain_curve_play_waits_for_matching_preview_audio() {
+        let mut harness = harness_with_long_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        wait_for_tab_fully_loaded(&mut harness);
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness
+            .state_mut()
+            .test_set_gain_curve(true, &[(0.0, -12.0), (1.0, 6.0)]));
+        harness.run_steps(2);
+
+        #[cfg(feature = "kittest_render")]
+        {
+            let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("debug")
+                .join("screenshot_verify")
+                .join("gain_curve_playback");
+            std::fs::create_dir_all(&out_dir).expect("create Gain playback screenshot dir");
+            harness
+                .render()
+                .expect("render Gain curve before Preview and Play")
+                .save(out_dir.join("gain_curve_before_preview_play.png"))
+                .expect("save Gain curve before Preview and Play");
+        }
+
+        assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+        assert!(
+            harness.state().test_preview_busy_for_active_tab(),
+            "long Gain-curve Preview should still be rendering before the immediate Play request"
+        );
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "Play must wait instead of auditioning the unprocessed source while Preview is rendering"
+        );
+
+        wait_for_preview_tool(&mut harness, ToolKind::Gain, true);
+        wait_for_preview_idle(&mut harness);
+
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "the requested audition should start automatically when the matching Preview is ready"
+        );
+        assert!(harness.state().test_playback_source_is_tool_preview());
+        assert!(
+            audio_buffer_peak(harness.state()) > 0.5,
+            "autoplay must use the processed Gain-curve buffer"
+        );
+
+        #[cfg(feature = "kittest_render")]
+        {
+            harness.get_by_label("Playing");
+            let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("debug")
+                .join("screenshot_verify")
+                .join("gain_curve_playback");
+            harness
+                .render()
+                .expect("render playing Gain preview")
+                .save(out_dir.join("gain_curve_preview_playing.png"))
+                .expect("save playing Gain preview");
+        }
+    }
+
+    #[test]
+    fn editor_non_gain_background_previews_wait_for_processed_audio_before_playing() {
+        for tool in [ToolKind::PitchShift, ToolKind::TimeStretch, ToolKind::Speed] {
+            let mut harness = harness_with_dynamic_editor_fixture();
+            harness.set_size(egui::vec2(1600.0, 900.0));
+            wait_for_scan(&mut harness);
+            ensure_editor_ready(&mut harness);
+
+            assert!(harness.state_mut().test_set_active_tool(tool));
+            match tool {
+                ToolKind::PitchShift => {
+                    assert!(harness
+                        .state_mut()
+                        .test_set_pitch_curve(true, &[(0.0, -5.0), (0.5, 7.0), (1.0, 3.0)],));
+                }
+                ToolKind::TimeStretch => {
+                    assert!(harness.state_mut().test_set_tool_stretch_rate(1.35));
+                }
+                ToolKind::Speed => {
+                    assert!(harness.state_mut().test_set_tool_speed_rate(0.72));
+                }
+                _ => unreachable!(),
+            }
+            harness.run_steps(2);
+
+            #[cfg(feature = "kittest_render")]
+            if tool == ToolKind::PitchShift {
+                let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("debug")
+                    .join("screenshot_verify")
+                    .join("non_gain_preview_playback");
+                std::fs::create_dir_all(&out_dir).expect("create non-Gain playback screenshot dir");
+                harness
+                    .render()
+                    .expect("render Pitch curve before Preview and Play")
+                    .save(out_dir.join("pitch_curve_before_preview_play.png"))
+                    .expect("save Pitch curve before Preview and Play");
+            }
+
+            assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+            assert!(
+                harness.state().test_preview_busy_for_active_tab(),
+                "{tool:?} should have a background Preview in flight"
+            );
+            harness.state_mut().test_request_workspace_play_toggle();
+            assert!(
+                !harness.state().test_audio_is_playing(),
+                "{tool:?} must not play the unprocessed source while Preview is rendering"
+            );
+
+            wait_for_preview_tool(&mut harness, tool, true);
+            wait_for_preview_idle(&mut harness);
+            assert!(
+                harness.state().test_audio_is_playing(),
+                "{tool:?} should start automatically with its completed Preview"
+            );
+            assert!(harness.state().test_playback_source_is_tool_preview());
+            assert_eq!(harness.state().test_preview_audio_tool(), Some(tool));
+            assert_eq!(harness.state().test_preview_overlay_tool(), Some(tool));
+            assert!(harness.state().test_visible_preview_audio_is_retained());
+            assert!(
+                audio_buffer_peak(harness.state()) > 0.01,
+                "{tool:?} Preview should install non-silent processed audio"
+            );
+
+            #[cfg(feature = "kittest_render")]
+            if tool == ToolKind::PitchShift {
+                harness.get_by_label("Playing");
+                let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("debug")
+                    .join("screenshot_verify")
+                    .join("non_gain_preview_playback");
+                harness
+                    .render()
+                    .expect("render playing Pitch Preview")
+                    .save(out_dir.join("pitch_curve_preview_playing.png"))
+                    .expect("save playing Pitch Preview");
+            }
+        }
+    }
+
+    #[test]
+    fn editor_music_analyze_preview_waits_for_processed_audio_before_playing() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::MusicAnalyze));
+        assert!(harness
+            .state_mut()
+            .test_set_music_analysis_result_mock(true));
+        assert!(harness.state_mut().test_set_mock_music_stems_audio(0.08));
+        harness.run_steps(2);
+
+        assert!(harness
+            .state_mut()
+            .test_apply_music_preview_mix_active_tab());
+        assert!(harness.state().test_preview_busy_for_active_tab());
+        harness.state_mut().test_request_workspace_play_toggle();
+        assert!(
+            !harness.state().test_audio_is_playing(),
+            "Music Analyze must wait for its processed mix instead of playing the source"
+        );
+
+        wait_for_preview_tool(&mut harness, ToolKind::MusicAnalyze, true);
+        wait_for_preview_idle(&mut harness);
+        assert!(harness.state().test_audio_is_playing());
+        assert!(harness.state().test_playback_source_is_tool_preview());
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::MusicAnalyze)
+        );
+        assert!(harness.state().test_visible_preview_audio_is_retained());
     }
 
     #[test]
@@ -5453,6 +6160,39 @@ mod kittest_suite {
             harness.state().test_preview_overlay_tool(),
             Some(ToolKind::Fade)
         );
+    }
+
+    #[test]
+    fn editor_dsp_and_repair_tools_build_preview_audio_and_overlay() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        for tool in [
+            ToolKind::NoiseGate,
+            ToolKind::Eq,
+            ToolKind::Compressor,
+            ToolKind::InsertSilence,
+            ToolKind::DeClick,
+            ToolKind::DeClip,
+            ToolKind::DeHum,
+        ] {
+            assert!(harness.state_mut().test_set_active_tool(tool));
+            assert!(harness.state_mut().test_refresh_tool_preview_active_tab());
+            wait_for_preview_tool(&mut harness, tool, true);
+            assert_eq!(
+                harness.state().test_preview_audio_tool(),
+                Some(tool),
+                "{tool:?} should provide audition audio"
+            );
+            assert_eq!(
+                harness.state().test_preview_overlay_tool(),
+                Some(tool),
+                "{tool:?} should provide a waveform preview"
+            );
+            assert!(harness.state_mut().test_force_preview_restore_active_tab());
+            harness.run_steps(2);
+        }
     }
 
     #[test]
@@ -5962,6 +6702,54 @@ mod kittest_suite {
 
     #[cfg(feature = "kittest_render")]
     #[test]
+    fn kittest_render_tool_icon_hover_shows_tool_name_without_reflow() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(4);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("tool_icon_hover");
+        std::fs::create_dir_all(&out_dir).expect("create Tool hover screenshot dir");
+        let before_path = out_dir.join("01_before_hover.png");
+        let after_path = out_dir.join("02_normalize_hover.png");
+
+        let normalize_rect = harness.get_by_label("⬆").rect();
+        let inspector_rect = first_label_rect(&harness, "Inspector");
+        harness
+            .render()
+            .expect("render Tool icons before hover")
+            .save(&before_path)
+            .expect("save Tool icons before hover");
+
+        harness.hover_at(normalize_rect.center());
+        harness.run_steps(2);
+        assert!(
+            harness.query_all_by_label("Normalize").next().is_some(),
+            "hovering the Normalize icon should immediately expose its Tool name"
+        );
+        assert_rect_nearly_same(
+            normalize_rect,
+            harness.get_by_label("⬆").rect(),
+            "Normalize icon while tooltip is visible",
+        );
+        assert_rect_nearly_same(
+            inspector_rect,
+            first_label_rect(&harness, "Inspector"),
+            "Inspector while Tool tooltip is visible",
+        );
+        harness
+            .render()
+            .expect("render Normalize Tool name on hover")
+            .save(&after_path)
+            .expect("save Normalize Tool hover");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
     fn kittest_render_editor_ui_stability_common_sizes_and_processing_png() {
         for (name, size) in [
             ("layout_760x540_idle.png", egui::vec2(760.0, 540.0)),
@@ -6034,6 +6822,7 @@ mod kittest_suite {
             "processing inspector range",
         );
         harness.state_mut().test_clear_mock_processing();
+        harness.run_steps(3);
 
         harness.set_size(egui::vec2(1600.0, 900.0));
         harness.run_steps(4);
@@ -6690,5 +7479,538 @@ mod kittest_suite {
 
         assert!(harness.state().test_recording_tab_open());
         harness.get_by_label("[Recording]");
+    }
+
+    #[test]
+    fn gain_curve_single_click_seeks_without_adding_point() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Gain));
+        assert!(harness.state_mut().test_set_gain_curve(true, &[]));
+        harness.run_steps(3);
+
+        let seek_position = editor_canvas_pos_at_frac(&harness, 0.72);
+        editor_primary_click_at_pos(&mut harness, seek_position);
+        let playhead = harness
+            .state()
+            .test_playhead_display_now()
+            .expect("playhead after gain-curve click");
+        let samples_len = harness.state().tabs[harness.state().active_tab.unwrap()].samples_len;
+        assert!(
+            playhead > samples_len / 2,
+            "single-click should seek, got {playhead} of {samples_len}"
+        );
+        let (_, points_after_click) = harness
+            .state()
+            .test_gain_curve_state()
+            .expect("gain curve state");
+        assert!(
+            points_after_click.is_empty(),
+            "single-click must not add a gain point"
+        );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_pitch_curve_before_after_png() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::PitchShift));
+        assert!(harness.state_mut().test_set_tool_pitch_semitones(3.0));
+        harness.run_steps(3);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("pitch_curve");
+        std::fs::create_dir_all(&out_dir).expect("create pitch curve screenshot dir");
+        let before_path = out_dir.join("pitch_static_before.png");
+        let after_path = out_dir.join("pitch_curve_after.png");
+        let preview_before = first_label_rect(&harness, "Preview");
+        let apply_before = first_label_rect(&harness, "Apply");
+        let before = harness.render().expect("render static pitch line");
+        before
+            .save(&before_path)
+            .expect("save static pitch screenshot");
+
+        assert!(harness.state_mut().test_set_pitch_curve(
+            true,
+            &[(0.08, -5.0), (0.35, 7.0), (0.66, -2.5), (0.92, 4.0)],
+        ));
+        harness.run_steps(3);
+        harness.get_by_label("Pitch curve (draw on waveform)");
+        harness.get_by_label("4 point(s)");
+        let (enabled, points) = harness
+            .state()
+            .test_pitch_curve_state()
+            .expect("pitch curve state");
+        assert!(enabled);
+        assert_eq!(points.len(), 4);
+        assert_rect_nearly_same(
+            preview_before,
+            first_label_rect(&harness, "Preview"),
+            "Pitch Preview while toggling curve",
+        );
+        assert_rect_nearly_same(
+            apply_before,
+            first_label_rect(&harness, "Apply"),
+            "Pitch Apply while toggling curve",
+        );
+
+        let after = harness.render().expect("render pitch curve");
+        after
+            .save(&after_path)
+            .expect("save pitch curve screenshot");
+        let changed_pixels = before
+            .pixels()
+            .zip(after.pixels())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert!(
+            changed_pixels > 1_000,
+            "pitch curve should visibly replace the static line: {changed_pixels} pixels changed"
+        );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_pencil_draft_apply_undo_png() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Pencil));
+        harness.run_steps(3);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("pencil_draft");
+        std::fs::create_dir_all(&out_dir).expect("create Pencil screenshot dir");
+        let before_path = out_dir.join("01_before.png");
+        let draft_path = out_dir.join("02_green_draft.png");
+        let applied_path = out_dir.join("03_applied.png");
+        let undo_path = out_dir.join("04_undo.png");
+
+        harness
+            .render()
+            .expect("render Pencil baseline")
+            .save(&before_path)
+            .expect("save Pencil baseline");
+        let apply_rect = first_label_rect(&harness, "Apply");
+        let cancel_rect = first_label_rect(&harness, "Cancel");
+
+        let tab_idx = harness.state().active_tab.expect("active editor tab");
+        let committed_before = harness.state().tabs[tab_idx].ch_samples.clone();
+        assert!(harness
+            .state_mut()
+            .test_pencil_draft_stroke(0.18, 0.9, 0.82, -0.9));
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Pencil)
+        );
+        assert_eq!(
+            harness.state().test_preview_audio_tool(),
+            Some(ToolKind::Pencil)
+        );
+        assert!(harness.state().test_playback_source_is_tool_preview());
+        assert_eq!(
+            harness.state().tabs[tab_idx].ch_samples,
+            committed_before,
+            "green Pencil draft must not commit early"
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx].ch_samples_arc.as_ref(),
+            &committed_before
+        );
+        assert_rect_nearly_same(
+            apply_rect,
+            first_label_rect(&harness, "Apply"),
+            "Pencil Apply while draft appears",
+        );
+        assert_rect_nearly_same(
+            cancel_rect,
+            first_label_rect(&harness, "Cancel"),
+            "Pencil Cancel while draft appears",
+        );
+        harness
+            .render()
+            .expect("render green Pencil draft")
+            .save(&draft_path)
+            .expect("save green Pencil draft");
+
+        // The always-visible Inspector buttons use the same local stroke
+        // history as Ctrl+Z/Y and stay in the same position.
+        harness.get_by_label("Undo").click();
+        harness.run_steps(2);
+        {
+            let draft = harness.state().tabs[tab_idx]
+                .pencil_draft
+                .as_ref()
+                .expect("Pencil draft after Inspector Undo");
+            assert!(draft.undo.is_empty());
+            assert_eq!(draft.redo.len(), 1);
+        }
+        harness.get_by_label("Redo").click();
+        harness.run_steps(2);
+        {
+            let draft = harness.state().tabs[tab_idx]
+                .pencil_draft
+                .as_ref()
+                .expect("Pencil draft after Inspector Redo");
+            assert_eq!(draft.undo.len(), 1);
+            assert!(draft.redo.is_empty());
+        }
+
+        assert!(harness.state_mut().test_pencil_apply_draft());
+        harness.run_steps(3);
+        assert_eq!(harness.state().test_preview_overlay_tool(), None);
+        assert!(harness.state().tabs[tab_idx].pencil_draft.is_none());
+        assert_eq!(
+            harness.state().tabs[tab_idx].ch_samples_arc.as_ref(),
+            &harness.state().tabs[tab_idx].ch_samples
+        );
+        harness
+            .render()
+            .expect("render applied Pencil edit")
+            .save(&applied_path)
+            .expect("save applied Pencil edit");
+
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(3);
+        assert_eq!(harness.state().tabs[tab_idx].ch_samples, committed_before);
+        harness
+            .render()
+            .expect("render Pencil global Undo")
+            .save(&undo_path)
+            .expect("save Pencil global Undo");
+    }
+
+    #[test]
+    fn pencil_edit_click_move_range_and_ctrl_draw_are_distinct() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_channel_view_all());
+        assert!(harness.state_mut().test_set_tab_view_offset(12_000));
+        assert!(harness.state_mut().test_set_tab_samples_per_px(0.125));
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Pencil));
+        harness.run_steps(4);
+        rightmost_labeled_control(&harness, "Edit").click();
+        harness.run_steps(4);
+
+        let tab_idx = harness.state().active_tab.expect("active Pencil tab");
+        let lane_count = harness.state().tabs[tab_idx].ch_samples.len().max(1);
+        let channel = 0;
+
+        #[cfg(feature = "kittest_render")]
+        let out_dir = {
+            let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("debug")
+                .join("screenshot_verify")
+                .join("pencil_interactions");
+            std::fs::create_dir_all(&out_dir).expect("create Pencil interaction screenshot dir");
+            harness
+                .render()
+                .expect("render Pencil interaction baseline")
+                .save(out_dir.join("01_before.png"))
+                .expect("save Pencil interaction baseline");
+            out_dir
+        };
+
+        // A simple point click selects only: no sample or local Undo mutation.
+        let click_sample = 12_025;
+        let before_click = harness.state().tabs[tab_idx]
+            .preview_overlay
+            .as_ref()
+            .expect("Pencil overlay before click")
+            .channels[channel]
+            .clone();
+        let undo_before_click = harness.state().tabs[tab_idx]
+            .pencil_draft
+            .as_ref()
+            .expect("Pencil draft before click")
+            .undo
+            .len();
+        let click_pos =
+            editor_pencil_point_pos(&harness, click_sample, channel, channel, lane_count);
+        editor_primary_click_at_pos(&mut harness, click_pos);
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(
+            tab.preview_overlay.as_ref().unwrap().channels[channel],
+            before_click,
+            "plain point click must not draw or alter samples"
+        );
+        let draft = tab.pencil_draft.as_ref().unwrap();
+        assert_eq!(draft.undo.len(), undo_before_click);
+        let selection = draft.selection.as_ref().expect("clicked point selection");
+        assert_eq!(
+            (selection.start, selection.end),
+            (click_sample, click_sample + 1)
+        );
+        assert_eq!(selection.channels, vec![channel]);
+
+        // Dragging the selected point changes that point vertically and
+        // records exactly one draft operation.
+        let point_move_start =
+            editor_pencil_point_pos(&harness, click_sample, channel, channel, lane_count);
+        let point_move_end = point_move_start - egui::vec2(0.0, 28.0);
+        editor_pointer_drag(&mut harness, point_move_start, point_move_end);
+        let tab = &harness.state().tabs[tab_idx];
+        let after_point_move = &tab.preview_overlay.as_ref().unwrap().channels[channel];
+        assert!(
+            (after_point_move[click_sample] - before_click[click_sample]).abs() > 0.01,
+            "plain point drag should move the grabbed point"
+        );
+        assert_eq!(
+            after_point_move[click_sample - 1],
+            before_click[click_sample - 1],
+            "point drag must not move its left neighbor"
+        );
+        assert_eq!(
+            after_point_move[click_sample + 1],
+            before_click[click_sample + 1],
+            "point drag must not move its right neighbor"
+        );
+        assert_eq!(
+            tab.pencil_draft.as_ref().unwrap().undo.len(),
+            undo_before_click + 1
+        );
+
+        // Dragging away from the curve selects a horizontal sample range but
+        // does not modify audio or create Undo history.
+        let range_start = 12_038;
+        let range_end = 12_045;
+        let lane = editor_wave_lane_rect(&harness, channel, lane_count);
+        let range_anchor_point =
+            editor_pencil_point_pos(&harness, range_start, channel, channel, lane_count);
+        let empty_y = if range_anchor_point.y < lane.center().y {
+            (range_anchor_point.y + 28.0).min(lane.bottom() - 12.0)
+        } else {
+            (range_anchor_point.y - 28.0).max(lane.top() + 12.0)
+        };
+        let range_drag_start = egui::pos2(range_anchor_point.x, empty_y);
+        let range_drag_end = egui::pos2(
+            editor_pencil_point_pos(&harness, range_end, channel, channel, lane_count).x,
+            empty_y,
+        );
+        let before_range_select = harness.state().tabs[tab_idx]
+            .preview_overlay
+            .as_ref()
+            .unwrap()
+            .channels[channel]
+            .clone();
+        let undo_before_range_select = harness.state().tabs[tab_idx]
+            .pencil_draft
+            .as_ref()
+            .unwrap()
+            .undo
+            .len();
+        editor_pointer_drag(&mut harness, range_drag_start, range_drag_end);
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(
+            tab.preview_overlay.as_ref().unwrap().channels[channel],
+            before_range_select,
+            "range selection must not alter samples"
+        );
+        let draft = tab.pencil_draft.as_ref().unwrap();
+        assert_eq!(draft.undo.len(), undo_before_range_select);
+        let selection = draft.selection.as_ref().expect("range point selection");
+        assert_eq!(
+            (selection.start, selection.end),
+            (range_start, range_end + 1)
+        );
+        assert_eq!(selection.channels, vec![channel]);
+
+        #[cfg(feature = "kittest_render")]
+        harness
+            .render()
+            .expect("render selected Pencil point range")
+            .save(out_dir.join("02_range_selected.png"))
+            .expect("save selected Pencil point range");
+
+        // Dragging any selected point moves every selected point by the same
+        // vertical delta while keeping the sample-time positions fixed.
+        let group_grab_sample = range_start + 2;
+        let group_move_start =
+            editor_pencil_point_pos(&harness, group_grab_sample, channel, channel, lane_count);
+        let group_move_end = group_move_start - egui::vec2(0.0, 24.0);
+        editor_pointer_drag(&mut harness, group_move_start, group_move_end);
+        let tab = &harness.state().tabs[tab_idx];
+        let after_group_move = &tab.preview_overlay.as_ref().unwrap().channels[channel];
+        let first_delta = after_group_move[range_start] - before_range_select[range_start];
+        assert!(
+            first_delta.abs() > 0.01,
+            "selected range should move vertically"
+        );
+        for sample in range_start..=range_end {
+            let delta = after_group_move[sample] - before_range_select[sample];
+            assert!(
+                (delta - first_delta).abs() <= 1.0e-5,
+                "selected samples must keep shape and timing: sample={sample} delta={delta} expected={first_delta}"
+            );
+        }
+        assert_eq!(
+            after_group_move[range_start - 1],
+            before_range_select[range_start - 1]
+        );
+        assert_eq!(
+            after_group_move[range_end + 1],
+            before_range_select[range_end + 1]
+        );
+        assert_eq!(
+            tab.pencil_draft.as_ref().unwrap().undo.len(),
+            undo_before_range_select + 1
+        );
+
+        #[cfg(feature = "kittest_render")]
+        harness
+            .render()
+            .expect("render vertically moved Pencil range")
+            .save(out_dir.join("03_range_moved.png"))
+            .expect("save vertically moved Pencil range");
+
+        // Freehand interpolation is exclusive to Ctrl+drag.
+        let draw_start_sample = 12_054;
+        let draw_end_sample = 12_062;
+        let draw_lane = editor_wave_lane_rect(&harness, channel, lane_count);
+        let draw_start = egui::pos2(
+            editor_pencil_point_pos(&harness, draw_start_sample, channel, channel, lane_count).x,
+            draw_lane.center().y + 52.0,
+        );
+        let draw_end = egui::pos2(
+            editor_pencil_point_pos(&harness, draw_end_sample, channel, channel, lane_count).x,
+            draw_lane.center().y - 52.0,
+        );
+        let before_ctrl_draw = harness.state().tabs[tab_idx]
+            .preview_overlay
+            .as_ref()
+            .unwrap()
+            .channels[channel]
+            .clone();
+        let undo_before_ctrl_draw = harness.state().tabs[tab_idx]
+            .pencil_draft
+            .as_ref()
+            .unwrap()
+            .undo
+            .len();
+        editor_pointer_drag_with_modifiers(&mut harness, draw_start, draw_end, Modifiers::CTRL);
+        let tab = &harness.state().tabs[tab_idx];
+        let after_ctrl_draw = &tab.preview_overlay.as_ref().unwrap().channels[channel];
+        let changed = (draw_start_sample..=draw_end_sample)
+            .filter(|&sample| (after_ctrl_draw[sample] - before_ctrl_draw[sample]).abs() > 0.001)
+            .count();
+        assert!(
+            changed >= 4,
+            "Ctrl+drag should draw an interpolated line across multiple samples: changed={changed}"
+        );
+        assert_eq!(
+            tab.pencil_draft.as_ref().unwrap().undo.len(),
+            undo_before_ctrl_draw + 1
+        );
+
+        #[cfg(feature = "kittest_render")]
+        harness
+            .render()
+            .expect("render Ctrl-drawn Pencil line")
+            .save(out_dir.join("04_ctrl_draw.png"))
+            .expect("save Ctrl-drawn Pencil line");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_max_zoom_sample_points_png() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_channel_view_all());
+        assert!(harness.state_mut().test_set_tab_view_offset(12_000));
+        assert!(harness.state_mut().test_set_tab_samples_per_px(0.125));
+        harness.run_steps(4);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("sample_points");
+        std::fs::create_dir_all(&out_dir).expect("create sample-point screenshot dir");
+        harness
+            .render()
+            .expect("render maximum zoom with sample points")
+            .save(out_dir.join("02_after_point_line.png"))
+            .expect("save maximum zoom with sample points");
+
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Pencil));
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render Pencil before explicit Edit")
+            .save(out_dir.join("04_pencil_before_edit.png"))
+            .expect("save Pencil before explicit Edit");
+        assert!(harness.state().tabs[harness.state().active_tab.unwrap()]
+            .pencil_draft
+            .is_none());
+        rightmost_labeled_control(&harness, "Edit").click();
+        harness.run_steps(3);
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].pencil_draft.is_some());
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Pencil)
+        );
+        assert_eq!(
+            harness.state().tabs[tab_idx]
+                .preview_overlay
+                .as_ref()
+                .map(|overlay| &overlay.channels),
+            Some(&harness.state().tabs[tab_idx].ch_samples)
+        );
+        harness
+            .render()
+            .expect("render aligned unchanged Pencil draft")
+            .save(out_dir.join("05_edit_aligned.png"))
+            .expect("save aligned unchanged Pencil draft");
+
+        let sample_count = harness.state().test_tab_samples_len().max(1) as f32;
+        let from_frac = 12_010.0 / sample_count;
+        let to_frac = 12_140.0 / sample_count;
+        assert!(harness
+            .state_mut()
+            .test_pencil_draft_stroke(from_frac, 0.85, to_frac, -0.85));
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_preview_overlay_tool(),
+            Some(ToolKind::Pencil)
+        );
+        harness
+            .render()
+            .expect("render green Pencil sample points")
+            .save(out_dir.join("06_edited_point_line.png"))
+            .expect("save green Pencil sample points");
+
+        rightmost_labeled_control(&harness, "Reset").click();
+        harness.run_steps(3);
+        let tab = &harness.state().tabs[tab_idx];
+        let draft = tab.pencil_draft.as_ref().expect("Edit mode after Reset");
+        assert!(draft.undo.is_empty());
+        assert!(draft.redo.is_empty());
+        assert_eq!(
+            tab.preview_overlay
+                .as_ref()
+                .map(|overlay| &overlay.channels),
+            Some(&tab.ch_samples)
+        );
+        harness
+            .render()
+            .expect("render reset aligned Pencil draft")
+            .save(out_dir.join("07_reset_aligned.png"))
+            .expect("save reset aligned Pencil draft");
     }
 }

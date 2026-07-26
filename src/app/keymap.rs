@@ -620,7 +620,11 @@ mod tests {
                 "binding {:?} renders empty key text",
                 b.action
             );
-            assert!(!b.desc.is_empty(), "binding {:?} has no description", b.action);
+            assert!(
+                !b.desc.is_empty(),
+                "binding {:?} has no description",
+                b.action
+            );
         }
     }
 

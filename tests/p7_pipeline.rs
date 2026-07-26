@@ -93,7 +93,9 @@ mod p7_pipeline {
         let mut harness = harness_with_startup(cfg);
         wait_until(&mut harness, "scan", |h| h.state().files.len() >= 1);
         harness.state_mut().test_set_watch_interval_ms(50);
-        wait_until(&mut harness, "watch spawned", |h| h.state().test_watch_active());
+        wait_until(&mut harness, "watch spawned", |h| {
+            h.state().test_watch_active()
+        });
         // Give the poller its baseline snapshot.
         std::thread::sleep(Duration::from_millis(150));
         harness.run_steps(2);
@@ -142,12 +144,18 @@ mod p7_pipeline {
         wait_until(&mut harness, "silence meta", |h| {
             h.state().test_meta_silence_ms(&path).is_some()
         });
-        let (lead, tail) = harness.state().test_meta_silence_ms(&path).expect("silence");
+        let (lead, tail) = harness
+            .state()
+            .test_meta_silence_ms(&path)
+            .expect("silence");
         assert!(
             (lead - 100.0).abs() <= 15.0,
             "lead silence ~100 ms, got {lead}"
         );
-        assert!((tail - 50.0).abs() <= 15.0, "tail silence ~50 ms, got {tail}");
+        assert!(
+            (tail - 50.0).abs() <= 15.0,
+            "tail silence ~50 ms, got {tail}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

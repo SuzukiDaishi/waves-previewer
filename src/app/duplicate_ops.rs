@@ -55,9 +55,8 @@ impl WavesPreviewer {
             return;
         }
         let total = paths.len();
-        let queue: Arc<Mutex<VecDeque<(usize, PathBuf)>>> = Arc::new(Mutex::new(
-            paths.iter().cloned().enumerate().collect(),
-        ));
+        let queue: Arc<Mutex<VecDeque<(usize, PathBuf)>>> =
+            Arc::new(Mutex::new(paths.iter().cloned().enumerate().collect()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel::<(usize, Option<FileFingerprint>)>();
         let workers = std::thread::available_parallelism()

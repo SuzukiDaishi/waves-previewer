@@ -786,7 +786,9 @@ pub static RESAMPLE_FALLBACK_COUNT: std::sync::atomic::AtomicU64 =
 
 fn note_resample_fallback(in_sr: u32, out_sr: u32) {
     RESAMPLE_FALLBACK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    eprintln!("resample: rubato failed, fell back to linear interpolation ({in_sr} -> {out_sr} Hz)");
+    eprintln!(
+        "resample: rubato failed, fell back to linear interpolation ({in_sr} -> {out_sr} Hz)"
+    );
 }
 
 pub fn resample_quality(
@@ -1201,11 +1203,7 @@ fn push_fixed_ascii(out: &mut Vec<u8>, s: &str, len: usize) {
 fn read_fixed_ascii(data: &[u8], start: usize, len: usize) -> String {
     let end = (start + len).min(data.len());
     let slice = &data[start.min(end)..end];
-    let trimmed: Vec<u8> = slice
-        .iter()
-        .copied()
-        .take_while(|&b| b != 0)
-        .collect();
+    let trimmed: Vec<u8> = slice.iter().copied().take_while(|&b| b != 0).collect();
     String::from_utf8_lossy(&trimmed).trim_end().to_string()
 }
 
@@ -1451,8 +1449,7 @@ pub fn read_wav_info(path: &Path) -> Result<Option<InfoFields>> {
     let mut pos = 4usize;
     while pos + 8 <= d.len() {
         let id = [d[pos], d[pos + 1], d[pos + 2], d[pos + 3]];
-        let size =
-            u32::from_le_bytes([d[pos + 4], d[pos + 5], d[pos + 6], d[pos + 7]]) as usize;
+        let size = u32::from_le_bytes([d[pos + 4], d[pos + 5], d[pos + 6], d[pos + 7]]) as usize;
         let start = pos + 8;
         let end = start.saturating_add(size).min(d.len());
         let text = String::from_utf8_lossy(&d[start..end])
@@ -1799,6 +1796,222 @@ pub fn process_pitchshift_offline(
     out
 }
 
+/// Evaluate a piecewise-linear pitch automation envelope in semitones.
+///
+/// Pitch is interpolated in semitone (log-frequency) space so a straight
+/// line produces a perceptually even glissando. The first/last breakpoint
+/// values extend to the corresponding ends of the timeline.
+pub fn pitch_envelope_semitones_at(
+    points: &[(usize, f32)],
+    fallback_semitones: f32,
+    sample: usize,
+) -> f32 {
+    if points.is_empty() {
+        return fallback_semitones;
+    }
+    if sample <= points[0].0 {
+        return points[0].1;
+    }
+    for window in points.windows(2) {
+        let (sample0, semitones0) = window[0];
+        let (sample1, semitones1) = window[1];
+        if sample < sample1 {
+            if sample1 <= sample0 {
+                return semitones1;
+            }
+            let t = (sample - sample0) as f64 / (sample1 - sample0) as f64;
+            return (semitones0 as f64 + (semitones1 as f64 - semitones0 as f64) * t) as f32;
+        }
+    }
+    points[points.len() - 1].1
+}
+
+fn interleave_channel_range(
+    channels: &[Vec<f32>],
+    start_frame: usize,
+    frame_count: usize,
+) -> Vec<f32> {
+    let channel_count = channels.len();
+    let mut interleaved = Vec::with_capacity(frame_count.saturating_mul(channel_count));
+    for frame in start_frame..start_frame.saturating_add(frame_count) {
+        for channel in channels {
+            interleaved.push(channel.get(frame).copied().unwrap_or(0.0));
+        }
+    }
+    interleaved
+}
+
+fn deinterleave_fixed_len(
+    interleaved: &[f32],
+    channel_count: usize,
+    frame_count: usize,
+) -> Vec<Vec<f32>> {
+    let mut channels = vec![Vec::with_capacity(frame_count); channel_count];
+    for frame in 0..frame_count {
+        let base = frame.saturating_mul(channel_count);
+        for (channel_index, channel) in channels.iter_mut().enumerate() {
+            channel.push(
+                interleaved
+                    .get(base + channel_index)
+                    .copied()
+                    .unwrap_or(0.0),
+            );
+        }
+    }
+    channels
+}
+
+/// Pitch-shift a multi-channel buffer with time-varying semitone automation.
+///
+/// One Signalsmith instance processes every channel for the whole render, so
+/// channel timing and spectral decisions remain coherent. Input and output
+/// block lengths are equal; latency is removed after flush so the result has
+/// exactly the same frame count as the input.
+pub fn process_pitchshift_curve_multi(
+    channels: &[Vec<f32>],
+    sample_rate: u32,
+    points: &[(usize, f32)],
+    fallback_semitones: f32,
+    timeline_offset: usize,
+) -> Vec<Vec<f32>> {
+    let channel_count = channels.len();
+    let frame_count = channels.first().map(Vec::len).unwrap_or(0);
+    if channel_count == 0 || frame_count == 0 {
+        return channels.to_vec();
+    }
+    if points.is_empty() && fallback_semitones.abs() <= 0.0001 {
+        return channels.to_vec();
+    }
+
+    let sample_rate = sample_rate.max(1);
+    let mut sorted_points = points.to_vec();
+    sorted_points.sort_by_key(|point| point.0);
+
+    // Retain the default 120 ms analysis window for low-frequency accuracy,
+    // but use a 10 ms interval so automation follows ramps more closely.
+    let block_frames = ((sample_rate as f64) * 0.12).round().max(32.0) as usize;
+    let automation_frames = ((sample_rate as f64) * 0.01).round().max(1.0) as usize;
+    let mut stretch = Stretch::new(
+        channel_count as u32,
+        block_frames,
+        automation_frames.min(block_frames.saturating_sub(1).max(1)),
+    );
+
+    let input_latency = stretch.input_latency();
+    if input_latency > 0 {
+        let pre_roll = interleave_channel_range(channels, 0, input_latency);
+        stretch.seek(&pre_roll, 1.0);
+    }
+
+    let output_latency = stretch.output_latency();
+    let mut raw_output = Vec::with_capacity(
+        frame_count
+            .saturating_add(output_latency)
+            .saturating_mul(channel_count),
+    );
+    let mut frame = 0usize;
+    while frame < frame_count {
+        let frames_this = automation_frames.min(frame_count - frame);
+        let automation_sample = timeline_offset
+            .saturating_add(frame)
+            .saturating_add(frames_this / 2);
+        let semitones =
+            pitch_envelope_semitones_at(&sorted_points, fallback_semitones, automation_sample)
+                .clamp(-12.0, 12.0);
+        stretch.set_transpose_factor_semitones(semitones, None);
+
+        let input = interleave_channel_range(channels, frame, frames_this);
+        let mut output = vec![0.0_f32; frames_this.saturating_mul(channel_count)];
+        stretch.process(&input, &mut output);
+        raw_output.extend_from_slice(&output);
+        frame += frames_this;
+    }
+
+    if output_latency > 0 {
+        let final_sample = timeline_offset.saturating_add(frame_count.saturating_sub(1));
+        let final_semitones =
+            pitch_envelope_semitones_at(&sorted_points, fallback_semitones, final_sample)
+                .clamp(-12.0, 12.0);
+        stretch.set_transpose_factor_semitones(final_semitones, None);
+        let mut tail = vec![0.0_f32; output_latency.saturating_mul(channel_count)];
+        stretch.flush(&mut tail);
+        raw_output.extend_from_slice(&tail);
+    }
+
+    let latency_samples = output_latency.saturating_mul(channel_count);
+    let required_samples = frame_count.saturating_mul(channel_count);
+    let aligned = if raw_output.len() >= latency_samples {
+        &raw_output[latency_samples..]
+    } else {
+        &[]
+    };
+    let take = aligned.len().min(required_samples);
+    let mut exact = Vec::with_capacity(required_samples);
+    exact.extend_from_slice(&aligned[..take]);
+    exact.resize(required_samples, 0.0);
+    deinterleave_fixed_len(&exact, channel_count, frame_count)
+}
+
+/// Apply a pitch curve to a whole buffer or splice only the selected range.
+/// Range renders include surrounding analysis context, while only the target
+/// samples are committed to keep the untouched audio bit-identical.
+pub fn process_pitchshift_curve_multi_spliced(
+    channels: &[Vec<f32>],
+    sample_rate: u32,
+    points: &[(usize, f32)],
+    fallback_semitones: f32,
+    range: Option<(usize, usize)>,
+) -> Vec<Vec<f32>> {
+    let frame_count = channels.first().map(Vec::len).unwrap_or(0);
+    if frame_count == 0 {
+        return channels.to_vec();
+    }
+    let Some((start, end)) = range
+        .filter(|(start, end)| *end > *start && *end <= frame_count)
+        .filter(|(start, end)| *start > 0 || *end < frame_count)
+    else {
+        return process_pitchshift_curve_multi(
+            channels,
+            sample_rate,
+            points,
+            fallback_semitones,
+            0,
+        );
+    };
+
+    // The default window is 120 ms. Use twice that amount on both sides so
+    // analysis at the selected boundaries sees stable source context.
+    let context_frames = ((sample_rate.max(1) as f64) * 0.24).round() as usize;
+    let context_start = start.saturating_sub(context_frames);
+    let context_end = end.saturating_add(context_frames).min(frame_count);
+    let context_channels: Vec<Vec<f32>> = channels
+        .iter()
+        .map(|channel| channel[context_start..context_end].to_vec())
+        .collect();
+    let shifted_context = process_pitchshift_curve_multi(
+        &context_channels,
+        sample_rate,
+        points,
+        fallback_semitones,
+        context_start,
+    );
+    let processed_start = start - context_start;
+    let processed_end = processed_start + (end - start);
+    let crossfade = splice_xfade_samples(sample_rate, end - start, end - start);
+
+    channels
+        .iter()
+        .enumerate()
+        .map(|(channel_index, original)| {
+            let processed = shifted_context
+                .get(channel_index)
+                .and_then(|channel| channel.get(processed_start..processed_end))
+                .unwrap_or(&[]);
+            splice_range_with_crossfade(original, start, end, processed, crossfade)
+        })
+        .collect()
+}
+
 // Heavy offline: time-stretch preserving pitch
 pub fn process_timestretch_offline(mono: &[f32], in_sr: u32, out_sr: u32, rate: f32) -> Vec<f32> {
     let rate = rate.clamp(0.25, 4.0);
@@ -2066,7 +2279,11 @@ pub struct NoiseGateParams {
 /// toward silence over `release_ms`; at/above it, ramped back to unity gain
 /// over `attack_ms`. Shared by the EffectGraph NoiseGate node and the Editor
 /// Inspector NoiseGate tool so both apply identical math.
-pub fn process_noise_gate_offline(mono: &[f32], sample_rate: u32, params: &NoiseGateParams) -> Vec<f32> {
+pub fn process_noise_gate_offline(
+    mono: &[f32],
+    sample_rate: u32,
+    params: &NoiseGateParams,
+) -> Vec<f32> {
     if mono.is_empty() {
         return Vec::new();
     }
@@ -2085,7 +2302,11 @@ pub fn process_noise_gate_offline(mono: &[f32], sample_rate: u32, params: &Noise
             rectified + release_coeff * (envelope - rectified)
         };
         let target_gain = if envelope >= threshold_lin { 1.0 } else { 0.0 };
-        let coeff = if target_gain > gain { attack_coeff } else { release_coeff };
+        let coeff = if target_gain > gain {
+            attack_coeff
+        } else {
+            release_coeff
+        };
         gain = target_gain + coeff * (gain - target_gain);
         out.push(sample * gain);
     }
@@ -2109,7 +2330,11 @@ pub struct CompressorParams {
 
 /// Feedforward peak compressor with a one-pole envelope follower. Shared by
 /// the EffectGraph Compressor node and the Editor Inspector Compressor tool.
-pub fn process_compressor_offline(mono: &[f32], sample_rate: u32, params: &CompressorParams) -> Vec<f32> {
+pub fn process_compressor_offline(
+    mono: &[f32],
+    sample_rate: u32,
+    params: &CompressorParams,
+) -> Vec<f32> {
     if mono.is_empty() {
         return Vec::new();
     }
@@ -2122,7 +2347,11 @@ pub fn process_compressor_offline(mono: &[f32], sample_rate: u32, params: &Compr
     let mut out = Vec::with_capacity(mono.len());
     for &sample in mono {
         let level_db = 20.0 * sample.abs().max(1e-9).log10();
-        let coeff = if level_db > envelope_db { attack_coeff } else { release_coeff };
+        let coeff = if level_db > envelope_db {
+            attack_coeff
+        } else {
+            release_coeff
+        };
         envelope_db = level_db + coeff * (envelope_db - level_db);
         let over_db = envelope_db - params.threshold_db;
         let gain_db = if over_db > 0.0 {
@@ -2768,12 +2997,9 @@ fn encode_flac(
     }
     let md5_digest: [u8; 16] = md5::Digest::finalize(md5).into();
 
-    let mut stream_info = flacenc::component::StreamInfo::new(
-        sample_rate.max(1) as usize,
-        channels,
-        bits_per_sample,
-    )
-    .map_err(|e| anyhow::anyhow!("flac stream init: {e:?}"))?;
+    let mut stream_info =
+        flacenc::component::StreamInfo::new(sample_rate.max(1) as usize, channels, bits_per_sample)
+            .map_err(|e| anyhow::anyhow!("flac stream init: {e:?}"))?;
     stream_info.set_md5_digest(&md5_digest);
     let mut stream = flacenc::component::Stream::with_stream_info(stream_info);
 
@@ -2791,8 +3017,7 @@ fn encode_flac(
         for i in pos..pos + this_block {
             for (ci, ch) in chans.iter().enumerate() {
                 block_scratch.push(
-                    encode_quant
-                        .quantize(ci, ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0)),
+                    encode_quant.quantize(ci, ch.get(i).copied().unwrap_or(0.0).clamp(-1.0, 1.0)),
                 );
             }
         }
@@ -2804,9 +3029,13 @@ fn encode_flac(
                 .fill_interleaved(&block_scratch)
                 .map_err(|e| anyhow::anyhow!("flac frame fill: {e:?}"))?;
         }
-        let frame =
-            flacenc::encode_fixed_size_frame(&config, &framebuf, frame_number, stream.stream_info())
-                .map_err(|e| anyhow::anyhow!("flac encode: {e:?}"))?;
+        let frame = flacenc::encode_fixed_size_frame(
+            &config,
+            &framebuf,
+            frame_number,
+            stream.stream_info(),
+        )
+        .map_err(|e| anyhow::anyhow!("flac encode: {e:?}"))?;
         // add_frame accumulates total_samples and min/max block/frame sizes.
         stream.add_frame(frame);
         pos += this_block;
@@ -2831,8 +3060,7 @@ fn encode_flac(
         let min_block = (block_size as u16).to_be_bytes();
         bytes[8..10].copy_from_slice(&min_block);
     }
-    std::fs::write(dst, bytes)
-        .with_context(|| format!("create flac output: {}", dst.display()))?;
+    std::fs::write(dst, bytes).with_context(|| format!("create flac output: {}", dst.display()))?;
     Ok(())
 }
 
@@ -3272,7 +3500,10 @@ fn replace_file_atomic_win(tmp: &Path, src: &Path) -> std::io::Result<()> {
         ReplaceFileW, REPLACEFILE_IGNORE_ACL_ERRORS, REPLACEFILE_IGNORE_MERGE_ERRORS,
     };
     fn wide(p: &Path) -> Vec<u16> {
-        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
     let replaced = wide(src);
     let replacement = wide(tmp);
@@ -3389,10 +3620,20 @@ fn k_weighting_apply_48k(chans: &mut [Vec<f32>]) {
     let (s, h) = (kw.shelf, kw.highpass);
     for ch in chans.iter_mut() {
         biquad_inplace_f32(
-            ch, s.b0 as f32, s.b1 as f32, s.b2 as f32, s.a1 as f32, s.a2 as f32,
+            ch,
+            s.b0 as f32,
+            s.b1 as f32,
+            s.b2 as f32,
+            s.a1 as f32,
+            s.a2 as f32,
         );
         biquad_inplace_f32(
-            ch, h.b0 as f32, h.b1 as f32, h.b2 as f32, h.a1 as f32, h.a2 as f32,
+            ch,
+            h.b0 as f32,
+            h.b1 as f32,
+            h.b2 as f32,
+            h.a1 as f32,
+            h.a2 as f32,
         );
     }
 }
@@ -3493,7 +3734,8 @@ pub fn true_peak_db_from_multi(chans: &[Vec<f32>], in_sr: u32) -> Option<f32> {
             } else {
                 (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
             };
-            let w = 0.5 * (1.0 - (2.0 * std::f64::consts::PI * k as f64 / (total - 1) as f64).cos());
+            let w =
+                0.5 * (1.0 - (2.0 * std::f64::consts::PI * k as f64 / (total - 1) as f64).cos());
             phases[k % factor].push((sinc * w) as f32);
         }
         for phase in phases.iter_mut() {
@@ -3696,6 +3938,72 @@ mod tests {
             right.push((t * 330.0 * std::f32::consts::TAU).sin() * 0.25);
         }
         vec![left, right]
+    }
+
+    #[test]
+    fn pitch_envelope_interpolates_in_semitones() {
+        let points = vec![(100usize, -12.0f32), (300, 12.0)];
+        assert_eq!(super::pitch_envelope_semitones_at(&[], 3.5, 200), 3.5);
+        assert_eq!(super::pitch_envelope_semitones_at(&points, 0.0, 0), -12.0);
+        assert!((super::pitch_envelope_semitones_at(&points, 0.0, 200) - 0.0).abs() < 1.0e-6);
+        assert_eq!(super::pitch_envelope_semitones_at(&points, 0.0, 400), 12.0);
+    }
+
+    #[test]
+    fn pitch_curve_render_preserves_length_and_channel_coherence() {
+        let sample_rate = 48_000u32;
+        let frames = sample_rate as usize;
+        let mono: Vec<f32> = (0..frames)
+            .map(|frame| {
+                let time = frame as f32 / sample_rate as f32;
+                (time * 220.0 * std::f32::consts::TAU).sin() * 0.4
+            })
+            .collect();
+        let channels = vec![mono.clone(), mono];
+        let points = vec![(0usize, -3.0f32), (frames / 2, 7.0), (frames - 1, 0.0)];
+        let output = super::process_pitchshift_curve_multi(&channels, sample_rate, &points, 0.0, 0);
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].len(), frames);
+        assert_eq!(output[1].len(), frames);
+        assert!(output.iter().flatten().all(|sample| sample.is_finite()));
+        let channel_difference = output[0]
+            .iter()
+            .zip(&output[1])
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            channel_difference <= 5.0e-4,
+            "identical channels diverged by {channel_difference}"
+        );
+    }
+
+    #[test]
+    fn static_pitch_curve_tracks_one_octave_within_two_cents() {
+        let sample_rate = 48_000u32;
+        let frames = sample_rate as usize * 2;
+        let source_hz = 220.0f32;
+        let mono: Vec<f32> = (0..frames)
+            .map(|frame| {
+                let time = frame as f32 / sample_rate as f32;
+                (time * source_hz * std::f32::consts::TAU).sin() * 0.4
+            })
+            .collect();
+        let output = super::process_pitchshift_curve_multi(&[mono], sample_rate, &[], 12.0, 0);
+        let rendered = &output[0];
+        let start = sample_rate as usize / 2;
+        let end = frames - sample_rate as usize / 2;
+        let crossings = rendered[start..end]
+            .windows(2)
+            .filter(|pair| pair[0] <= 0.0 && pair[1] > 0.0)
+            .count();
+        let duration = (end - start) as f64 / sample_rate as f64;
+        let measured_hz = crossings as f64 / duration;
+        let cents = 1200.0 * (measured_hz / 440.0).log2();
+        assert!(
+            cents.abs() <= 2.0,
+            "expected 440 Hz, measured {measured_hz:.3} Hz ({cents:.3} cents)"
+        );
     }
 
     #[test]
@@ -3931,7 +4239,9 @@ mod tests {
         export_channels_audio(&synth_stereo(48_000, 0.5), 48_000, &src).expect("export wav");
         crate::loop_markers::write_loop_markers(&src, Some((5_000, 20_000)))
             .expect("write loop markers");
-        let audio_before = crate::audio_io::decode_audio_multi(&src).expect("decode before").0;
+        let audio_before = crate::audio_io::decode_audio_multi(&src)
+            .expect("decode before")
+            .0;
 
         // A file without bext reads as None.
         assert_eq!(read_wav_bext(&src).expect("read"), None);
@@ -3944,7 +4254,9 @@ mod tests {
             origination_time: "12:34:56".to_string(),
         };
         write_wav_bext(&src, &fields).expect("write bext");
-        let loaded = read_wav_bext(&src).expect("read back").expect("bext present");
+        let loaded = read_wav_bext(&src)
+            .expect("read back")
+            .expect("bext present");
         assert_eq!(loaded, fields);
         // Fixed BWF v1 payload size.
         let bext = parse_riff_wave_chunks(&src)
@@ -3959,7 +4271,9 @@ mod tests {
             Some((5_000, 20_000))
         );
         assert_eq!(
-            crate::audio_io::decode_audio_multi(&src).expect("decode after").0,
+            crate::audio_io::decode_audio_multi(&src)
+                .expect("decode after")
+                .0,
             audio_before
         );
 
@@ -3973,10 +4287,7 @@ mod tests {
             .filter(|c| &c.id == b"bext")
             .count();
         assert_eq!(n_bext, 1);
-        assert_eq!(
-            read_wav_bext(&src).unwrap().unwrap().description,
-            "Updated"
-        );
+        assert_eq!(read_wav_bext(&src).unwrap().unwrap().description, "Updated");
 
         // Empty date/time are auto-stamped as yyyy-mm-dd / hh:mm:ss.
         write_wav_bext(&src, &BextFields::default()).expect("auto stamp");
@@ -4154,8 +4465,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
-
     // ---- Loudness (BS.1770-4 / EBU Tech 3341) ----
 
     fn stereo_sine(freq: f32, amp_dbfs: f32, sr: u32, secs: f32) -> Vec<Vec<f32>> {
@@ -4239,26 +4548,30 @@ mod tests {
             mm > sm + 3.0,
             "burst: momentary ({mm}) should clearly exceed short-term ({sm})"
         );
-        assert!((mm + 20.0).abs() <= 0.5, "momentary max should be ~-20, got {mm}");
+        assert!(
+            (mm + 20.0).abs() <= 0.5,
+            "momentary max should be ~-20, got {mm}"
+        );
     }
 
     // True peak: an fs/4 sine sampled at 45 degree phase offset has all its
     // samples at -3.01 dBFS while the continuous waveform peaks at 0 dBTP.
     #[test]
-    fn true_peak_recovers_intersample_peak()  {
+    fn true_peak_recovers_intersample_peak() {
         let sr = 48_000u32;
         let frames = sr as usize;
         let ch: Vec<f32> = (0..frames)
-            .map(|i| {
-                (std::f32::consts::TAU * (i as f32) / 4.0 + std::f32::consts::FRAC_PI_4).sin()
-            })
+            .map(|i| (std::f32::consts::TAU * (i as f32) / 4.0 + std::f32::consts::FRAC_PI_4).sin())
             .collect();
         let mut sample_peak = 0.0f32;
         for &v in &ch {
             sample_peak = sample_peak.max(v.abs());
         }
         let sample_peak_db = 20.0 * sample_peak.log10();
-        assert!((sample_peak_db + 3.01).abs() < 0.1, "sample peak {sample_peak_db}");
+        assert!(
+            (sample_peak_db + 3.01).abs() < 0.1,
+            "sample peak {sample_peak_db}"
+        );
         let tp = super::true_peak_db_from_multi(&[ch], sr).expect("tp");
         assert!(
             (tp - 0.0).abs() <= 0.35,
@@ -4291,8 +4604,12 @@ mod tests {
             tone[0].clone(),
             tone[1].clone(),
         ];
-        let lf = super::loudness_metrics_from_multi(&front, sr).unwrap().lufs_i;
-        let ls = super::loudness_metrics_from_multi(&surround, sr).unwrap().lufs_i;
+        let lf = super::loudness_metrics_from_multi(&front, sr)
+            .unwrap()
+            .lufs_i;
+        let ls = super::loudness_metrics_from_multi(&surround, sr)
+            .unwrap()
+            .lufs_i;
         // G=1.41 is a POWER weight in BS.1770-4 (L = -0.691 + 10log10(sum G_i z_i)),
         // so the level delta is 10*log10(1.41) ~ +1.49 dB.
         let expected = 10.0 * 1.41f32.log10();
@@ -4303,7 +4620,9 @@ mod tests {
         // LFE must be excluded entirely.
         let mut lfe_only: Vec<Vec<f32>> = vec![silence.clone(); 6];
         lfe_only[3] = tone[0].clone();
-        let l_lfe = super::loudness_metrics_from_multi(&lfe_only, sr).unwrap().lufs_i;
+        let l_lfe = super::loudness_metrics_from_multi(&lfe_only, sr)
+            .unwrap()
+            .lufs_i;
         assert!(
             l_lfe == f32::NEG_INFINITY || l_lfe < -60.0,
             "LFE-only signal should gate out, got {l_lfe}"
@@ -4313,7 +4632,10 @@ mod tests {
     #[test]
     fn noise_gate_silences_signal_below_threshold() {
         let sr = 48_000;
-        let quiet: Vec<f32> = make_signal(sr as usize, 3.0).iter().map(|v| v * 0.001).collect();
+        let quiet: Vec<f32> = make_signal(sr as usize, 3.0)
+            .iter()
+            .map(|v| v * 0.001)
+            .collect();
         let params = NoiseGateParams {
             threshold_db: -20.0,
             attack_ms: 1.0,
@@ -4505,11 +4827,17 @@ mod tests {
         };
         super::write_wav_bext(&path, &bext).expect("write bext");
 
-        let got_info = super::read_wav_info(&path).expect("read info").expect("info present");
+        let got_info = super::read_wav_info(&path)
+            .expect("read info")
+            .expect("info present");
         assert_eq!(got_info, info);
-        let got_ixml = super::read_wav_ixml(&path).expect("read ixml").expect("ixml present");
+        let got_ixml = super::read_wav_ixml(&path)
+            .expect("read ixml")
+            .expect("ixml present");
         assert_eq!(got_ixml, ixml);
-        let got_bext = super::read_wav_bext(&path).expect("read bext").expect("bext present");
+        let got_bext = super::read_wav_bext(&path)
+            .expect("read bext")
+            .expect("bext present");
         assert_eq!(got_bext.description, "desc");
         // Audio survives all three writes bit-exact in count.
         let (chans, sr) = crate::audio_io::decode_audio_multi(&path).expect("decode");
@@ -4517,7 +4845,10 @@ mod tests {
         assert_eq!(chans[0].len(), 4801);
 
         // Re-write with changed fields replaces (no duplicate chunks).
-        let info2 = super::InfoFields { name: "Renamed".into(), ..info.clone() };
+        let info2 = super::InfoFields {
+            name: "Renamed".into(),
+            ..info.clone()
+        };
         super::write_wav_info_ixml(&path, &info2, &ixml).expect("rewrite");
         let raw = std::fs::read(&path).expect("raw");
         let count = raw.windows(4).filter(|w| w == b"INAM").count();
@@ -4550,5 +4881,4 @@ mod tests {
         assert!(xml.contains("a&lt;b&gt;&amp;c&quot;d&apos;e"), "{xml}");
         assert!(!xml.contains("a<b>"), "raw text must be escaped: {xml}");
     }
-
 }

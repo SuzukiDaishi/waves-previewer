@@ -78,12 +78,9 @@ impl crate::app::WavesPreviewer {
                         ui.end_row();
                         for (i, region) in tab.regions.iter_mut().enumerate() {
                             ui.add(
-                                egui::TextEdit::singleline(&mut region.label)
-                                    .desired_width(120.0),
+                                egui::TextEdit::singleline(&mut region.label).desired_width(120.0),
                             );
-                            let fmt = |sample: usize| {
-                                format!("{:.3}s", sample as f64 / sr as f64)
-                            };
+                            let fmt = |sample: usize| format!("{:.3}s", sample as f64 / sr as f64);
                             if ui
                                 .link(fmt(region.start))
                                 .on_hover_text("Select this region in the editor")

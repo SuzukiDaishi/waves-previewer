@@ -89,11 +89,9 @@ impl crate::app::WavesPreviewer {
                                 let label = path.display().to_string();
                                 if ui
                                     .add(
-                                        egui::Label::new(
-                                            RichText::new(&label).small().monospace(),
-                                        )
-                                        .sense(egui::Sense::click())
-                                        .truncate(),
+                                        egui::Label::new(RichText::new(&label).small().monospace())
+                                            .sense(egui::Sense::click())
+                                            .truncate(),
                                     )
                                     .on_hover_text(&label)
                                     .clicked()

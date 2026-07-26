@@ -145,7 +145,9 @@ mod p3_spectral_tools {
         assert_eq!(before[0][far.clone()], after[0][far.clone()]);
         // Stamps are consumed by Apply.
         let tab_idx = harness.state().active_tab.unwrap();
-        assert!(harness.state().tabs[tab_idx].spectral_brush_stamps.is_empty());
+        assert!(harness.state().tabs[tab_idx]
+            .spectral_brush_stamps
+            .is_empty());
         assert!(harness.state().tabs[tab_idx].dirty);
 
         // Undo restores the original buffer bit-exactly.
@@ -324,10 +326,7 @@ mod p3_spectral_tools {
             tab.freq_selection = Some((700.0, 1_300.0));
         }
         assert!(harness.state_mut().test_spectral_copy());
-        assert_eq!(
-            harness.state().test_spectral_clipboard_len(),
-            Some(16_000)
-        );
+        assert_eq!(harness.state().test_spectral_clipboard_len(), Some(16_000));
         // Paste into the silent half (selection start = paste anchor).
         {
             let idx = harness.state().active_tab.unwrap();
@@ -338,8 +337,7 @@ mod p3_spectral_tools {
         harness.run_steps(2);
         let after = tab_samples(&harness);
         let rms = |x: &[f32]| {
-            (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64)
-                .sqrt()
+            (x.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>() / x.len() as f64).sqrt()
         };
         assert!(
             rms(&after[0][32_000..44_000]) > 0.05,

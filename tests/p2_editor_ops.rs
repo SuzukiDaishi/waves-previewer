@@ -337,7 +337,11 @@ mod p2_editor_ops {
         harness.run_steps(2);
 
         let after = tab_samples(&harness);
-        assert_eq!(after[0].len(), len + copied, "insert length like plain insert");
+        assert_eq!(
+            after[0].len(),
+            len + copied,
+            "insert length like plain insert"
+        );
         let pos = len / 2;
         // The middle of the pasted span is the untouched clip content.
         let mid = copied / 2;
@@ -359,9 +363,7 @@ mod p2_editor_ops {
         let before = tab_samples(&harness);
         let len = before[0].len();
 
-        assert!(harness
-            .state_mut()
-            .test_pencil_stroke(0.25, 0.5, 0.5, -0.5));
+        assert!(harness.state_mut().test_pencil_stroke(0.25, 0.5, 0.5, -0.5));
         harness.run_steps(2);
 
         let after = tab_samples(&harness);
@@ -385,6 +387,168 @@ mod p2_editor_ops {
         assert!(harness.state_mut().test_editor_undo());
         harness.run_steps(2);
         assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pencil_draft_preserves_committed_audio_and_has_local_undo_redo() {
+        use neowaves::app::ToolKind;
+
+        let (mut harness, dir) = open_editor_tab("pencil_draft", &synth_stereo(48_000, 0.2));
+        let before = tab_samples(&harness);
+        let tab_idx = harness.state().active_tab.unwrap();
+        let len = before[0].len();
+        let start = (len as f32 * 0.25) as usize;
+        let end = (len as f32 * 0.5) as usize;
+        let was_dirty = harness.state().tabs[tab_idx].dirty;
+
+        assert!(harness
+            .state_mut()
+            .test_pencil_draft_stroke(0.25, 0.6, 0.5, -0.4));
+        harness.run_steps(2);
+
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            assert_eq!(
+                tab.ch_samples, before,
+                "Pencil draft must not mutate committed samples before Apply"
+            );
+            assert_eq!(
+                tab.ch_samples_arc.as_ref(),
+                &before,
+                "the worker mirror must remain synchronized during a draft"
+            );
+            assert_eq!(tab.dirty, was_dirty, "draft is not a committed edit");
+            assert_eq!(
+                tab.preview_overlay
+                    .as_ref()
+                    .map(|overlay| overlay.source_tool),
+                Some(ToolKind::Pencil)
+            );
+            let overlay = tab.preview_overlay.as_ref().expect("green Pencil draft");
+            assert!((overlay.channels[0][start] - 0.6).abs() < 1e-6);
+            assert!((overlay.channels[0][end] + 0.4).abs() < 1e-6);
+            assert_eq!(tab.pencil_draft.as_ref().unwrap().undo.len(), 1);
+        }
+        assert!(
+            harness.state().test_playback_source_is_tool_preview(),
+            "the audio source must follow the green draft"
+        );
+        assert!(
+            (harness
+                .state()
+                .test_audio_buffer_sample(0, start)
+                .expect("Pencil preview audio start")
+                - 0.6)
+                .abs()
+                < 1e-6,
+            "playback/MiniMeter source must contain the green draft samples"
+        );
+
+        // This is the former crash path: Ctrl+Z while the Pencil draft is
+        // active. It must use local stroke history, not committed undo.
+        assert!(harness.state_mut().test_pencil_draft_undo());
+        harness.run_steps(1);
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            let overlay = tab
+                .preview_overlay
+                .as_ref()
+                .expect("draft retained for Redo");
+            assert_eq!(overlay.channels[0][start], before[0][start]);
+            assert_eq!(overlay.channels[0][end], before[0][end]);
+            let draft = tab.pencil_draft.as_ref().unwrap();
+            assert!(draft.undo.is_empty());
+            assert_eq!(draft.redo.len(), 1);
+            assert_eq!(tab.ch_samples_arc.as_ref(), &tab.ch_samples);
+        }
+
+        assert!(harness.state_mut().test_pencil_draft_redo());
+        harness.run_steps(1);
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            let overlay = tab.preview_overlay.as_ref().unwrap();
+            assert!((overlay.channels[0][start] - 0.6).abs() < 1e-6);
+            assert!((overlay.channels[0][end] + 0.4).abs() < 1e-6);
+        }
+
+        assert!(harness.state_mut().test_pencil_apply_draft());
+        harness.run_steps(2);
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            assert!(tab.pencil_draft.is_none());
+            assert!(tab.preview_overlay.is_none());
+            assert!((tab.ch_samples[0][start] - 0.6).abs() < 1e-6);
+            assert_eq!(tab.ch_samples_arc.as_ref(), &tab.ch_samples);
+            assert!(tab.dirty);
+        }
+
+        // Apply is one normal editor operation.
+        assert!(harness.state_mut().test_editor_undo());
+        harness.run_steps(2);
+        assert_eq!(before, tab_samples(&harness));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pencil_cancel_discards_green_draft_without_committing() {
+        let (mut harness, dir) = open_editor_tab("pencil_cancel", &synth_stereo(48_000, 0.1));
+        let before = tab_samples(&harness);
+        let tab_idx = harness.state().active_tab.unwrap();
+
+        assert!(harness
+            .state_mut()
+            .test_pencil_draft_stroke(0.2, 0.8, 0.3, -0.8));
+        assert!(harness.state_mut().test_pencil_cancel_draft());
+        harness.run_steps(2);
+
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(tab.ch_samples, before);
+        assert_eq!(tab.ch_samples_arc.as_ref(), &tab.ch_samples);
+        assert!(tab.pencil_draft.is_none());
+        assert!(tab.preview_overlay.is_none());
+        assert!(tab.preview_audio_tool.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pencil_edit_starts_explicitly_and_reset_keeps_edit_mode() {
+        use neowaves::app::ToolKind;
+
+        let (mut harness, dir) = open_editor_tab("pencil_edit_reset", &synth_stereo(48_000, 0.1));
+        let before = tab_samples(&harness);
+        let tab_idx = harness.state().active_tab.unwrap();
+        assert!(harness.state().tabs[tab_idx].pencil_draft.is_none());
+        assert!(harness.state().tabs[tab_idx].preview_overlay.is_none());
+
+        assert!(harness.state_mut().test_pencil_start_editing());
+        harness.run_steps(1);
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            assert!(tab.pencil_draft.is_some());
+            let overlay = tab.preview_overlay.as_ref().expect("green Edit draft");
+            assert_eq!(overlay.source_tool, ToolKind::Pencil);
+            assert_eq!(overlay.channels, before);
+            assert_eq!(tab.ch_samples, before);
+        }
+
+        assert!(harness
+            .state_mut()
+            .test_pencil_draft_stroke(0.2, 0.75, 0.4, -0.75));
+        assert!(harness.state_mut().test_pencil_reset_draft());
+        harness.run_steps(1);
+        {
+            let tab = &harness.state().tabs[tab_idx];
+            let draft = tab.pencil_draft.as_ref().expect("Edit mode retained");
+            assert!(draft.undo.is_empty());
+            assert!(draft.redo.is_empty());
+            assert_eq!(tab.preview_overlay.as_ref().unwrap().channels, before);
+            assert_eq!(tab.ch_samples, before);
+            assert_eq!(tab.ch_samples_arc.as_ref(), &tab.ch_samples);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -444,7 +608,10 @@ mod p2_editor_ops {
         let peak1 = before[1].iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let expect_g = 10f32.powf(-6.0 / 20.0) / peak1;
         for (b, a) in before[1].iter().zip(after[1].iter()) {
-            assert!((a - b * expect_g).abs() < 1e-4, "ch1 normalized to its own peak");
+            assert!(
+                (a - b * expect_g).abs() < 1e-4,
+                "ch1 normalized to its own peak"
+            );
         }
         let peak_after = after[1].iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(

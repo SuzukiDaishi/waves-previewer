@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::app::types::{
-    EditorApplyResult, EditorUndoState, ToolKind, VirtualTrimPhase, VirtualTrimResult,
-    VirtualTrimState,
+    EditorApplyResult, EditorUndoState, PencilActiveStroke, PencilDraft, PencilStrokeEdit,
+    PreviewOverlay, ToolKind, VirtualTrimPhase, VirtualTrimResult, VirtualTrimState,
 };
 
 const VIRTUAL_TRIM_COPY_CHUNK_FRAMES: usize = 262_144;
@@ -121,7 +121,11 @@ impl crate::app::WavesPreviewer {
     }
 
     fn editor_invalidate_destructive_preview_state(tab: &mut crate::app::types::EditorTab) {
+        tab.pencil_draft = None;
+        tab.pencil_last_point = None;
+        tab.pencil_stroke_channels.clear();
         tab.preview_audio_tool = None;
+        tab.preview_audio_buffer = None;
         tab.preview_overlay = None;
         tab.preview_offset_samples = None;
         tab.pending_loop_unwrap = None;
@@ -636,6 +640,7 @@ impl crate::app::WavesPreviewer {
     /// Paste-insert the audio clipboard at the selection start / playhead.
     /// The clip is resampled to the tab's buffer rate when needed and its
     /// channel layout is adapted (repeat modulo) to the tab's channel count.
+    #[cfg(feature = "kittest")]
     pub(super) fn editor_paste_insert_from_audio_clipboard(&mut self, tab_idx: usize) -> bool {
         self.editor_paste_from_audio_clipboard(tab_idx, super::types::PasteMode::Insert)
     }
@@ -795,7 +800,10 @@ impl crate::app::WavesPreviewer {
                 // Fade-in against the samples immediately before pos.
                 for k in 0..xf {
                     let t = (k as f32 + 0.5) / xf as f32;
-                    let (win, wout) = ((t * std::f32::consts::FRAC_PI_2).sin(), (t * std::f32::consts::FRAC_PI_2).cos());
+                    let (win, wout) = (
+                        (t * std::f32::consts::FRAC_PI_2).sin(),
+                        (t * std::f32::consts::FRAC_PI_2).cos(),
+                    );
                     let prev = if pos >= xf - k {
                         orig.get(pos + k - xf).copied().unwrap_or(0.0)
                     } else {
@@ -806,7 +814,10 @@ impl crate::app::WavesPreviewer {
                 // Fade-out into the samples at/after pos.
                 for k in 0..xf {
                     let t = (k as f32 + 0.5) / xf as f32;
-                    let (wout, win) = ((t * std::f32::consts::FRAC_PI_2).cos(), (t * std::f32::consts::FRAC_PI_2).sin());
+                    let (wout, win) = (
+                        (t * std::f32::consts::FRAC_PI_2).cos(),
+                        (t * std::f32::consts::FRAC_PI_2).sin(),
+                    );
                     let next = orig.get(pos + k).copied().unwrap_or(0.0);
                     let idx = ins_len - xf + k;
                     ins[idx] = ins[idx] * wout + next * win;
@@ -816,7 +827,240 @@ impl crate::app::WavesPreviewer {
         self.editor_insert_channels_at(tab_idx, pos, insert)
     }
 
-    /// Write a linearly interpolated pencil segment into the target channels.
+    fn editor_pencil_recompute_mixdown_range(
+        overlay: &mut crate::app::types::PreviewOverlay,
+        start: usize,
+        end: usize,
+    ) {
+        let Some(mixdown) = overlay.mixdown.as_mut() else {
+            return;
+        };
+        let channel_count = overlay.channels.len();
+        if channel_count == 0 {
+            return;
+        }
+        let end = end.min(mixdown.len());
+        for sample_idx in start.min(end)..end {
+            let sum = overlay
+                .channels
+                .iter()
+                .filter_map(|channel| channel.get(sample_idx))
+                .copied()
+                .sum::<f32>();
+            mixdown[sample_idx] = sum / channel_count as f32;
+        }
+    }
+
+    /// Begin a Pencil stroke against a separate green draft. The committed
+    /// samples and Arc worker mirror are deliberately left untouched.
+    pub(crate) fn editor_pencil_begin_stroke(
+        tab: &mut super::types::EditorTab,
+        channels: &[usize],
+    ) -> bool {
+        if tab.samples_len == 0 || tab.ch_samples.is_empty() {
+            return false;
+        }
+        let mut channels: Vec<usize> = channels
+            .iter()
+            .copied()
+            .filter(|&channel| channel < tab.ch_samples.len())
+            .collect();
+        channels.sort_unstable();
+        channels.dedup();
+        if channels.is_empty() {
+            return false;
+        }
+        let Some(draft) = tab.pencil_draft.as_mut() else {
+            return false;
+        };
+        let needs_overlay = tab
+            .preview_overlay
+            .as_ref()
+            .is_none_or(|overlay| overlay.source_tool != ToolKind::Pencil);
+        if needs_overlay {
+            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                tab.ch_samples.clone(),
+                ToolKind::Pencil,
+                tab.samples_len,
+            ));
+        }
+        // A new edit after Undo starts a new branch.
+        draft.redo.clear();
+        draft.active = Some(PencilActiveStroke {
+            channels: channels.clone(),
+            start: usize::MAX,
+            end: 0,
+            before: vec![Vec::new(); channels.len()],
+        });
+        tab.pencil_last_point = None;
+        tab.pencil_stroke_channels = channels;
+        tab.preview_audio_tool = Some(ToolKind::Pencil);
+        true
+    }
+
+    /// Capture a fixed sample range for a vertical point/selection move.
+    /// Subsequent drag frames are evaluated against this original patch so
+    /// pointer updates never accumulate rounding error.
+    pub(crate) fn editor_pencil_begin_range_move(
+        tab: &mut super::types::EditorTab,
+        channels: &[usize],
+        start: usize,
+        end: usize,
+    ) -> bool {
+        let len = tab.samples_len;
+        if len == 0 {
+            return false;
+        }
+        let start = start.min(len);
+        let end = end.min(len).max(start);
+        if start >= end {
+            return false;
+        }
+        let Some(draft) = tab.pencil_draft.as_mut() else {
+            return false;
+        };
+        let Some(overlay) = tab
+            .preview_overlay
+            .as_ref()
+            .filter(|overlay| overlay.source_tool == ToolKind::Pencil)
+        else {
+            return false;
+        };
+        let mut channels: Vec<usize> = channels
+            .iter()
+            .copied()
+            .filter(|&channel| channel < overlay.channels.len())
+            .collect();
+        channels.sort_unstable();
+        channels.dedup();
+        if channels.is_empty() {
+            return false;
+        }
+        let before: Vec<Vec<f32>> = channels
+            .iter()
+            .map(|&channel| {
+                overlay
+                    .channels
+                    .get(channel)
+                    .map(|samples| {
+                        let channel_start = start.min(samples.len());
+                        let channel_end = end.min(samples.len()).max(channel_start);
+                        samples[channel_start..channel_end].to_vec()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        if before.iter().all(Vec::is_empty) {
+            return false;
+        }
+        draft.redo.clear();
+        draft.active = Some(PencilActiveStroke {
+            channels: channels.clone(),
+            start,
+            end,
+            before,
+        });
+        tab.pencil_stroke_channels = channels;
+        tab.pencil_last_point = None;
+        true
+    }
+
+    /// Move every point in the active fixed range by the same amplitude
+    /// delta, using the range snapshot captured at drag start.
+    pub(crate) fn editor_pencil_move_active_range(
+        tab: &mut super::types::EditorTab,
+        delta_amp: f32,
+    ) -> bool {
+        let Some(draft) = tab.pencil_draft.as_ref() else {
+            return false;
+        };
+        let Some(active) = draft.active.as_ref() else {
+            return false;
+        };
+        if active.start >= active.end {
+            return false;
+        }
+        let channels = active.channels.clone();
+        let before = active.before.clone();
+        let start = active.start;
+        let end = active.end;
+        let Some(overlay) = tab.preview_overlay.as_mut() else {
+            return false;
+        };
+        if overlay.source_tool != ToolKind::Pencil {
+            return false;
+        }
+        let mut changed = false;
+        for (&channel, original) in channels.iter().zip(before.iter()) {
+            let Some(samples) = overlay.channels.get_mut(channel) else {
+                continue;
+            };
+            if start >= samples.len() {
+                continue;
+            }
+            let patch_end = start.saturating_add(original.len()).min(samples.len());
+            for (sample, &source) in samples[start..patch_end].iter_mut().zip(original.iter()) {
+                let moved = (source + delta_amp).clamp(-4.0, 4.0);
+                changed |= (*sample - moved).abs() > f32::EPSILON;
+                *sample = moved;
+            }
+        }
+        Self::editor_pencil_recompute_mixdown_range(overlay, start, end);
+        overlay.revision = PreviewOverlay::next_revision();
+        Self::invalidate_editor_viewport_cache(tab);
+        changed
+    }
+
+    /// Enter explicit Pencil edit mode and install an unchanged green draft.
+    pub(super) fn editor_pencil_start_editing(&mut self, tab_idx: usize) -> bool {
+        {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            if tab.samples_len == 0 || tab.ch_samples.is_empty() || tab.pencil_draft.is_some() {
+                return false;
+            }
+            tab.pencil_draft = Some(PencilDraft::default());
+            tab.pencil_last_point = None;
+            tab.pencil_stroke_channels.clear();
+            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                tab.ch_samples.clone(),
+                ToolKind::Pencil,
+                tab.samples_len,
+            ));
+            tab.preview_audio_tool = Some(ToolKind::Pencil);
+            Self::invalidate_editor_viewport_cache(tab);
+        }
+        self.editor_pencil_refresh_preview_audio(tab_idx);
+        true
+    }
+
+    /// Restore the Pencil draft to the currently committed audio while
+    /// remaining in Edit mode.
+    pub(super) fn editor_pencil_reset_draft(&mut self, tab_idx: usize) -> bool {
+        {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let Some(draft) = tab.pencil_draft.as_mut() else {
+                return false;
+            };
+            *draft = PencilDraft::default();
+            tab.pencil_last_point = None;
+            tab.pencil_stroke_channels.clear();
+            tab.preview_overlay = Some(Self::preview_overlay_from_channels(
+                tab.ch_samples.clone(),
+                ToolKind::Pencil,
+                tab.samples_len,
+            ));
+            tab.preview_audio_tool = Some(ToolKind::Pencil);
+            Self::invalidate_editor_viewport_cache(tab);
+        }
+        self.editor_pencil_refresh_preview_audio(tab_idx);
+        true
+    }
+
+    /// Write a linearly interpolated Pencil segment into the green draft.
     pub(crate) fn editor_pencil_write_segment(
         tab: &mut super::types::EditorTab,
         channels: &[usize],
@@ -827,6 +1071,19 @@ impl crate::app::WavesPreviewer {
         if len == 0 {
             return;
         }
+        let Some(draft) = tab.pencil_draft.as_mut() else {
+            return;
+        };
+        let Some(active) = draft.active.as_mut() else {
+            return;
+        };
+        let Some(overlay) = tab.preview_overlay.as_mut() else {
+            return;
+        };
+        if overlay.source_tool != ToolKind::Pencil {
+            return;
+        }
+
         let (a, av, b, bv) = if from.0 <= to.0 {
             (from.0, from.1, to.0, to.1)
         } else {
@@ -834,9 +1091,48 @@ impl crate::app::WavesPreviewer {
         };
         let a = a.min(len - 1);
         let b = b.min(len - 1);
+        let new_start = active.start.min(a);
+        let new_end = active.end.max(b.saturating_add(1));
+        if active.start == usize::MAX {
+            active.start = a;
+            active.end = b.saturating_add(1);
+            active.before = active
+                .channels
+                .iter()
+                .map(|&channel| {
+                    overlay
+                        .channels
+                        .get(channel)
+                        .map(|samples| samples[a..active.end.min(samples.len())].to_vec())
+                        .unwrap_or_default()
+                })
+                .collect();
+        } else if new_start != active.start || new_end != active.end {
+            for (row, &channel) in active.before.iter_mut().zip(active.channels.iter()) {
+                let Some(samples) = overlay.channels.get(channel) else {
+                    continue;
+                };
+                let mut expanded = Vec::with_capacity(new_end.saturating_sub(new_start));
+                if new_start < active.start {
+                    expanded.extend_from_slice(
+                        &samples[new_start.min(samples.len())..active.start.min(samples.len())],
+                    );
+                }
+                expanded.extend_from_slice(row);
+                if active.end < new_end {
+                    expanded.extend_from_slice(
+                        &samples[active.end.min(samples.len())..new_end.min(samples.len())],
+                    );
+                }
+                *row = expanded;
+            }
+            active.start = new_start;
+            active.end = new_end;
+        }
+
         let n = b - a;
         for &ci in channels {
-            let Some(ch) = tab.ch_samples.get_mut(ci) else {
+            let Some(ch) = overlay.channels.get_mut(ci) else {
                 continue;
             };
             for i in a..=b {
@@ -852,32 +1148,220 @@ impl crate::app::WavesPreviewer {
                 }
             }
         }
+        Self::editor_pencil_recompute_mixdown_range(overlay, a, b.saturating_add(1));
+        overlay.revision = PreviewOverlay::next_revision();
     }
 
-    /// Finish a pencil stroke: push the undo state captured at stroke start
-    /// and run the shared destructive-apply pipeline.
-    pub(super) fn editor_pencil_commit(&mut self, tab_idx: usize) {
-        let undo_state = {
+    /// Close the active stroke and add its compact patch to draft history.
+    pub(crate) fn editor_pencil_finish_stroke(tab: &mut super::types::EditorTab) -> bool {
+        let Some(draft) = tab.pencil_draft.as_mut() else {
+            return false;
+        };
+        let Some(active) = draft.active.take() else {
+            return false;
+        };
+        tab.pencil_last_point = None;
+        if active.start == usize::MAX || active.start >= active.end {
+            return false;
+        }
+        let Some(overlay) = tab.preview_overlay.as_ref() else {
+            return false;
+        };
+        let after: Vec<Vec<f32>> = active
+            .channels
+            .iter()
+            .map(|&channel| {
+                overlay
+                    .channels
+                    .get(channel)
+                    .map(|samples| {
+                        samples[active.start.min(samples.len())..active.end.min(samples.len())]
+                            .to_vec()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        if active.before == after {
+            return false;
+        }
+        draft.undo.push(PencilStrokeEdit {
+            channels: active.channels,
+            start: active.start,
+            before: active.before,
+            after,
+        });
+        draft.redo.clear();
+        true
+    }
+
+    fn editor_pencil_apply_patch(
+        tab: &mut super::types::EditorTab,
+        edit: &PencilStrokeEdit,
+        use_after: bool,
+    ) -> bool {
+        let Some(overlay) = tab.preview_overlay.as_mut() else {
+            return false;
+        };
+        if overlay.source_tool != ToolKind::Pencil {
+            return false;
+        }
+        let rows = if use_after { &edit.after } else { &edit.before };
+        let mut changed = false;
+        let mut patch_end = edit.start;
+        for (&channel, row) in edit.channels.iter().zip(rows.iter()) {
+            let Some(samples) = overlay.channels.get_mut(channel) else {
+                continue;
+            };
+            let end = edit.start.saturating_add(row.len()).min(samples.len());
+            let count = end.saturating_sub(edit.start.min(end));
+            if count == 0 {
+                continue;
+            }
+            samples[edit.start..end].copy_from_slice(&row[..count]);
+            patch_end = patch_end.max(end);
+            changed = true;
+        }
+        if changed {
+            Self::editor_pencil_recompute_mixdown_range(overlay, edit.start, patch_end);
+            overlay.revision = PreviewOverlay::next_revision();
+            Self::invalidate_editor_viewport_cache(tab);
+        }
+        changed
+    }
+
+    pub(super) fn editor_pencil_refresh_preview_audio(&mut self, tab_idx: usize) {
+        let channels = self.tabs.get(tab_idx).and_then(|tab| {
+            tab.preview_overlay
+                .as_ref()
+                .filter(|overlay| overlay.source_tool == ToolKind::Pencil)
+                .map(|overlay| overlay.channels.clone())
+        });
+        if let Some(channels) = channels {
+            self.set_preview_channels_keep_pos(tab_idx, ToolKind::Pencil, channels);
+        }
+    }
+
+    pub(super) fn editor_pencil_undo_draft(&mut self, tab_idx: usize) -> bool {
+        let changed = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
-                return;
+                return false;
             };
-            let Some(undo) = tab.pencil_undo.take() else {
-                return;
+            let _ = Self::editor_pencil_finish_stroke(tab);
+            let edit = tab.pencil_draft.as_mut().and_then(|draft| draft.undo.pop());
+            let Some(edit) = edit else {
+                return false;
             };
+            let changed = Self::editor_pencil_apply_patch(tab, &edit, false);
+            if changed {
+                if let Some(draft) = tab.pencil_draft.as_mut() {
+                    draft.redo.push(edit);
+                }
+            }
+            changed
+        };
+        if changed {
+            self.editor_pencil_refresh_preview_audio(tab_idx);
+        }
+        changed
+    }
+
+    pub(super) fn editor_pencil_redo_draft(&mut self, tab_idx: usize) -> bool {
+        let changed = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let edit = tab.pencil_draft.as_mut().and_then(|draft| draft.redo.pop());
+            let Some(edit) = edit else {
+                return false;
+            };
+            let changed = Self::editor_pencil_apply_patch(tab, &edit, true);
+            if changed {
+                if let Some(draft) = tab.pencil_draft.as_mut() {
+                    draft.undo.push(edit);
+                }
+            }
+            changed
+        };
+        if changed {
+            self.editor_pencil_refresh_preview_audio(tab_idx);
+        }
+        changed
+    }
+
+    pub(super) fn editor_pencil_cancel_draft(&mut self, tab_idx: usize) -> bool {
+        let had_draft = self
+            .tabs
+            .get(tab_idx)
+            .is_some_and(|tab| tab.pencil_draft.is_some());
+        if !had_draft {
+            return false;
+        }
+        self.clear_preview_if_any(tab_idx);
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            tab.pencil_draft = None;
+            tab.pencil_last_point = None;
+            tab.pencil_stroke_channels.clear();
+            Self::invalidate_editor_viewport_cache(tab);
+        }
+        true
+    }
+
+    /// Apply the whole green Pencil draft as one committed editor operation.
+    pub(super) fn editor_pencil_commit(&mut self, tab_idx: usize) -> bool {
+        let undo_state = {
+            let Some(tab) = self.tabs.get(tab_idx) else {
+                return false;
+            };
+            let has_changes = tab
+                .pencil_draft
+                .as_ref()
+                .is_some_and(|draft| !draft.undo.is_empty());
+            if !has_changes {
+                return false;
+            }
+            Self::capture_undo_state_labeled(tab, "Pencil")
+        };
+        {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let Some(overlay) = tab.preview_overlay.take() else {
+                return false;
+            };
+            if overlay.source_tool != ToolKind::Pencil {
+                tab.preview_overlay = Some(overlay);
+                return false;
+            }
+            tab.ch_samples = overlay.channels;
+            tab.pencil_draft = None;
             tab.pencil_last_point = None;
             tab.pencil_stroke_channels.clear();
             tab.dirty = true;
             Self::editor_clamp_ranges(tab);
-            *undo
-        };
+        }
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        true
     }
 
     #[cfg(feature = "kittest")]
-    pub fn test_pencil_stroke(&mut self, from_frac: f32, amp0: f32, to_frac: f32, amp1: f32) -> bool {
+    pub fn test_pencil_draft_stroke(
+        &mut self,
+        from_frac: f32,
+        amp0: f32,
+        to_frac: f32,
+        amp1: f32,
+    ) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
         };
+        if self
+            .tabs
+            .get(tab_idx)
+            .is_some_and(|tab| tab.pencil_draft.is_none())
+            && !self.editor_pencil_start_editing(tab_idx)
+        {
+            return false;
+        }
         {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return false;
@@ -887,12 +1371,65 @@ impl crate::app::WavesPreviewer {
             }
             let a = ((tab.samples_len as f32) * from_frac.clamp(0.0, 1.0)) as usize;
             let b = ((tab.samples_len as f32) * to_frac.clamp(0.0, 1.0)) as usize;
-            tab.pencil_undo = Some(Box::new(Self::capture_undo_state_labeled(tab, "Pencil")));
             let channels: Vec<usize> = (0..tab.ch_samples.len()).collect();
+            if !Self::editor_pencil_begin_stroke(tab, &channels) {
+                return false;
+            }
             Self::editor_pencil_write_segment(tab, &channels, (a, amp0), (b, amp1));
+            if !Self::editor_pencil_finish_stroke(tab) {
+                return false;
+            }
         }
-        self.editor_pencil_commit(tab_idx);
+        self.editor_pencil_refresh_preview_audio(tab_idx);
         true
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_apply_draft(&mut self) -> bool {
+        self.active_tab
+            .is_some_and(|tab_idx| self.editor_pencil_commit(tab_idx))
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_start_editing(&mut self) -> bool {
+        self.active_tab
+            .is_some_and(|tab_idx| self.editor_pencil_start_editing(tab_idx))
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_reset_draft(&mut self) -> bool {
+        self.active_tab
+            .is_some_and(|tab_idx| self.editor_pencil_reset_draft(tab_idx))
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_cancel_draft(&mut self) -> bool {
+        self.active_tab
+            .is_some_and(|tab_idx| self.editor_pencil_cancel_draft(tab_idx))
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_draft_undo(&mut self) -> bool {
+        self.trigger_undo_redo(false)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_draft_redo(&mut self) -> bool {
+        self.trigger_undo_redo(true)
+    }
+
+    #[cfg(feature = "kittest")]
+    pub fn test_pencil_stroke(
+        &mut self,
+        from_frac: f32,
+        amp0: f32,
+        to_frac: f32,
+        amp1: f32,
+    ) -> bool {
+        if !self.test_pencil_draft_stroke(from_frac, amp0, to_frac, amp1) {
+            return false;
+        }
+        self.test_pencil_apply_draft()
     }
 
     /// Mean of a sample slice in f64 (stable for long buffers).
@@ -1049,10 +1586,7 @@ impl crate::app::WavesPreviewer {
             .get(tab_idx)
             .map(|t| t.tool_state.declick_sensitivity)
             .unwrap_or(0.5);
-        let range = self
-            .tabs
-            .get(tab_idx)
-            .and_then(Self::editor_selected_range);
+        let range = self.tabs.get(tab_idx).and_then(Self::editor_selected_range);
         self.spawn_editor_apply_for_tab_range(
             tab_idx,
             crate::app::types::ToolKind::DeClick,
@@ -1085,10 +1619,7 @@ impl crate::app::WavesPreviewer {
             .get(tab_idx)
             .map(|t| t.tool_state.declip_sensitivity)
             .unwrap_or(0.5);
-        let range = self
-            .tabs
-            .get(tab_idx)
-            .and_then(Self::editor_selected_range);
+        let range = self.tabs.get(tab_idx).and_then(Self::editor_selected_range);
         self.spawn_editor_apply_for_tab_range(
             tab_idx,
             crate::app::types::ToolKind::DeClip,
@@ -1141,9 +1672,9 @@ impl crate::app::WavesPreviewer {
                 .map(|ch| {
                     let filtered = crate::app::dehum::dehum_channel(ch, buffer_sr, &cfg);
                     match range {
-                        Some((s, e)) => crate::app::dehum::splice_processed_range(
-                            ch, &filtered, s, e, fade,
-                        ),
+                        Some((s, e)) => {
+                            crate::app::dehum::splice_processed_range(ch, &filtered, s, e, fade)
+                        }
                         None => filtered,
                     }
                 })
@@ -2188,7 +2719,8 @@ impl crate::app::WavesPreviewer {
                 if mask.as_ref().is_some_and(|m| !m[ci]) {
                     continue;
                 }
-                let processed = crate::wave::process_noise_gate_offline(&ch[s..e], sample_rate, &params);
+                let processed =
+                    crate::wave::process_noise_gate_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
             tab.dirty = true;
@@ -2219,7 +2751,8 @@ impl crate::app::WavesPreviewer {
                 if mask.as_ref().is_some_and(|m| !m[ci]) {
                     continue;
                 }
-                let processed = crate::wave::process_three_band_eq_offline(&ch[s..e], sample_rate, &params);
+                let processed =
+                    crate::wave::process_three_band_eq_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
             tab.dirty = true;
@@ -2250,7 +2783,8 @@ impl crate::app::WavesPreviewer {
                 if mask.as_ref().is_some_and(|m| !m[ci]) {
                     continue;
                 }
-                let processed = crate::wave::process_compressor_offline(&ch[s..e], sample_rate, &params);
+                let processed =
+                    crate::wave::process_compressor_offline(&ch[s..e], sample_rate, &params);
                 ch[s..e].copy_from_slice(&processed);
             }
             tab.dirty = true;
@@ -2649,6 +3183,33 @@ impl crate::app::WavesPreviewer {
         param: f32,
         range: Option<(usize, usize)>,
     ) {
+        self.spawn_editor_apply_for_tab_range_with_pitch_curve(tab_idx, tool, param, range, None);
+    }
+
+    pub(super) fn spawn_editor_apply_pitch_curve_for_tab_range(
+        &mut self,
+        tab_idx: usize,
+        fallback_semitones: f32,
+        points: Vec<(usize, f32)>,
+        range: Option<(usize, usize)>,
+    ) {
+        self.spawn_editor_apply_for_tab_range_with_pitch_curve(
+            tab_idx,
+            ToolKind::PitchShift,
+            fallback_semitones,
+            range,
+            Some(points),
+        );
+    }
+
+    fn spawn_editor_apply_for_tab_range_with_pitch_curve(
+        &mut self,
+        tab_idx: usize,
+        tool: ToolKind,
+        param: f32,
+        range: Option<(usize, usize)>,
+        pitch_curve: Option<Vec<(usize, f32)>>,
+    ) {
         use std::sync::mpsc;
         // Single apply slot: the UI disables further applies on the busy tab;
         // races (hotkeys, other tabs) refuse with a toast instead of
@@ -2684,7 +3245,16 @@ impl crate::app::WavesPreviewer {
             let mut out: Vec<Vec<f32>> = Vec::with_capacity(ch.len());
             let mut lufs_override = None;
             match tool {
-                ToolKind::PitchShift | ToolKind::TimeStretch | ToolKind::Speed => {
+                ToolKind::PitchShift => {
+                    out = crate::wave::process_pitchshift_curve_multi_spliced(
+                        &ch,
+                        sr,
+                        pitch_curve.as_deref().unwrap_or(&[]),
+                        param,
+                        range,
+                    );
+                }
+                ToolKind::TimeStretch | ToolKind::Speed => {
                     for chan in ch.iter() {
                         let processed =
                             Self::process_tool_segment_spliced(chan, tool, param, sr, range);
@@ -2936,7 +3506,8 @@ impl crate::app::WavesPreviewer {
                 let adopt_audio = matches!(
                     (&self.playback_session.source, &tab_path),
                     (crate::app::PlaybackSourceKind::EditorTab(p), Some(tp)) if p == tp
-                ) || (self.active_tab == Some(cur_idx) && self.is_editor_workspace_active());
+                ) || (self.active_tab == Some(cur_idx)
+                    && self.is_editor_workspace_active());
                 if adopt_audio {
                     self.audio.stop();
                     if let Some((path, buffer_sr, channels)) = self.tabs.get(cur_idx).map(|tab| {
@@ -3294,8 +3865,14 @@ mod clear_edit_tests {
 
         let tab = &app.tabs[tab_idx];
         assert!(!tab.dirty, "clear edit should mark the tab clean");
-        assert!(tab.undo_stack.is_empty(), "clear edit should wipe undo history");
-        assert!(tab.redo_stack.is_empty(), "clear edit should wipe redo history");
+        assert!(
+            tab.undo_stack.is_empty(),
+            "clear edit should wipe undo history"
+        );
+        assert!(
+            tab.redo_stack.is_empty(),
+            "clear edit should wipe redo history"
+        );
         assert!(
             (tab.ch_samples[0][0] - 0.2).abs() < 1e-4,
             "clear edit should restore the original sample value, got {}",
@@ -3385,12 +3962,18 @@ mod clear_edit_tests {
         // end edge; the middle is fully inverted.
         let mut ch: Vec<f32> = vec![1.0; 100];
         crate::app::WavesPreviewer::invert_polarity_channel_range(&mut ch, 10, 90, 8);
-        assert!(ch[9] == 1.0 && ch[10] > 0.0, "start edge must stay continuous");
+        assert!(
+            ch[9] == 1.0 && ch[10] > 0.0,
+            "start edge must stay continuous"
+        );
         assert!(ch[10] > ch[11], "gain must descend across the start fade");
         for v in &ch[18..82] {
             assert_eq!(*v, -1.0);
         }
-        assert!(ch[89] > 0.0 && ch[90] == 1.0, "end edge must stay continuous");
+        assert!(
+            ch[89] > 0.0 && ch[90] == 1.0,
+            "end edge must stay continuous"
+        );
 
         // Range touching the buffer edges: no fade there (nothing to join).
         let mut ch: Vec<f32> = vec![1.0; 50];

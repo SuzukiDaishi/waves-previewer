@@ -141,8 +141,8 @@ impl crate::app::WavesPreviewer {
                         .striped(true)
                         .show(ui, |ui| {
                             for binding in KEYMAP.iter().filter(|b| b.context == context) {
-                                let rebindable = binding.dispatch == Dispatch::Table
-                                    && binding.chord.is_some();
+                                let rebindable =
+                                    binding.dispatch == Dispatch::Table && binding.chord.is_some();
                                 if !rebindable {
                                     // Manual rows keep their dedicated handlers;
                                     // shown grayed so the list stays complete.

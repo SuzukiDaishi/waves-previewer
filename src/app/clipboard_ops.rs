@@ -209,9 +209,9 @@ impl super::WavesPreviewer {
                         resample_quality,
                     );
                     sample_rate = new_sr;
-                    audio = Some(std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(
-                        channels,
-                    )));
+                    audio = Some(std::sync::Arc::new(
+                        crate::audio::AudioBuffer::from_channels(channels),
+                    ));
                 }
             }
 
@@ -221,11 +221,10 @@ impl super::WavesPreviewer {
             let needs_temp_export = was_ready || has_override;
             if needs_temp_export {
                 if let Some(audio_ref) = audio.as_ref().filter(|a| a.len() > 0) {
-                    if let Some(tmp) =
-                        crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
-                            "clipboard", "wav",
-                        )
-                    {
+                    if let Some(tmp) = crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
+                        "clipboard",
+                        "wav",
+                    ) {
                         let range = (0, audio_ref.len());
                         if crate::wave::export_selection_wav(
                             &audio_ref.channels,
@@ -562,8 +561,7 @@ impl super::WavesPreviewer {
         });
         let consumed_copy =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::C));
-        let consumed_cut =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X));
+        let consumed_cut = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::X));
         let consumed_paste_mix = ctx.input_mut(|i| {
             i.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
@@ -888,7 +886,7 @@ mod tests {
 
     #[test]
     fn clipboard_win_formats_accessible() {
-        use clipboard_win::formats::{CF_UNICODETEXT, FileList, Unicode};
+        use clipboard_win::formats::{FileList, Unicode, CF_UNICODETEXT};
         // Just verify these types are importable and constructable
         let _ = FileList;
         let _ = Unicode;
@@ -899,7 +897,8 @@ mod tests {
     fn clipboard_win_clipboard_new_attempts_api_exists() {
         // Verify Clipboard::new_attempts exists with the expected signature
         // (does not actually open the clipboard in this test)
-        let _ = clipboard_win::Clipboard::new_attempts as fn(usize) -> clipboard_win::SysResult<clipboard_win::Clipboard>;
+        let _ = clipboard_win::Clipboard::new_attempts
+            as fn(usize) -> clipboard_win::SysResult<clipboard_win::Clipboard>;
     }
 
     #[test]
@@ -915,9 +914,8 @@ mod tests {
         let marker = "neowaves_paste\0";
         let mut utf16: Vec<u16> = marker.encode_utf16().collect();
         utf16.push(0);
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2)
-        };
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * 2) };
         // Decode back and verify
         let decoded: Vec<u16> = bytes
             .chunks_exact(2)

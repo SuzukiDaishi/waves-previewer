@@ -60,10 +60,6 @@ impl OverlayBinsCache {
             }
             self.entries.push(OverlayBinsEntry { key, values });
         }
-        &self
-            .entries
-            .last()
-            .expect("entry pushed above")
-            .values
+        &self.entries.last().expect("entry pushed above").values
     }
 }

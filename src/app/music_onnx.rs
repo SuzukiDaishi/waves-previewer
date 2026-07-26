@@ -3037,7 +3037,10 @@ mod tests {
     fn rand_range_within_bounds() {
         for max in [1usize, 2, 5, 10, 100] {
             let result = rand::rng().random_range(0..max);
-            assert!(result < max, "random_range(0..{max}) returned {result} which is out of bounds");
+            assert!(
+                result < max,
+                "random_range(0..{max}) returned {result} which is out of bounds"
+            );
         }
     }
 
@@ -3051,7 +3054,10 @@ mod tests {
             seen[v] = true;
         }
         for (i, &hit) in seen.iter().enumerate() {
-            assert!(hit, "value {i} never appeared in 2000 samples from 0..{max}");
+            assert!(
+                hit,
+                "value {i} never appeared in 2000 samples from 0..{max}"
+            );
         }
     }
 

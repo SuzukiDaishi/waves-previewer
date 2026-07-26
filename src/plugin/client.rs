@@ -221,12 +221,27 @@ fn run_worker_process(request: &WorkerRequest) -> Result<WorkerResponse, String>
             }
         }
     };
-    let stdout = stdout_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .and_then(|h| h.join().ok())
-        .unwrap_or_default();
+    // A shell worker can leave descendant processes holding inherited pipe
+    // handles after the shell itself is killed. Waiting for the reader
+    // threads in that case would turn a short timeout into the descendant's
+    // full runtime. The detached readers exit when those handles eventually
+    // close; successful workers are still joined so their complete response
+    // and diagnostics are collected.
+    let collect_output = wait_result.is_ok();
+    let stdout = if collect_output {
+        stdout_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let stderr = if collect_output {
+        stderr_handle
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if cleanup_temp {
         let _ = std::fs::remove_file(&worker_path);
     }
@@ -356,7 +371,10 @@ impl GuiWorkerClient {
                     timeout.as_millis()
                 ));
             }
-            match self.rx.recv_timeout(remaining.min(Duration::from_millis(250))) {
+            match self
+                .rx
+                .recv_timeout(remaining.min(Duration::from_millis(250)))
+            {
                 Ok(Ok(resp)) => return Ok(resp),
                 Ok(Err(e)) => return Err(e),
                 Err(mpsc::RecvTimeoutError::Timeout) => {

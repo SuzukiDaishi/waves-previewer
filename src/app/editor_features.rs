@@ -136,10 +136,10 @@ impl super::WavesPreviewer {
                 return;
             }
             let mono = super::WavesPreviewer::mixdown_channels(&channels, samples_len);
-            let data = Self::compute_world_feature_data(&mono, sample_rate, f0_method, &|p: f32| {
-                shared_progress
-                    .store((p * 100.0) as u32, std::sync::atomic::Ordering::Relaxed);
-            });
+            let data =
+                Self::compute_world_feature_data(&mono, sample_rate, f0_method, &|p: f32| {
+                    shared_progress.store((p * 100.0) as u32, std::sync::atomic::Ordering::Relaxed);
+                });
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return;
             }
@@ -171,12 +171,7 @@ impl super::WavesPreviewer {
             Some(progress),
         );
         let frame_step = ((sr as f64 * features.frame_period_ms / 1_000.0).round() as usize).max(1);
-        let mut voiced: Vec<f32> = features
-            .f0
-            .iter()
-            .copied()
-            .filter(|f0| *f0 > 0.0)
-            .collect();
+        let mut voiced: Vec<f32> = features.f0.iter().copied().filter(|f0| *f0 > 0.0).collect();
         let voiced_ratio = if features.f0.is_empty() {
             0.0
         } else {
@@ -239,7 +234,11 @@ impl super::WavesPreviewer {
             AnalysisProgress {
                 done_units: 0,
                 // WORLD reports live percent; the others finish in one unit.
-                total_units: if kind == EditorAnalysisKind::World { 100 } else { 1 },
+                total_units: if kind == EditorAnalysisKind::World {
+                    100
+                } else {
+                    1
+                },
                 started_at: std::time::Instant::now(),
             },
         );

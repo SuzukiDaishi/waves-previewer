@@ -491,7 +491,11 @@ impl crate::app::WavesPreviewer {
         let console_max = (ui.available_height() * 0.45).max(120.0);
         egui::Panel::bottom("effect_graph_console_panel")
             .resizable(true)
-            .default_size(self.effect_graph.bottom_panel_height.clamp(90.0, console_max))
+            .default_size(
+                self.effect_graph
+                    .bottom_panel_height
+                    .clamp(90.0, console_max),
+            )
             .size_range(egui::Rangef::new(72.0, console_max))
             .show_inside(ui, |ui| {
                 self.ui_effect_graph_console(ui);
@@ -1345,11 +1349,8 @@ impl crate::app::WavesPreviewer {
                 Color32::from_black_alpha(90),
             );
             let body_fill = Color32::from_rgb(30, 33, 40);
-            let header_fill = crate::app::helpers::lerp_color(
-                Color32::from_rgb(36, 40, 48),
-                accent,
-                0.22,
-            );
+            let header_fill =
+                crate::app::helpers::lerp_color(Color32::from_rgb(36, 40, 48), accent, 0.22);
             painter.rect_filled(rect, corner, body_fill);
             painter.rect_filled(
                 title_rect,
@@ -1379,7 +1380,10 @@ impl crate::app::WavesPreviewer {
                 painter.rect_stroke(
                     rect.expand(3.0),
                     corner + 3.0,
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(border.r(), border.g(), border.b(), 90)),
+                    Stroke::new(
+                        1.0,
+                        Color32::from_rgba_unmultiplied(border.r(), border.g(), border.b(), 90),
+                    ),
                     StrokeKind::Outside,
                 );
             }
@@ -1407,8 +1411,16 @@ impl crate::app::WavesPreviewer {
                         ),
                         galley.size() + pad * 2.0,
                     );
-                    painter.rect_filled(badge_rect, badge_rect.height() * 0.5, Color32::from_black_alpha(110));
-                    painter.galley(badge_rect.min + pad, galley, Color32::from_rgb(214, 224, 234));
+                    painter.rect_filled(
+                        badge_rect,
+                        badge_rect.height() * 0.5,
+                        Color32::from_black_alpha(110),
+                    );
+                    painter.galley(
+                        badge_rect.min + pad,
+                        galley,
+                        Color32::from_rgb(214, 224, 234),
+                    );
                 }
             }
 
@@ -1447,7 +1459,11 @@ impl crate::app::WavesPreviewer {
             for (port_key, pin_pos) in node_input_pins.iter() {
                 painter.circle_filled(*pin_pos, 7.0, Color32::from_rgb(18, 20, 24));
                 painter.circle_filled(*pin_pos, 5.0, Color32::from_rgb(196, 212, 228));
-                painter.circle_stroke(*pin_pos, 7.0, Stroke::new(1.0, Color32::from_rgb(70, 80, 92)));
+                painter.circle_stroke(
+                    *pin_pos,
+                    7.0,
+                    Stroke::new(1.0, Color32::from_rgb(70, 80, 92)),
+                );
                 let input_label = if matches!(&node.data, EffectGraphNodeData::CombineChannels)
                     && matches!(
                         combine_mode,
@@ -1510,7 +1526,11 @@ impl crate::app::WavesPreviewer {
             for (port_key, pin_pos) in node_output_pins.iter() {
                 painter.circle_filled(*pin_pos, 7.0, Color32::from_rgb(18, 20, 24));
                 painter.circle_filled(*pin_pos, 5.0, Color32::from_rgb(110, 170, 255));
-                painter.circle_stroke(*pin_pos, 7.0, Stroke::new(1.0, Color32::from_rgb(70, 80, 92)));
+                painter.circle_stroke(
+                    *pin_pos,
+                    7.0,
+                    Stroke::new(1.0, Color32::from_rgb(70, 80, 92)),
+                );
                 painter.text(
                     egui::pos2(pin_pos.x - 10.0, pin_pos.y),
                     egui::Align2::RIGHT_CENTER,
@@ -1619,7 +1639,9 @@ impl crate::app::WavesPreviewer {
                     attack_ms,
                     release_ms,
                     makeup_db,
-                } => compressor = Some((*threshold_db, *ratio, *attack_ms, *release_ms, *makeup_db)),
+                } => {
+                    compressor = Some((*threshold_db, *ratio, *attack_ms, *release_ms, *makeup_db))
+                }
                 EffectGraphNodeData::Trim {
                     threshold_below_peak_db,
                     pre_roll_ms,

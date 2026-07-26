@@ -250,15 +250,11 @@ impl WavesPreviewer {
             let before_chunk = self.capture_list_undo_items_by_paths(&[path.clone()]);
 
             let pending_gain = self.pending_gain_db_for_path(&path);
-            let effective = self
-                .lufs_override
-                .get(&path)
-                .copied()
-                .or_else(|| {
-                    self.meta_for_path(&path)
-                        .and_then(|m| m.lufs_i)
-                        .map(|v| v + pending_gain)
-                });
+            let effective = self.lufs_override.get(&path).copied().or_else(|| {
+                self.meta_for_path(&path)
+                    .and_then(|m| m.lufs_i)
+                    .map(|v| v + pending_gain)
+            });
             enum Outcome {
                 Failed,
                 Skipped,

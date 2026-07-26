@@ -118,7 +118,7 @@ mod p1_operability {
 
     #[test]
     fn single_click_select_only_when_pref_off() {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
         let dir = make_temp_dir("click_pref_off");
         let wav = dir.join("click_target.wav");
         neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.4), 48_000, &wav)
@@ -143,7 +143,7 @@ mod p1_operability {
 
     #[test]
     fn single_click_auditions_by_default() {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
         let dir = make_temp_dir("click_pref_on");
         let wav = dir.join("click_target.wav");
         neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.4), 48_000, &wav)
@@ -168,7 +168,7 @@ mod p1_operability {
 
     #[test]
     fn space_plays_selected_row_when_pref_off() {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
         let dir = make_temp_dir("click_pref_space");
         let wav = dir.join("click_target.wav");
         neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.4), 48_000, &wav)
@@ -228,7 +228,7 @@ mod p1_operability {
 
     #[test]
     fn f2_inline_rename_commits_and_cancels() {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
         let dir = make_temp_dir("inline_rename");
         let wav = dir.join("old_name.wav");
         neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.3), 48_000, &wav)
@@ -275,11 +275,15 @@ mod p1_operability {
 
     #[test]
     fn inline_rename_guards_list_nav() {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
         let dir = make_temp_dir("inline_rename_guard");
         for name in ["a_first.wav", "b_second.wav"] {
-            neowaves::wave::export_channels_audio(&synth_stereo(48_000, 0.2), 48_000, &dir.join(name))
-                .expect("export wav");
+            neowaves::wave::export_channels_audio(
+                &synth_stereo(48_000, 0.2),
+                48_000,
+                &dir.join(name),
+            )
+            .expect("export wav");
         }
         let mut harness = harness_with_folder(dir.clone());
         wait_for_scan(&mut harness);

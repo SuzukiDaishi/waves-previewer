@@ -222,8 +222,13 @@ impl WavesPreviewer {
                     let Some((path, pending_gain, facts)) = job else {
                         break;
                     };
-                    let row =
-                        crate::app::inspection::inspect_file(&path, pending_gain, &facts, &cfg, &cancel);
+                    let row = crate::app::inspection::inspect_file(
+                        &path,
+                        pending_gain,
+                        &facts,
+                        &cfg,
+                        &cancel,
+                    );
                     if tx.send(row).is_err() {
                         break;
                     }
@@ -288,7 +293,9 @@ impl WavesPreviewer {
                     state.total
                 )
             } else {
-                format!("Inspection finished: {errors} errors, {warnings} warnings, {passed} passed")
+                format!(
+                    "Inspection finished: {errors} errors, {warnings} warnings, {passed} passed"
+                )
             };
             let severity = if errors > 0 {
                 ToastSeverity::Warning
@@ -299,7 +306,6 @@ impl WavesPreviewer {
             self.inspection_report = Some(InspectionReportState {
                 rows,
                 cfg: self.inspection_cfg.clone(),
-                generated_at: std::time::SystemTime::now(),
                 cancelled,
             });
             self.show_inspection_window = true;

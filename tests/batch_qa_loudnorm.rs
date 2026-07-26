@@ -59,9 +59,7 @@ mod batch_qa_loudnorm {
         paths: Vec<PathBuf>,
         target: f32,
     ) {
-        harness
-            .state_mut()
-            .test_begin_batch_loudnorm(paths, target);
+        harness.state_mut().test_begin_batch_loudnorm(paths, target);
         let start = Instant::now();
         loop {
             harness.run_steps(1);

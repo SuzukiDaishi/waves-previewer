@@ -1115,7 +1115,11 @@ pub fn project_tool_state_to_tool_state(t: &ProjectToolState) -> ToolState {
         loudness_target_lufs: t.loudness_target_lufs,
         pitch_semitones: t.pitch_semitones,
         stretch_rate: t.stretch_rate,
-        speed_rate: if t.speed_rate > 0.0 { t.speed_rate } else { 1.0 },
+        speed_rate: if t.speed_rate > 0.0 {
+            t.speed_rate
+        } else {
+            1.0
+        },
         warp_time_radius_ms: if t.warp_time_radius_ms > 0.0 {
             t.warp_time_radius_ms
         } else {
@@ -1327,9 +1331,6 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
 pub fn sidecar_audio_dst(project_path: &Path, prefix: &str, index: usize) -> PathBuf {
     project_data_dir(project_path).join(format!("{prefix}_{index:04}.wav"))
 }
-
-
-
 
 pub fn load_sidecar_audio(
     project_path: &Path,

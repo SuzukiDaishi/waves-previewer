@@ -21,9 +21,7 @@ impl crate::app::WavesPreviewer {
                     .active_tab
                     .filter(|_| self.is_editor_workspace_active());
                 let Some(tab_idx) = tab_idx else {
-                    ui.label(
-                        RichText::new("Open an editor tab to see its edit history.").weak(),
-                    );
+                    ui.label(RichText::new("Open an editor tab to see its edit history.").weak());
                     return;
                 };
                 let Some(tab) = self.tabs.get(tab_idx) else {
@@ -45,7 +43,7 @@ impl crate::app::WavesPreviewer {
                     let steps = undo_len - i;
                     let text = format!("{}", state.label);
                     if ui
-                        .add_enabled(!apply_busy, egui::SelectableLabel::new(false, text))
+                        .add_enabled(!apply_busy, egui::Button::selectable(false, text))
                         .on_hover_text(format!("Undo {steps} step(s) back to before this edit"))
                         .clicked()
                     {
@@ -60,7 +58,7 @@ impl crate::app::WavesPreviewer {
                     if ui
                         .add_enabled(
                             !apply_busy,
-                            egui::SelectableLabel::new(false, RichText::new(text).weak()),
+                            egui::Button::selectable(false, RichText::new(text).weak()),
                         )
                         .on_hover_text(format!("Redo {} step(s)", j + 1))
                         .clicked()

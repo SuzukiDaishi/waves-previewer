@@ -146,7 +146,10 @@ mod p4_usability {
             .test_keymap_assign("EditorZoomIn", "Q")
             .expect("rebind to Q");
         assert_eq!(
-            harness.state().test_keymap_effective("EditorZoomIn").as_deref(),
+            harness
+                .state()
+                .test_keymap_effective("EditorZoomIn")
+                .as_deref(),
             Some("Q")
         );
         harness.key_press(egui::Key::Q);
@@ -248,10 +251,15 @@ mod p4_usability {
         // Two labeled edits: Trim then Invert Polarity.
         assert!(harness.state_mut().test_apply_trim_frac(0.1, 0.9));
         harness.run_steps(2);
-        assert!(harness.state_mut().test_apply_invert_polarity_frac(0.0, 1.0));
+        assert!(harness
+            .state_mut()
+            .test_apply_invert_polarity_frac(0.0, 1.0));
         harness.run_steps(2);
         let (undo, redo) = harness.state().test_undo_history_labels();
-        assert_eq!(undo, vec!["Trim".to_string(), "Invert Polarity".to_string()]);
+        assert_eq!(
+            undo,
+            vec!["Trim".to_string(), "Invert Polarity".to_string()]
+        );
         assert!(redo.is_empty());
         // Jump two steps back in one click: original buffer restored, both
         // ops now sit in the redo (future) column with their labels.
@@ -346,7 +354,10 @@ mod p4_usability {
         // Scrub around sample 5000: the loop atomics form a ±40 ms window.
         let (ls, le, enabled) = harness.state_mut().test_scrub_begin_update(tab_id, 5_000);
         assert!(enabled, "scrub must enable looping");
-        assert!(ls < 5_000 && le > 5_000, "window must bracket the pointer: {ls}..{le}");
+        assert!(
+            ls < 5_000 && le > 5_000,
+            "window must bracket the pointer: {ls}..{le}"
+        );
         assert!(le - ls > 1_000, "window should span ~80 ms: {}", le - ls);
         // Moving the pointer moves the window.
         let (ls2, le2, _) = harness.state_mut().test_scrub_begin_update(tab_id, 9_000);
@@ -381,5 +392,4 @@ mod p4_usability {
         assert_eq!(harness.state().selected, Some(1));
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

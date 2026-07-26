@@ -4,10 +4,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn make_temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "neowaves_engine_export_cli_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("neowaves_engine_export_cli_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir

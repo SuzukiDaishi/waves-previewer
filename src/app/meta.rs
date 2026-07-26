@@ -550,11 +550,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
     (MetaPool { shared }, rx)
 }
 
-fn run_meta_task(
-    task: MetaTask,
-    cancel: &AtomicBool,
-    tx: &std::sync::mpsc::Sender<MetaUpdate>,
-) {
+fn run_meta_task(task: MetaTask, cancel: &AtomicBool, tx: &std::sync::mpsc::Sender<MetaUpdate>) {
     let (p, do_header, do_decode) = match task {
         MetaTask::Header(path) => (path, true, true),
         MetaTask::HeaderOnly(path) => (path, true, false),

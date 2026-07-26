@@ -113,7 +113,11 @@ pub fn detect_clipped(
             // Corner test: the waveform must approach/leave the rail much
             // faster than it moves while on it, or it's just a smooth crest.
             let run_range = hi - lo;
-            let d_in = if i >= 3 { (ch[i] - ch[i - 3]).abs() } else { f32::MAX };
+            let d_in = if i >= 3 {
+                (ch[i] - ch[i - 3]).abs()
+            } else {
+                f32::MAX
+            };
             let d_out = if j + 3 <= n {
                 (ch[j + 2] - ch[j - 1]).abs()
             } else {
@@ -219,7 +223,10 @@ mod tests {
         );
         // The bridge must actually rise above the rail somewhere.
         let peak_after = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        assert!(peak_after > 0.72, "repair never left the rail: {peak_after}");
+        assert!(
+            peak_after > 0.72,
+            "repair never left the rail: {peak_after}"
+        );
     }
 
     #[test]

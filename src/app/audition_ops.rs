@@ -147,8 +147,12 @@ impl crate::app::WavesPreviewer {
             let Some(state) = self.variation_audition.as_mut() else {
                 return;
             };
-            let next =
-                Self::variation_next_cursor(state.mode, state.cursor, state.paths.len(), &mut state.rng);
+            let next = Self::variation_next_cursor(
+                state.mode,
+                state.cursor,
+                state.paths.len(),
+                &mut state.rng,
+            );
             state.cursor = next;
             state.played += 1;
             state.item_started = false;
@@ -161,10 +165,7 @@ impl crate::app::WavesPreviewer {
 
     #[cfg(feature = "kittest")]
     pub fn test_set_list_multi_selection(&mut self, paths: &[PathBuf]) -> bool {
-        let mut rows: Vec<usize> = paths
-            .iter()
-            .filter_map(|p| self.row_for_path(p))
-            .collect();
+        let mut rows: Vec<usize> = paths.iter().filter_map(|p| self.row_for_path(p)).collect();
         if rows.is_empty() {
             return false;
         }
@@ -253,7 +254,10 @@ impl crate::app::WavesPreviewer {
             return;
         }
         if self.mix_audition_state.is_some() {
-            self.push_toast(ToastSeverity::Info, "A mix audition is already being prepared");
+            self.push_toast(
+                ToastSeverity::Info,
+                "A mix audition is already being prepared",
+            );
             return;
         }
         if paths.len() > Self::MIX_AUDITION_MAX_FILES {
@@ -428,7 +432,10 @@ mod tests {
         assert!((out[0][0] - 2.0 * g).abs() < 1e-6);
         assert!((out[1][0] - 0.0).abs() < 1e-6, "mono fans into R: 1 + -1");
         assert!((out[0][1] - g).abs() < 1e-6);
-        assert!((out[0][2] - 0.5 * g).abs() < 1e-6, "beyond mono's end only stereo remains");
+        assert!(
+            (out[0][2] - 0.5 * g).abs() < 1e-6,
+            "beyond mono's end only stereo remains"
+        );
         assert!(WavesPreviewer::mix_buffers(&[]).is_empty());
         assert!(WavesPreviewer::mix_buffers(&[vec![]]).is_empty());
     }

@@ -89,10 +89,7 @@ mod batch_qa_inspection {
         }
     }
 
-    fn run_inspection(
-        harness: &mut Harness<'static, WavesPreviewer>,
-        cfg: InspectionConfig,
-    ) {
+    fn run_inspection(harness: &mut Harness<'static, WavesPreviewer>, cfg: InspectionConfig) {
         let paths: Vec<PathBuf> = harness.state().test_visible_list_paths();
         harness.state_mut().test_set_inspection_cfg(cfg);
         harness.state_mut().test_begin_inspection_run(paths);
@@ -119,7 +116,10 @@ mod batch_qa_inspection {
         run_inspection(&mut harness, qa_cfg());
 
         assert_eq!(harness.state().test_inspection_report_rows(), 4);
-        assert_eq!(harness.state().test_inspection_report_cancelled(), Some(false));
+        assert_eq!(
+            harness.state().test_inspection_report_cancelled(),
+            Some(false)
+        );
 
         let hot = harness
             .state()
@@ -219,7 +219,10 @@ mod batch_qa_inspection {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(harness.state().test_inspection_report_cancelled(), Some(true));
+        assert_eq!(
+            harness.state().test_inspection_report_cancelled(),
+            Some(true)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -166,7 +166,10 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_inspection_report_rows(&self) -> usize {
-        self.inspection_report.as_ref().map(|r| r.rows.len()).unwrap_or(0)
+        self.inspection_report
+            .as_ref()
+            .map(|r| r.rows.len())
+            .unwrap_or(0)
     }
 
     pub fn test_inspection_report_cancelled(&self) -> Option<bool> {
@@ -1262,7 +1265,7 @@ impl super::WavesPreviewer {
         let Some(tab_idx) = self.active_tab else {
             return false;
         };
-        self.refresh_tool_preview_for_tab(tab_idx);
+        self.rebuild_tool_preview_for_tab(tab_idx);
         true
     }
 
@@ -1323,6 +1326,60 @@ impl super::WavesPreviewer {
         true
     }
 
+    pub fn test_set_pitch_curve(&mut self, enabled: bool, points_frac: &[(f32, f32)]) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.pitch_env_enabled = enabled;
+        tab.pitch_env_points = points_frac
+            .iter()
+            .map(|(fraction, semitones)| {
+                let sample =
+                    (fraction.clamp(0.0, 1.0) as f64 * tab.samples_len as f64).round() as usize;
+                (sample.min(tab.samples_len), semitones.clamp(-12.0, 12.0))
+            })
+            .collect();
+        tab.pitch_env_points.sort_by_key(|point| point.0);
+        tab.pitch_env_drag = None;
+        true
+    }
+
+    pub fn test_pitch_curve_state(&self) -> Option<(bool, Vec<(usize, f32)>)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some((tab.pitch_env_enabled, tab.pitch_env_points.clone()))
+    }
+
+    pub fn test_set_gain_curve(&mut self, enabled: bool, points_frac: &[(f32, f32)]) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.gain_env_enabled = enabled;
+        tab.gain_env_points = points_frac
+            .iter()
+            .map(|(fraction, db)| {
+                let sample =
+                    (fraction.clamp(0.0, 1.0) as f64 * tab.samples_len as f64).round() as usize;
+                (sample.min(tab.samples_len), db.clamp(-24.0, 24.0))
+            })
+            .collect();
+        tab.gain_env_points.sort_by_key(|point| point.0);
+        tab.gain_env_drag = None;
+        true
+    }
+
+    pub fn test_gain_curve_state(&self) -> Option<(bool, Vec<(usize, f32)>)> {
+        let tab_idx = self.active_tab?;
+        let tab = self.tabs.get(tab_idx)?;
+        Some((tab.gain_env_enabled, tab.gain_env_points.clone()))
+    }
+
     pub fn test_set_tool_stretch_rate(&mut self, stretch_rate: f32) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
@@ -1332,6 +1389,20 @@ impl super::WavesPreviewer {
         };
         tab.tool_state = ToolState {
             stretch_rate,
+            ..tab.tool_state
+        };
+        true
+    }
+
+    pub fn test_set_tool_speed_rate(&mut self, speed_rate: f32) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.tool_state = ToolState {
+            speed_rate,
             ..tab.tool_state
         };
         true
@@ -1662,8 +1733,8 @@ impl super::WavesPreviewer {
     pub fn test_keymap_assign(&mut self, action: &str, chord: &str) -> Result<(), String> {
         let action = crate::app::keymap::Action::from_name(action)
             .ok_or_else(|| format!("unknown action: {action}"))?;
-        let (mods, key) = crate::app::keymap::parse_chord(chord)
-            .ok_or_else(|| format!("bad chord: {chord}"))?;
+        let (mods, key) =
+            crate::app::keymap::parse_chord(chord).ok_or_else(|| format!("bad chord: {chord}"))?;
         self.keymap_assign(action, mods, key)
     }
 
@@ -2137,6 +2208,20 @@ impl super::WavesPreviewer {
         self.request_workspace_play_toggle();
     }
 
+    pub fn test_playback_source_is_tool_preview(&self) -> bool {
+        matches!(
+            self.playback_session.source,
+            crate::app::PlaybackSourceKind::ToolPreview
+        )
+    }
+
+    pub fn test_visible_preview_audio_is_retained(&self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.visible_preview_audio_for_tab(tab_idx).is_some()
+    }
+
     pub fn test_active_editor_exact_audio_ready(&self) -> bool {
         self.active_editor_exact_audio_ready()
     }
@@ -2197,7 +2282,7 @@ impl super::WavesPreviewer {
         Some((state.copied_frames as f32 / state.total_frames as f32).clamp(0.0, 1.0))
     }
 
-    pub fn test_marker_preview_pending(&self) -> bool {
+    pub fn test_marker_edit_pending(&self) -> bool {
         let Some(tab_idx) = self.active_tab else {
             return false;
         };
