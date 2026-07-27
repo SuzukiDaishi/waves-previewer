@@ -22,7 +22,10 @@ type HeavyOverlayMessage = (
     bool,
 );
 
+pub mod actions;
+mod ai_ops;
 mod app_init;
+mod assistant_ops;
 mod audio_ops;
 mod audition_ops;
 mod auto_trim;
@@ -809,6 +812,9 @@ pub struct WavesPreviewer {
     // export/save settings (simple, in-memory)
     export_cfg: ExportConfig,
     show_export_settings: bool,
+    assistant_state: assistant_ops::AssistantState,
+    #[cfg(feature = "gemini")]
+    assistant_runtime: Option<crate::ai::coordinator::AiCoordinator>,
     show_shortcuts_window: bool,
     show_keymap_window: bool,
     show_undo_history_window: bool,
@@ -1698,6 +1704,7 @@ impl WavesPreviewer {
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
+            ai_metadata: None,
             external: None,
             virtual_audio: None,
             virtual_state: None,
@@ -1832,6 +1839,7 @@ impl WavesPreviewer {
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
+            ai_metadata: None,
             external: None,
             virtual_audio: Some(audio),
             virtual_state,

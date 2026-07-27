@@ -24,6 +24,24 @@ pub struct ProjectFile {
     pub active_tab: Option<usize>,
     #[serde(default)]
     pub cached_edits: Vec<ProjectEdit>,
+    #[serde(default)]
+    pub assistant: Option<ProjectAssistantAudit>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectAssistantAudit {
+    #[serde(default)]
+    pub previous_interaction_id: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<ProjectActionAudit>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectActionAudit {
+    pub action: String,
+    pub summary: String,
+    #[serde(default)]
+    pub target_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -42,12 +60,20 @@ pub struct ProjectList {
     pub virtual_items: Vec<ProjectVirtualItem>,
     #[serde(default)]
     pub transcript_languages: Vec<ProjectTranscriptLanguage>,
+    #[serde(default)]
+    pub ai_metadata: Vec<ProjectAiMetadata>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ProjectTranscriptLanguage {
     pub path: String,
     pub language: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectAiMetadata {
+    pub path: String,
+    pub metadata: super::types::AiItemMetadata,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1350,6 +1376,19 @@ pub fn describe_missing(path: &Path) -> String {
 impl super::WavesPreviewer {
     pub(super) fn close_project(&mut self) {
         self.audio.stop();
+        #[cfg(feature = "gemini")]
+        if let Some(runtime) = &self.assistant_runtime {
+            for job_id in self
+                .assistant_state
+                .active_jobs
+                .keys()
+                .copied()
+                .collect::<Vec<_>>()
+            {
+                let _ = runtime.send(crate::ai::coordinator::AiCommand::Cancel { job_id });
+            }
+        }
+        self.assistant_state.reset_session_context();
         self.tabs.clear();
         self.active_tab = None;
         self.workspace_view = super::types::WorkspaceView::List;
@@ -1453,6 +1492,7 @@ files = []
         let list: ProjectList =
             toml::from_str(raw).expect("deserialize ProjectList without virtual_items");
         assert!(list.virtual_items.is_empty());
+        assert!(list.ai_metadata.is_empty());
     }
 
     #[test]
@@ -1465,6 +1505,7 @@ files = []
             bit_depth_overrides: Vec::new(),
             format_overrides: Vec::new(),
             transcript_languages: Vec::new(),
+            ai_metadata: Vec::new(),
             virtual_items: vec![ProjectVirtualItem {
                 path: "virtual://trim_0001".to_string(),
                 display_name: "trim_0001".to_string(),
@@ -1514,6 +1555,7 @@ files = []
                     language: "en".to_string(),
                 },
             ],
+            ai_metadata: Vec::new(),
             virtual_items: Vec::new(),
         };
         let text = toml::to_string(&list).expect("serialize ProjectList");
@@ -1523,6 +1565,94 @@ files = []
         assert_eq!(restored.transcript_languages[0].language, "ja");
         assert_eq!(restored.transcript_languages[1].path, "b.wav");
         assert_eq!(restored.transcript_languages[1].language, "en");
+    }
+
+    #[test]
+    fn project_ai_metadata_roundtrip_contains_only_confirmed_values() {
+        let source = crate::app::types::AiItemMetadata {
+            classification_suggestion: Some(crate::ai::models::AudioClassification {
+                primary_class: crate::ai::models::AudioKind::Voice,
+                confidence: 0.93,
+                contains: Default::default(),
+                description_ja: "提案".into(),
+                warnings: Vec::new(),
+            }),
+            confirmed_class: Some(crate::ai::models::AudioKind::Se),
+            ucs_suggestion: None,
+            confirmed_ucs_category_id: Some("IMPACTS".into()),
+            confirmed_ucs_subcategory_id: Some("METAL".into()),
+            confirmed_descriptors: vec!["heavy".into()],
+            transcript_suggestion: Some(crate::ai::models::VoiceTranscript {
+                language: "ja".into(),
+                full_text: "一時的な提案".into(),
+                segments: Vec::new(),
+            }),
+            confirmed_transcript: Some(crate::ai::models::VoiceTranscript {
+                language: "ja".into(),
+                full_text: "確認済み".into(),
+                segments: Vec::new(),
+            }),
+            manually_edited: true,
+        };
+        let confirmed = source.confirmed_only().expect("confirmed metadata");
+        assert!(confirmed.classification_suggestion.is_none());
+        assert!(confirmed.transcript_suggestion.is_none());
+        assert_eq!(
+            confirmed
+                .confirmed_transcript
+                .as_ref()
+                .map(|transcript| transcript.full_text.as_str()),
+            Some("確認済み")
+        );
+
+        let list = ProjectList {
+            root: None,
+            files: vec!["a.wav".into()],
+            ai_metadata: vec![ProjectAiMetadata {
+                path: "a.wav".into(),
+                metadata: confirmed,
+            }],
+            ..Default::default()
+        };
+        let text = toml::to_string(&list).expect("serialize ProjectList");
+        assert!(!text.contains("一時的な提案"));
+        let restored: ProjectList = toml::from_str(&text).expect("deserialize ProjectList");
+        let metadata = &restored.ai_metadata[0].metadata;
+        assert_eq!(
+            metadata.confirmed_class,
+            Some(crate::ai::models::AudioKind::Se)
+        );
+        assert_eq!(
+            metadata.confirmed_ucs_subcategory_id.as_deref(),
+            Some("METAL")
+        );
+        assert_eq!(metadata.confirmed_descriptors, vec!["heavy"]);
+        assert!(metadata.classification_suggestion.is_none());
+        assert!(metadata.transcript_suggestion.is_none());
+    }
+
+    #[test]
+    fn assistant_audit_roundtrip_contains_reference_and_bounded_summary_only() {
+        let audit = ProjectAssistantAudit {
+            previous_interaction_id: Some("interaction-reference".into()),
+            actions: vec![ProjectActionAudit {
+                action: "markers.add".into(),
+                summary: "Completed markers.add for 1 target(s).".into(),
+                target_count: 1,
+            }],
+        };
+        let text = toml::to_string(&audit).expect("serialize assistant audit");
+        assert!(!text.contains("api_key"));
+        assert!(!text.contains("arguments"));
+        assert!(!text.contains("remote"));
+        let restored: ProjectAssistantAudit =
+            toml::from_str(&text).expect("deserialize assistant audit");
+        assert_eq!(
+            restored.previous_interaction_id.as_deref(),
+            Some("interaction-reference")
+        );
+        assert_eq!(restored.actions[0].action, "markers.add");
+        assert_eq!(restored.actions[0].target_count, 1);
     }
 
     #[test]

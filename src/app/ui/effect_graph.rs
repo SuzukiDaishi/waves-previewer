@@ -461,7 +461,9 @@ impl crate::app::WavesPreviewer {
 
     pub(in crate::app) fn ui_effect_graph_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.request_plugin_scan_if_needed();
-        self.handle_effect_graph_shortcuts(ctx);
+        if ui.is_enabled() {
+            self.handle_effect_graph_shortcuts(ctx);
+        }
         self.ui_effect_graph_unsaved_prompt(ctx);
 
         // Side panels first so the console only spans the canvas area, then a

@@ -9,6 +9,8 @@ use base64::Engine;
 use image::{ColorType, ImageBuffer, ImageEncoder, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+#[cfg(feature = "gemini")]
+use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use super::cli_workspace::{resolve_playback_range, CliWorkspace};
@@ -32,7 +34,8 @@ use crate::audio_io::{
     read_embedded_artwork, AudioInfo,
 };
 use crate::cli::{
-    BatchCommand, BatchExportArgs, BatchLoudnessApplyArgs, BatchLoudnessCommand,
+    AiClassifyArgs, AiCommand, AiDiagnosticsArgs, AiIndexArgs, AiIndexBatchArgs, AiSearchArgs,
+    AiStatusArgs, BatchCommand, BatchExportArgs, BatchLoudnessApplyArgs, BatchLoudnessCommand,
     BatchLoudnessPlanArgs, CliCommand, CliCursorSnap, CliEffectGraphSpectrumMode,
     CliLoopXfadeShape, CliRoot, CliSpectralViewMode, CliToggle, DebugCommand, DebugScreenshotArgs,
     DebugSummaryArgs, EditorCommand, EditorCursorCommand, EditorCursorGetArgs,
@@ -230,6 +233,7 @@ fn dispatch_cli(command: CliCommand) -> Result<CliCommandOutput> {
         CliCommand::External(cmd) => dispatch_external(cmd),
         CliCommand::Transcript(cmd) => dispatch_transcript(cmd),
         CliCommand::MusicAi(cmd) => dispatch_music_ai(cmd),
+        CliCommand::Ai(cmd) => dispatch_ai(cmd),
         CliCommand::Plugin(cmd) => dispatch_plugin(cmd),
         CliCommand::EffectGraph(cmd) => dispatch_effect_graph(cmd),
         CliCommand::Render(cmd) => dispatch_render(cmd),
@@ -373,6 +377,12 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         CliCommand::MusicAi(MusicAiCommand::Analyze(_)) => "music-ai.analyze",
         CliCommand::MusicAi(MusicAiCommand::ApplyMarkers(_)) => "music-ai.apply-markers",
         CliCommand::MusicAi(MusicAiCommand::ExportStems(_)) => "music-ai.export-stems",
+        CliCommand::Ai(AiCommand::Status(_)) => "ai.status",
+        CliCommand::Ai(AiCommand::Classify(_)) => "ai.classify",
+        CliCommand::Ai(AiCommand::Index(_)) => "ai.index",
+        CliCommand::Ai(AiCommand::IndexBatch(_)) => "ai.index-batch",
+        CliCommand::Ai(AiCommand::Search(_)) => "ai.search",
+        CliCommand::Ai(AiCommand::Diagnostics(_)) => "ai.diagnostics",
         CliCommand::Plugin(PluginCommand::SearchPath(PluginSearchPathCommand::List(_))) => {
             "plugin.search-path.list"
         }
@@ -616,6 +626,496 @@ fn dispatch_music_ai(command: MusicAiCommand) -> Result<CliCommandOutput> {
         MusicAiCommand::Analyze(args) => music_ai_analyze(args),
         MusicAiCommand::ApplyMarkers(args) => music_ai_apply_markers(args),
         MusicAiCommand::ExportStems(args) => music_ai_export_stems(args),
+    }
+}
+
+fn dispatch_ai(command: AiCommand) -> Result<CliCommandOutput> {
+    match command {
+        AiCommand::Status(args) => ai_status(args),
+        AiCommand::Classify(args) => ai_classify(args),
+        AiCommand::Index(args) => ai_index(args),
+        AiCommand::IndexBatch(args) => ai_index_batch(args),
+        AiCommand::Search(args) => ai_search(args),
+        AiCommand::Diagnostics(args) => ai_diagnostics(args),
+    }
+}
+
+fn ai_status(_args: AiStatusArgs) -> Result<CliCommandOutput> {
+    #[cfg(not(feature = "gemini"))]
+    {
+        return Ok(CliCommandOutput {
+            result: json!({
+                "feature_available": false,
+                "configured": false,
+            }),
+            warnings: vec!["This NeoWaves build does not include the Gemini feature.".into()],
+        });
+    }
+    #[cfg(feature = "gemini")]
+    {
+        let credential = crate::ai::credentials::load_api_key().ok();
+        let database_path = cli_ai_database_path(None)?;
+        Ok(CliCommandOutput {
+            result: json!({
+                "feature_available": true,
+                "configured": credential.is_some(),
+                "credential_source": credential.as_ref().map(|(_, source)| match source {
+                    crate::ai::credentials::CredentialSource::Environment => "environment",
+                    crate::ai::credentials::CredentialSource::Keyring => "os_keyring",
+                }),
+                "endpoint": crate::ai::gemini::DEFAULT_BASE_URL,
+                "interaction_model": crate::ai::gemini::DEFAULT_INTERACTION_MODEL,
+                "embedding_model": crate::ai::gemini::DEFAULT_EMBEDDING_MODEL,
+                "embedding_dimensions": crate::ai::gemini::DEFAULT_EMBEDDING_DIMENSIONS,
+                "database": pathbuf_to_string(&database_path),
+                "database_exists": database_path.is_file(),
+            }),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn ai_classify(args: AiClassifyArgs) -> Result<CliCommandOutput> {
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = args;
+        bail!("This NeoWaves build does not include the Gemini feature.");
+    }
+    #[cfg(feature = "gemini")]
+    {
+        let input = absolute_existing_path(&args.input)?;
+        if !is_supported_audio_path(&input) {
+            bail!("unsupported audio input: {}", input.display());
+        }
+        let coordinator = spawn_cli_ai_coordinator()?;
+        let job_id = 1;
+        coordinator
+            .send(crate::ai::coordinator::AiCommand::Classify {
+                job_id,
+                media_id: 1,
+                path: input.clone(),
+            })
+            .map_err(anyhow::Error::msg)?;
+        match wait_for_cli_ai(&coordinator, job_id)? {
+            crate::ai::coordinator::AiEvent::AnalysisCompleted {
+                result: crate::ai::models::AiAnalysisResult::Classification(classification),
+                ..
+            } => Ok(CliCommandOutput {
+                result: json!({
+                    "input": pathbuf_to_string(&input),
+                    "classification": classification,
+                }),
+                warnings: Vec::new(),
+            }),
+            event => bail!("unexpected Gemini completion: {event:?}"),
+        }
+    }
+}
+
+fn ai_index(args: AiIndexArgs) -> Result<CliCommandOutput> {
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = args;
+        bail!("This NeoWaves build does not include the Gemini feature.");
+    }
+    #[cfg(feature = "gemini")]
+    {
+        let input = absolute_existing_path(&args.input)?;
+        if !is_supported_audio_path(&input) {
+            bail!("unsupported audio input: {}", input.display());
+        }
+        // Resolve credentials before creating the index directory: an unconfigured
+        // CLI invocation must not create an AI database as a side effect.
+        let coordinator = spawn_cli_ai_coordinator()?;
+        let database_path = cli_ai_database_path(args.database.as_deref())?;
+        ensure_parent_dir(&database_path)?;
+        let job_id = 1;
+        coordinator
+            .send(crate::ai::coordinator::AiCommand::IndexAudio {
+                job_id,
+                media_id: 1,
+                path: input.clone(),
+                database_path: database_path.clone(),
+            })
+            .map_err(anyhow::Error::msg)?;
+        match wait_for_cli_ai(&coordinator, job_id)? {
+            crate::ai::coordinator::AiEvent::Indexed {
+                content_hash,
+                cached,
+                ..
+            } => Ok(CliCommandOutput {
+                result: json!({
+                    "input": pathbuf_to_string(&input),
+                    "database": pathbuf_to_string(&database_path),
+                    "content_hash": content_hash,
+                    "cached": cached,
+                }),
+                warnings: Vec::new(),
+            }),
+            event => bail!("unexpected Gemini completion: {event:?}"),
+        }
+    }
+}
+
+fn ai_index_batch(args: AiIndexBatchArgs) -> Result<CliCommandOutput> {
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = args;
+        bail!("This NeoWaves build does not include the Gemini feature.");
+    }
+    #[cfg(feature = "gemini")]
+    {
+        if args.input.is_empty() || args.input.len() > 10_000 {
+            bail!("AI index batch must contain 1..=10000 --input values");
+        }
+        let mut seen = HashSet::new();
+        let mut inputs = Vec::with_capacity(args.input.len());
+        for input in args.input {
+            let input = if input.is_absolute() {
+                input
+            } else {
+                std::env::current_dir()
+                    .context("resolve current directory")?
+                    .join(input)
+            };
+            if !is_supported_audio_path(&input) {
+                bail!("unsupported audio input: {}", input.display());
+            }
+            let path_key = pathbuf_to_string(&input);
+            if seen.insert(path_key.clone()) {
+                inputs.push((input, path_key));
+            }
+        }
+        if inputs.is_empty() {
+            bail!("AI index batch has no unique inputs");
+        }
+
+        // Credential resolution comes first so a no-key invocation cannot create
+        // the database or a resumable batch journal.
+        let coordinator = spawn_cli_ai_coordinator()?;
+        let database_path = cli_ai_database_path(args.database.as_deref())?;
+        ensure_parent_dir(&database_path)?;
+        let manifest_hash = ai_batch_manifest_hash(
+            inputs.iter().map(|(_, path_key)| path_key.as_str()),
+            crate::ai::gemini::DEFAULT_BASE_URL,
+            crate::ai::gemini::DEFAULT_EMBEDDING_MODEL,
+            crate::ai::gemini::DEFAULT_EMBEDDING_DIMENSIONS,
+        );
+        let mut store = crate::ai::storage::AiStore::open(&database_path)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let path_keys = inputs
+            .iter()
+            .map(|(_, path_key)| path_key.clone())
+            .collect::<Vec<_>>();
+        let initial = store
+            .prepare_index_batch(&manifest_hash, &path_keys, args.retry_failed)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let resumed = initial.completed > 0 || initial.failed > 0;
+        let mut failures = Vec::new();
+        let mut cached_count = 0usize;
+        while let Some(item) = store
+            .claim_next_batch_item(&manifest_hash)
+            .map_err(|error| anyhow::anyhow!("{error}"))?
+        {
+            let path = PathBuf::from(&item.path_key);
+            if !path.is_file() {
+                store
+                    .finish_batch_item(&manifest_hash, item.ordinal, None, Some("input_missing"))
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+                failures.push(json!({
+                    "ordinal": item.ordinal,
+                    "input": item.path_key,
+                    "error": "input_missing",
+                }));
+                continue;
+            }
+            let job_id = (item.ordinal as u64).saturating_add(1);
+            if let Err(error) = coordinator.send(crate::ai::coordinator::AiCommand::IndexAudio {
+                job_id,
+                media_id: job_id,
+                path: path.clone(),
+                database_path: database_path.clone(),
+            }) {
+                store
+                    .finish_batch_item(
+                        &manifest_hash,
+                        item.ordinal,
+                        None,
+                        Some("runtime_unavailable"),
+                    )
+                    .map_err(|storage_error| anyhow::anyhow!("{storage_error}"))?;
+                failures.push(json!({
+                    "ordinal": item.ordinal,
+                    "input": item.path_key,
+                    "error": error,
+                }));
+                continue;
+            }
+            match wait_for_cli_ai(&coordinator, job_id) {
+                Ok(crate::ai::coordinator::AiEvent::Indexed {
+                    content_hash,
+                    cached,
+                    ..
+                }) => {
+                    cached_count += usize::from(cached);
+                    store
+                        .finish_batch_item(&manifest_hash, item.ordinal, Some(&content_hash), None)
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                }
+                Ok(event) => {
+                    store
+                        .finish_batch_item(
+                            &manifest_hash,
+                            item.ordinal,
+                            None,
+                            Some("unexpected_result"),
+                        )
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    failures.push(json!({
+                        "ordinal": item.ordinal,
+                        "input": item.path_key,
+                        "error": format!("unexpected completion: {event:?}"),
+                    }));
+                }
+                Err(error) => {
+                    store
+                        .finish_batch_item(&manifest_hash, item.ordinal, None, Some("index_failed"))
+                        .map_err(|storage_error| anyhow::anyhow!("{storage_error}"))?;
+                    failures.push(json!({
+                        "ordinal": item.ordinal,
+                        "input": item.path_key,
+                        "error": error.to_string(),
+                    }));
+                }
+            }
+        }
+        let progress = store
+            .batch_progress(&manifest_hash)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let warnings = if failures.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!(
+                "{} item(s) failed; rerun with the same inputs and --retry-failed.",
+                failures.len()
+            )]
+        };
+        Ok(CliCommandOutput {
+            result: json!({
+                "database": pathbuf_to_string(&database_path),
+                "manifest_hash": manifest_hash,
+                "resumed": resumed,
+                "status": progress.status,
+                "total": progress.total,
+                "completed": progress.completed,
+                "failed": progress.failed,
+                "cache_hits": cached_count,
+                "failures": failures,
+            }),
+            warnings,
+        })
+    }
+}
+
+#[cfg(feature = "gemini")]
+fn ai_batch_manifest_hash<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    endpoint: &str,
+    model: &str,
+    dimensions: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    for value in [endpoint, model] {
+        hasher.update(value.len().to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update(dimensions.to_le_bytes());
+    for path in paths {
+        hasher.update(path.len().to_le_bytes());
+        hasher.update(path.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn ai_search(args: AiSearchArgs) -> Result<CliCommandOutput> {
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = args;
+        bail!("This NeoWaves build does not include the Gemini feature.");
+    }
+    #[cfg(feature = "gemini")]
+    {
+        let query = args.query.trim().to_string();
+        if query.is_empty() {
+            bail!("AI search query must not be empty");
+        }
+        if !(1..=200).contains(&args.limit) {
+            bail!("AI search limit must be in 1..=200");
+        }
+        let coordinator = spawn_cli_ai_coordinator()?;
+        let database_path = cli_ai_database_path(args.database.as_deref())?;
+        if !database_path.is_file() {
+            bail!("AI index does not exist: {}", database_path.display());
+        }
+        let job_id = 1;
+        coordinator
+            .send(crate::ai::coordinator::AiCommand::SearchText {
+                job_id,
+                query: query.clone(),
+                database_path: database_path.clone(),
+                limit: args.limit,
+            })
+            .map_err(anyhow::Error::msg)?;
+        match wait_for_cli_ai(&coordinator, job_id)? {
+            crate::ai::coordinator::AiEvent::SimilarityCompleted {
+                hits,
+                indexed_segments,
+                backend,
+                warning,
+                ..
+            } => {
+                let hits = hits
+                    .into_iter()
+                    .map(|hit| {
+                        json!({
+                            "content_hash": hit.content_hash,
+                            "segment_start_ms": hit.segment_start_ms,
+                            "segment_end_ms": hit.segment_end_ms,
+                            "score": hit.score,
+                            "paths": hit.path_keys,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(CliCommandOutput {
+                    result: json!({
+                        "query": query,
+                        "database": pathbuf_to_string(&database_path),
+                        "search_backend": backend.as_str(),
+                        "indexed_segments": indexed_segments,
+                        "hits": hits,
+                    }),
+                    warnings: warning.into_iter().collect(),
+                })
+            }
+            event => bail!("unexpected Gemini completion: {event:?}"),
+        }
+    }
+}
+
+fn ai_diagnostics(args: AiDiagnosticsArgs) -> Result<CliCommandOutput> {
+    #[cfg(not(feature = "gemini"))]
+    {
+        let _ = args;
+        return Ok(CliCommandOutput {
+            result: json!({
+                "feature_available": false,
+            }),
+            warnings: vec!["This NeoWaves build does not include the Gemini feature.".into()],
+        });
+    }
+    #[cfg(feature = "gemini")]
+    {
+        let database_path = cli_ai_database_path(args.database.as_deref())?;
+        if !database_path.is_file() {
+            return Ok(CliCommandOutput {
+                result: json!({
+                    "feature_available": true,
+                    "database": pathbuf_to_string(&database_path),
+                    "database_exists": false,
+                }),
+                warnings: Vec::new(),
+            });
+        }
+        let store = crate::ai::storage::AiStore::open(&database_path)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let diagnostics = store
+            .diagnostics()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(CliCommandOutput {
+            result: json!({
+                "feature_available": true,
+                "database": pathbuf_to_string(&database_path),
+                "database_exists": true,
+                "schema_version": diagnostics.schema_version,
+                "content_objects": diagnostics.content_objects,
+                "embedding_segments": diagnostics.embedding_segments,
+                "active_batches": diagnostics.active_batches,
+                "failed_batch_items": diagnostics.failed_batch_items,
+                "hnsw_default_threshold": crate::ai::storage::HNSW_RECOMMENDED_SEGMENTS,
+                "exact_search_warning_threshold": crate::ai::storage::EXACT_SEARCH_WARNING_SEGMENTS,
+            }),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[cfg(feature = "gemini")]
+fn spawn_cli_ai_coordinator() -> Result<crate::ai::coordinator::AiCoordinator> {
+    let (api_key, _) =
+        crate::ai::credentials::load_api_key().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let provider = crate::ai::gemini::GeminiProvider::new(api_key, Default::default())
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    crate::ai::coordinator::AiCoordinator::spawn(std::sync::Arc::new(provider))
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(feature = "gemini")]
+fn cli_ai_database_path(explicit: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return absolute_output_path(path);
+    }
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .context("LOCALAPPDATA/APPDATA is unavailable; pass --database")?;
+    Ok(PathBuf::from(base)
+        .join("NeoWaves")
+        .join("ai_index.sqlite3"))
+}
+
+#[cfg(feature = "gemini")]
+fn wait_for_cli_ai(
+    coordinator: &crate::ai::coordinator::AiCoordinator,
+    job_id: u64,
+) -> Result<crate::ai::coordinator::AiEvent> {
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        match coordinator.try_recv() {
+            Ok(event) => match event {
+                crate::ai::coordinator::AiEvent::Started { .. } => {}
+                crate::ai::coordinator::AiEvent::Failed {
+                    job_id: event_job,
+                    error,
+                    ..
+                } if event_job == job_id => bail!("{error}"),
+                crate::ai::coordinator::AiEvent::Cancelled { job_id: event_job }
+                    if event_job == job_id =>
+                {
+                    bail!("Gemini job was cancelled")
+                }
+                crate::ai::coordinator::AiEvent::InteractionCompleted {
+                    job_id: event_job, ..
+                }
+                | crate::ai::coordinator::AiEvent::AnalysisCompleted {
+                    job_id: event_job, ..
+                }
+                | crate::ai::coordinator::AiEvent::Indexed {
+                    job_id: event_job, ..
+                }
+                | crate::ai::coordinator::AiEvent::SimilarityCompleted {
+                    job_id: event_job, ..
+                } if event_job == job_id => return Ok(event),
+                _ => {}
+            },
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                bail!("Gemini runtime stopped before completing the command")
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = coordinator.send(crate::ai::coordinator::AiCommand::Cancel { job_id });
+            bail!("Gemini command timed out")
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -2682,6 +3182,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
             format_overrides: Vec::new(),
             virtual_items: Vec::new(),
             transcript_languages: Vec::new(),
+            ai_metadata: Vec::new(),
         },
         app: ProjectApp {
             theme: "Dark".to_string(),
@@ -2708,6 +3209,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
         tabs: Vec::new(),
         active_tab: None,
         cached_edits: Vec::new(),
+        assistant: None,
     })
 }
 

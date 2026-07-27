@@ -38,6 +38,67 @@ impl super::WavesPreviewer {
         self.toasts.iter().map(|t| t.message.clone()).collect()
     }
 
+    pub fn test_visible_file_audio_count(&self) -> usize {
+        self.gemini_visible_audio_ids().len()
+    }
+
+    pub fn test_open_gemini_assistant_shell(&mut self) {
+        self.assistant_state.enabled = true;
+        self.assistant_state.configured = true;
+        self.assistant_state.display = crate::app::assistant_ops::AssistantDisplayMode::Overlay;
+    }
+
+    pub fn test_open_gemini_settings_only(&mut self) {
+        self.assistant_state.display = crate::app::assistant_ops::AssistantDisplayMode::Hidden;
+        self.assistant_state.show_review = false;
+        self.assistant_state.show_settings = true;
+    }
+
+    pub fn test_add_gemini_trace(&mut self) {
+        self.assistant_state
+            .traces
+            .push(crate::app::assistant_ops::AssistantTraceUi {
+                action: "interaction".into(),
+                summary: "19 tokens".into(),
+                ok: true,
+                duration_ms: 42,
+                target_count: 0,
+            });
+    }
+
+    #[cfg(feature = "gemini")]
+    pub fn test_open_gemini_action_approval(&mut self) {
+        let action_request = crate::app::actions::ActionRequest {
+            action: "labels.accept".into(),
+            arguments: serde_json::json!({"media_id": 7, "class": "se"}),
+            expected_context_revision: Some(42),
+            approval: None,
+        };
+        let plan = serde_json::json!({
+            "action": "labels.accept",
+            "arguments": action_request.arguments,
+            "targets": [{"media_id": 7, "display_name": "Impact_Metal_01.wav"}],
+            "undo": false
+        });
+        let approval = self.assistant_state.approvals.request(
+            &action_request,
+            crate::app::actions::RiskClass::R3,
+            42,
+            "Accept the current AI classification suggestion.",
+            plan,
+        );
+        self.assistant_state.pending_agent_approval =
+            Some(crate::app::assistant_ops::PendingAgentApproval {
+                approval,
+                action_request,
+                call_id: "test-call".into(),
+                call_name: "labels.accept".into(),
+                previous_interaction_id: "test-interaction".into(),
+                completed_results: Vec::new(),
+            });
+        self.assistant_state.show_review = true;
+    }
+
     pub fn test_set_shortcuts_window_open(&mut self, open: bool) {
         self.show_shortcuts_window = open;
     }

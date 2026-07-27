@@ -385,6 +385,7 @@ mod tests {
             status: MediaStatus::Ok,
             transcript: None,
             transcript_language: None,
+            ai_metadata: None,
             external: Default::default(),
             virtual_audio: None,
             virtual_state: None,

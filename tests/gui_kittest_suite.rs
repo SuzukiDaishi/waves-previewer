@@ -1432,6 +1432,195 @@ mod kittest_suite {
         top_menu_button(&harness, "List");
     }
 
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_gemini_settings_no_key_before_after() {
+        let mut harness = harness_empty();
+        let before = render_ui_stability_png(&mut harness, "gemini_no_key_before.png");
+        assert!(
+            harness
+                .query_all_by_label("Gemini Assistant Settings")
+                .next()
+                .is_none(),
+            "Gemini settings must be closed at baseline"
+        );
+
+        top_menu_button(&harness, "Tools").click();
+        harness.run_steps(1);
+        harness.get_by_label("AI ⏵").click();
+        harness.run_steps(1);
+        harness.get_by_label("Gemini Settings...").click();
+        harness.run_steps(2);
+
+        assert!(
+            harness
+                .query_all_by_label("Gemini Assistant Settings")
+                .next()
+                .is_some(),
+            "Gemini settings title should be visible"
+        );
+        assert!(
+            harness
+                .query_all_by_label("API key: not configured")
+                .next()
+                .is_some(),
+            "kittest must not initialize a configured Gemini credential"
+        );
+        let after = render_ui_stability_png(&mut harness, "gemini_no_key_settings.png");
+        assert_eq!(before.dimensions(), after.dimensions());
+
+        harness.get_by_label("Refresh status").click();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label("Refresh complete: Gemini API key is not configured.")
+                .next()
+                .is_some(),
+            "Refresh must always show an observable result"
+        );
+        let refreshed = render_ui_stability_png(&mut harness, "gemini_no_key_refresh.png");
+        assert_eq!(before.dimensions(), refreshed.dimensions());
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_bulk_embedding_button_is_visible_and_operable() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        let visible_audio_count = harness.state().test_visible_file_audio_count();
+        assert!(visible_audio_count > 0);
+        render_ui_stability_png(&mut harness, "bulk_embedding_button_before.png");
+
+        top_menu_button(&harness, "Tools").click();
+        harness.run_steps(1);
+        harness.get_by_label("AI ⏵").click();
+        harness.run_steps(2);
+        let label = format!("Index Visible List Embeddings... ({visible_audio_count})");
+        harness.get_by_label(&label);
+        render_ui_stability_png(&mut harness, "bulk_embedding_button_ai_menu.png");
+
+        harness.get_by_label(&label).click();
+        harness.run_steps(3);
+        harness.get_by_label("Gemini Assistant Settings");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_gemini_assistant_shell() {
+        let mut harness = harness_empty();
+        harness.state_mut().test_open_gemini_assistant_shell();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label("Gemini Assistant")
+                .next()
+                .is_some(),
+            "Gemini Assistant heading should be visible"
+        );
+        assert!(
+            harness.query_all_by_label("Send").next().is_some(),
+            "Gemini Assistant prompt action should be visible"
+        );
+        render_ui_stability_png(&mut harness, "gemini_assistant_overlay.png");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_gemini_composer_and_foreground_input_focus() {
+        let mut harness = harness_with_wavs(false);
+        wait_for_scan(&mut harness);
+
+        let assistant_hover = egui::pos2(1080.0, 300.0);
+        harness.hover_at(assistant_hover);
+        harness.event(egui::Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: egui::vec2(0.0, -240.0),
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        assert!(
+            harness.state().test_list_scroll_row() > 0,
+            "fixture wheel must move the uncovered List before focus is captured"
+        );
+        let list_row_before_focus = harness.state().test_list_scroll_row();
+        render_ui_stability_png(&mut harness, "gemini_focus_list_before.png");
+
+        harness.state_mut().test_open_gemini_assistant_shell();
+        harness.run_steps(3);
+        let composer = harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        assert!(
+            composer.bottom() > 620.0,
+            "composer must be pinned near the panel bottom, got {composer:?}"
+        );
+
+        harness.hover_at(assistant_hover);
+        harness.event(egui::Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: egui::vec2(0.0, -240.0),
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_list_scroll_row(),
+            list_row_before_focus,
+            "assistant wheel input must not scroll the List behind it"
+        );
+        render_ui_stability_png(&mut harness, "gemini_focus_assistant_after.png");
+
+        harness.state_mut().test_add_gemini_trace();
+        harness.run_steps(3);
+        let composer_with_trace = harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .rect();
+        assert!(
+            composer_with_trace.bottom() > 620.0,
+            "composer must stay pinned when action traces exist, got {composer_with_trace:?}"
+        );
+        render_ui_stability_png(&mut harness, "gemini_trace_composer_after.png");
+
+        harness.state_mut().test_open_gemini_settings_only();
+        harness.run_steps(3);
+        let settings_rect = harness.get_by_label("Gemini Assistant Settings").rect();
+        harness.hover_at(settings_rect.center());
+        harness.event(egui::Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: egui::vec2(0.0, -240.0),
+            modifiers: Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().test_list_scroll_row(),
+            list_row_before_focus,
+            "Settings wheel input must not scroll the List behind it"
+        );
+        render_ui_stability_png(&mut harness, "gemini_focus_settings_after.png");
+    }
+
+    #[cfg(all(feature = "kittest_render", feature = "gemini"))]
+    #[test]
+    fn kittest_render_gemini_action_approval() {
+        let mut harness = harness_empty();
+        harness.state_mut().test_open_gemini_action_approval();
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label("Approve Action")
+                .next()
+                .is_some(),
+            "approval action should be visible"
+        );
+        assert!(
+            harness.query_all_by_label("Reject Action").next().is_some(),
+            "rejection action should be visible"
+        );
+        render_ui_stability_png(&mut harness, "gemini_action_approval.png");
+    }
+
     #[test]
     fn inspector_panel_visible_when_editor_open() {
         let mut harness = harness_with_wavs(true);
@@ -6420,13 +6609,56 @@ mod kittest_suite {
 
         harness.get_by_label(&label).click_secondary();
         harness.run_steps(2);
+        harness.get_by_label("Processing ⏵").click();
+        harness.run_steps(1);
         harness.get_by_label("Effect Graph ⏵").click();
         harness.run_steps(1);
-        harness.get_by_label("Open").click();
+        harness.get_by_label("Open with Selection").click();
         harness.run_steps(3);
 
         assert!(harness.state().test_effect_graph_workspace_open());
         assert_eq!(harness.state().test_effect_graph_target_path(), Some(path));
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_list_context_menu_is_grouped_and_exposes_similar_search() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        let path = select_first_row(&mut harness);
+        let label = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("file name")
+            .to_string();
+        render_ui_stability_png(&mut harness, "list_context_menu_before.png");
+
+        harness.get_by_label(&label).click_secondary();
+        harness.run_steps(2);
+        for expected in [
+            "Open in Editor",
+            "Find Similar Sounds...",
+            "Reveal in Folder",
+            "Clipboard ⏵",
+            "AI & Analysis ⏵",
+            "Processing ⏵",
+            "File / List ⏵",
+            "Selection ⏵",
+        ] {
+            harness.get_by_label(expected);
+        }
+        assert!(
+            harness
+                .query_all_by_label("Normalize Loudness...")
+                .next()
+                .is_none(),
+            "processing commands should stay inside their submenu"
+        );
+        render_ui_stability_png(&mut harness, "list_context_menu_organized.png");
+
+        harness.get_by_label("Find Similar Sounds...").click();
+        harness.run_steps(3);
+        harness.get_by_label("Gemini Assistant Settings");
     }
 
     #[test]

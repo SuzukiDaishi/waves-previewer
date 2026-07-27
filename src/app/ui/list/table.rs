@@ -27,9 +27,10 @@ impl WavesPreviewer {
             Vec::new()
         };
         let list_rect = ui.available_rect_before_wrap();
-        let pointer_over_list = ui
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|p| list_rect.contains(p));
+        let pointer_over_list = ui.is_enabled()
+            && ui
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|p| list_rect.contains(p));
         if self.debug.cfg.enabled {
             self.debug.last_pointer_over_list = pointer_over_list;
         }

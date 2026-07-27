@@ -318,6 +318,39 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("skip_dotfiles=") {
                 let v = matches!(rest.trim(), "1" | "true" | "yes" | "on");
                 self.skip_dotfiles = v;
+            } else if let Some(rest) = line.strip_prefix("gemini_enabled=") {
+                self.assistant_state.enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("gemini_privacy_mode=") {
+                self.assistant_state.privacy_mode =
+                    matches!(rest.trim(), "1" | "true" | "yes" | "on");
+            } else if let Some(rest) = line.strip_prefix("gemini_upload_policy=") {
+                self.assistant_state.upload_policy =
+                    super::assistant_ops::CloudUploadPolicy::from_prefs(rest);
+            } else if let Some(rest) = line.strip_prefix("gemini_endpoint=") {
+                let value = rest.trim();
+                if value.starts_with("https://") && value.len() <= 512 {
+                    self.assistant_state.endpoint = value.to_string();
+                }
+            } else if let Some(rest) = line.strip_prefix("gemini_interaction_model=") {
+                let value = rest.trim();
+                if !value.is_empty() && value.len() <= 128 {
+                    self.assistant_state.interaction_model = value.to_string();
+                }
+            } else if let Some(rest) = line.strip_prefix("gemini_embedding_model=") {
+                let value = rest.trim();
+                if !value.is_empty() && value.len() <= 128 {
+                    self.assistant_state.embedding_model = value.to_string();
+                }
+            } else if let Some(rest) = line.strip_prefix("gemini_embedding_dimensions=") {
+                if let Ok(value) = rest.trim().parse::<usize>() {
+                    self.assistant_state.embedding_dimensions = value.clamp(128, 3072);
+                }
+            } else if let Some(rest) = line.strip_prefix("gemini_ucs_catalog=") {
+                let value = rest.trim().trim_matches('"');
+                if !value.is_empty() {
+                    self.assistant_state.ucs_catalog_path = Some(PathBuf::from(value));
+                    self.assistant_state.ucs_catalog = None;
+                }
             } else if let Some(rest) = line.strip_prefix("zero_cross_eps=") {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     if v.is_finite() {
@@ -966,6 +999,50 @@ zoo_flip_manual={}\n",
             self.zoo_speed,
             zoo_flip_manual
         );
+        out.push_str("gemini_enabled=");
+        out.push_str(if self.assistant_state.enabled {
+            "1"
+        } else {
+            "0"
+        });
+        out.push('\n');
+        out.push_str("gemini_privacy_mode=");
+        out.push_str(if self.assistant_state.privacy_mode {
+            "1"
+        } else {
+            "0"
+        });
+        out.push('\n');
+        out.push_str("gemini_upload_policy=");
+        out.push_str(self.assistant_state.upload_policy.persisted_prefs_name());
+        out.push('\n');
+        out.push_str("gemini_endpoint=");
+        out.push_str(&self.assistant_state.endpoint.replace(['\r', '\n'], ""));
+        out.push('\n');
+        out.push_str("gemini_interaction_model=");
+        out.push_str(
+            &self
+                .assistant_state
+                .interaction_model
+                .replace(['\r', '\n'], ""),
+        );
+        out.push('\n');
+        out.push_str("gemini_embedding_model=");
+        out.push_str(
+            &self
+                .assistant_state
+                .embedding_model
+                .replace(['\r', '\n'], ""),
+        );
+        out.push('\n');
+        out.push_str("gemini_embedding_dimensions=");
+        out.push_str(&self.assistant_state.embedding_dimensions.to_string());
+        out.push('\n');
+        if let Some(path) = &self.assistant_state.ucs_catalog_path {
+            out.push_str("gemini_ucs_catalog=");
+            out.push_str(&path.to_string_lossy().replace(['\r', '\n'], ""));
+            out.push('\n');
+        }
         if let Some(path) = &self.zoo_gif_path {
             out.push_str("zoo_gif_path=");
             out.push_str(&path.to_string_lossy().replace('\n', " "));
@@ -1192,6 +1269,47 @@ mod tests {
         assert_eq!(loaded.list_col_widths.get("file").copied(), Some(314.5));
         assert_eq!(loaded.list_col_widths.get("wave").copied(), Some(220.0));
         assert!(!loaded.list_click_audition);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gemini_prefs_roundtrip_models_endpoint_without_secrets_or_session_grant() {
+        let dir = temp_dir("gemini_prefs");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        app.assistant_state.endpoint = "https://generativelanguage.googleapis.com/v1".into();
+        app.assistant_state.interaction_model = "gemini-3.6-flash".into();
+        app.assistant_state.embedding_model = "gemini-embedding-2".into();
+        app.assistant_state.embedding_dimensions = 1536;
+        app.assistant_state.upload_policy =
+            crate::app::assistant_ops::CloudUploadPolicy::ThisSession;
+        let catalog = dir.join("ucs.json");
+        std::fs::write(&catalog, "[]").expect("write catalog placeholder");
+        app.assistant_state.ucs_catalog_path = Some(catalog.clone());
+        app.assistant_state.api_key_input = "do-not-write-this-key".into();
+        app.save_prefs_to_path(&prefs);
+        let raw = std::fs::read_to_string(&prefs).expect("read prefs");
+        assert!(!raw.contains("do-not-write-this-key"));
+        assert!(raw.contains("gemini_endpoint=https://generativelanguage.googleapis.com/v1"));
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(
+            loaded.assistant_state.endpoint,
+            "https://generativelanguage.googleapis.com/v1"
+        );
+        assert_eq!(loaded.assistant_state.embedding_dimensions, 1536);
+        assert_eq!(
+            loaded.assistant_state.ucs_catalog_path.as_deref(),
+            Some(catalog.as_path())
+        );
+        assert!(loaded.assistant_state.ucs_catalog.is_none());
+        assert_eq!(
+            loaded.assistant_state.upload_policy,
+            crate::app::assistant_ops::CloudUploadPolicy::Never
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

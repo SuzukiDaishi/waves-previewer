@@ -2753,7 +2753,7 @@ impl crate::app::WavesPreviewer {
         } else {
             0.0
         };
-        if !ctx.egui_wants_keyboard_input() && tab_samples_len > 0 {
+        if ui.is_enabled() && !ctx.egui_wants_keyboard_input() && tab_samples_len > 0 {
             let mods = ctx.input(|i| i.modifiers);
             let ctrl = mods.ctrl || mods.command;
             let shift = mods.shift;
@@ -4293,6 +4293,7 @@ impl crate::app::WavesPreviewer {
             // Handle interactions (seek, zoom, pan, selection)
             if view_mode == ViewMode::Waveform
                 && display_samples_len > 0
+                && ui.is_enabled()
                 && !ctx.egui_wants_keyboard_input()
             {
                 let zoom_in = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
@@ -4314,12 +4315,13 @@ impl crate::app::WavesPreviewer {
 
             // Detect hover using pointer position against our canvas rect (robust across senses)
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-            let pointer_over_waveform = pointer_pos.map_or(false, |p| {
-                rect.contains(p)
-                    && amplitude_nav_rect
-                        .map(|amp_rect| !amp_rect.contains(p))
-                        .unwrap_or(true)
-            });
+            let pointer_over_waveform = ui.is_enabled()
+                && pointer_pos.is_some_and(|p| {
+                    rect.contains(p)
+                        && amplitude_nav_rect
+                            .map(|amp_rect| !amp_rect.contains(p))
+                            .unwrap_or(true)
+                });
             if pointer_over_waveform {
                 // Zoom with wheel/pinch over this widget.
                 // `zoom_delta` captures ctrl/cmd+wheel and pinch gestures robustly.

@@ -26,6 +26,19 @@ impl WavesPreviewer {
             self.ui_topbar_list_menu(ui);
             self.ui_topbar_tools_menu(ui, ctx);
             self.ui_topbar_help_menu(ui);
+            if self.assistant_is_ready() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let jobs = self.assistant_state.active_jobs.len();
+                    let label = if jobs == 0 {
+                        "✦ Gemini".to_string()
+                    } else {
+                        format!("✦ Gemini ({jobs})")
+                    };
+                    if ui.button(label).clicked() {
+                        self.open_gemini_assistant();
+                    }
+                });
+            }
         });
     }
 
@@ -401,6 +414,123 @@ impl WavesPreviewer {
 
     fn ui_topbar_ai_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("AI", |ui| {
+            ui.strong("Gemini");
+            if self.assistant_state.configured {
+                ui.label(RichText::new("Assistant: ready").color(Color32::from_rgb(120, 220, 140)));
+            } else {
+                ui.label(RichText::new("Assistant: not configured").weak());
+            }
+            if ui.button("Gemini Assistant...").clicked() {
+                self.open_gemini_assistant();
+                ui.close();
+            }
+            if ui.button("Gemini Settings...").clicked() {
+                self.assistant_state.show_settings = true;
+                ui.close();
+            }
+            if ui.button("AI Review Queue...").clicked() {
+                self.assistant_state.show_review = true;
+                ui.close();
+            }
+            let visible_audio_count = self.gemini_visible_audio_ids().len();
+            let embedding_batch_running = self
+                .assistant_state
+                .embedding_batch
+                .as_ref()
+                .is_some_and(|batch| !batch.job_ids.is_empty());
+            if ui
+                .add_enabled(
+                    visible_audio_count > 0 && !embedding_batch_running,
+                    egui::Button::new(format!(
+                        "Index Visible List Embeddings... ({visible_audio_count})"
+                    )),
+                )
+                .on_disabled_hover_text(if embedding_batch_running {
+                    "An embedding batch is already running."
+                } else {
+                    "No file-backed audio is visible in the List."
+                })
+                .clicked()
+            {
+                self.request_gemini_visible_embedding_index();
+                ui.close();
+            }
+            if let Some(batch) = self.assistant_state.embedding_batch.as_ref() {
+                if embedding_batch_running {
+                    ui.label(format!(
+                        "Embedding: {}/{} · cached {} · changed/new {} · failed {}",
+                        batch.completed, batch.total, batch.cached, batch.embedded, batch.failed
+                    ));
+                    if ui.button("Cancel Embedding Batch").clicked() {
+                        self.cancel_gemini_embedding_batch();
+                        ui.close();
+                    }
+                }
+            }
+            let has_selection = !self.selected_item_ids().is_empty();
+            if ui
+                .add_enabled(
+                    has_selection,
+                    egui::Button::new("Classify Selected with Gemini..."),
+                )
+                .clicked()
+            {
+                self.request_gemini_direct_analysis(
+                    crate::app::assistant_ops::DirectAnalysisKind::Classify,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    has_selection,
+                    egui::Button::new("Index Selected Embeddings..."),
+                )
+                .clicked()
+            {
+                self.request_gemini_direct_analysis(
+                    crate::app::assistant_ops::DirectAnalysisKind::IndexEmbedding,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    has_selection && self.assistant_state.ucs_catalog_path.is_some(),
+                    egui::Button::new("Suggest UCS Tags with Gemini..."),
+                )
+                .on_disabled_hover_text("Select a canonical UCS JSON catalog in Gemini Settings")
+                .clicked()
+            {
+                self.request_gemini_direct_analysis(
+                    crate::app::assistant_ops::DirectAnalysisKind::AssignUcs,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    has_selection,
+                    egui::Button::new("Suggest Speech Transcript with Gemini..."),
+                )
+                .clicked()
+            {
+                self.request_gemini_direct_analysis(
+                    crate::app::assistant_ops::DirectAnalysisKind::TranscribeVoice,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    has_selection,
+                    egui::Button::new("Suggest Lyrics with Gemini..."),
+                )
+                .clicked()
+            {
+                self.request_gemini_direct_analysis(
+                    crate::app::assistant_ops::DirectAnalysisKind::TranscribeLyrics,
+                );
+                ui.close();
+            }
+            ui.separator();
+            ui.strong("Local AI");
             if self.transcript_ai_has_model() {
                 ui.label(
                     RichText::new("Transcript model: ready")

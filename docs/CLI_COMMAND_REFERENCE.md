@@ -935,6 +935,77 @@ Result highlights:
 - `failed_paths`
 - `destination_dir`
 
+## ai
+
+Gemini commands are available when NeoWaves is built with the `gemini` feature.
+They read `GEMINI_API_KEY` first and then the OS credential store. JSON output
+reports only whether a credential is configured; it never returns the key.
+
+### `ai status`
+
+Reports feature availability, credential configuration, model identifiers,
+embedding dimensions, and the global SQLite index location without starting an
+AI worker or creating the database.
+
+```powershell
+neowaves --cli ai status
+```
+
+### `ai classify`
+
+Sends the explicitly named audio file to Gemini and returns the structured
+SE / Voice / Music / Other classification suggestion.
+
+```powershell
+neowaves --cli ai classify --input .\effect.wav
+```
+
+### `ai index`
+
+Hashes and indexes one explicitly named audio file. Cached content/model/
+dimension matches do not call the embedding API again. Audio above the Gemini
+duration or inline-size limits is converted to bounded start/middle/end WAV
+segments on a worker.
+
+```powershell
+neowaves --cli ai index --input .\effect.wav
+neowaves --cli ai index --input .\ambience.flac --database .\semantic.sqlite3
+```
+
+### `ai index-batch`
+
+Indexes up to 10,000 explicitly named audio files with a SQLite-backed journal.
+Rerunning the same ordered input manifest resumes unfinished items. Completed
+items remain complete, an item interrupted while running is requeued, and
+`--retry-failed` retries prior failures. A cache hit prevents a second embedding
+request if the process stopped after indexing but before journaling completion.
+
+```powershell
+neowaves --cli ai index-batch --input .\a.wav --input .\b.wav
+neowaves --cli ai index-batch --input .\a.wav --input .\b.wav --retry-failed
+```
+
+### `ai search`
+
+Embeds a text query and searches the normalized audio index. Exact cosine is
+used below 100,000 segments. At 100,000 or more, a background HNSW index is
+built and reused until the embedding generation changes. The JSON
+`search_backend` field reports the path used.
+
+```powershell
+neowaves --cli ai search --query "heavy metal impact" --limit 20
+```
+
+### `ai diagnostics`
+
+Reads SQLite schema/index/batch recovery state without requiring an API key or
+creating a missing database.
+
+```powershell
+neowaves --cli ai diagnostics
+neowaves --cli ai diagnostics --database .\semantic.sqlite3
+```
+
 ## plugin
 
 ### `plugin search-path`
@@ -1047,5 +1118,6 @@ Implemented and usable today:
 - `external`
 - `transcript`
 - `music-ai`
+- `ai` (with the `gemini` feature)
 - `plugin`
 - `debug`

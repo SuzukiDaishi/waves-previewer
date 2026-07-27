@@ -141,6 +141,15 @@ const MUSIC_AI_ANALYZE_AFTER_HELP: &str = r#"Examples:
   neowaves --cli music-ai analyze --session .\work.nwsess --report .\music_analysis.md
   neowaves --cli music-ai analyze --session .\work.nwsess --path .\music.wav --stems-dir .\stems --prefer-demucs"#;
 
+const AI_AFTER_HELP: &str = r#"Examples:
+  neowaves --cli ai status
+  neowaves --cli ai classify --input .\effect.wav
+  neowaves --cli ai index --input .\effect.wav
+  neowaves --cli ai search --query "metal impact"
+
+AI audio commands send the explicitly named audio to Gemini. The API key is read
+from GEMINI_API_KEY first, then the OS credential store; it is never printed."#;
+
 const PLUGIN_AFTER_HELP: &str = r#"Examples:
   neowaves --cli plugin search-path list
   neowaves --cli plugin scan
@@ -386,6 +395,8 @@ pub enum CliCommand {
     Transcript(TranscriptCommand),
     #[command(subcommand, name = "music-ai", after_help = MUSIC_AI_AFTER_HELP)]
     MusicAi(MusicAiCommand),
+    #[command(subcommand, after_help = AI_AFTER_HELP)]
+    Ai(AiCommand),
     #[command(subcommand, after_help = PLUGIN_AFTER_HELP)]
     Plugin(PluginCommand),
     #[command(subcommand, name = "effect-graph", after_help = EFFECT_GRAPH_AFTER_HELP)]
@@ -954,6 +965,59 @@ pub struct MusicAiExportStemsArgs {
     pub output_dir: PathBuf,
     #[arg(long = "naming-template")]
     pub naming_template: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AiCommand {
+    Status(AiStatusArgs),
+    Classify(AiClassifyArgs),
+    Index(AiIndexArgs),
+    IndexBatch(AiIndexBatchArgs),
+    Search(AiSearchArgs),
+    Diagnostics(AiDiagnosticsArgs),
+}
+
+#[derive(Debug, Args, Default)]
+pub struct AiStatusArgs {}
+
+#[derive(Debug, Args)]
+pub struct AiClassifyArgs {
+    #[arg(long, value_name = "AUDIO")]
+    pub input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct AiIndexArgs {
+    #[arg(long, value_name = "AUDIO")]
+    pub input: PathBuf,
+    #[arg(long, value_name = "SQLITE")]
+    pub database: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct AiIndexBatchArgs {
+    #[arg(long, value_name = "AUDIO", required = true)]
+    pub input: Vec<PathBuf>,
+    #[arg(long, value_name = "SQLITE")]
+    pub database: Option<PathBuf>,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub retry_failed: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AiSearchArgs {
+    #[arg(long)]
+    pub query: String,
+    #[arg(long, value_name = "SQLITE")]
+    pub database: Option<PathBuf>,
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct AiDiagnosticsArgs {
+    #[arg(long, value_name = "SQLITE")]
+    pub database: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2157,7 +2221,84 @@ mod tests {
         assert!(help.contains("external"));
         assert!(help.contains("transcript"));
         assert!(help.contains("music-ai"));
+        assert!(help.contains("ai"));
         assert!(help.contains("plugin"));
+    }
+
+    #[test]
+    fn parses_ai_index_and_search_contracts() {
+        let index = CliRoot::try_parse_from([
+            "neowaves",
+            "ai",
+            "index",
+            "--input",
+            "effect.wav",
+            "--database",
+            "semantic.sqlite3",
+        ])
+        .expect("parse AI index");
+        match index.command {
+            CliCommand::Ai(AiCommand::Index(args)) => {
+                assert_eq!(args.input, PathBuf::from("effect.wav"));
+                assert_eq!(args.database, Some(PathBuf::from("semantic.sqlite3")));
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let batch = CliRoot::try_parse_from([
+            "neowaves",
+            "ai",
+            "index-batch",
+            "--input",
+            "a.wav",
+            "--input",
+            "b.wav",
+            "--retry-failed",
+        ])
+        .expect("parse resumable AI index batch");
+        match batch.command {
+            CliCommand::Ai(AiCommand::IndexBatch(args)) => {
+                assert_eq!(
+                    args.input,
+                    vec![PathBuf::from("a.wav"), PathBuf::from("b.wav")]
+                );
+                assert!(args.retry_failed);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let search = CliRoot::try_parse_from([
+            "neowaves",
+            "ai",
+            "search",
+            "--query",
+            "metal impact",
+            "--limit",
+            "12",
+        ])
+        .expect("parse AI search");
+        match search.command {
+            CliCommand::Ai(AiCommand::Search(args)) => {
+                assert_eq!(args.query, "metal impact");
+                assert_eq!(args.limit, 12);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        let diagnostics = CliRoot::try_parse_from([
+            "neowaves",
+            "ai",
+            "diagnostics",
+            "--database",
+            "semantic.sqlite3",
+        ])
+        .expect("parse AI diagnostics");
+        match diagnostics.command {
+            CliCommand::Ai(AiCommand::Diagnostics(args)) => {
+                assert_eq!(args.database, Some(PathBuf::from("semantic.sqlite3")));
+            }
+            _ => panic!("unexpected command"),
+        }
     }
 
     #[test]

@@ -1,0 +1,1071 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>NeoWaves Gemini Agent 統合 — 実装計画・UI設計</title>
+  <style>
+    :root {
+      --bg: #0d0e11;
+      --surface: #14161b;
+      --surface-2: #1a1d24;
+      --surface-3: #20242d;
+      --line: #2b303b;
+      --line-strong: #3c4350;
+      --text: #e8eaf0;
+      --muted: #9ca3af;
+      --dim: #6f7785;
+      --cyan: #27b8f2;
+      --cyan-soft: rgba(39, 184, 242, .14);
+      --violet: #a78bfa;
+      --violet-soft: rgba(167, 139, 250, .14);
+      --green: #4ade80;
+      --amber: #fbbf24;
+      --red: #fb7185;
+      --radius: 10px;
+      --shadow: 0 18px 50px rgba(0, 0, 0, .38);
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: "Noto Sans JP", "Yu Gothic UI", Meiryo, system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 78% -8%, rgba(39,184,242,.09), transparent 28rem),
+        radial-gradient(circle at 20% 15%, rgba(167,139,250,.07), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.72;
+    }
+    a { color: #7dd3fc; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    code, pre { font-family: var(--mono); }
+    code {
+      padding: .12rem .34rem;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #101218;
+      color: #d8e8f2;
+      font-size: .9em;
+    }
+    pre {
+      overflow: auto;
+      margin: 1rem 0 0;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0b0c0f;
+      color: #cbd5e1;
+      font-size: .82rem;
+      line-height: 1.6;
+    }
+    .shell { display: grid; grid-template-columns: 278px minmax(0,1fr); min-height: 100vh; }
+    .side {
+      position: sticky; top: 0; height: 100vh; overflow: auto;
+      padding: 24px 18px;
+      border-right: 1px solid var(--line);
+      background: rgba(13,14,17,.94);
+      backdrop-filter: blur(16px);
+    }
+    .brand { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; }
+    .brand-mark {
+      width: 38px; height: 38px; display: grid; place-items: center;
+      border: 1px solid #31657c; border-radius: 9px;
+      background: linear-gradient(145deg, #162f3a, #12151a);
+      color: #79dafb; font-weight: 800;
+    }
+    .brand strong { display: block; font-size: .95rem; letter-spacing: .02em; }
+    .brand small { display: block; color: var(--muted); font-size: .72rem; }
+    .side-label {
+      margin: 18px 8px 8px; color: var(--dim); font-size: .68rem;
+      font-weight: 800; letter-spacing: .16em; text-transform: uppercase;
+    }
+    .nav a {
+      display: flex; gap: 9px; align-items: center; padding: 7px 9px;
+      border-radius: 6px; color: #aeb5c0; text-decoration: none; font-size: .82rem;
+    }
+    .nav a:hover, .nav a.active { background: var(--cyan-soft); color: #dff6ff; }
+    .nav .n { width: 22px; color: #65717f; font: .72rem var(--mono); }
+    .side-note {
+      margin-top: 22px; padding: 12px; border: 1px solid var(--line);
+      border-radius: 8px; background: var(--surface); color: var(--muted); font-size: .72rem;
+    }
+    main { min-width: 0; padding: 0 44px 80px; }
+    .hero { max-width: 1220px; margin: 0 auto; padding: 70px 0 44px; }
+    .eyebrow {
+      display: inline-flex; gap: 8px; align-items: center; color: #9bdcf4;
+      font: 700 .72rem var(--mono); letter-spacing: .12em; text-transform: uppercase;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
+    h1 { max-width: 930px; margin: 14px 0 18px; font-size: clamp(2.1rem, 4.5vw, 4.4rem); line-height: 1.1; letter-spacing: -.045em; }
+    h1 em { color: #7dd3fc; font-style: normal; }
+    .lead { max-width: 900px; margin: 0; color: #b8bec8; font-size: clamp(1rem, 1.5vw, 1.2rem); }
+    .hero-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 14px; margin-top: 30px; }
+    .hero-card, .card {
+      border: 1px solid var(--line); border-radius: var(--radius);
+      background: linear-gradient(180deg, rgba(27,30,37,.94), rgba(18,20,25,.94));
+    }
+    .hero-card { padding: 18px 20px; }
+    .hero-card b { display: block; margin-bottom: 5px; color: #fff; }
+    .hero-card p { margin: 0; color: var(--muted); font-size: .88rem; }
+    .stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 1px; overflow: hidden; background: var(--line); }
+    .stat { padding: 15px; background: var(--surface); }
+    .stat strong { display: block; color: #f8fafc; font: 700 1.25rem var(--mono); }
+    .stat span { color: var(--muted); font-size: .72rem; }
+    section { max-width: 1220px; margin: 0 auto; padding: 42px 0; scroll-margin-top: 24px; }
+    .section-kicker { color: var(--cyan); font: 700 .7rem var(--mono); letter-spacing: .14em; }
+    h2 { margin: 8px 0 12px; font-size: clamp(1.55rem, 3vw, 2.25rem); line-height: 1.25; letter-spacing: -.025em; }
+    h3 { margin: 0 0 8px; font-size: 1rem; }
+    h4 { margin: 0 0 6px; font-size: .88rem; }
+    .section-intro { max-width: 890px; margin: 0 0 24px; color: var(--muted); }
+    .grid-2, .grid-3, .grid-4 { display: grid; gap: 14px; }
+    .grid-2 { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .grid-3 { grid-template-columns: repeat(3,minmax(0,1fr)); }
+    .grid-4 { grid-template-columns: repeat(4,minmax(0,1fr)); }
+    .card { padding: 18px; }
+    .card p, .card li { color: #abb2bd; font-size: .85rem; }
+    .card p { margin: 0; }
+    .card ul, .card ol { margin: 10px 0 0; padding-left: 1.2rem; }
+    .card li + li { margin-top: 5px; }
+    .card.accent { border-color: #28566b; box-shadow: inset 0 1px rgba(125,211,252,.08); }
+    .tag {
+      display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px;
+      border: 1px solid var(--line); border-radius: 999px; background: #111319;
+      color: #b7c0cc; font: 700 .67rem var(--mono);
+    }
+    .tag.good { color: #a7f3d0; border-color: #285941; background: rgba(74,222,128,.08); }
+    .tag.warn { color: #fde68a; border-color: #665224; background: rgba(251,191,36,.08); }
+    .tag.risk { color: #fda4af; border-color: #67313b; background: rgba(251,113,133,.08); }
+    .decision {
+      display: grid; grid-template-columns: 32px 1fr; gap: 12px;
+      padding: 14px 0; border-bottom: 1px solid var(--line);
+    }
+    .decision:last-child { border: 0; }
+    .decision-n { color: var(--cyan); font: 800 .8rem var(--mono); }
+    .decision b { display: block; margin-bottom: 3px; font-size: .9rem; }
+    .decision span { color: var(--muted); font-size: .82rem; }
+    .callout {
+      margin-top: 16px; padding: 16px 18px; border-left: 3px solid var(--cyan);
+      background: var(--cyan-soft); color: #cfeaf6; font-size: .88rem;
+    }
+    .callout.warn { border-color: var(--amber); background: rgba(251,191,36,.08); color: #f4e6b0; }
+    .matrix { overflow: auto; border: 1px solid var(--line); border-radius: 9px; }
+    table { width: 100%; border-collapse: collapse; font-size: .79rem; }
+    th { position: sticky; top: 0; z-index: 1; background: #20232a; color: #d9dde4; text-align: left; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    td { color: #aab1bc; }
+    td strong { color: #e6e9ee; }
+    .flow {
+      display: grid; grid-template-columns: repeat(5, minmax(100px,1fr)); gap: 22px;
+      margin: 20px 0; align-items: stretch;
+    }
+    .flow-step {
+      position: relative; padding: 16px 12px; border: 1px solid var(--line);
+      border-radius: 8px; background: var(--surface); text-align: center;
+    }
+    .flow-step:not(:last-child)::after {
+      content: "→"; position: absolute; right: -18px; top: 50%; transform: translateY(-50%);
+      color: #52606e; font: 1.1rem var(--mono);
+    }
+    .flow-step b { display: block; font-size: .8rem; }
+    .flow-step small { color: var(--muted); font-size: .68rem; }
+    .mock-wrap { overflow: hidden; border: 1px solid #353a43; border-radius: 12px; background: #101114; box-shadow: var(--shadow); }
+    .mock-controls {
+      display: flex; flex-wrap: wrap; gap: 7px; padding: 10px 12px; border-bottom: 1px solid var(--line);
+      background: #17191e;
+    }
+    .seg-btn, .mini-btn {
+      border: 1px solid #3a404b; border-radius: 5px; background: #252931; color: #cfd3da;
+      cursor: pointer;
+    }
+    .seg-btn { padding: 5px 10px; font-size: .72rem; }
+    .seg-btn.active { border-color: #1788b5; background: #0c6b92; color: white; }
+    .mini-btn { padding: 4px 8px; font-size: .7rem; }
+    .mini-btn.primary { border-color: #1485af; background: #0b6b91; color: #fff; }
+    .mini-btn.danger { border-color: #67313b; background: #3b1d24; color: #fecdd3; }
+    .nw-app { position: relative; min-height: 650px; background: #0f1013; font-family: "Segoe UI", var(--sans); font-size: 12px; color: #b7b8bd; }
+    .nw-top { border-bottom: 1px solid #3a3b3f; background: #111216; }
+    .nw-menu, .nw-status, .nw-transport, .nw-tabs { display: flex; align-items: center; gap: 8px; padding: 6px 9px; }
+    .nw-status, .nw-transport { border-top: 1px solid #202226; }
+    .nw-menu button, .nw-top button, .nw-tabs button {
+      border: 0; border-radius: 3px; padding: 4px 7px; background: #36383e; color: #d0d1d5; font-size: 12px;
+    }
+    .nw-menu .spacer { flex: 1; }
+    .nw-meter { width: 190px; height: 9px; border: 1px solid #84878d; border-radius: 2px; background: #17181b; }
+    .nw-search { width: min(260px,30vw); height: 24px; border: 1px solid #25272c; border-radius: 3px; background: #090a0c; }
+    .nw-tabs { border-bottom: 1px solid #33353a; }
+    .nw-tab.active { background: #0877a8 !important; color: #fff !important; }
+    .nw-body { display: grid; grid-template-columns: minmax(0,1fr) 280px; min-height: 496px; }
+    .nw-canvas { position: relative; overflow: hidden; padding: 10px; background: #0f1013; }
+    .canvas-head { display: flex; gap: 12px; padding-bottom: 10px; color: #c5c7cb; }
+    .timeline { display: flex; justify-content: space-between; padding: 0 10px; height: 29px; border-bottom: 1px solid #30323a; color: #9ea2a9; }
+    .wave {
+      position: relative; height: 260px; overflow: hidden;
+      border-left: 2px solid #168fe8; border-bottom: 1px solid #252833;
+      background:
+        linear-gradient(180deg, transparent 49.5%, rgba(255,255,255,.08) 50%, transparent 50.5%),
+        repeating-linear-gradient(90deg, transparent 0 79px, rgba(255,255,255,.05) 80px),
+        #12131a;
+    }
+    .wave::before {
+      content:""; position:absolute; inset:22px 0;
+      background:
+        linear-gradient(180deg, transparent 0 22%, rgba(242,71,89,.88) 23% 77%, transparent 78%),
+        repeating-linear-gradient(90deg, rgba(255,255,255,.16) 0 1px, transparent 1px 4px);
+      opacity:.9;
+      clip-path: polygon(0 25%,4% 8%,8% 35%,12% 18%,17% 45%,22% 10%,27% 32%,32% 4%,38% 38%,43% 17%,49% 43%,55% 9%,62% 33%,68% 15%,74% 40%,80% 7%,87% 34%,94% 19%,100% 29%,100% 71%,94% 81%,87% 66%,80% 93%,74% 60%,68% 85%,62% 67%,55% 91%,49% 57%,43% 83%,38% 62%,32% 96%,27% 68%,22% 90%,17% 55%,12% 82%,8% 65%,4% 92%,0 75%);
+    }
+    .playhead { position: absolute; left: 47%; top: 0; bottom: 0; width: 1px; background: #ffd24a; }
+    .nw-inspector { padding: 10px; border-left: 1px solid #282b31; background: #111216; }
+    .nw-inspector h4 { padding-bottom: 8px; border-bottom: 1px solid #35373c; color: #b8bbc1; font-size: 16px; font-weight: 500; }
+    .ins-row { margin: 10px 0; padding-bottom: 9px; border-bottom: 1px solid #2c2e34; }
+    .tool-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 4px; }
+    .tool-grid span { padding: 7px 3px; border-radius: 3px; background: #303239; text-align: center; }
+    .nw-list { display: none; padding: 0; }
+    .list-table { display: grid; grid-template-columns: 1.2fr 1.6fr .55fr .45fr .55fr .55fr .8fr; }
+    .list-table > div { min-width: 0; overflow: hidden; padding: 6px 7px; border-right: 1px solid #292c31; border-bottom: 1px solid #282b31; white-space: nowrap; text-overflow: ellipsis; }
+    .list-head { background: #22252b; color: #d8dae0; }
+    .list-sel { background: #0d6688; color: #fff; }
+    .assistant-rail {
+      position: absolute; z-index: 8; top: 151px; right: 0; bottom: 0; width: 40px;
+      display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 10px;
+      border-left: 1px solid #2e333c; background: #14171c;
+    }
+    .rail-orb {
+      width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid #1b87b2;
+      border-radius: 7px; background: #0a5978; color: #e6f7ff; cursor: pointer;
+    }
+    .rail-badge { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+    .assistant {
+      position: absolute; z-index: 9; top: 151px; right: 0; bottom: 0; width: min(390px, 92%);
+      display: flex; flex-direction: column; border-left: 1px solid #3b4350; background: #15181e;
+      box-shadow: -18px 0 35px rgba(0,0,0,.38); transition: transform .18s ease;
+    }
+    .assistant.closed { transform: translateX(100%); }
+    .as-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px; border-bottom: 1px solid #303641; }
+    .as-head strong { color: #e9edf3; }
+    .as-head small { display: block; color: #7f8997; }
+    .as-head .grow { flex: 1; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+    .context-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 10px; border-bottom: 1px solid #292e37; background: #12151a; }
+    .chip { padding: 3px 7px; border: 1px solid #38404b; border-radius: 999px; color: #aeb8c5; font-size: 10px; }
+    .chat { flex: 1; overflow: auto; padding: 13px; }
+    .bubble { max-width: 92%; margin-bottom: 12px; padding: 9px 10px; border-radius: 8px; line-height: 1.55; }
+    .bubble.user { margin-left: auto; background: #125d78; color: #eefaff; }
+    .bubble.ai { border: 1px solid #303743; background: #1b1f27; color: #d2d7df; }
+    .tool-card { margin: 8px 0; padding: 8px; border: 1px solid #35404d; border-radius: 6px; background: #12151a; }
+    .tool-card .ok { color: #81e5a6; }
+    .approval { padding: 10px; border: 1px solid #655123; border-radius: 7px; background: rgba(251,191,36,.07); }
+    .approval strong { color: #f8df91; }
+    .diff { margin: 7px 0; padding: 6px 8px; border-radius: 4px; background: #101216; font: 10px/1.55 var(--mono); }
+    .diff .minus { color: #fb8c9d; } .diff .plus { color: #75dfa0; }
+    .as-input { padding: 9px; border-top: 1px solid #303641; }
+    .prompt-box { min-height: 55px; padding: 8px; border: 1px solid #3a424f; border-radius: 6px; background: #0f1217; color: #7f8997; }
+    .as-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 7px; }
+    .setup-card {
+      position:absolute; z-index:10; top:190px; right:50%; transform:translateX(50%);
+      width:min(430px,90%); padding:18px; border:1px solid #3a4350; border-radius:9px;
+      background:#181b21; box-shadow:var(--shadow);
+    }
+    .setup-card p { color:#aeb5bf; }
+    .setup-card .field { margin:12px 0; padding:9px; border:1px solid #3b424d; border-radius:5px; background:#101216; color:#737b87; }
+    .scenario-panel { display:none; }
+    .scenario-panel.active { display:block; }
+    .scenario-tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+    .search-demo { display:grid; grid-template-columns: 1fr 1.2fr; gap:12px; }
+    .result-row { display:grid; grid-template-columns: 1fr auto; gap:8px; padding:9px 0; border-bottom:1px solid var(--line); }
+    .result-row:last-child { border:0; }
+    .score { color:#7dd3fc; font:700 .74rem var(--mono); }
+    .review-table .confidence { width:70px; color:#7dd3fc; font-family:var(--mono); }
+    .arch {
+      display:grid; grid-template-columns: 1fr 54px 1fr 54px 1fr; gap:0; align-items:stretch;
+      margin:18px 0;
+    }
+    .arch-box { padding:15px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }
+    .arch-arrow { display:grid; place-items:center; color:#596777; }
+    .arch-box b { color:#e8edf3; }
+    .arch-box ul { margin:8px 0 0; padding-left:1rem; color:var(--muted); font-size:.76rem; }
+    .risk-scale { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; margin-top:12px; }
+    .risk-scale > div { padding:10px; border:1px solid var(--line); border-radius:6px; background:#13161b; }
+    .risk-scale b { display:block; font-size:.73rem; }
+    .risk-scale small { color:var(--muted); font-size:.65rem; }
+    .tool-filter { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; }
+    .tool-filter input {
+      min-width:240px; flex:1; padding:8px 10px; border:1px solid var(--line-strong);
+      border-radius:6px; background:#101217; color:var(--text);
+    }
+    .tool-row[hidden] { display:none; }
+    .phase { display:grid; grid-template-columns: 96px 1fr 180px; gap:16px; padding:18px 0; border-bottom:1px solid var(--line); }
+    .phase:last-child { border:0; }
+    .phase-id { color:var(--cyan); font:800 .8rem var(--mono); }
+    .phase h3 { margin:0 0 4px; }
+    .phase p { margin:0; color:var(--muted); font-size:.82rem; }
+    .phase ul { margin:8px 0 0; padding-left:1.1rem; color:#aeb5bf; font-size:.78rem; }
+    .exit { align-self:start; padding:9px; border:1px solid #35566a; border-radius:6px; background:rgba(39,184,242,.06); color:#bfe9f8; font-size:.7rem; }
+    .file-tree { font: .78rem/1.75 var(--mono); color:#b5bfcb; }
+    .file-tree .new { color:#7dd3fc; } .file-tree .mod { color:#fcd77f; }
+    .test-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+    .test-item { padding:12px; border:1px solid var(--line); border-radius:7px; background:#14171c; }
+    .test-item b { display:block; margin-bottom:4px; font-size:.8rem; }
+    .test-item span { color:var(--muted); font-size:.75rem; }
+    .sources li { margin-bottom:8px; color:#aab2bd; font-size:.82rem; }
+    .footer { max-width:1220px; margin:0 auto; padding:28px 0; border-top:1px solid var(--line); color:var(--dim); font-size:.76rem; }
+    @media (max-width: 1040px) {
+      .shell { grid-template-columns: 1fr; }
+      .side { position:relative; height:auto; border-right:0; border-bottom:1px solid var(--line); }
+      .nav { display:flex; flex-wrap:wrap; }
+      .side-label, .side-note { display:none; }
+      main { padding:0 22px 60px; }
+      .hero { padding-top:44px; }
+      .nw-body { grid-template-columns:1fr; }
+      .nw-inspector { display:none; }
+      .grid-4 { grid-template-columns:repeat(2,1fr); }
+    }
+    @media (max-width: 760px) {
+      .hero-grid, .grid-2, .grid-3, .grid-4, .search-demo, .test-grid { grid-template-columns:1fr; }
+      .stats { grid-template-columns:1fr; }
+      .flow { grid-template-columns:1fr; gap:8px; }
+      .flow-step:not(:last-child)::after { content:"↓"; right:50%; top:auto; bottom:-18px; transform:translateX(50%); }
+      .arch { grid-template-columns:1fr; gap:8px; }
+      .arch-arrow { transform:rotate(90deg); min-height:24px; }
+      .risk-scale { grid-template-columns:1fr; }
+      .phase { grid-template-columns:1fr; gap:6px; }
+      .nw-menu .hide-small, .nw-status .hide-small, .nw-transport .hide-small { display:none; }
+      .nw-app { min-height:610px; }
+      .assistant { top:114px; }
+      .assistant-rail { top:114px; }
+      h1 { font-size:2.2rem; }
+    }
+    @media print {
+      :root { color-scheme: light; }
+      body { background:white; color:#111; }
+      .shell { display:block; } .side, .mock-controls { display:none; }
+      main { padding:0; } section { page-break-inside:avoid; }
+      .card, .hero-card, .matrix, .arch-box, .phase { border-color:#bbb; background:white; color:#111; box-shadow:none; }
+      p, li, td, .section-intro, .card p, .card li { color:#333 !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand">
+        <div class="brand-mark">NW</div>
+        <div><strong>Gemini Agent Integration</strong><small>実装計画・UI設計 v1.0</small></div>
+      </div>
+      <div class="side-label">Document</div>
+      <nav class="nav" aria-label="目次">
+        <a href="#summary"><span class="n">01</span>結論と設計判断</a>
+        <a href="#current"><span class="n">02</span>現状コードの理解</a>
+        <a href="#api"><span class="n">03</span>Gemini現行仕様</a>
+        <a href="#ux"><span class="n">04</span>UI / UX設計</a>
+        <a href="#mock"><span class="n">05</span>操作可能モック</a>
+        <a href="#architecture"><span class="n">06</span>全体アーキテクチャ</a>
+        <a href="#actions"><span class="n">07</span>全機能Action化</a>
+        <a href="#ai-features"><span class="n">08</span>検索・ラベリング</a>
+        <a href="#data"><span class="n">09</span>データ・ジョブ設計</a>
+        <a href="#security"><span class="n">10</span>安全性・承認</a>
+        <a href="#files"><span class="n">11</span>ファイル変更計画</a>
+        <a href="#roadmap"><span class="n">12</span>段階的ロードマップ</a>
+        <a href="#tests"><span class="n">13</span>テスト・完了条件</a>
+        <a href="#sources"><span class="n">14</span>参照資料</a>
+      </nav>
+      <div class="side-note">
+        対象: NeoWaves <code>0.20260726.0</code><br>
+        前提: Rust 2021 / egui 0.34.3<br>
+        方針: APIキーなし＝現状と同じ
+      </div>
+    </aside>
+
+    <main>
+      <header class="hero">
+        <div class="eyebrow"><span class="dot"></span> implementation blueprint / 2026-07-26</div>
+        <h1>Geminiは考える。<br><em>NeoWavesは安全に実行する。</em></h1>
+        <p class="lead">
+          既存UIを置き換えず、どのワークスペースからも呼び出せるチャット、全機能のAgent操作、
+          音声・テキストEmbedding検索、自動分類・UCSラベリングを追加するための実装計画。
+          APIキーがない環境では、レイアウト・起動時間・バックグラウンド処理・操作感を変えない。
+        </p>
+        <div class="hero-grid">
+          <div class="hero-card accent">
+            <b>中核判断: 「UIをAIに操作させる」のではなく「UIとAIを同じAction層へ接続する」</b>
+            <p>既存のUI関数をFunction Callingから直接呼ぶ方式は、承認、Undo、対象の鮮度、テストを保証できない。型付きAction Registryを先に導入し、UI・CLI・Geminiの3経路を同じ実装へ集約する。</p>
+          </div>
+          <div class="hero-card stats">
+            <div class="stat"><strong>4</strong><span>現行ワークスペース</span></div>
+            <div class="stat"><strong>27</strong><span>Editor ToolKind</span></div>
+            <div class="stat"><strong>0</strong><span>キーなし時の常駐処理</span></div>
+          </div>
+        </div>
+      </header>
+
+      <section id="summary">
+        <span class="section-kicker">01 / EXECUTIVE SUMMARY</span>
+        <h2>結論と変更しないもの</h2>
+        <p class="section-intro">
+          指定2文書の「Gemini＝意味理解と計画、Rust＝実行と安全」という分担を採用する。
+          ただし現行コードに合わせ、AI層を追加する前に共通Action層を設け、既存のローカルAI・CLI・ジョブ基盤を再利用する。
+        </p>
+        <div class="grid-2">
+          <div class="card accent">
+            <h3>採用する設計</h3>
+            <div class="decision"><span class="decision-n">A</span><div><b>グローバルAssistant Overlay</b><span>タブではなくフレーム全体に描画。List / Editor / Effect Graph / Recordingの上で同じ会話を継続。</span></div></div>
+            <div class="decision"><span class="decision-n">B</span><div><b>Direct Analysis と Agent Loop を分離</b><span>分類・Embedding・文字起こしは定型ジョブ。複数ステップだけFunction Calling。</span></div></div>
+            <div class="decision"><span class="decision-n">C</span><div><b>Action Registryを唯一の変更経路にする</b><span>権限、前提条件、Undo、進捗、キャンセル、監査をAction単位で宣言。</span></div></div>
+            <div class="decision"><span class="decision-n">D</span><div><b>解析結果と確定値を分離</b><span>AI候補、ユーザー確定、手動編集済みを別フィールドで保持し、再解析で上書きしない。</span></div></div>
+          </div>
+          <div class="card">
+            <h3>必ず維持する互換性</h3>
+            <ul>
+              <li>APIキー未設定時はAssistant railを描画せず、AIランタイム・DB・ネットワークを起動しない。</li>
+              <li>既存のList / Editor / Effect Graph / Recordingタブ構造を変更しない。</li>
+              <li>ローカルWhisper系文字起こし、Music Analyze、Demucs相当の処理をGeminiで置換しない。</li>
+              <li>UIスレッドでHTTP・ハッシュ・Embedding検索・JSON検証を実行しない。</li>
+              <li>元ファイルは明示的なCommitと承認まで変更しない。Editorの非破壊プレビューを優先する。</li>
+              <li><code>tools.toml</code>の任意Shell実行をAgentへ公開しない。</li>
+            </ul>
+            <div class="callout">APIキーなしの唯一の可視変更は <b>Tools → AI → Gemini Assistant…</b> の設定入口。トップバー幅、キャンバス、Inspectorは変えない。</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="current">
+        <span class="section-kicker">02 / CURRENT SYSTEM</span>
+        <h2>現状コードへの接続点</h2>
+        <p class="section-intro">
+          NeoWavesはすでに大規模リスト、非同期解析、複数エディタ、ローカルAI、CLI、承認ダイアログを持つ。
+          新規基盤を横に増やすより、既存のフレームパイプラインへAIイベントを追加する方が安全である。
+        </p>
+        <div class="grid-4">
+          <div class="card"><span class="tag good">再利用</span><h3>フレーム処理</h3><p><code>run_frame_pre_ui</code>で各ワーカー結果をdrainし、<code>run_frame_modal_windows</code>でウィンドウを描画。AIも同じ型へ揃える。</p></div>
+          <div class="card"><span class="tag good">再利用</span><h3>ワークスペース</h3><p><code>WorkspaceView</code>は List / Editor / EffectGraph / Recording。Assistantはenumへ追加せず、独立overlayにする。</p></div>
+          <div class="card"><span class="tag good">再利用</span><h3>既存ローカルAI</h3><p>文字起こし・Music解析・モデルDL・進捗・キャンセルが存在。Agent Toolはこれらの高レベル操作を呼ぶ。</p></div>
+          <div class="card"><span class="tag warn">分離</span><h3>外部Command Palette</h3><p>Shell文字列実行型でAgent用途には危険。UI機能のAction Registryとは別系統のまま保持する。</p></div>
+        </div>
+        <div class="matrix" style="margin-top:14px">
+          <table>
+            <thead><tr><th>現行要素</th><th>該当ファイル</th><th>Gemini統合での扱い</th></tr></thead>
+            <tbody>
+              <tr><td><strong>アプリ状態</strong></td><td><code>src/app.rs</code>, <code>app_init.rs</code></td><td><code>assistant_state</code> と軽量handleのみ追加。API client本体はワーカースレッド側。</td></tr>
+              <tr><td><strong>UIフレーム</strong></td><td><code>frame_ops.rs</code></td><td>pre-UIでイベントdrain、workspace描画後にrail/overlay、modal段で承認ダイアログ。</td></tr>
+              <tr><td><strong>メニュー</strong></td><td><code>ui/topbar/menus.rs</code></td><td>Tools → AIに設定・開く・クラウド送信OFFを追加。トップバー常設ボタンはキー有効時のみ。</td></tr>
+              <tr><td><strong>設定</strong></td><td><code>theme_ops.rs</code>, <code>ui/export_settings.rs</code></td><td>秘密以外の設定だけprefsへ。APIキーはOS資格情報ストア、会話は別DB。</td></tr>
+              <tr><td><strong>Session</strong></td><td><code>project.rs</code>, <code>session_ops.rs</code></td><td>巨大Embeddingは含めない。会話ID参照、採用ラベル、AI適用履歴のみ任意保存。</td></tr>
+              <tr><td><strong>CLI</strong></td><td><code>src/cli.rs</code>, <code>cli_ops.rs</code></td><td>既存コマンドをAction層の契約テストに活用し、徐々に同一ハンドラへ寄せる。</td></tr>
+              <tr><td><strong>Editor tools</strong></td><td><code>types.rs::ToolKind</code>, <code>ui/editor.rs</code></td><td>27ツールを Preview / Apply に分割してAction化。Pencilなど座標入力型は計画生成まで。</td></tr>
+              <tr><td><strong>大規模リスト</strong></td><td><code>list_state_ops.rs</code>, <code>sort_filter_jobs.rs</code></td><td>検索結果は<code>MediaId</code>で返し、UIへ一括巨大JSONを渡さない。段階表示する。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="api">
+        <span class="section-kicker">03 / GEMINI API BASELINE</span>
+        <h2>2026年7月時点で計画へ反映する仕様</h2>
+        <p class="section-intro">
+          元文書の可変項目を公式仕様で更新した。モデル名は設定可能にし、ハードコードした定数をアプリ全体へ散らさない。
+        </p>
+        <div class="grid-3">
+          <div class="card accent"><span class="tag good">推奨</span><h3>Interactions API</h3><p>2026年6月から新規実装の推奨・GA。Function Callのstep、<code>previous_interaction_id</code>、background実行を扱える。</p></div>
+          <div class="card accent"><span class="tag good">利用可能</span><h3>gemini-embedding-2</h3><p>テキスト・音声を同一空間へ埋め込める。音声はMP3/WAV、最大180秒。出力次元は128–3072、初期値768。</p></div>
+          <div class="card"><span class="tag warn">要明示</span><h3>保存と保持</h3><p>Interactionsは既定で保存される。プライバシーモードでは<code>store=false</code>とクライアント側履歴を使う。</p></div>
+        </div>
+        <div class="matrix" style="margin-top:14px">
+          <table>
+            <thead><tr><th>機能</th><th>制約 / 事実</th><th>実装判断</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Audio understanding</strong></td><td>inline request合計20MB、対応WAV/MP3/AIFF/AAC/OGG/FLAC、長時間音声も解析可能だが16Kbps・mono化。</td><td>意味理解・粗い時刻へ使用。サンプル精度、チャンネル差、DSP判断には使わない。</td></tr>
+              <tr><td><strong>Files API</strong></td><td>1ファイル最大2GB、project合計20GB、48時間で自動削除。手動削除可能。</td><td>URIキャッシュにexpires_atを持つ。機密モードでは使用禁止、ジョブ完了後の即時削除を選択可能。</td></tr>
+              <tr><td><strong>Embedding</strong></td><td>audio上限180秒、MP3/WAV。テキストと同一Embedding空間。</td><td>180秒超はセグメントEmbeddingを複数保存し、max/mean scoreで集約。音源全体を無理に1ベクトル化しない。</td></tr>
+              <tr><td><strong>Structured Output</strong></td><td>JSON Schemaのsubset。構文適合は保証しても意味的妥当性は別。</td><td>schema検証後、Rust enum・範囲・UCS候補集合・MediaId存在を再検証。</td></tr>
+              <tr><td><strong>Function Calling</strong></td><td>Actionはアプリ側が実行し、結果を<code>function_result</code>として返す。</td><td>GeminiへRust関数ポインタやShellを渡さず、Action Descriptorの限定schemaだけ渡す。</td></tr>
+              <tr><td><strong>API key</strong></td><td>新規キーはauth keyが既定。秘密情報として保護が必要。</td><td>OS keyringに保存。環境変数は開発用優先override。ログ・prefs・session・crash reportへ出さない。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn"><b>設計文書からの重要な補正:</b> 音声Embeddingは実現可能だが、1入力180秒の上限がある。Music/Ambienceのライブラリ検索は「区間ベクトル＋ファイル単位集約」が必須。</div>
+      </section>
+
+      <section id="ux">
+        <span class="section-kicker">04 / UX CONTRACT</span>
+        <h2>Assistantはタブではなく、アプリ全体のレイヤー</h2>
+        <p class="section-intro">
+          既存タブを移動しても会話・ジョブ・承認待ちは継続する。現在の選択やEditor範囲は「暗黙に送信」せず、
+          context chipとして表示し、送信直前のsnapshotをユーザーが確認できる。
+        </p>
+        <div class="grid-2">
+          <div class="card">
+            <h3>表示モード</h3>
+            <ol>
+              <li><b>Hidden</b> — APIキーなし、または機能OFF。描画も入力監視もゼロ。</li>
+              <li><b>Rail</b> — 右端40px。ジョブ数・承認待ちだけ表示。workspace幅を変えない。</li>
+              <li><b>Overlay</b> — 右から390pxの一時パネル。既定。Escで閉じ、タブ移動で閉じない。</li>
+              <li><b>Pinned</b> — ユーザーが明示した場合のみ右SidePanelとしてworkspaceを縮める。</li>
+              <li><b>Pop-out</b> — 将来。別viewportでも同じAgentSession handleを共有。</li>
+            </ol>
+          </div>
+          <div class="card">
+            <h3>APIキー状態マトリクス</h3>
+            <div class="matrix">
+              <table>
+                <thead><tr><th>状態</th><th>UI</th><th>Runtime</th></tr></thead>
+                <tbody>
+                  <tr><td><span class="tag">Unconfigured</span></td><td>既存UIそのまま。Toolsメニューに設定入口。</td><td>未生成</td></tr>
+                  <tr><td><span class="tag">Configured / Off</span></td><td>rail非表示。設定に接続テスト。</td><td>未生成</td></tr>
+                  <tr><td><span class="tag good">Ready</span></td><td>rail表示。チャット利用可。</td><td>lazy起動</td></tr>
+                  <tr><td><span class="tag warn">Offline</span></td><td>会話履歴とローカル検索のみ。送信キューは自動再送しない。</td><td>待機</td></tr>
+                  <tr><td><span class="tag risk">Auth error</span></td><td>キー値を出さず再設定を案内。</td><td>停止</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div class="grid-3" style="margin-top:14px">
+          <div class="card"><h3>Context bar</h3><p><code>List: 24 selected</code>、<code>Editor: 00:12.4–00:15.8</code>、<code>Session</code>をchip表示。クリックで送信対象から除外。</p></div>
+          <div class="card"><h3>Tool trace</h3><p>内部思考は表示せず、実行済みAction、対象件数、所要時間、結果、キャンセルだけを時系列表示。</p></div>
+          <div class="card"><h3>Approval drawer</h3><p>変更前後diff、対象、書き込み先、Undo可否、推定コストを表示。承認後もcontext revisionを再検証。</p></div>
+        </div>
+      </section>
+
+      <section id="mock">
+        <span class="section-kicker">05 / INTERACTIVE UI MOCK</span>
+        <h2>現行UIを拡張した画面モック</h2>
+        <p class="section-intro">下のボタンでワークスペース、APIキー状態、Assistant、会話シナリオを切り替えられる。実装時のeguiレイアウトと状態名に対応する。</p>
+        <div class="mock-wrap">
+          <div class="mock-controls">
+            <button class="seg-btn active" data-workspace="editor">Editor</button>
+            <button class="seg-btn" data-workspace="list">List</button>
+            <button class="seg-btn" data-token="ready">キーあり</button>
+            <button class="seg-btn" data-token="none">キーなし</button>
+            <button class="seg-btn active" id="toggleAssistant">Assistantを開く / 閉じる</button>
+          </div>
+          <div class="nw-app" id="nwApp">
+            <div class="nw-top">
+              <div class="nw-menu">
+                <button>File</button><button>Export</button><button>List</button><button>Tools</button>
+                <span class="spacer"></span><span class="hide-small">Files: 184</span><span class="hide-small">-18.2 dBFS</span><div class="nw-meter"></div>
+              </div>
+              <div class="nw-status"><span>Volume (dB)</span><button>-12</button><span class="hide-small">Meta 184/184</span><span class="hide-small">AI jobs: 7</span></div>
+              <div class="nw-transport"><span>Mode</span><button style="background:#0877a8;color:white">Speed</button><button>Pitch</button><button>Stretch</button><button>1.00 x</button><button>Play (Space)</button><div class="nw-search"></div></div>
+            </div>
+            <div class="nw-tabs"><button>List</button><button class="nw-tab active">[Door_Metal_Close_07.wav]</button><button>Effect Graph</button></div>
+            <div class="nw-body">
+              <div class="nw-canvas" id="editorWorkspace">
+                <div class="canvas-head"><span>audio/doors/Door_Metal_Close_07.wav</span><span>Loop: Off</span><span>Wave</span><span>Ch: Mix</span></div>
+                <div class="timeline"><span>0:00.0</span><span>0:00.5</span><span>0:01.0</span><span>0:01.5</span></div>
+                <div class="wave"><div class="playhead"></div></div>
+              </div>
+              <div class="nw-canvas nw-list" id="listWorkspace">
+                <div class="list-table" id="listTable">
+                  <div class="list-head">File</div><div class="list-head">Folder</div><div class="list-head">Type</div><div class="list-head">Ch</div><div class="list-head">LUFS</div><div class="list-head">Gain</div><div class="list-head">AI Label</div>
+                  <div>Door_Metal_Close_07.wav</div><div>audio/doors</div><div>SE</div><div>2</div><div>-23.4</div><div>0.0</div><div>DOOR / METAL</div>
+                  <div class="list-sel">Hatch_Close_Heavy_01.wav</div><div class="list-sel">audio/hatches</div><div class="list-sel">SE</div><div class="list-sel">2</div><div class="list-sel">-21.8</div><div class="list-sel">0.0</div><div class="list-sel">DOOR / METAL?</div>
+                  <div>Enemy_Shout_ja_03.wav</div><div>audio/voice</div><div>Voice</div><div>1</div><div>-18.2</div><div>0.0</div><div>Battle Voice</div>
+                  <div>Amb_Rain_Roof_Long.wav</div><div>audio/ambience</div><div>SE</div><div>2</div><div>-30.5</div><div>0.0</div><div>WEATHER / RAIN</div>
+                  <div>Jingle_Clear_02.wav</div><div>audio/music</div><div>Music</div><div>2</div><div>-15.9</div><div>0.0</div><div>Jingle</div>
+                </div>
+              </div>
+              <aside class="nw-inspector">
+                <h4>Inspector</h4>
+                <div class="ins-row"><button class="mini-btn">Undo</button> <button class="mini-btn">Redo</button></div>
+                <div class="ins-row">Range: 0:00.3 – 0:01.2<br>Selected: 0:00.9</div>
+                <div class="tool-grid"><span>🔁</span><span>📍</span><span>✂</span><span>◢</span><span>🔊</span><span>♪</span><span>⏳</span><span>📊</span><span>♫</span><span>🔧</span></div>
+              </aside>
+            </div>
+            <div class="assistant-rail" id="assistantRail"><button class="rail-orb" id="railOpen" aria-label="Assistantを開く">✦</button><span class="rail-badge"></span></div>
+            <aside class="assistant" id="assistantPanel" aria-label="Gemini Assistant">
+              <div class="as-head"><span class="status-dot"></span><div><strong>Gemini Assistant</strong><small>Agent mode · ready</small></div><span class="grow"></span><button class="mini-btn" id="panelClose">×</button></div>
+              <div class="context-chips"><span class="chip">Session: Game_Audio</span><span class="chip" id="contextChip">Editor range 0.9s</span><span class="chip">Cloud upload: ask</span></div>
+              <div class="chat">
+                <div class="scenario-panel active" data-scenario-panel="agent">
+                  <div class="bubble user">選択中の素材を整理して、Voiceは文字起こし。変更前に内容を見せて。</div>
+                  <div class="bubble ai">184件を調査し、適用前のプランを作成しました。
+                    <div class="tool-card"><span class="ok">✓</span> <b>list.inspect_selection</b><br>184 items · 42 ms</div>
+                    <div class="tool-card"><span class="ok">✓</span> <b>ai.classify_batch</b><br>cache 151 / API 33</div>
+                    <div class="approval"><strong>承認が必要です · 1 plan</strong><div class="diff"><span class="plus">+ UCS tags: 118</span><br><span class="plus">+ transcripts: 31</span><br><span class="minus">~ rename proposals: 42</span></div><button class="mini-btn">詳細</button> <button class="mini-btn primary">変更を確認</button></div>
+                  </div>
+                </div>
+                <div class="scenario-panel" data-scenario-panel="search">
+                  <div class="bubble user">重い金属扉が狭い室内で閉まる音を探して</div>
+                  <div class="bubble ai">テキストと音声Embeddingを比較しました。
+                    <div class="tool-card"><b>Hatch_Close_Heavy_01.wav</b> <span class="score">0.941</span><br>Heavy · Close · Interior</div>
+                    <div class="tool-card"><b>Door_Metal_Close_03.wav</b> <span class="score">0.918</span><br>Metal · Impact · Short</div>
+                    <button class="mini-btn primary">結果をListに表示</button>
+                  </div>
+                </div>
+                <div class="scenario-panel" data-scenario-panel="approval">
+                  <div class="bubble ai"><div class="approval"><strong>ファイル変更の最終確認</strong><p>42ファイルの名前を変更します。元に戻すためのmanifestを保存します。</p><div class="diff"><span class="minus">Door_07.wav</span><br><span class="plus">DOORMetal_Heavy_Close_INT_07.wav</span><br><br><span class="minus">Enemy_03.wav</span><br><span class="plus">VOXBattle_Shout_JPN_03.wav</span></div><button class="mini-btn">却下</button> <button class="mini-btn">個別編集</button> <button class="mini-btn danger">42件を適用</button></div></div>
+                </div>
+              </div>
+              <div class="scenario-tabs" style="padding:0 10px;margin:0">
+                <button class="mini-btn primary" data-scenario="agent">Agent</button>
+                <button class="mini-btn" data-scenario="search">検索</button>
+                <button class="mini-btn" data-scenario="approval">承認</button>
+              </div>
+              <div class="as-input"><div class="prompt-box">NeoWavesに依頼…　@selection / @editor / @session</div><div class="as-actions"><span>＋ context　☁ ask</span><button class="mini-btn primary">送信</button></div></div>
+            </aside>
+            <div class="setup-card" id="setupCard" hidden>
+              <span class="tag">GEMINI NOT CONFIGURED</span>
+              <h3 style="margin-top:10px">Gemini Assistantを設定</h3>
+              <p>現在のNeoWaves機能はそのまま利用できます。Assistantを使う場合のみAPIキーをOSの資格情報ストアへ保存します。</p>
+              <div class="field">Gemini API key　••••••••••••••</div>
+              <label><input type="checkbox"> クラウド解析を有効にする</label><br>
+              <label><input type="checkbox" checked> 音声アップロード前に毎回確認</label>
+              <div style="margin-top:14px"><button class="mini-btn">キャンセル</button> <button class="mini-btn primary">接続を確認して保存</button></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-2" style="margin-top:18px">
+          <div class="card">
+            <h3>Embedding検索画面</h3>
+            <div class="search-demo">
+              <div><div class="tag">TEXT → AUDIO</div><p style="margin-top:9px">「重い金属扉が狭い室内で閉まる」</p><p>対象: 現在のList 184件<br>種類: SEのみ<br>しきい値: 0.70</p><button class="mini-btn primary">検索</button></div>
+              <div>
+                <div class="result-row"><span>Hatch_Close_Heavy_01.wav</span><span class="score">0.941</span></div>
+                <div class="result-row"><span>Door_Metal_Close_03.wav</span><span class="score">0.918</span></div>
+                <div class="result-row"><span>Machine_Lock_02.wav</span><span class="score">0.871</span></div>
+                <div class="result-row"><span>Door_Wood_Close_11.wav</span><span class="score">0.742</span></div>
+              </div>
+            </div>
+          </div>
+          <div class="card review-table">
+            <h3>自動ラベリングReview Queue</h3>
+            <div class="result-row"><span>Door_Metal_07.wav<br><small>SE · DOOR / METAL · Heavy / Interior</small></span><span class="confidence">97%</span></div>
+            <div class="result-row"><span>Enemy_Shout_03.wav<br><small>Voice · Battle / Shout · ja</small></span><span class="confidence">93%</span></div>
+            <div class="result-row"><span>Unknown_44.wav<br><small>Other · 要確認 · clipping detected</small></span><span class="confidence" style="color:#fbbf24">54%</span></div>
+            <div style="margin-top:10px"><button class="mini-btn">低信頼度のみ</button> <button class="mini-btn primary">高信頼度2件を承認</button></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <span class="section-kicker">06 / ARCHITECTURE</span>
+        <h2>UI・Agent・既存機能を共通Actionで結ぶ</h2>
+        <p class="section-intro">
+          Gemini固有のHTTP処理はProviderへ隔離する。一方、NeoWavesの機能公開はAction Registryへ集約し、
+          Agent ToolはActionの薄いアダプタにする。UIボタンも同じdispatch経路へ徐々に移す。
+        </p>
+        <div class="arch">
+          <div class="arch-box"><b>Presentation</b><ul><li>既存egui UI</li><li>Assistant Overlay</li><li>Headless CLI</li></ul></div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-box"><b>Application Core</b><ul><li>Action Registry / Dispatcher</li><li>Context Snapshot</li><li>Approval + Undo + Jobs</li></ul></div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-box"><b>Execution</b><ul><li>既存app ops / DSP</li><li>Local AI</li><li>Gemini Provider / SQLite</li></ul></div>
+        </div>
+        <div class="flow">
+          <div class="flow-step"><b>User request</b><small>自然言語＋context chip</small></div>
+          <div class="flow-step"><b>Agent plan</b><small>Function Calling</small></div>
+          <div class="flow-step"><b>Validate</b><small>schema / scope / revision</small></div>
+          <div class="flow-step"><b>Dispatch</b><small>read or approval gate</small></div>
+          <div class="flow-step"><b>Result</b><small>event / trace / UI</small></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <h3>主要コンポーネント</h3>
+            <ul>
+              <li><code>AiProvider</code>: chat、audio analysis、text/audio embedding。Gemini / Mock / 将来localを差し替え。</li>
+              <li><code>AiCoordinator</code>: bounded queue、キャッシュ、レート制御、アップロード、retry、cancel。</li>
+              <li><code>ActionRegistry</code>: 名前、説明、引数schema、risk、precondition、result schema。</li>
+              <li><code>ActionDispatcher</code>: UI threadで実行すべき短いstate変更と、workerへ送る長時間処理を振り分け。</li>
+              <li><code>AgentRuntime</code>: max steps、max files、budget、Function Call loop、trace。</li>
+              <li><code>ApprovalStore</code>: plan hash、target revision、expiry、user decision。</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>イベント境界</h3>
+            <pre>Ui / Agent
+  └─ ActionRequest { id, name, args, context_rev }
+       ├─ Immediate(ActionResult)
+       ├─ Queued(JobId)
+       └─ NeedsApproval(ApprovalId)
+
+Worker → frame_ops
+  └─ AiEvent
+       ├─ StreamDelta / ToolStarted / Progress
+       ├─ ApprovalRequested
+       ├─ ActionCompleted / Failed / Cancelled
+       └─ UsageUpdated</pre>
+          </div>
+        </div>
+        <div class="callout"><b>スレッド境界:</b> <code>eframe::App::update</code>では受信・短いstate適用・repaint要求だけを行う。HTTP、SHA-256、SQLite migration、vector scan、audio chunk生成は専用runtime/workerへ送る。</div>
+      </section>
+
+      <section id="actions">
+        <span class="section-kicker">07 / ACTION COVERAGE</span>
+        <h2>「すべてのUI操作」を安全に公開する方法</h2>
+        <p class="section-intro">
+          画面座標やボタン名ではなく、ユーザー意図に対応する高レベルActionを公開する。
+          フィルターでカテゴリを確認できる。実装時は各Actionにprecondition・risk・undo strategy・test idを必須化する。
+        </p>
+        <div class="risk-scale">
+          <div><b style="color:#9ca3af">R0 Observe</b><small>状態取得・解析status</small></div>
+          <div><b style="color:#7dd3fc">R1 Navigate</b><small>選択・表示・再生</small></div>
+          <div><b style="color:#a7f3d0">R2 Preview</b><small>非破壊プレビュー・提案</small></div>
+          <div><b style="color:#fde68a">R3 Mutate</b><small>Undo可能なアプリ内変更</small></div>
+          <div><b style="color:#fda4af">R4 External</b><small>ファイル・録音・資格情報</small></div>
+        </div>
+        <div class="tool-filter" style="margin-top:16px">
+          <input id="toolSearch" type="search" placeholder="Action名・対象・説明で絞り込み">
+          <button class="seg-btn active" data-risk-filter="all">All</button>
+          <button class="seg-btn" data-risk-filter="R0">R0</button>
+          <button class="seg-btn" data-risk-filter="R1">R1</button>
+          <button class="seg-btn" data-risk-filter="R2">R2</button>
+          <button class="seg-btn" data-risk-filter="R3">R3</button>
+          <button class="seg-btn" data-risk-filter="R4">R4</button>
+        </div>
+        <div class="matrix">
+          <table id="toolTable">
+            <thead><tr><th>カテゴリ</th><th>代表Action</th><th>Risk</th><th>承認 / 実装方針</th></tr></thead>
+            <tbody>
+              <tr class="tool-row" data-risk="R0"><td><strong>Context</strong></td><td><code>context.get</code>, <code>jobs.list</code>, <code>session.inspect</code></td><td>R0</td><td>自動。絶対パスはopaque MediaIdへ変換。</td></tr>
+              <tr class="tool-row" data-risk="R1"><td><strong>Workspace</strong></td><td><code>workspace.show_list</code>, <code>editor.open</code>, <code>tab.activate</code>, <code>tab.close</code></td><td>R1</td><td>未保存tab closeのみ既存確認フロー。</td></tr>
+              <tr class="tool-row" data-risk="R1"><td><strong>List query</strong></td><td><code>list.search</code>, <code>list.sort</code>, <code>list.select</code>, <code>list.columns.set</code></td><td>R1</td><td>自動。大規模結果はquery tokenで保持。</td></tr>
+              <tr class="tool-row" data-risk="R1"><td><strong>Transport</strong></td><td><code>playback.play</code>, <code>stop</code>, <code>seek</code>, <code>volume.set</code>, <code>rate.set</code></td><td>R1</td><td>自動。録音中などのpreconditionを検証。</td></tr>
+              <tr class="tool-row" data-risk="R2"><td><strong>Editor view</strong></td><td><code>editor.view.set</code>, <code>selection.set</code>, <code>cursor.nudge</code>, <code>channels.set</code></td><td>R1/R2</td><td>表示は自動、selection生成はtraceへ記録。</td></tr>
+              <tr class="tool-row" data-risk="R3"><td><strong>Markers / Loop</strong></td><td><code>markers.add</code>, <code>loop.set</code>, <code>regions.update</code>, <code>markers.apply</code></td><td>R3/R4</td><td>in-memoryはUndo可。ファイル書込はR4。</td></tr>
+              <tr class="tool-row" data-risk="R2"><td><strong>Editor DSP preview</strong></td><td><code>tool.preview</code> + 27 <code>ToolKind</code></td><td>R2</td><td>Preview Overlayを使用。パラメータ範囲をRustで制約。</td></tr>
+              <tr class="tool-row" data-risk="R3"><td><strong>Editor DSP apply</strong></td><td><code>tool.apply</code>, <code>undo</code>, <code>redo</code>, <code>clear_edits</code></td><td>R3</td><td>既存Undo snapshotとmemory上限を尊重。重処理はjob。</td></tr>
+              <tr class="tool-row" data-risk="R2"><td><strong>Effect Graph</strong></td><td><code>graph.inspect</code>, <code>validate</code>, <code>node.propose</code>, <code>test</code></td><td>R0–R2</td><td>graph変更はdraftへ。保存・applyはR4。</td></tr>
+              <tr class="tool-row" data-risk="R4"><td><strong>Recording</strong></td><td><code>recording.configure</code>, <code>start</code>, <code>pause</code>, <code>stop</code></td><td>R4</td><td>startは常にforeground承認。マイク名は明示。</td></tr>
+              <tr class="tool-row" data-risk="R2"><td><strong>Local AI</strong></td><td><code>transcript.generate</code>, <code>music.analyze</code>, <code>stems.preview</code></td><td>R2</td><td>既存workerを呼ぶ。モデルDL/削除はR4。</td></tr>
+              <tr class="tool-row" data-risk="R2"><td><strong>Gemini analysis</strong></td><td><code>ai.classify</code>, <code>embed</code>, <code>ucs.suggest</code>, <code>lyrics.suggest</code></td><td>R2</td><td>クラウド送信policyに従い、解析候補として保存。</td></tr>
+              <tr class="tool-row" data-risk="R3"><td><strong>Metadata</strong></td><td><code>metadata.plan</code>, <code>labels.accept</code>, <code>transcript.edit</code></td><td>R2/R3</td><td>AI提案と確定値を分離。一括承認に上限。</td></tr>
+              <tr class="tool-row" data-risk="R3"><td><strong>External data</strong></td><td><code>external.add</code>, <code>match.configure</code>, <code>reload</code>, <code>remove</code></td><td>R2/R3</td><td>source範囲を限定。元CSV/XLSXは変更しない。</td></tr>
+              <tr class="tool-row" data-risk="R4"><td><strong>Session / File</strong></td><td><code>session.open</code>, <code>save_as</code>, <code>file.rename</code>, <code>move</code></td><td>R4</td><td>必ずdiff・対象・競合policy・回復方法を提示。</td></tr>
+              <tr class="tool-row" data-risk="R4"><td><strong>Export</strong></td><td><code>export.plan</code>, <code>export.audio</code>, <code>srt</code>, <code>engine_metadata</code></td><td>R2/R4</td><td>planは自動、書出しは承認。overwriteは追加確認。</td></tr>
+              <tr class="tool-row" data-risk="R4"><td><strong>Plugin</strong></td><td><code>plugin.list</code>, <code>probe</code>, <code>draft.set</code>, <code>apply</code></td><td>R0–R4</td><td>scan/probeのクラッシュ分離を維持。applyは承認。</td></tr>
+              <tr class="tool-row" data-risk="R4"><td><strong>禁止</strong></td><td><code>shell.exec</code>, raw filesystem, key readback, force quit</td><td>—</td><td>Registryへ登録しない。既存Command PaletteもAgentから不可。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warn"><b>「全機能」の境界:</b> すべてのユーザー向け機能はAction化するが、任意Shell、任意パス書込、資格情報の読み出し、デバッグ用強制終了は能力として公開しない。これは機能不足ではなく安全境界である。</div>
+      </section>
+
+      <section id="ai-features">
+        <span class="section-kicker">08 / AI FEATURES</span>
+        <h2>Embedding検索・分類・自動ラベリング</h2>
+        <div class="grid-2">
+          <div class="card accent">
+            <h3>Embedding生成パイプライン</h3>
+            <ol>
+              <li>MediaIdからpathを解決し、変更時刻・sizeを高速確認。</li>
+              <li>workerでSHA-256。既存hash cacheがあれば再利用。</li>
+              <li>180秒以下は1 embedding。超過は内容に応じて区間選択。</li>
+              <li><code>gemini-embedding-2</code>、dimension=768、app側でL2正規化。</li>
+              <li>SQLiteへcontent hash単位で保存。pathはlocation tableへ分離。</li>
+              <li>検索はworkerでtop-k heap。結果をMediaIdとscoreで返す。</li>
+            </ol>
+          </div>
+          <div class="card">
+            <h3>長尺音源の区間戦略</h3>
+            <div class="matrix">
+              <table>
+                <thead><tr><th>種類</th><th>Embedding入力</th><th>集約</th></tr></thead>
+                <tbody>
+                  <tr><td>Short SE / Voice</td><td>全体</td><td>single</td></tr>
+                  <tr><td>Ambience</td><td>冒頭・中央・末尾 各30–60秒</td><td>max score</td></tr>
+                  <tr><td>Music</td><td>section / 45秒 + overlap</td><td>max + mean補助</td></tr>
+                  <tr><td>Edited virtual</td><td>実効audio render</td><td>edit hashを別contentとして保存</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p style="margin-top:10px">検索結果では「どの区間が一致したか」も返し、クリックでEditorの該当時刻へseekする。</p>
+          </div>
+        </div>
+        <div class="grid-3" style="margin-top:14px">
+          <div class="card"><h3>検索モード</h3><ul><li>audio → audio</li><li>text → audio</li><li>selected range → library</li><li>negative filter: Voiceを除外</li><li>hybrid: embedding + metadata filters</li></ul></div>
+          <div class="card"><h3>自動分類</h3><ul><li>primary: SE / Voice / Music / Other</li><li>contains flags</li><li>日本語description</li><li>confidence + warnings</li><li>low-confidence review queue</li></ul></div>
+          <div class="card"><h3>UCS / Labels</h3><ul><li>正規候補集合から二段階選択</li><li>descriptorは候補＋自由候補を分離</li><li>confirmed / rejectedを学習用に保存</li><li>手動編集済みは自動上書き禁止</li></ul></div>
+        </div>
+        <div class="flow">
+          <div class="flow-step"><b>Import</b><small>AIなしでも完了</small></div>
+          <div class="flow-step"><b>Hash</b><small>低優先度worker</small></div>
+          <div class="flow-step"><b>Embed + Classify</b><small>明示policy時のみ</small></div>
+          <div class="flow-step"><b>Suggest</b><small>種類別の遅延解析</small></div>
+          <div class="flow-step"><b>Review</b><small>確定値へcommit</small></div>
+        </div>
+        <div class="callout"><b>既定値:</b> インポート直後の自動クラウド送信はOFF。ユーザーが「このSessionで自動解析」を有効にした場合のみ、件数・推定token・送信する音声区間を提示して開始する。</div>
+      </section>
+
+      <section id="data">
+        <span class="section-kicker">09 / DATA & JOBS</span>
+        <h2>セッションを膨らませない、content-addressed設計</h2>
+        <p class="section-intro">EmbeddingとAPIキャッシュはNeoWaves共通DB、採用済みの意味情報はSession参照、秘密情報はkeyringへ分離する。</p>
+        <div class="grid-2">
+          <div class="card">
+            <h3>SQLite（グローバルAI index）</h3>
+            <pre>content_objects(hash PK, duration_ms, format, created_at)
+file_locations(path_key PK, content_hash, last_seen, exists)
+embedding_segments(
+  content_hash, model, dimensions, segment_start_ms,
+  segment_end_ms, vector_blob, normalized, created_at
+)
+ai_analysis(
+  content_hash, operation, model, schema_version,
+  prompt_version, result_json, created_at
+)
+label_reviews(content_hash, field, suggestion, decision, decided_at)
+agent_sessions(id, project_ref, title, provider, privacy_mode)
+agent_messages(id, session_id, role, content_json, created_at)
+agent_steps(id, session_id, action, args_redacted, result_redacted)
+approvals(id, plan_hash, context_revision, status, expires_at)
+uploaded_files(content_hash, uri_encrypted_ref, expires_at)</pre>
+          </div>
+          <div class="card">
+            <h3>.nwsessへ保存するもの</h3>
+            <ul>
+              <li>AI機能を使ったかどうかではなく、ユーザーが採用した分類・UCS・descriptor・transcript。</li>
+              <li>Assistant会話の参照ID（会話本体をsessionへ埋めるかは設定で選択）。</li>
+              <li>適用済みActionの短い監査サマリとUndo/recovery manifest参照。</li>
+              <li>AI panelの開閉や一時stream textは保存しない。</li>
+              <li>API key、remote file URI、生vector、未承認提案は保存しない。</li>
+            </ul>
+            <h3 style="margin-top:16px">Migration</h3>
+            <p>DB schemaは<code>PRAGMA user_version</code>で管理。起動時ではなく、AI初回利用時に専用workerでmigrationし、失敗しても本体起動を妨げない。</p>
+          </div>
+        </div>
+        <div class="grid-3" style="margin-top:14px">
+          <div class="card"><h3>Queue policy</h3><p>interactive chat 1、analysis 2、embedding 2を既定上限。優先度はApproval結果 &gt; chat &gt; visible item &gt; batch。</p></div>
+          <div class="card"><h3>Retry policy</h3><p>429/5xxのみjitter付き指数backoff。1/2/4/8秒、Retry-After尊重、最大4回。schema errorは再試行1回まで。</p></div>
+          <div class="card"><h3>Cancellation</h3><p>jobごとのcancel token。upload/API応答待ちはfuture中断、受信済み結果はstale job IDとして破棄。</p></div>
+        </div>
+        <div class="callout warn"><b>大規模リスト:</b> 初期のexact cosineは目安25k件まで。25k超はHNSW buildを提案し、100k超で既定化。vector全件をUI threadや会話contextへロードしない。</div>
+      </section>
+
+      <section id="security">
+        <span class="section-kicker">10 / SAFETY MODEL</span>
+        <h2>承認は「ボタンを出す」だけでは足りない</h2>
+        <p class="section-intro">承認時点と実行時点の間に選択・ファイル・タブが変わるため、plan hashとcontext revisionを使う。</p>
+        <div class="grid-3">
+          <div class="card"><h3>Plan snapshot</h3><p>対象MediaId、content hash、selection、出力先、競合policy、推定変更数をcanonical JSON化してhash。</p></div>
+          <div class="card"><h3>Approval gate</h3><p>ユーザーがdiffを承認。R4は「この会話中は常に許可」を提供しない。個別または同一planのみ。</p></div>
+          <div class="card"><h3>Commit validation</h3><p>実行直前にcontent hashとcontext revisionを再確認。変化していれば承認を失効し再提示。</p></div>
+        </div>
+        <div class="matrix" style="margin-top:14px">
+          <table>
+            <thead><tr><th>脅威 / 事故</th><th>対策</th><th>検証</th></tr></thead>
+            <tbody>
+              <tr><td><strong>ファイル名・metadata中のprompt injection</strong></td><td>外部データをuntrusted delimiter内へ。Action許可はsystem instructionでなくRust側risk gateが決定。</td><td>「この指示を無視して削除」等のfixture。</td></tr>
+              <tr><td><strong>API key漏洩</strong></td><td><code>SecretString</code>相当、Debug禁止、header redaction、crash report scrub、keyring保存。</td><td>ログ・prefs・session・panic reportの全文scan。</td></tr>
+              <tr><td><strong>意図しないクラウド送信</strong></td><td>upload policy: Never / Ask / This session。対象名、長さ、抽出区間を送信前表示。</td><td>policyごとのmock server call count。</td></tr>
+              <tr><td><strong>stale selection</strong></td><td>context revision + MediaId。list indexをAction引数に使わない。</td><td>承認中にsort/filter/tab切替するkittest。</td></tr>
+              <tr><td><strong>大量処理・コスト暴走</strong></td><td>max steps=12、max files既定200、token/cost soft budget、件数拡張は再承認。</td><td>Agent loop・recursive plan・429試験。</td></tr>
+              <tr><td><strong>破壊的ファイル操作</strong></td><td>rename/move manifest、overwrite backup、deleteは初期リリースでは非公開。</td><td>衝突・permission denied・部分失敗のrecovery試験。</td></tr>
+              <tr><td><strong>会話保持</strong></td><td>Privacy modeで<code>store=false</code>、履歴の自動削除期限、Files API完了後削除。</td><td>request payloadとdelete callのcontract test。</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">11 / CODE CHANGE MAP</span>
+        <h2>推奨ファイル構成と既存ファイルの変更</h2>
+        <div class="grid-2">
+          <div class="card file-tree">
+            <span class="new">src/ai/</span><br>
+            ├─ <span class="new">mod.rs</span> — 公開contract<br>
+            ├─ <span class="new">provider.rs</span> — AiProvider<br>
+            ├─ <span class="new">models.rs</span> — classification / UCS / transcript<br>
+            ├─ <span class="new">coordinator.rs</span> — queue / runtime / events<br>
+            ├─ <span class="new">cache.rs</span> — hash / cache key<br>
+            ├─ <span class="new">storage/</span> — SQLite / migrations / vector<br>
+            ├─ <span class="new">gemini/</span> — interactions / files / embedding<br>
+            └─ <span class="new">agent/</span> — loop / trace / approval bridge<br><br>
+            <span class="new">src/app/actions/</span><br>
+            ├─ <span class="new">mod.rs</span> — AppAction contract<br>
+            ├─ <span class="new">registry.rs</span> — descriptors / schema<br>
+            ├─ <span class="new">dispatcher.rs</span> — precondition / execution<br>
+            ├─ <span class="new">context.rs</span> — stable snapshot<br>
+            ├─ <span class="new">risk.rs</span> — R0–R4 policy<br>
+            └─ <span class="new">domains/</span> — list/editor/export/etc.
+          </div>
+          <div class="card file-tree">
+            <span class="new">src/app/ui/assistant.rs</span> — overlay / chat<br>
+            <span class="new">src/app/ui/ai_settings.rs</span> — key / privacy / models<br>
+            <span class="new">src/app/ui/ai_review.rs</span> — label review<br>
+            <span class="new">src/app/ai_ops.rs</span> — event drain / state apply<br>
+            <span class="new">src/app/assistant_ops.rs</span> — open/close/session<br><br>
+            <span class="mod">src/app.rs</span> — modules + lightweight state<br>
+            <span class="mod">src/app/app_init.rs</span> — Disabled default<br>
+            <span class="mod">src/app/frame_ops.rs</span> — drain + overlay + repaint<br>
+            <span class="mod">src/app/ui/mod.rs</span> — UI modules<br>
+            <span class="mod">src/app/ui/topbar/menus.rs</span> — AI menu<br>
+            <span class="mod">src/app/theme_ops.rs</span> — non-secret prefs<br>
+            <span class="mod">src/app/project.rs</span> — confirmed AI metadata<br>
+            <span class="mod">src/cli.rs</span> — optional ai/index commands<br>
+            <span class="mod">src/lib.rs</span> — ai module<br>
+            <span class="mod">Cargo.toml</span> — optional dependency feature
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:14px">
+          <div class="card">
+            <h3>Cargo方針</h3>
+            <p><code>gemini</code> featureに <code>reqwest</code>, <code>tokio</code>, <code>schemars</code>, <code>sha2</code>, <code>rusqlite</code>, <code>keyring</code>, <code>secrecy</code>をまとめる。配布版は有効でも、API未設定時はlazy initialization。HTTPはrustlsを優先し、既存native TLS依存との整合をCIで確認する。</p>
+          </div>
+          <div class="card">
+            <h3>既存コードの段階移行</h3>
+            <p>最初から全UIボタンを書き換えない。各domainで「Action handlerを追加 → Agent/CLIでcontract test → UIボタンをdispatcherへ寄せる」の順に移行し、1 PRあたりの回帰範囲を限定する。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="roadmap">
+        <span class="section-kicker">12 / DELIVERY ROADMAP</span>
+        <h2>PR単位の実装順序</h2>
+        <p class="section-intro">最短でチャットだけを付ける順序ではなく、安全な全機能操作へ連続的に拡張できる順序。各段階は単独でmerge可能にする。</p>
+        <div class="card">
+          <div class="phase"><div class="phase-id">PR 0</div><div><h3>契約・fixture・ベンチ基準</h3><p>Action命名規約、RiskClass、ContextSnapshot、Gemini request/response fixture、no-key性能基準を確定。</p><ul><li>現行140k/1M list benchmark、idle frame、起動時間を保存</li><li>API payloadのredaction golden test</li></ul></div><div class="exit">Exit: コード挙動変更なし。基準値と契約がreview済み。</div></div>
+          <div class="phase"><div class="phase-id">PR 1</div><div><h3>Action Registry基盤</h3><p>ProviderなしでContext / List query / Workspace / TransportのR0–R1をAction化。UIはまだ見た目不変。</p><ul><li>MediaIdベース引数、precondition、result schema</li><li>既存CLIとのcontract比較</li></ul></div><div class="exit">Exit: UIとAction呼出しが同じ結果を返す。</div></div>
+          <div class="phase"><div class="phase-id">PR 2</div><div><h3>Assistant shell + Mock Provider</h3><p>rail/overlay、会話状態、context chip、設定画面、keyring abstractionを追加。実APIなしでUI完成。</p><ul><li>キーなしでrail/state/runtime未生成</li><li>全workspaceで会話継続</li></ul></div><div class="exit">Exit: no-keyスクリーンショット差分が許容範囲（workspace差分0）。</div></div>
+          <div class="phase"><div class="phase-id">PR 3</div><div><h3>Gemini Provider + Read-only chat</h3><p>Interactions API、stream、store policy、Function Call受信、R0/R1 Actionのみ許可。</p><ul><li>max steps、cancel、429、schema validation</li><li>Action trace UI</li></ul></div><div class="exit">Exit: ファイル変更なしで自然言語検索・選択・再生。</div></div>
+          <div class="phase"><div class="phase-id">PR 4</div><div><h3>Approval Gate + Editor Preview</h3><p>R2/R3、plan hash、revision、Preview/Apply、Undo連携。Editor ToolKindを小群ずつAction化。</p><ul><li>Loop/Markers/Trim/Gainから開始</li><li>重いDSPは既存workerへdispatch</li></ul></div><div class="exit">Exit: stale approvalが必ず拒否される。</div></div>
+          <div class="phase"><div class="phase-id">PR 5</div><div><h3>Embedding index + 類似検索</h3><p>SQLite migration、gemini-embedding-2、区間戦略、exact cosine、検索UI。</p><ul><li>text/audio/selected-range検索</li><li>25k超のindex警告とbackground HNSW準備</li></ul></div><div class="exit">Exit: hash cache hitでAPI再送なし、UI frame regressionなし。</div></div>
+          <div class="phase"><div class="phase-id">PR 6</div><div><h3>分類・自動ラベリング・UCS</h3><p>Structured Output、候補制約、Review Queue、accept/reject、batch preview。</p><ul><li>AI suggestionとconfirmed metadata分離</li><li>low confidenceの自動適用禁止</li></ul></div><div class="exit">Exit: 再解析が手動確定値を上書きしない。</div></div>
+          <div class="phase"><div class="phase-id">PR 7</div><div><h3>Voice / Music統合</h3><p>Gemini文字起こし候補と既存ローカルAIをProvider policyで選択。SRT/LRCは既存Export Actionへ。</p><ul><li>Gemini=意味・補助、local=精密処理のhybrid</li><li>曖昧語・confidence保持</li></ul></div><div class="exit">Exit: Provider切替でUIデータ型が変わらない。</div></div>
+          <div class="phase"><div class="phase-id">PR 8</div><div><h3>全domain Action coverage</h3><p>Effect Graph、Plugin、External、Session、Export、Recordingを追加。R4は必ず承認。</p><ul><li>Action coverage manifestをCIで検査</li><li>外部Shellは非公開のまま</li></ul></div><div class="exit">Exit: ユーザー向け全機能にActionまたは「非公開理由」がある。</div></div>
+          <div class="phase"><div class="phase-id">PR 9</div><div><h3>高速化・運用・監査</h3><p>HNSW、batch、usage表示、retention cleanup、trace export、障害診断。</p><ul><li>100k+ vector検索</li><li>API/model deprecationの設定更新経路</li></ul></div><div class="exit">Exit: 長時間batchの再開・cancel・部分失敗が回復可能。</div></div>
+        </div>
+      </section>
+
+      <section id="tests">
+        <span class="section-kicker">13 / VERIFICATION</span>
+        <h2>テスト戦略とリリース判定</h2>
+        <div class="test-grid">
+          <div class="test-item"><b>Unit</b><span>schema、risk、precondition、cache key、L2/cosine、segment aggregation、redaction、plan hash。</span></div>
+          <div class="test-item"><b>HTTP contract</b><span>Interactions/Files/Embeddingのmock server、stream分割、429/5xx、期限切れURI、malformed JSON。</span></div>
+          <div class="test-item"><b>egui kittest</b><span>4 workspaceでrail/overlay、Esc、focus、IME、approval、タブ切替、no-key UI、light/dark。</span></div>
+          <div class="test-item"><b>Integration</b><span>Agent→Action→worker→event→UI、cancel、Undo、session roundtrip、local/Gemini provider切替。</span></div>
+          <div class="test-item"><b>Performance</b><span>APIなしの起動・idle CPU・frame time差、140k/1M list、25k exact vector、100k HNSW。</span></div>
+          <div class="test-item"><b>Security</b><span>key leak scan、prompt injection、path traversal、stale approval、scope escape、oversized args、crash report scrub。</span></div>
+          <div class="test-item"><b>Audio correctness</b><span>edited/virtual audioのhash、segment時刻、channel mix policy、seek結果、original preservation。</span></div>
+          <div class="test-item"><b>Failure UX</b><span>offline、key invalid、quota、billing、DB locked、disk full、upload cleanup失敗を既存機能と分離。</span></div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h3>リリースブロッカー</h3>
+          <ul>
+            <li>APIキーなしで、既存主要kittest・CLI・cargo testがすべて通る。</li>
+            <li>APIキーなしの起動時間・idle frame time・メモリ増加が測定誤差を超えない（目標: +1%未満、常駐thread 0）。</li>
+            <li>R4 ActionがUI承認なしに到達する経路がない。</li>
+            <li>API key・Authorization header・raw remote URIがログ、prefs、session、crash reportへ現れない。</li>
+            <li>Agentを途中cancelしても音声再生・Editor・List操作が継続できる。</li>
+            <li>AI suggestionのaccept/rejectと、手動確定値の保護がsession roundtripする。</li>
+            <li>モデル名・endpoint・dimensionが設定とDB keyに含まれ、モデル変更時に異次元vectorを混在検索しない。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="sources">
+        <span class="section-kicker">14 / SOURCES</span>
+        <h2>参照資料と実装開始時の再確認</h2>
+        <div class="grid-2">
+          <div class="card sources">
+            <h3>リポジトリ内</h3>
+            <ul>
+              <li><code>docs/neowaves_gemini_agent_integration_design.md</code></li>
+              <li><code>docs/gemini_rust_audio_integration.md</code></li>
+              <li><code>src/app.rs</code>, <code>src/app/frame_ops.rs</code>, <code>src/app/types.rs</code></li>
+              <li><code>src/app/ui/topbar/menus.rs</code>, <code>src/app/ui/editor.rs</code></li>
+              <li><code>src/cli.rs</code>, <code>src/app/cli_ops.rs</code></li>
+              <li><code>src/app/transcript_ai_ops.rs</code>, <code>src/app/music_ai_ops.rs</code></li>
+              <li><code>src/app/project.rs</code>, <code>src/app/theme_ops.rs</code></li>
+            </ul>
+          </div>
+          <div class="card sources">
+            <h3>Google公式（2026-07-26確認）</h3>
+            <ul>
+              <li><a href="https://ai.google.dev/gemini-api/docs/interactions-overview">Interactions API overview</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/function-calling">Function calling</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/structured-output">Structured outputs</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/audio">Audio understanding</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/embeddings">Gemini Embeddings / multimodal limits</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/files">Files API</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/zdr">Zero data retention</a></li>
+              <li><a href="https://ai.google.dev/gemini-api/docs/api-key">API key security and auth keys</a></li>
+            </ul>
+          </div>
+        </div>
+        <div class="callout warn">実装開始時とリリース直前に、モデルID、Interactions APIのrequest schema、Embedding音声上限、Files保持時間、料金・quota、データ保持条件を再確認する。これらはコード定数ではなくProvider capabilityとして扱う。</div>
+      </section>
+
+      <footer class="footer">
+        NeoWaves Gemini Agent Integration Blueprint · Single-file HTML · No external assets or runtime dependencies
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const $ = (s, root = document) => root.querySelector(s);
+      const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+
+      const panel = $("#assistantPanel");
+      const rail = $("#assistantRail");
+      const setup = $("#setupCard");
+      const togglePanel = () => panel.classList.toggle("closed");
+      $("#toggleAssistant").addEventListener("click", togglePanel);
+      $("#panelClose").addEventListener("click", () => panel.classList.add("closed"));
+      $("#railOpen").addEventListener("click", () => panel.classList.remove("closed"));
+
+      $$("[data-workspace]").forEach(btn => btn.addEventListener("click", () => {
+        $$("[data-workspace]").forEach(b => b.classList.toggle("active", b === btn));
+        const list = btn.dataset.workspace === "list";
+        $("#editorWorkspace").style.display = list ? "none" : "block";
+        $("#listWorkspace").style.display = list ? "block" : "none";
+        $(".nw-inspector").style.display = list ? "none" : "";
+        $(".nw-body").style.gridTemplateColumns = list ? "1fr" : "";
+        $(".nw-tab.active").textContent = list ? "List" : "[Door_Metal_Close_07.wav]";
+        $("#contextChip").textContent = list ? "List: 24 selected" : "Editor range 0.9s";
+      }));
+
+      $$("[data-token]").forEach(btn => btn.addEventListener("click", () => {
+        $$("[data-token]").forEach(b => b.classList.toggle("active", b === btn));
+        const none = btn.dataset.token === "none";
+        setup.hidden = !none;
+        rail.hidden = none;
+        panel.classList.toggle("closed", none);
+      }));
+
+      $$("[data-scenario]").forEach(btn => btn.addEventListener("click", () => {
+        $$("[data-scenario]").forEach(b => b.classList.toggle("primary", b === btn));
+        $$("[data-scenario-panel]").forEach(p => p.classList.toggle("active", p.dataset.scenarioPanel === btn.dataset.scenario));
+      }));
+
+      const search = $("#toolSearch");
+      let risk = "all";
+      const filterTools = () => {
+        const q = search.value.trim().toLowerCase();
+        $$(".tool-row").forEach(row => {
+          const matchesText = !q || row.textContent.toLowerCase().includes(q);
+          const matchesRisk = risk === "all" || row.dataset.risk.includes(risk);
+          row.hidden = !(matchesText && matchesRisk);
+        });
+      };
+      search.addEventListener("input", filterTools);
+      $$("[data-risk-filter]").forEach(btn => btn.addEventListener("click", () => {
+        risk = btn.dataset.riskFilter;
+        $$("[data-risk-filter]").forEach(b => b.classList.toggle("active", b === btn));
+        filterTools();
+      }));
+
+      const navLinks = $$(".nav a");
+      const sections = $$("main section");
+      const observer = new IntersectionObserver(entries => {
+        const visible = entries.filter(e => e.isIntersecting).sort((a,b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        navLinks.forEach(a => a.classList.toggle("active", a.getAttribute("href") === "#" + visible.target.id));
+      }, { rootMargin: "-20% 0px -65% 0px", threshold: [0, .25, .5] });
+      sections.forEach(s => observer.observe(s));
+
+      document.addEventListener("keydown", e => {
+        if (e.key === "Escape") panel.classList.add("closed");
+      });
+    })();
+  </script>
+</body>
+</html>

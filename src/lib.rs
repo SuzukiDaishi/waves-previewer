@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod app;
 pub mod audio;
 pub mod audio_capture;

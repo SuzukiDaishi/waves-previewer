@@ -18,7 +18,8 @@ impl WavesPreviewer {
             ctx.memory(|m| m.has_focus(crate::app::WavesPreviewer::search_box_id()));
         let has_non_list_focus = focused_id.is_some() && focused_id != Some(list_focus_id);
         let rename_modal_open = self.list_modal_open();
-        let allow_focus_reclaim = !rename_modal_open && !search_focused && !has_non_list_focus;
+        let allow_focus_reclaim =
+            ui.is_enabled() && !rename_modal_open && !search_focused && !has_non_list_focus;
         let focus_resp = ui.interact(metrics.list_rect, list_focus_id, Sense::click());
         if self.list_has_focus && !list_focus_now && allow_focus_reclaim {
             ctx.memory_mut(|m| m.request_focus(list_focus_id));
@@ -41,7 +42,8 @@ impl WavesPreviewer {
         let allow_list_keys = self.is_list_workspace_active()
             && !self.files.is_empty()
             && !search_focused
-            && !rename_modal_open;
+            && !rename_modal_open
+            && ui.is_enabled();
         if self.debug.cfg.enabled && self.is_list_workspace_active() && !self.files.is_empty() {
             let nav_key_pressed = ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)

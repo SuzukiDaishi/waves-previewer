@@ -1,3 +1,6 @@
+pub(super) mod ai_review;
+pub(super) mod ai_settings;
+pub(super) mod assistant;
 pub(super) mod debug;
 pub(super) mod dsp_widgets;
 pub(super) mod duplicates;

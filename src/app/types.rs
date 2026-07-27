@@ -200,11 +200,58 @@ pub struct MediaItem {
     /// does not deep-copy the full transcript text and segments.
     pub transcript: Option<Arc<Transcript>>,
     pub transcript_language: Option<String>,
+    /// AI suggestions and confirmed semantic metadata. Boxed because the
+    /// common million-row list case has no Gemini data.
+    pub ai_metadata: Option<Box<AiItemMetadata>>,
     /// External CSV/Excel row values. Boxed option: most rows have none and
     /// an inline empty HashMap cost 48 bytes per item at 1M files.
     pub external: Option<Box<HashMap<String, String>>>,
     pub virtual_audio: Option<Arc<AudioBuffer>>,
     pub virtual_state: Option<VirtualState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiItemMetadata {
+    #[serde(default)]
+    pub classification_suggestion: Option<crate::ai::models::AudioClassification>,
+    #[serde(default)]
+    pub confirmed_class: Option<crate::ai::models::AudioKind>,
+    #[serde(default)]
+    pub ucs_suggestion: Option<crate::ai::models::UcsAnalysis>,
+    #[serde(default)]
+    pub confirmed_ucs_category_id: Option<String>,
+    #[serde(default)]
+    pub confirmed_ucs_subcategory_id: Option<String>,
+    #[serde(default)]
+    pub confirmed_descriptors: Vec<String>,
+    #[serde(default)]
+    pub transcript_suggestion: Option<crate::ai::models::VoiceTranscript>,
+    #[serde(default)]
+    pub confirmed_transcript: Option<crate::ai::models::VoiceTranscript>,
+    #[serde(default)]
+    pub manually_edited: bool,
+}
+
+impl AiItemMetadata {
+    pub fn confirmed_only(&self) -> Option<Self> {
+        let has_confirmed = self.confirmed_class.is_some()
+            || self.confirmed_ucs_category_id.is_some()
+            || self.confirmed_ucs_subcategory_id.is_some()
+            || !self.confirmed_descriptors.is_empty()
+            || self.confirmed_transcript.is_some()
+            || self.manually_edited;
+        has_confirmed.then(|| Self {
+            classification_suggestion: None,
+            confirmed_class: self.confirmed_class,
+            ucs_suggestion: None,
+            confirmed_ucs_category_id: self.confirmed_ucs_category_id.clone(),
+            confirmed_ucs_subcategory_id: self.confirmed_ucs_subcategory_id.clone(),
+            confirmed_descriptors: self.confirmed_descriptors.clone(),
+            transcript_suggestion: None,
+            confirmed_transcript: self.confirmed_transcript.clone(),
+            manually_edited: self.manually_edited,
+        })
+    }
 }
 
 impl MediaItem {

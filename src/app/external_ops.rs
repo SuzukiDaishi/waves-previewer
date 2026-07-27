@@ -68,6 +68,7 @@ impl WavesPreviewer {
                 status: crate::app::types::MediaStatus::Ok,
                 transcript: None,
                 transcript_language: None,
+                ai_metadata: None,
                 external: None,
                 virtual_audio: None,
                 virtual_state: None,

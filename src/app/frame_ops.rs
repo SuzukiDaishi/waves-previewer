@@ -34,6 +34,7 @@ impl WavesPreviewer {
         self.tabs.iter().any(|t| t.dirty)
             || !self.edited_cache.is_empty()
             || self.pending_gain_count_throttled() > 0
+            || self.assistant_state.confirmed_metadata_dirty
     }
 
     fn run_frame_quit_prompt(&mut self, ctx: &egui::Context) {
@@ -70,7 +71,10 @@ impl WavesPreviewer {
     pub(super) fn run_frame_ui(&mut self, ui: &mut egui::Ui, frame_started: Instant) {
         let ctx = ui.ctx().clone();
         let t_ws = Instant::now();
-        let activate_path = self.run_frame_workspace(ui);
+        let background_input_enabled = !self.assistant_captures_app_input();
+        let activate_path = ui
+            .add_enabled_ui(background_input_enabled, |ui| self.run_frame_workspace(ui))
+            .inner;
         if std::env::var_os("NEOWAVES_BENCH_TRACE").is_some() {
             let ms = t_ws.elapsed().as_secs_f64() * 1000.0;
             if ms > 50.0 {
@@ -137,6 +141,7 @@ impl WavesPreviewer {
         self.apply_pending_transcript_seek();
         self.process_tool_results();
         self.process_tool_queue();
+        self.drain_gemini_events(ctx);
         trace_stage!("apply_search_if_due", self.apply_search_if_due());
         self.handle_screenshot_events(ctx);
         if ctx.input(|i| i.key_pressed(Key::F9)) {
@@ -208,7 +213,9 @@ impl WavesPreviewer {
     fn run_frame_workspace(&mut self, ui: &mut egui::Ui) -> Option<PathBuf> {
         let ctx = ui.ctx().clone();
         self.ui_top_bar(ui);
-        self.handle_dropped_files(&ctx);
+        if ui.is_enabled() {
+            self.handle_dropped_files(&ctx);
+        }
         let mut activate_path: Option<PathBuf> = None;
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -504,6 +511,7 @@ impl WavesPreviewer {
             self.ui_editor_zoo_overlay(ctx, None, ctx.content_rect());
         }
         self.ui_busy_overlay(ctx);
+        self.ui_gemini_assistant(ctx);
     }
 
     fn run_frame_pending_editor_autoplay(&mut self, ctx: &egui::Context) {
@@ -549,6 +557,9 @@ impl WavesPreviewer {
     }
 
     fn run_frame_modal_windows(&mut self, ctx: &egui::Context) {
+        // Closing a foreground surface must not let the same key event fall
+        // through into the workspace during this frame.
+        let assistant_had_input_focus = self.assistant_captures_app_input();
         self.run_frame_leave_prompt(ctx);
         self.run_frame_quit_prompt(ctx);
         self.run_frame_first_save_prompt(ctx);
@@ -564,6 +575,8 @@ impl WavesPreviewer {
         self.ui_bwf_dialog(ctx);
         self.ui_inspection_dialog(ctx);
         self.ui_loudnorm_dialog(ctx);
+        self.ui_gemini_settings_window(ctx);
+        self.ui_ai_review_window(ctx);
         self.ui_transcription_settings_window(ctx);
         self.ui_external_data_window(ctx);
         self.ui_transcript_window(ctx);
@@ -575,9 +588,11 @@ impl WavesPreviewer {
         self.run_frame_resample_dialog(ctx);
         self.ui_crash_report_window(ctx);
         self.ui_debug_window(ctx);
-        self.handle_global_shortcuts(ctx);
-        self.handle_clipboard_hotkeys(ctx);
-        self.handle_undo_redo_hotkeys(ctx);
+        if !assistant_had_input_focus && !self.assistant_captures_app_input() {
+            self.handle_global_shortcuts(ctx);
+            self.handle_clipboard_hotkeys(ctx);
+            self.handle_undo_redo_hotkeys(ctx);
+        }
         self.ui_toast_overlay(ctx);
     }
 

@@ -330,6 +330,9 @@ impl WavesPreviewer {
                 codec: Default::default(),
             },
             show_export_settings: false,
+            assistant_state: assistant_ops::AssistantState::new(),
+            #[cfg(feature = "gemini")]
+            assistant_runtime: None,
             show_shortcuts_window: false,
             show_keymap_window: false,
             show_undo_history_window: false,
@@ -421,6 +424,7 @@ impl WavesPreviewer {
             recording_tab: RecordingTabState::default(),
         };
         app.load_prefs();
+        app.refresh_gemini_credential_status();
         app.cleanup_neowaves_temp_cache_files();
         app.refresh_crash_reports_on_startup();
         app.refresh_audio_output_devices();

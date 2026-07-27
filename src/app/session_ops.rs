@@ -13,11 +13,12 @@ use super::project::{
     project_plugin_fx_draft_to_draft, project_region_to_entry, project_spectrogram_from_cfg,
     project_tab_from_tab, project_tool_state_to_tool_state, region_entry_to_project, rel_path,
     resolve_path, serialize_project, sidecar_audio_dst, spectro_config_from_project,
-    tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph, ProjectBitDepthOverride,
-    ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy, ProjectExternalSource,
-    ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns,
-    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage,
-    ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource,
+    tool_kind_from_str, ProjectActionAudit, ProjectAiMetadata, ProjectApp,
+    ProjectAppliedEffectGraph, ProjectAssistantAudit, ProjectBitDepthOverride, ProjectEdit,
+    ProjectEffectGraphUi, ProjectExportPolicy, ProjectExternalSource, ProjectExternalState,
+    ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns, ProjectListItem,
+    ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage, ProjectVirtualItem,
+    ProjectVirtualOp, ProjectVirtualSource,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
@@ -538,6 +539,20 @@ impl super::WavesPreviewer {
             })
             .collect();
         transcript_languages.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut ai_metadata: Vec<ProjectAiMetadata> = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.ai_metadata
+                    .as_deref()
+                    .and_then(super::types::AiItemMetadata::confirmed_only)
+                    .map(|metadata| ProjectAiMetadata {
+                        path: rel_path(&item.path, base_dir),
+                        metadata,
+                    })
+            })
+            .collect();
+        ai_metadata.sort_by(|a, b| a.path.cmp(&b.path));
         let list = ProjectList {
             root: self.root.as_ref().map(|p| rel_path(p, base_dir)),
             files: list_files.iter().map(|p| rel_path(p, base_dir)).collect(),
@@ -547,6 +562,7 @@ impl super::WavesPreviewer {
             format_overrides,
             virtual_items,
             transcript_languages,
+            ai_metadata,
         };
         let key_column = self
             .external_key_index
@@ -829,6 +845,41 @@ impl super::WavesPreviewer {
             tabs,
             active_tab: self.active_tab,
             cached_edits,
+            assistant: {
+                #[cfg(feature = "gemini")]
+                let previous_interaction_id = if self.assistant_state.privacy_mode {
+                    None
+                } else {
+                    self.assistant_state.agent.previous_interaction_id.clone()
+                };
+                #[cfg(not(feature = "gemini"))]
+                let previous_interaction_id = None;
+                let actions = self
+                    .assistant_state
+                    .traces
+                    .iter()
+                    .rev()
+                    .filter(|trace| trace.ok && trace.action != "interaction")
+                    .take(100)
+                    .map(|trace| ProjectActionAudit {
+                        action: trace.action.clone(),
+                        summary: format!(
+                            "Completed {} for {} target(s).",
+                            trace.action, trace.target_count
+                        ),
+                        target_count: trace.target_count,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>();
+                (previous_interaction_id.is_some() || !actions.is_empty()).then_some(
+                    ProjectAssistantAudit {
+                        previous_interaction_id,
+                        actions,
+                    },
+                )
+            },
         };
         Ok((path, project, sidecar_jobs))
     }
@@ -861,6 +912,7 @@ impl super::WavesPreviewer {
 
     fn finish_session_save(&mut self, path: PathBuf) {
         self.project_path = Some(path.clone());
+        self.assistant_state.confirmed_metadata_dirty = false;
         self.add_recent_session_path(&path);
         // Recorded virtual items have just been persisted as sidecar audio;
         // their backing temp WAVs in %TEMP% are no longer needed.
@@ -1299,6 +1351,26 @@ impl super::WavesPreviewer {
             let path = resolve_path(&item.path, &base_dir);
             self.set_transcript_language_for_path(&path, Some(item.language.clone()));
         }
+        for item in project.list.ai_metadata.iter() {
+            let path = resolve_path(&item.path, &base_dir);
+            if let Some(list_item) = self.item_for_path_mut(&path) {
+                list_item.ai_metadata = Some(Box::new(item.metadata.clone()));
+                if let Some(transcript) = item.metadata.confirmed_transcript.as_ref() {
+                    list_item.transcript = Some(std::sync::Arc::new(super::types::Transcript {
+                        segments: transcript
+                            .segments
+                            .iter()
+                            .map(|segment| super::types::TranscriptSegment {
+                                start_ms: segment.start_ms,
+                                end_ms: segment.end_ms,
+                                text: segment.text.clone(),
+                            })
+                            .collect(),
+                        full_text: transcript.full_text.clone(),
+                    }));
+                }
+            }
+        }
         self.sample_rate_override.clear();
         for override_item in project.list.sample_rate_overrides.iter() {
             if override_item.sample_rate == 0 {
@@ -1692,6 +1764,25 @@ impl super::WavesPreviewer {
             self.workspace_view = super::types::WorkspaceView::Editor;
         } else {
             self.workspace_view = super::types::WorkspaceView::List;
+        }
+        if let Some(assistant) = project.assistant.as_ref() {
+            self.assistant_state.traces = assistant
+                .actions
+                .iter()
+                .take(100)
+                .map(|entry| super::assistant_ops::AssistantTraceUi {
+                    action: entry.action.clone(),
+                    summary: entry.summary.clone(),
+                    ok: true,
+                    duration_ms: 0,
+                    target_count: entry.target_count,
+                })
+                .collect();
+            #[cfg(feature = "gemini")]
+            if !self.assistant_state.privacy_mode {
+                self.assistant_state.agent.previous_interaction_id =
+                    assistant.previous_interaction_id.clone();
+            }
         }
         self.add_recent_session_path(&project_path);
         Ok(())
