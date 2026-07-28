@@ -878,6 +878,46 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
             enabled_by_default: true,
         },
         ColumnDescriptor {
+            key: "dbtp",
+            description: "True peak dBTP",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "lufs_s",
+            description: "Max short-term LUFS",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "lufs_m",
+            description: "Max momentary LUFS",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "silence_lead",
+            description: "Leading silence in ms (-60 dBFS)",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "silence_tail",
+            description: "Trailing silence in ms (-60 dBFS)",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "edge_zero",
+            description: "NG when the first or last sample is not near zero",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "over_peak",
+            description: "NG when the sample peak exceeds 0 dBFS",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "blank_pad",
+            description: "NG when leading or trailing blank exceeds the configured limits",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
             key: "bpm",
             description: "BPM",
             enabled_by_default: false,
@@ -4109,6 +4149,9 @@ fn parse_list_column_keys(raw: &str) -> Result<Vec<String>> {
         ("bpm", cfg.bpm),
         ("silence_lead", cfg.silence_lead),
         ("silence_tail", cfg.silence_tail),
+        ("edge_zero", cfg.edge_zero),
+        ("over_peak", cfg.over_peak),
+        ("blank_pad", cfg.blank_pad),
         ("created_at", cfg.created_at),
         ("modified_at", cfg.modified_at),
         ("gain", cfg.gain),
@@ -4148,6 +4191,9 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
         wave: false,
         silence_lead: false,
         silence_tail: false,
+        edge_zero: false,
+        over_peak: false,
+        blank_pad: false,
     };
     for key in raw.split(',').map(str::trim).filter(|key| !key.is_empty()) {
         match key {
@@ -4172,6 +4218,9 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
             "bpm" => cfg.bpm = true,
             "silence_lead" => cfg.silence_lead = true,
             "silence_tail" => cfg.silence_tail = true,
+            "edge_zero" => cfg.edge_zero = true,
+            "over_peak" => cfg.over_peak = true,
+            "blank_pad" => cfg.blank_pad = true,
             "created_at" => cfg.created_at = true,
             "modified_at" => cfg.modified_at = true,
             "gain" => cfg.gain = true,
@@ -4209,6 +4258,9 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         wave: cfg.wave,
         silence_lead: cfg.silence_lead,
         silence_tail: cfg.silence_tail,
+        edge_zero: cfg.edge_zero,
+        over_peak: cfg.over_peak,
+        blank_pad: cfg.blank_pad,
         order: Vec::new(),
         widths: Vec::new(),
     }

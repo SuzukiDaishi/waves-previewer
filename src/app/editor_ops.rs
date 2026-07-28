@@ -2324,6 +2324,7 @@ impl crate::app::WavesPreviewer {
                 let source_end = state.source_end;
                 let source_ref = state.source_ref.clone();
                 let quality = Self::to_wave_resample_quality(self.src_quality);
+                let blank_threshold_dbfs = self.blank_threshold_dbfs;
                 let (tx, rx) = std::sync::mpsc::channel::<VirtualTrimResult>();
                 std::thread::spawn(move || {
                     if source_sr != out_sr {
@@ -2345,6 +2346,7 @@ impl crate::app::WavesPreviewer {
                         &audio.channels,
                         source_sr,
                         bits_per_sample,
+                        blank_threshold_dbfs,
                     );
                     let _ = tx.send(VirtualTrimResult {
                         source_path,

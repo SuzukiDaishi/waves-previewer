@@ -290,6 +290,12 @@ pub struct ProjectListColumns {
     pub silence_lead: bool,
     #[serde(default)]
     pub silence_tail: bool,
+    #[serde(default)]
+    pub edge_zero: bool,
+    #[serde(default)]
+    pub over_peak: bool,
+    #[serde(default)]
+    pub blank_pad: bool,
     /// Display order by column name; empty = default order (old files).
     #[serde(default)]
     pub order: Vec<String>,
@@ -1198,6 +1204,7 @@ pub fn tool_kind_from_str(s: &str) -> ToolKind {
         "DeNoise" => ToolKind::DeNoise,
         "SpectralBrush" => ToolKind::SpectralBrush,
         "PluginFx" => ToolKind::PluginFx,
+        "ChannelRouting" => ToolKind::ChannelRouting,
         _ => ToolKind::LoopEdit,
     }
 }
@@ -1315,6 +1322,8 @@ pub fn missing_file_meta(path: &Path) -> FileMeta {
         bpm: None,
         silence_lead_ms: None,
         silence_tail_ms: None,
+        edge_abs: None,
+        blank_pad: None,
         created_at: None,
         modified_at: None,
         cover_art: None,
@@ -1396,6 +1405,7 @@ impl super::WavesPreviewer {
         self.spectro_cache_bytes = 0;
         self.reset_all_feature_analysis_state();
         self.clear_scan_state();
+        self.list_max_duration_secs = 0.0;
         for raw in raw_paths {
             let p = resolve_path(raw, base_dir);
             let mut item = self.make_media_item(p.clone());

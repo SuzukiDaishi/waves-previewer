@@ -4479,6 +4479,7 @@ impl WavesPreviewer {
                     &job.channels,
                     job.final_sample_rate.max(1),
                     job.bits_per_sample,
+                    job.blank_threshold_dbfs,
                 );
                 if result_tx
                     .send(EffectGraphApplyPostprocessResult {
@@ -4507,6 +4508,7 @@ impl WavesPreviewer {
     ) {
         self.ensure_effect_graph_postprocess_worker();
         let bits_per_sample = self.effective_bits_for_path(path).unwrap_or(32);
+        let blank_threshold_dbfs = self.blank_threshold_dbfs;
         self.effect_graph
             .pending_effect_graph_commits
             .insert(path.to_path_buf(), generation);
@@ -4518,6 +4520,7 @@ impl WavesPreviewer {
                     channels: channels.to_vec(),
                     final_sample_rate,
                     bits_per_sample,
+                    blank_threshold_dbfs,
                 })
                 .is_err()
             {

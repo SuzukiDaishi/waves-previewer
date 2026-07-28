@@ -29,6 +29,7 @@ mod auto_trim;
 mod auto_trim_ops;
 mod bwf_ops;
 mod capture;
+pub mod channel_routing_ops;
 mod cli_ops;
 mod cli_workspace;
 mod clipboard_ops;
@@ -119,8 +120,8 @@ use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
     ColumnId, ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode,
-    RateMode, StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant,
-    TranscriptPerfMode, ViewMode, WorkspaceView,
+    RateMode, SortDir, SortKey, StartupConfig, ToolKind, TranscriptComputeTarget,
+    TranscriptModelVariant, TranscriptPerfMode, ViewMode, WorkspaceView,
 };
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
@@ -617,6 +618,14 @@ pub struct WavesPreviewer {
     list_col_widths_seen: Vec<(&'static str, f32)>,
     list_table_ui_id: Option<egui::Id>,
     list_table_col_count: usize,
+    /// Longest duration seen since the list was last loaded, which decides
+    /// whether Length renders `h:mm:ss` for every row. A monotonic latch on
+    /// purpose: an exact maximum would need decrement hooks on every removal
+    /// path (delete, undo, watch folder), and recomputing it is an O(n) walk
+    /// that would land in the middle of scan streaming. Worst case is
+    /// cosmetic — deleting the only long file keeps the wider format until
+    /// the list is reloaded.
+    list_max_duration_secs: f32,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
     /// TTL cache for `Path::is_file()` checks in the list view. Probing the
     /// filesystem for every visible row on every frame stalls the UI thread,
@@ -707,6 +716,12 @@ pub struct WavesPreviewer {
     // list filtering
     skip_dotfiles: bool,
     zero_cross_epsilon: f32,
+    /// Blank Pad column: level a frame must stay under to count as blank.
+    blank_threshold_dbfs: f32,
+    /// Blank Pad column: how much blank has to accumulate before it is flagged.
+    /// Without a floor here, a file that correctly starts on a zero sample
+    /// would always report NG.
+    blank_min_ms: f32,
     // Spectral selection edit (RX-style): edge fade lengths for mute/play.
     spectral_edit_time_fade_ms: f32,
     spectral_edit_freq_fade_hz: f32,
@@ -1706,10 +1721,15 @@ impl WavesPreviewer {
         item
     }
 
+    /// `blank_threshold_dbfs` must be the live setting rather than the default:
+    /// `meta_for_path` prefers `edited_cache[..].display_meta` while the row
+    /// loop's re-queue check inspects `item.meta`, so anything left `None` here
+    /// shows as unresolved on an edited row forever.
     fn build_meta_from_audio(
         channels: &[Vec<f32>],
         sample_rate: u32,
         bits_per_sample: u16,
+        blank_threshold_dbfs: f32,
     ) -> FileMeta {
         let frames = channels.first().map(|c| c.len()).unwrap_or(0);
         let mut mono = Vec::with_capacity(frames);
@@ -1784,6 +1804,19 @@ impl WavesPreviewer {
             bpm,
             silence_lead_ms: None,
             silence_tail_ms: None,
+            // Always resolved (see decode_full_meta): an unresolved value on an
+            // edited row can never self-heal.
+            edge_abs: Some(
+                crate::app::inspection::scan_edge_samples(channels).unwrap_or(EdgeSamples {
+                    first_abs: 0.0,
+                    last_abs: 0.0,
+                }),
+            ),
+            blank_pad: Some(crate::app::inspection::scan_blank_pad(
+                channels,
+                sample_rate,
+                blank_threshold_dbfs,
+            )),
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -1806,6 +1839,7 @@ impl WavesPreviewer {
             &audio.channels,
             sample_rate,
             bits_per_sample,
+            self.blank_threshold_dbfs,
         ));
         self.make_virtual_item_with_meta(display_name, audio, meta, virtual_state)
     }
@@ -2009,6 +2043,7 @@ impl WavesPreviewer {
             .has_headers(false)
             .from_path(path)
             .map_err(|e| format!("csv export open failed: {e}"))?;
+        let uses_hours = self.list_length_uses_hours();
         let mut header: Vec<String> = Vec::new();
         if cols.edited {
             header.push("Edited".to_string());
@@ -2109,9 +2144,11 @@ impl WavesPreviewer {
                 }
             }
             if cols.length {
+                // Same rule as the list cell, so a folder with an hour-plus
+                // file doesn't export "120:11".
                 let text = meta
                     .and_then(|m| m.duration_secs)
-                    .map(crate::app::helpers::format_duration)
+                    .map(|secs| crate::app::helpers::format_duration_scaled(secs, uses_hours))
                     .unwrap_or_default();
                 row.push(text);
             }
@@ -2455,6 +2492,7 @@ impl WavesPreviewer {
         self.path_index.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.list_max_duration_secs = 0.0;
         self.reset_meta_pool();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();

@@ -151,6 +151,10 @@ impl WavesPreviewer {
                     .filter(|v| v.is_finite())
                     .map(|v| v as f64),
             ),
+            // QA columns sort by verdict: NG, then OK, then not-yet-known.
+            SortKey::EdgeZero => OwnedKey::Num(self.qa_edge_zero_for_path(&item.path).sort_rank()),
+            SortKey::OverPeak => OwnedKey::Num(self.qa_over_peak_for_path(&item.path).sort_rank()),
+            SortKey::BlankPad => OwnedKey::Num(self.qa_blank_pad_for_path(&item.path).sort_rank()),
             SortKey::CreatedAt => OwnedKey::Num(
                 m.and_then(|m| m.created_at)
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())

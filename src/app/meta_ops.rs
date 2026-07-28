@@ -31,6 +31,9 @@ impl super::WavesPreviewer {
                 | crate::app::types::SortKey::LufsMomentary
                 | crate::app::types::SortKey::SilenceLead
                 | crate::app::types::SortKey::SilenceTail
+                | crate::app::types::SortKey::EdgeZero
+                | crate::app::types::SortKey::OverPeak
+                | crate::app::types::SortKey::BlankPad
         )
     }
 
@@ -52,6 +55,9 @@ impl super::WavesPreviewer {
             .saturating_sub(1)
             .clamp(1, 6);
         let (pool, rx) = crate::app::meta::spawn_meta_pool(workers);
+        // Only pool construction site, so a pool recreated mid-session keeps
+        // measuring Blank Pad at the user's threshold rather than the default.
+        pool.set_blank_threshold_dbfs(self.blank_threshold_dbfs);
         self.meta_pool = Some(pool);
         self.meta_rx = Some(rx);
         self.meta_inflight.clear();
@@ -60,6 +66,29 @@ impl super::WavesPreviewer {
         self.list_meta_prefetch_cursor = 0;
         self.transcript_inflight.clear();
         self.transcript_ai_inflight.clear();
+    }
+
+    /// Publish the Blank Pad threshold to an already-running pool. Rows whose
+    /// measurement was taken at the old threshold detect it as stale on the
+    /// next frame and re-queue themselves, so no bulk invalidation is needed.
+    pub(super) fn push_blank_threshold_to_meta_pool(&mut self) {
+        if let Some(pool) = self.meta_pool.as_ref() {
+            pool.set_blank_threshold_dbfs(self.blank_threshold_dbfs);
+        }
+        // Edited rows display from `edited_cache`, which no decode job ever
+        // revisits — leaving them stale forever. Their samples are already in
+        // memory, so rescan directly instead.
+        let threshold = self.blank_threshold_dbfs;
+        for cached in self.edited_cache.values_mut() {
+            let sr = cached.buffer_sample_rate.max(1);
+            if let Some(meta) = cached.display_meta.as_mut() {
+                meta.blank_pad = Some(crate::app::inspection::scan_blank_pad(
+                    &cached.ch_samples,
+                    sr,
+                    threshold,
+                ));
+            }
+        }
     }
 
     pub(super) fn ensure_meta_pool(&mut self) {

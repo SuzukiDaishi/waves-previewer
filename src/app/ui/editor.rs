@@ -3004,6 +3004,7 @@ impl crate::app::WavesPreviewer {
         let mut pending_denoise_learn = false;
         let mut pending_denoise_preview = false;
         let mut pending_denoise_apply = false;
+        let mut pending_channel_routing_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -7842,6 +7843,7 @@ impl crate::app::WavesPreviewer {
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
                                 ToolKind::SpectralBrush => "Spectral Brush",
+                                ToolKind::ChannelRouting => "Channel Routing",
                             };
                             // Grouped icon toolbar; wraps in narrow panels so
                             // every tool stays one click away. Selection still
@@ -7874,6 +7876,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::DeNoise => "≈",
                                 ToolKind::SpectralWarp => "🌀",
                                 ToolKind::SpectralBrush => "🖌",
+                                ToolKind::ChannelRouting => "⇄",
                             };
                             const TOOL_GROUPS: [&[ToolKind]; 4] = [
                                 // Navigate / annotate / basic level edits
@@ -7911,6 +7914,7 @@ impl crate::app::WavesPreviewer {
                                     ToolKind::DeClip,
                                     ToolKind::DeHum,
                                     ToolKind::DeNoise,
+                                    ToolKind::ChannelRouting,
                                 ],
                             ];
                             ui.horizontal_wrapped(|ui| {
@@ -7969,6 +7973,12 @@ impl crate::app::WavesPreviewer {
                                 if matches!(tab.active_tool, ToolKind::Trim) {
                                     // Trim-specific range display should not persist after leaving Trim.
                                     tab.trim_range = None;
+                                }
+                                if matches!(tab.active_tool, ToolKind::ChannelRouting) {
+                                    // Drop a half-drawn cable; the matrix
+                                    // itself is cheap to keep and is re-seeded
+                                    // whenever the channel count changes.
+                                    tab.channel_routing_draft.connecting_from = None;
                                 }
                                 if matches!(tab.active_tool, ToolKind::Pencil) {
                                     // Pencil lives entirely in the green draft.
@@ -11423,6 +11433,28 @@ impl crate::app::WavesPreviewer {
                                         });
                                     });
                                 }
+                                ToolKind::ChannelRouting => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Rewire, duplicate or drop channels. Applies to the whole file — the selection and channel view are ignored.",
+                                            )
+                                            .weak(),
+                                        );
+                                        let in_count = tab.ch_samples.len().max(1);
+                                        let apply = Self::ui_channel_routing_patchbay(
+                                            ui,
+                                            &mut tab.channel_routing_draft,
+                                            in_count,
+                                        );
+                                        if apply && !apply_busy && !tab.loading {
+                                            pending_channel_routing_apply = true;
+                                        }
+                                    });
+                                }
                                 ToolKind::DeNoise => {
                                     ui.scope(|ui| {
                                         let s = ui.style_mut();
@@ -12323,6 +12355,9 @@ impl crate::app::WavesPreviewer {
                 }
                 if pending_denoise_apply {
                     self.spawn_denoise_apply_for_tab(tab_idx);
+                }
+                if pending_channel_routing_apply {
+                    self.editor_apply_channel_routing(tab_idx);
                 }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();

@@ -409,6 +409,18 @@ impl crate::app::WavesPreviewer {
                                     .on_hover_text(
                                         "Trailing silence (ms, -60 dBFS threshold); computed on full decode",
                                     );
+                                ui.checkbox(&mut next_cols.edge_zero, "Edge0")
+                                    .on_hover_text(
+                                        "NG when the first or last sample of any channel is louder than the zero-cross epsilon; computed on full decode",
+                                    );
+                                ui.checkbox(&mut next_cols.over_peak, "Over0")
+                                    .on_hover_text(
+                                        "NG when the sample peak (including pending gain) exceeds 0 dBFS; computed on full decode",
+                                    );
+                                ui.checkbox(&mut next_cols.blank_pad, "Blank")
+                                    .on_hover_text(
+                                        "NG when leading or trailing blank reaches the threshold and duration set below; computed on full decode",
+                                    );
                                 ui.checkbox(&mut next_cols.wave, "Wave");
                             });
                             let external_available = !self.external_visible_columns.is_empty();
@@ -436,7 +448,10 @@ impl crate::app::WavesPreviewer {
                                 || next_cols.gain
                                 || next_cols.wave
                                 || next_cols.silence_lead
-                                || next_cols.silence_tail;
+                                || next_cols.silence_tail
+                                || next_cols.edge_zero
+                                || next_cols.over_peak
+                                || next_cols.blank_pad;
                             if !any_visible {
                                 next_cols.file = true;
                             }
@@ -483,6 +498,50 @@ impl crate::app::WavesPreviewer {
                                 if ui.button("Reset Order").clicked() {
                                     self.list_column_order =
                                         crate::app::types::ColumnId::ALL.to_vec();
+                                    self.save_prefs();
+                                }
+                            });
+                            ui.separator();
+                            ui.label("Blank Pad column:");
+                            ui.horizontal(|ui| {
+                                ui.label("Threshold:");
+                                let mut th = self.blank_threshold_dbfs;
+                                let resp = ui.add(
+                                    egui::DragValue::new(&mut th)
+                                        .range(-120.0..=0.0)
+                                        .speed(0.5)
+                                        .fixed_decimals(1)
+                                        .suffix(" dBFS"),
+                                );
+                                // Commit on release: every intermediate drag
+                                // value would mark all visible rows stale and
+                                // churn full-decode jobs.
+                                let committed = resp.drag_stopped()
+                                    || resp.lost_focus()
+                                    || (resp.changed() && !resp.dragged());
+                                if resp.changed() {
+                                    self.blank_threshold_dbfs = th.clamp(-120.0, 0.0);
+                                }
+                                if committed {
+                                    self.push_blank_threshold_to_meta_pool();
+                                    self.save_prefs();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Min length:");
+                                let mut min_ms = self.blank_min_ms;
+                                // Display-side only, so this needs no re-decode.
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut min_ms)
+                                            .range(0.0..=60_000.0)
+                                            .speed(1.0)
+                                            .fixed_decimals(0)
+                                            .suffix(" ms"),
+                                    )
+                                    .changed()
+                                {
+                                    self.blank_min_ms = min_ms.clamp(0.0, 60_000.0);
                                     self.save_prefs();
                                 }
                             });

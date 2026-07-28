@@ -270,13 +270,18 @@ impl crate::app::WavesPreviewer {
 
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
-            amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
+            amp_to_color, db_to_amp, db_to_color, format_duration_scaled, format_system_time_local,
             highlight_text_job_with_regex,
         };
+        use crate::app::list_state_ops::QaStatus;
         if self.ui_list_empty_state(ui) {
             return;
         }
         let cols = self.list_columns;
+        // Hoisted out of the row loop: read once per frame, and needed inside
+        // the closure that borrows self mutably.
+        let uses_hours = self.list_length_uses_hours();
+        let blank_threshold_dbfs = self.blank_threshold_dbfs;
         // Compile the search highlight regex once per frame instead of per row.
         let highlight_re = self.cached_highlight_regex();
         let metrics = self.list_view_metrics(ui);
@@ -406,7 +411,22 @@ impl crate::app::WavesPreviewer {
                                         .meta
                                         .as_ref()
                                         .and_then(|m| m.silence_lead_ms)
-                                        .is_none()));
+                                        .is_none())
+                                || (cols.edge_zero
+                                    && item.meta.as_ref().and_then(|m| m.edge_abs).is_none())
+                                // The header pass only estimates the peak off a
+                                // 0.25 s prefix, which is not enough to call a
+                                // file over 0 dBFS either way.
+                                || (cols.over_peak
+                                    && item.meta.as_ref().map_or(true, |m| m.peak_db_estimate))
+                                // A measurement taken at a threshold the user
+                                // has since changed is stale, not missing.
+                                || (cols.blank_pad
+                                    && item.meta.as_ref().map_or(true, |m| {
+                                        m.blank_pad.map_or(true, |b| {
+                                            b.threshold_dbfs != blank_threshold_dbfs
+                                        })
+                                    })));
                             (
                                 needs_bg_full,
                                 needs_wave_meta,
@@ -851,7 +871,7 @@ impl crate::app::WavesPreviewer {
                                         .and_then(|m| m.duration_secs)
                                         .unwrap_or(f32::NAN);
                                     let text = if secs.is_finite() {
-                                        format_duration(secs)
+                                        format_duration_scaled(secs, uses_hours)
                                     } else {
                                         "...".into()
                                     };
@@ -1185,6 +1205,55 @@ impl crate::app::WavesPreviewer {
                                     );
                                     let resp = self.attach_row_context_menu(resp, row_idx, ctx);
                                     if resp.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            // QA columns share one renderer: a passing file gets
+                            // an empty cell so only the problems draw the eye.
+                            C::EdgeZero | C::OverPeak | C::BlankPad => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    // Copy the verdict out before touching
+                                    // &mut self below.
+                                    let status =
+                                        self.qa_status_for_column(sorted_col, &path_owned);
+                                    let ng_fill = self.palette().error_text;
+                                    let weak = ui.visuals().weak_text_color();
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    let resp2 = match status {
+                                        QaStatus::Pass => resp2,
+                                        QaStatus::Unknown => {
+                                            ui.painter().text(
+                                                rect2.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "...",
+                                                fid,
+                                                weak,
+                                            );
+                                            resp2
+                                        }
+                                        QaStatus::Fail(reason) => {
+                                            ui.painter().rect_filled(rect2, 4.0, ng_fill);
+                                            ui.painter().text(
+                                                rect2.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "NG",
+                                                fid,
+                                                egui::Color32::WHITE,
+                                            );
+                                            resp2.on_hover_text(reason)
+                                        }
+                                    };
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
                                         clicked_to_load = true;
                                     }
                                 });

@@ -269,6 +269,9 @@ pub enum SortKey {
     Bpm,
     SilenceLead,
     SilenceTail,
+    EdgeZero,
+    OverPeak,
+    BlankPad,
     CreatedAt,
     ModifiedAt,
     External(usize),
@@ -353,6 +356,9 @@ pub enum ColumnId {
     LufsM,
     SilenceLead,
     SilenceTail,
+    EdgeZero,
+    OverPeak,
+    BlankPad,
     Bpm,
     CreatedAt,
     ModifiedAt,
@@ -383,6 +389,9 @@ impl ColumnId {
         ColumnId::LufsM,
         ColumnId::SilenceLead,
         ColumnId::SilenceTail,
+        ColumnId::EdgeZero,
+        ColumnId::OverPeak,
+        ColumnId::BlankPad,
         ColumnId::Bpm,
         ColumnId::CreatedAt,
         ColumnId::ModifiedAt,
@@ -413,6 +422,9 @@ impl ColumnId {
             ColumnId::LufsM => "lufs_m",
             ColumnId::SilenceLead => "silence_lead",
             ColumnId::SilenceTail => "silence_tail",
+            ColumnId::EdgeZero => "edge_zero",
+            ColumnId::OverPeak => "over_peak",
+            ColumnId::BlankPad => "blank_pad",
             ColumnId::Bpm => "bpm",
             ColumnId::CreatedAt => "created_at",
             ColumnId::ModifiedAt => "modified_at",
@@ -448,6 +460,9 @@ impl ColumnId {
             ColumnId::LufsM => "LUFS-M",
             ColumnId::SilenceLead => "Silence Head",
             ColumnId::SilenceTail => "Silence Tail",
+            ColumnId::EdgeZero => "Edge Zero",
+            ColumnId::OverPeak => "Over 0 dBFS",
+            ColumnId::BlankPad => "Blank Pad",
             ColumnId::Bpm => "BPM",
             ColumnId::CreatedAt => "Created",
             ColumnId::ModifiedAt => "Modified",
@@ -481,6 +496,9 @@ impl ColumnId {
             ColumnId::LufsM => cols.lufs_m,
             ColumnId::SilenceLead => cols.silence_lead,
             ColumnId::SilenceTail => cols.silence_tail,
+            ColumnId::EdgeZero => cols.edge_zero,
+            ColumnId::OverPeak => cols.over_peak,
+            ColumnId::BlankPad => cols.blank_pad,
             ColumnId::Bpm => cols.bpm,
             ColumnId::CreatedAt => cols.created_at,
             ColumnId::ModifiedAt => cols.modified_at,
@@ -531,6 +549,11 @@ pub struct ListColumnConfig {
     // Leading/trailing silence columns (full-decode metadata; default off).
     pub silence_lead: bool,
     pub silence_tail: bool,
+    // QA columns: blank when the file passes, "NG" when it doesn't
+    // (full-decode metadata; default off).
+    pub edge_zero: bool,
+    pub over_peak: bool,
+    pub blank_pad: bool,
 }
 
 impl Default for ListColumnConfig {
@@ -561,6 +584,9 @@ impl Default for ListColumnConfig {
             wave: true,
             silence_lead: false,
             silence_tail: false,
+            edge_zero: false,
+            over_peak: false,
+            blank_pad: false,
         }
     }
 }
@@ -816,6 +842,7 @@ pub enum ToolKind {
     PluginFx,
     SpectralWarp,
     SpectralBrush,
+    ChannelRouting,
 }
 
 impl ToolKind {
@@ -848,7 +875,93 @@ impl ToolKind {
             ToolKind::DeNoise => "De-noise",
             ToolKind::SpectralWarp => "Spectral Warp",
             ToolKind::SpectralBrush => "Spectral Brush",
+            ToolKind::ChannelRouting => "Channel Routing",
         }
+    }
+}
+
+/// Patchbay state for [`ToolKind::ChannelRouting`]: which input channels feed
+/// each output channel. Not `Copy`, so it lives on `EditorTab` rather than in
+/// the flat `ToolState`.
+///
+/// Deliberately kept out of `EditorUndoState`: the matrix is re-seeded from the
+/// tab's channel count whenever the two disagree (see `reseed_if_stale`), which
+/// covers undo/redo of a routing apply without extra snapshot plumbing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChannelRoutingDraft {
+    /// Channel count this matrix was built for.
+    pub in_count: usize,
+    pub out_count: usize,
+    /// `sources[out]` = input channels mixed into that output, ascending and
+    /// deduplicated. An empty entry means the output is silent.
+    pub sources: Vec<Vec<usize>>,
+    /// Input port a cable is currently being dragged from.
+    pub connecting_from: Option<usize>,
+}
+
+/// Upper bound on routed output channels; matches the effect graph's 8-port
+/// split/combine nodes and the engine's channel folding.
+pub const CHANNEL_ROUTING_MAX_OUT: usize = 8;
+
+impl ChannelRoutingDraft {
+    /// Straight-through wiring: out[i] <- in[i].
+    pub fn identity(in_count: usize) -> Self {
+        let n = in_count.max(1);
+        Self {
+            in_count: n,
+            out_count: n,
+            sources: (0..n).map(|i| vec![i]).collect(),
+            connecting_from: None,
+        }
+    }
+
+    /// Rebuild from scratch when the tab's channel count no longer matches —
+    /// e.g. after applying a routing, or undoing one.
+    pub fn reseed_if_stale(&mut self, in_count: usize) {
+        if self.in_count != in_count.max(1) || self.sources.len() != self.out_count {
+            *self = Self::identity(in_count);
+        }
+    }
+
+    pub fn set_out_count(&mut self, out_count: usize) {
+        let n = out_count.clamp(1, CHANNEL_ROUTING_MAX_OUT);
+        self.out_count = n;
+        self.sources.resize(n, Vec::new());
+        self.connecting_from = None;
+    }
+
+    pub fn is_linked(&self, input: usize, output: usize) -> bool {
+        self.sources.get(output).is_some_and(|s| s.contains(&input))
+    }
+
+    /// Toggle one cable. Returns true when the link was added.
+    pub fn toggle_link(&mut self, input: usize, output: usize) -> bool {
+        let Some(slot) = self.sources.get_mut(output) else {
+            return false;
+        };
+        if let Some(pos) = slot.iter().position(|s| *s == input) {
+            slot.remove(pos);
+            false
+        } else {
+            slot.push(input);
+            slot.sort_unstable();
+            slot.dedup();
+            true
+        }
+    }
+
+    /// True when the matrix would leave the audio untouched.
+    pub fn is_identity(&self) -> bool {
+        self.out_count == self.in_count
+            && self
+                .sources
+                .iter()
+                .enumerate()
+                .all(|(out, srcs)| srcs.as_slice() == [out])
+    }
+
+    pub fn total_links(&self) -> usize {
+        self.sources.iter().map(|s| s.len()).sum()
     }
 }
 
@@ -1700,6 +1813,7 @@ pub struct EditorTab {
     pub preview_overlay: Option<PreviewOverlay>,
     pub music_analysis_draft: MusicAnalysisDraft,
     pub plugin_fx_draft: PluginFxDraft,
+    pub channel_routing_draft: ChannelRoutingDraft,
     pub pending_loop_unwrap: Option<u32>,
     pub undo_stack: Vec<EditorUndoState>,
     pub undo_bytes: usize,
@@ -1912,6 +2026,7 @@ impl EditorTab {
             preview_overlay: None,
             music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
             plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
+            channel_routing_draft: crate::app::types::ChannelRoutingDraft::default(),
             pending_loop_unwrap: None,
             undo_stack: Vec::new(),
             undo_bytes: 0,
@@ -1967,6 +2082,32 @@ impl EditorTab {
     }
 }
 
+/// Absolute value of the very first and very last frame, maxed across
+/// channels. Stored raw so the Edge Zero column can compare against the
+/// user's `zero_cross_epsilon` at display time — changing the epsilon then
+/// costs no re-decode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EdgeSamples {
+    pub first_abs: f32,
+    pub last_abs: f32,
+}
+
+/// Leading/trailing blank measured for the Blank Pad column. The threshold
+/// used rides along with the measurement so a settings change is detected
+/// per-row (`threshold_dbfs != current`) instead of by walking every item —
+/// which also means a decode that was already in flight when the setting
+/// changed is correctly recognized as stale when it lands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlankPadScan {
+    pub lead_ms: f32,
+    pub tail_ms: f32,
+    pub threshold_dbfs: f32,
+    /// Whole file sits below `threshold_dbfs`; `scan_silence_ms` reports the
+    /// full duration on *both* ends in that case, which would otherwise read
+    /// as a nonsensical double-length blank.
+    pub all_silent: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct FileMeta {
     pub channels: u16,
@@ -1993,6 +2134,10 @@ pub struct FileMeta {
     /// Leading/trailing silence (-60 dBFS threshold) in ms, full decode only.
     pub silence_lead_ms: Option<f32>,
     pub silence_tail_ms: Option<f32>,
+    /// First/last frame amplitude for the Edge Zero column, full decode only.
+    pub edge_abs: Option<EdgeSamples>,
+    /// Blank Pad measurement at the user-configured threshold, full decode only.
+    pub blank_pad: Option<BlankPadScan>,
     pub created_at: Option<SystemTime>,
     pub modified_at: Option<SystemTime>,
     pub cover_art: Option<Arc<egui::ColorImage>>,
@@ -3623,6 +3768,9 @@ pub struct EffectGraphApplyPostprocessJob {
     pub channels: Vec<Vec<f32>>,
     pub final_sample_rate: u32,
     pub bits_per_sample: u16,
+    /// Rides on the job because the postprocess worker is persistent and
+    /// cannot capture the live setting.
+    pub blank_threshold_dbfs: f32,
 }
 
 #[derive(Debug)]

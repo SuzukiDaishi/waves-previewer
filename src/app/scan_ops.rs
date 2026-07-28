@@ -75,6 +75,7 @@ impl WavesPreviewer {
         self.sample_rate_probe_cache.clear();
         self.bit_depth_override.clear();
         self.format_override.clear();
+        self.list_max_duration_secs = 0.0;
         self.reset_meta_pool();
     }
 
@@ -97,6 +98,7 @@ impl WavesPreviewer {
         self.selected = None;
         self.selected_multi.clear();
         self.select_anchor = None;
+        self.list_max_duration_secs = 0.0;
         self.reset_meta_pool();
     }
 

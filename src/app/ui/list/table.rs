@@ -296,6 +296,7 @@ impl WavesPreviewer {
             "bit_rate" => 70.0,
             "peak" | "lufs" | "dbtp" | "lufs_s" | "lufs_m" => 90.0,
             "silence_lead" | "silence_tail" => 80.0,
+            "edge_zero" | "over_peak" | "blank_pad" => 60.0,
             "bpm" => 70.0,
             "created_at" | "modified_at" => 120.0,
             "gain" => 80.0,
@@ -343,6 +344,10 @@ impl WavesPreviewer {
                 C::LufsM => Some(("LUFS-M", SortKey::LufsMomentary, false)),
                 C::SilenceLead => Some(("Sil.Head", SortKey::SilenceLead, false)),
                 C::SilenceTail => Some(("Sil.Tail", SortKey::SilenceTail, false)),
+                // Descending first so one click brings the NG rows to the top.
+                C::EdgeZero => Some(("Edge0", SortKey::EdgeZero, false)),
+                C::OverPeak => Some(("Over0", SortKey::OverPeak, false)),
+                C::BlankPad => Some(("Blank", SortKey::BlankPad, false)),
                 C::Bpm => Some(("BPM", SortKey::Bpm, false)),
                 C::CreatedAt => Some(("Created", SortKey::CreatedAt, true)),
                 C::ModifiedAt => Some(("Modified", SortKey::ModifiedAt, true)),

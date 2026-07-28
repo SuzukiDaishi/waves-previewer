@@ -597,6 +597,9 @@ impl super::WavesPreviewer {
                 super::types::SortKey::Bpm => "Bpm",
                 super::types::SortKey::SilenceLead => "SilenceLead",
                 super::types::SortKey::SilenceTail => "SilenceTail",
+                super::types::SortKey::EdgeZero => "EdgeZero",
+                super::types::SortKey::OverPeak => "OverPeak",
+                super::types::SortKey::BlankPad => "BlankPad",
                 super::types::SortKey::CreatedAt => "CreatedAt",
                 super::types::SortKey::ModifiedAt => "ModifiedAt",
                 super::types::SortKey::External(_) => "External",
@@ -640,6 +643,9 @@ impl super::WavesPreviewer {
                 wave: self.list_columns.wave,
                 silence_lead: self.list_columns.silence_lead,
                 silence_tail: self.list_columns.silence_tail,
+                edge_zero: self.list_columns.edge_zero,
+                over_peak: self.list_columns.over_peak,
+                blank_pad: self.list_columns.blank_pad,
                 order: self
                     .list_column_order
                     .iter()
@@ -1009,6 +1015,9 @@ impl super::WavesPreviewer {
             wave: project.app.list_columns.wave,
             silence_lead: project.app.list_columns.silence_lead,
             silence_tail: project.app.list_columns.silence_tail,
+            edge_zero: project.app.list_columns.edge_zero,
+            over_peak: project.app.list_columns.over_peak,
+            blank_pad: project.app.list_columns.blank_pad,
         };
         if !project.app.list_columns.order.is_empty() {
             let parsed: Vec<super::types::ColumnId> = project
@@ -1042,6 +1051,9 @@ impl super::WavesPreviewer {
             "Bpm" => super::types::SortKey::Bpm,
             "SilenceLead" => super::types::SortKey::SilenceLead,
             "SilenceTail" => super::types::SortKey::SilenceTail,
+            "EdgeZero" => super::types::SortKey::EdgeZero,
+            "OverPeak" => super::types::SortKey::OverPeak,
+            "BlankPad" => super::types::SortKey::BlankPad,
             "CreatedAt" => super::types::SortKey::CreatedAt,
             "ModifiedAt" => super::types::SortKey::ModifiedAt,
             _ => super::types::SortKey::File,
@@ -1212,6 +1224,7 @@ impl super::WavesPreviewer {
                         &channels,
                         sample_rate,
                         bits_per_sample,
+                        self.blank_threshold_dbfs,
                     )));
                     item.virtual_audio = Some(audio);
                     item.virtual_state = Some(VirtualState {
@@ -1395,7 +1408,10 @@ impl super::WavesPreviewer {
                 super::WavesPreviewer::build_editor_waveform_cache(&chans, samples_len);
             let bits = self.effective_bits_for_path(&path).unwrap_or(32);
             let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
-                &chans, buffer_sr, bits,
+                &chans,
+                buffer_sr,
+                bits,
+                self.blank_threshold_dbfs,
             ));
             self.edited_cache.insert(
                 path,
@@ -1473,7 +1489,10 @@ impl super::WavesPreviewer {
                     super::WavesPreviewer::build_editor_waveform_cache(&chans, samples_len);
                 let bits = self.effective_bits_for_path(&tab_path).unwrap_or(32);
                 let display_meta = Some(super::WavesPreviewer::build_meta_from_audio(
-                    &chans, buffer_sr, bits,
+                    &chans,
+                    buffer_sr,
+                    bits,
+                    self.blank_threshold_dbfs,
                 ));
                 self.edited_cache.insert(
                     tab_path.clone(),

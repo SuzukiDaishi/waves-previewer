@@ -1122,6 +1122,7 @@ impl super::WavesPreviewer {
                         &tab.ch_samples,
                         tab.buffer_sample_rate.max(1),
                         self.effective_bits_for_path(&tab.path).unwrap_or(32),
+                        self.blank_threshold_dbfs,
                     )),
                     dirty: tab.dirty,
                     loop_region: tab.loop_region,
@@ -1501,6 +1502,9 @@ impl super::WavesPreviewer {
                     | SortKey::LufsMomentary
                     | SortKey::SilenceLead
                     | SortKey::SilenceTail
+                    | SortKey::EdgeZero
+                    | SortKey::OverPeak
+                    | SortKey::BlankPad
                     | SortKey::Bpm
                     | SortKey::CreatedAt
                     | SortKey::ModifiedAt

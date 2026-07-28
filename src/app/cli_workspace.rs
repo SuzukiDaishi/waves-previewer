@@ -467,10 +467,12 @@ impl CliWorkspace {
                     },
                 );
             }
+            // ChannelRouting needs an NxM matrix that has no CLI spelling yet.
             ToolKind::LoopEdit
             | ToolKind::Markers
             | ToolKind::PluginFx
-            | ToolKind::MusicAnalyze => {
+            | ToolKind::MusicAnalyze
+            | ToolKind::ChannelRouting => {
                 bail!("tool apply is not supported for {:?}", active_tool)
             }
         }

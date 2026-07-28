@@ -61,6 +61,9 @@ impl WavesPreviewer {
         self.src_quality = SrcQuality::Good;
         self.list_columns = ListColumnConfig::default();
         self.zero_cross_epsilon = 1.0e-4;
+        self.blank_threshold_dbfs = super::inspection::DEFAULT_BLANK_THRESHOLD_DBFS;
+        self.blank_min_ms = super::inspection::DEFAULT_BLANK_MIN_MS;
+        self.push_blank_threshold_to_meta_pool();
         self.transcript_ai_cfg = super::types::TranscriptAiConfig::default();
         self.sanitize_transcript_ai_config();
         self.refresh_transcript_ai_status();
@@ -322,6 +325,18 @@ impl WavesPreviewer {
                 if let Ok(v) = rest.trim().parse::<f32>() {
                     if v.is_finite() {
                         self.zero_cross_epsilon = v.max(0.0);
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("blank_threshold_dbfs=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.blank_threshold_dbfs = v.clamp(-120.0, 0.0);
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("blank_min_ms=") {
+                if let Ok(v) = rest.trim().parse::<f32>() {
+                    if v.is_finite() {
+                        self.blank_min_ms = v.clamp(0.0, 60_000.0);
                     }
                 }
             } else if let Some(rest) = line.strip_prefix("editor_invert_wave_zoom_wheel=") {
@@ -687,6 +702,7 @@ impl WavesPreviewer {
         }
         self.set_recent_sessions_from_prefs(recent_sessions);
         self.sanitize_transcript_ai_config();
+        self.push_blank_threshold_to_meta_pool();
     }
 
     pub(super) fn save_prefs(&self) {
@@ -819,6 +835,8 @@ impl WavesPreviewer {
         let mut out = format!(
             "theme={}\nskip_dotfiles={}\n\
 zero_cross_eps={:.6}\n\
+blank_threshold_dbfs={:.1}\n\
+blank_min_ms={:.0}\n\
 editor_invert_wave_zoom_wheel={}\n\
 editor_invert_shift_wheel_pan={}\n\
 editor_wheel_mode={}\n\
@@ -883,6 +901,8 @@ zoo_flip_manual={}\n",
             theme,
             skip,
             self.zero_cross_epsilon,
+            self.blank_threshold_dbfs,
+            self.blank_min_ms,
             invert_wave_zoom_wheel,
             invert_shift_wheel_pan,
             editor_wheel_mode,
@@ -1217,6 +1237,50 @@ mod tests {
         fallback.editor_wheel_scrolls = true;
         fallback.load_prefs_from_path(&prefs);
         assert!(!fallback.editor_wheel_scrolls);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn blank_pad_settings_prefs_roundtrip_and_clamp() {
+        let dir = temp_dir("blank_pad_prefs");
+        let prefs = dir.join("prefs.txt");
+        let mut app =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        assert_eq!(
+            app.blank_threshold_dbfs,
+            crate::app::inspection::DEFAULT_BLANK_THRESHOLD_DBFS
+        );
+        assert_eq!(
+            app.blank_min_ms,
+            crate::app::inspection::DEFAULT_BLANK_MIN_MS
+        );
+        app.blank_threshold_dbfs = -32.5;
+        app.blank_min_ms = 250.0;
+        app.save_prefs_to_path(&prefs);
+
+        let mut loaded =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        loaded.load_prefs_from_path(&prefs);
+        assert_eq!(loaded.blank_threshold_dbfs, -32.5);
+        assert_eq!(loaded.blank_min_ms, 250.0);
+
+        // Out-of-range and non-finite values from a hand-edited file are
+        // clamped/ignored rather than poisoning the scan threshold.
+        std::fs::write(&prefs, "blank_threshold_dbfs=40\nblank_min_ms=-5\n").expect("write prefs");
+        let mut clamped =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        clamped.load_prefs_from_path(&prefs);
+        assert_eq!(clamped.blank_threshold_dbfs, 0.0);
+        assert_eq!(clamped.blank_min_ms, 0.0);
+
+        std::fs::write(&prefs, "blank_threshold_dbfs=NaN\n").expect("write prefs");
+        let mut bogus =
+            WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
+        bogus.load_prefs_from_path(&prefs);
+        assert_eq!(
+            bogus.blank_threshold_dbfs,
+            crate::app::inspection::DEFAULT_BLANK_THRESHOLD_DBFS
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
