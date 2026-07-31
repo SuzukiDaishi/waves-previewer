@@ -3,7 +3,7 @@ mod kittest_suite {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use egui::{Key, Modifiers, MouseWheelUnit};
@@ -11,6 +11,8 @@ mod kittest_suite {
         kittest::{NodeT, Queryable},
         Harness,
     };
+    #[cfg(feature = "kittest_render")]
+    use neowaves::app::ColumnId;
     use neowaves::app::ToolKind;
     use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
@@ -474,10 +476,17 @@ mod kittest_suite {
         }
     }
 
-    /// WORLD analysis (DIO/StoneMask/CheapTrick/D4C) of the small fixture
-    /// clips completes in a couple of seconds even in debug builds; keep the
-    /// budget aligned with the suite's other readiness waits.
-    const WORLD_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(30);
+    /// WORLD jobs are CPU-heavy and the Rust test runner otherwise starts all
+    /// three GUI analysis cases concurrently. Serialize them so this timeout
+    /// measures one job rather than thread-pool contention.
+    const WORLD_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(90);
+
+    fn world_analysis_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
 
     fn wait_for_world_features(
         harness: &mut Harness<'static, WavesPreviewer>,
@@ -1314,6 +1323,206 @@ mod kittest_suite {
         image
     }
 
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_external_dialog_many_columns_stays_visible_and_scrolls() {
+        let fixture_dir = make_temp_dir("external_dialog_many_columns");
+        let mut cfg = StartupConfig::default();
+        cfg.external_dummy_rows = Some(20);
+        cfg.external_dummy_cols = 180;
+        cfg.external_dummy_path = Some(fixture_dir.join("many_columns.csv"));
+        cfg.external_show_dialog = true;
+
+        let mut harness = harness_with_startup(cfg);
+        let viewport = egui::vec2(900.0, 620.0);
+        harness.set_size(viewport);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            harness.run_steps(1);
+            if harness
+                .query_all_by_label("Visible Columns")
+                .next()
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "external dummy table did not finish loading"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        harness.run_steps(3);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("external_dialog_scroll");
+        std::fs::create_dir_all(&out_dir).expect("create external dialog screenshot dir");
+        harness
+            .render()
+            .expect("render external dialog top")
+            .save(out_dir.join("kittest_top.png"))
+            .expect("save external dialog top screenshot");
+
+        for label in [
+            "External Data",
+            "Load CSV/Excel...",
+            "Visible Columns",
+            "Col2",
+        ] {
+            let rect = first_label_rect(&harness, label);
+            assert!(
+                rect.left() >= 0.0
+                    && rect.top() >= 0.0
+                    && rect.right() <= viewport.x
+                    && rect.bottom() <= viewport.y,
+                "{label} must stay inside the viewport: {rect:?}"
+            );
+        }
+
+        let column_hover = first_label_rect(&harness, "Col2").center();
+        harness.hover_at(column_hover);
+        for _ in 0..36 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -6.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+        }
+        let last_column = first_label_rect(&harness, "Col180");
+        assert!(
+            last_column.bottom() <= viewport.y,
+            "last external column should be reachable by scrolling: {last_column:?}"
+        );
+        harness
+            .render()
+            .expect("render external columns scrolled")
+            .save(out_dir.join("kittest_columns_scrolled.png"))
+            .expect("save external columns scrolled screenshot");
+
+        let outer_hover = first_label_rect(&harness, "Scope (optional)").center();
+        harness.hover_at(outer_hover);
+        for _ in 0..12 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -5.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::default(),
+            });
+            harness.run_steps(1);
+        }
+        let summary = first_label_rect(&harness, "Matched: 0  Unmatched: 0");
+        assert!(
+            summary.bottom() <= viewport.y,
+            "dialog footer should be reachable by outer scrolling: {summary:?}"
+        );
+        harness
+            .render()
+            .expect("render external dialog bottom")
+            .save(out_dir.join("kittest_dialog_scrolled.png"))
+            .expect("save external dialog bottom screenshot");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_list_columns_window_toggles_and_reorders_columns() {
+        let mut harness = harness_with_wavs(false);
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        harness.run_steps(3);
+
+        top_menu_button(&harness, "List").click();
+        harness.run_steps(1);
+        harness.get_by_label("Columns...").click();
+        harness.run_steps(5);
+        assert!(harness.state().test_show_list_columns_window());
+        assert_eq!(
+            harness.state().list_column_order[0],
+            ColumnId::Edited,
+            "fixture should begin with the default built-in order"
+        );
+        assert!(
+            !harness.state().list_columns.cover_art,
+            "Art should begin hidden"
+        );
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("list_columns");
+        std::fs::create_dir_all(&out_dir).expect("create List Columns screenshot dir");
+        harness
+            .render()
+            .expect("render List Columns before changes")
+            .save(out_dir.join("01_before.png"))
+            .expect("save List Columns before screenshot");
+
+        let window_rect = first_label_rect(&harness, "List Columns");
+        let file_drag = harness.get_by_label("Drag File column").rect().center();
+        let edited_drop = harness
+            .query_all_by_label("Edited")
+            .filter(|node| node.rect().intersects(window_rect))
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("Edited drop row")
+            .rect()
+            .center();
+        editor_pointer_drag(&mut harness, file_drag, edited_drop);
+        assert_eq!(
+            harness.state().list_column_order[0],
+            ColumnId::File,
+            "dragging File onto Edited should move File to the left edge"
+        );
+        harness.get_by_label("Reset order").click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().list_column_order[0], ColumnId::Edited);
+
+        harness
+            .query_all_by_label("Art")
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::CheckBox)
+            .expect("Art visibility checkbox")
+            .click();
+        harness.run_steps(2);
+        assert!(
+            harness.state().list_columns.cover_art,
+            "Art checkbox should update the List immediately"
+        );
+
+        harness.get_by_label("Move Art earlier").click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().list_column_order[0],
+            ColumnId::CoverArt,
+            "moving Art earlier should place it at the left edge"
+        );
+        assert_eq!(harness.state().list_column_order[1], ColumnId::Edited);
+        harness
+            .render()
+            .expect("render List Columns after changes")
+            .save(out_dir.join("02_art_visible_and_first.png"))
+            .expect("save List Columns changed screenshot");
+
+        harness.state_mut().test_set_show_list_columns_window(false);
+        harness.state_mut().test_set_show_export_settings(true);
+        harness.run_steps(3);
+        assert!(
+            harness.query_all_by_label("List Columns:").next().is_none(),
+            "List Columns controls must no longer live inside Settings"
+        );
+        assert!(
+            harness.query_all_by_label("Column Order").next().is_none(),
+            "the old Settings order editor must be removed"
+        );
+    }
+
     #[test]
     fn load_folder_shows_files() {
         let mut harness = harness_with_wavs(false);
@@ -1838,7 +2047,7 @@ mod kittest_suite {
         ensure_editor_ready(&mut harness);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         harness.run_steps(3);
-        let before = first_label_rect(&harness, "Loop inspector: -");
+        let before = first_label_rect(&harness, "Seam Check");
 
         assert!(harness
             .state_mut()
@@ -1847,7 +2056,7 @@ mod kittest_suite {
 
         assert_rect_nearly_same(
             before,
-            first_label_rect(&harness, "Loop inspector: -"),
+            first_label_rect(&harness, "Seam Check"),
             "loop inspector row",
         );
         assert!(harness.state_mut().test_clear_mock_loop_detect());
@@ -2498,7 +2707,7 @@ mod kittest_suite {
     }
 
     #[test]
-    fn recent_sessions_pref_roundtrip_shows_three_nwsess() {
+    fn recent_sessions_pref_roundtrip_filters_legacy_sessions() {
         let dir = make_temp_dir("recent_prefs");
         let first = dir.join("first.nwsess");
         let second = dir.join("second.nwsess");
@@ -2515,7 +2724,7 @@ mod kittest_suite {
             second.clone(),
             bad,
             third.clone(),
-            fourth,
+            fourth.clone(),
         ]);
         harness.state().test_save_prefs_to_path(&prefs);
         harness
@@ -2524,10 +2733,11 @@ mod kittest_suite {
         harness.state_mut().test_load_prefs_from_path(&prefs);
 
         let recents = harness.state().test_recent_session_paths();
-        assert_eq!(recents.len(), 3);
+        assert_eq!(recents.len(), 4);
         assert_eq!(recents[0], std::fs::canonicalize(&first).unwrap());
         assert_eq!(recents[1], std::fs::canonicalize(&second).unwrap());
         assert_eq!(recents[2], std::fs::canonicalize(&third).unwrap());
+        assert_eq!(recents[3], std::fs::canonicalize(&fourth).unwrap());
     }
 
     #[test]
@@ -2798,6 +3008,7 @@ mod kittest_suite {
 
     #[test]
     fn world_view_runs_analysis_and_caches_features() {
+        let _world_guard = world_analysis_test_guard();
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);
         open_first_tab(&mut harness);
@@ -2816,6 +3027,7 @@ mod kittest_suite {
 
     #[test]
     fn world_f0_edit_resynthesizes_audio_with_undo() {
+        let _world_guard = world_analysis_test_guard();
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);
         open_first_tab(&mut harness);
@@ -2899,7 +3111,9 @@ mod kittest_suite {
 
     #[test]
     fn world_f0_zoom_and_edit_toggles_respond() {
+        let _world_guard = world_analysis_test_guard();
         let mut harness = harness_with_wavs(false);
+        harness.set_size(egui::vec2(1600.0, 1200.0));
         wait_for_scan(&mut harness);
         open_first_tab(&mut harness);
         ensure_editor_ready(&mut harness);
@@ -3600,16 +3814,13 @@ mod kittest_suite {
         harness.key_press(Key::P);
         harness.run_steps(3);
 
+        assert!(harness.state().test_loop_region().is_some());
         assert!(!harness
-            .query_all_by_label("Pre-Loop window")
+            .query_all_by_label("Seam Check")
             .collect::<Vec<_>>()
             .is_empty());
         assert!(!harness
-            .query_all_by_label("Seam preview")
-            .collect::<Vec<_>>()
-            .is_empty());
-        assert!(!harness
-            .query_all_by_label("Post-Loop window")
+            .query_all_by_label("Auto Detect")
             .collect::<Vec<_>>()
             .is_empty());
     }
@@ -6162,6 +6373,72 @@ mod kittest_suite {
         );
     }
 
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_edge_fade_tool_drags_and_applies_both_edges_once() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_active_tool(ToolKind::Fade));
+        assert!(harness.state_mut().test_set_tool_fade_ms(100.0, 160.0));
+        harness.run_steps(5);
+
+        harness.get_by_label("Edge Fade");
+        harness.get_by_label("START  ·  FADE IN");
+        harness.get_by_label("END  ·  FADE OUT");
+        harness.get_by_label("Apply Edge Fades");
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("edge_fade_tool");
+        std::fs::create_dir_all(&out_dir).expect("create Edge Fade screenshot directory");
+        harness
+            .render()
+            .expect("render Edge Fade draft")
+            .save(out_dir.join("01_edge_fade_draft.png"))
+            .expect("save Edge Fade draft screenshot");
+
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let tab = &harness.state().tabs[tab_idx];
+        let clip_ms = tab.samples_len as f32 / tab.buffer_sample_rate.max(1) as f32 * 1000.0;
+        let start_fraction = (tab.tool_state.fade_in_ms / clip_ms).clamp(0.0, 1.0);
+        let start = editor_canvas_pos_at_frac(&harness, start_fraction);
+        let end = editor_canvas_pos_at_frac(&harness, 0.28);
+        editor_pointer_drag(&mut harness, start, end);
+        let dragged_ms = harness.state().tabs[tab_idx].tool_state.fade_in_ms;
+        assert!(
+            (dragged_ms - clip_ms * 0.28).abs() <= clip_ms * 0.03,
+            "blue fade-in handle should set the draft length: got {dragged_ms} ms for {clip_ms} ms clip"
+        );
+        harness
+            .render()
+            .expect("render dragged Edge Fade")
+            .save(out_dir.join("02_edge_fade_dragged.png"))
+            .expect("save dragged Edge Fade screenshot");
+
+        let undo_before = harness.state().tabs[tab_idx].undo_stack.len();
+        harness.get_by_label("Apply Edge Fades").click();
+        harness.run_steps(5);
+        wait_for_waveform_pyramid(&mut harness);
+        let tab = &harness.state().tabs[tab_idx];
+        assert_eq!(
+            tab.undo_stack.len(),
+            undo_before + 1,
+            "front and back fades should be one undo step"
+        );
+        assert!(tab.ch_samples[0][0].abs() <= f32::EPSILON);
+        assert!(tab.ch_samples[0][tab.samples_len - 1].abs() <= f32::EPSILON);
+        assert_eq!(tab.tool_state.fade_in_ms, 0.0);
+        assert_eq!(tab.tool_state.fade_out_ms, 0.0);
+        harness
+            .render()
+            .expect("render applied Edge Fade")
+            .save(out_dir.join("03_edge_fade_applied.png"))
+            .expect("save applied Edge Fade screenshot");
+    }
+
     #[test]
     fn editor_dsp_and_repair_tools_build_preview_audio_and_overlay() {
         let mut harness = harness_with_editor_fixture();
@@ -6645,16 +6922,96 @@ mod kittest_suite {
         harness
             .state_mut()
             .test_set_mock_transcript_model_download_progress(3, 7);
+        harness.run_steps(2);
+        harness.get_by_label("Downloading transcript model... 3/7");
+
+        harness
+            .state_mut()
+            .test_clear_mock_model_download_progress();
         harness
             .state_mut()
             .test_set_mock_music_model_download_progress(5, 9);
         harness.run_steps(2);
-
-        harness.get_by_label("Downloading transcript model... 3/7");
-        harness.get_by_label("Downloading music analyze model... 5/9");
+        harness.get_by_label("Downloading music model... 5/9");
         harness
             .state_mut()
             .test_clear_mock_model_download_progress();
+    }
+
+    #[test]
+    fn metadata_hex_row_double_click_seeks_and_selects_pcm_frame() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        assert!(harness.state_mut().test_set_metadata_view(true));
+
+        let started = Instant::now();
+        while !harness.state().test_metadata_document_ready() {
+            harness.run_steps(1);
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "metadata document timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_buffer_transport(48_000));
+        assert!(harness.state_mut().test_set_metadata_follow_playback(false));
+        harness.state_mut().test_set_audio_playing_flag(true);
+        harness.run_steps(6);
+
+        let source_len = harness.state().test_audio_source_len();
+        assert!(source_len > 0);
+        harness.get_by_label("縦波形シークバー").click();
+        harness.run_steps(6);
+        let waveform_seeked = harness.state().test_audio_play_pos();
+        assert!(
+            waveform_seeked.abs_diff(source_len / 2) < source_len / 20,
+            "waveform click should seek near the middle: pos={waveform_seeked} len={source_len}"
+        );
+        let waveform_selected = harness
+            .state()
+            .test_metadata_hex_selection()
+            .expect("waveform seek must select the corresponding PCM frame bytes");
+        assert_eq!(waveform_selected.length, 8);
+        let waveform_fraction = harness
+            .state()
+            .test_metadata_hex_seek_fraction()
+            .expect("waveform cursor fraction");
+        assert!((waveform_fraction - 0.5).abs() < 0.05);
+
+        let row_start = waveform_selected.offset / 16 * 16;
+        harness.state_mut().test_audio_seek_to_sample(128);
+        harness.run_steps(3);
+
+        let row_label = format!("Hex row {row_start:016X}");
+        harness.input_mut().time = Some(10.0);
+        harness.get_by_label(&row_label).click();
+        harness.run_steps(1);
+        harness.input_mut().time = Some(10.1);
+        harness.get_by_label(&row_label).click();
+        harness.run_steps(4);
+
+        let seeked = harness.state().test_audio_play_pos();
+        let selection_after_clicks = harness.state().test_metadata_hex_selection();
+        let fraction_after_clicks = harness.state().test_metadata_hex_seek_fraction();
+        assert!(
+            seeked.abs_diff(source_len / 2) <= 4,
+            "double-clicking the PCM row should move the waveform/audio cursor back to that row: pos={seeked} selection={selection_after_clicks:?} fraction={fraction_after_clicks:?}"
+        );
+        let selected = harness
+            .state()
+            .test_metadata_hex_selection()
+            .expect("double-click must select the exact PCM frame bytes");
+        assert_eq!(
+            selected.length, 8,
+            "stereo 32-bit PCM frame must highlight all eight interleaved bytes"
+        );
+        assert!(harness.state().test_metadata_hex_seek_fraction().is_some());
+        harness.state_mut().test_set_audio_playing_flag(false);
     }
 
     #[cfg(feature = "kittest_render")]
@@ -6678,6 +7035,120 @@ mod kittest_suite {
             .unwrap_or_else(|e| panic!("save kittest render png failed: {e}"));
         let size = std::fs::metadata(&out).expect("png metadata").len();
         assert!(size > 1024, "rendered png looks too small: {size} bytes");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_metadata_structure_and_hex_screenshots() {
+        let mut harness = harness_with_dynamic_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        harness.run_steps(3);
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("metadata_inspector");
+        std::fs::create_dir_all(&out_dir).expect("create metadata screenshot directory");
+        harness
+            .render()
+            .expect("render waveform baseline")
+            .save(out_dir.join("01_wave_baseline.png"))
+            .expect("save waveform baseline");
+
+        assert!(harness.state_mut().test_set_metadata_view(false));
+        let started = Instant::now();
+        while !harness.state().test_metadata_document_ready() {
+            harness.run_steps(1);
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "metadata document timeout"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(harness.state().test_metadata_node_count() >= 3);
+        harness.run_steps(3);
+        harness.get_by_label("Details");
+        harness.get_by_label("Properties");
+        harness
+            .render()
+            .expect("render Metadata Structure")
+            .save(out_dir.join("02_metadata_structure.png"))
+            .expect("save Metadata Structure");
+
+        assert!(
+            harness.query_by_label("fmt").is_none(),
+            "WAV fmt must not appear in the Structure list"
+        );
+        harness.get_by_label("data").click();
+        harness.run_steps(4);
+        harness
+            .render()
+            .expect("render expanded audio preview")
+            .save(out_dir.join("02b_metadata_audio.png"))
+            .expect("save expanded audio preview");
+
+        assert!(harness.state_mut().test_set_metadata_view(true));
+        harness.run_steps(6);
+        harness.get_by_label("Offset");
+        harness.get_by_label("再生位置に自動スクロール");
+        harness
+            .render()
+            .expect("render Metadata Hex")
+            .save(out_dir.join("03_metadata_hex.png"))
+            .expect("save Metadata Hex");
+
+        harness.get_by_label("32 bytes").click();
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render Metadata Hex at 32 bytes per row")
+            .save(out_dir.join("03b_metadata_hex_32.png"))
+            .expect("save 32-byte Metadata Hex");
+        harness.get_by_label("16 bytes").click();
+        harness.run_steps(3);
+
+        harness.get_by_label("再生位置に自動スクロール").click();
+        assert!(harness
+            .state_mut()
+            .test_force_active_tab_buffer_transport(48_000));
+        harness.state_mut().test_audio_seek_to_sample(4_096);
+        harness.state_mut().test_set_audio_playing_flag(true);
+        harness.run_steps(6);
+        assert!(
+            harness.query_by_label("Exact PCM source mapping").is_none(),
+            "Hex should not duplicate live PCM details above the grid"
+        );
+        assert_eq!(
+            harness.state().test_metadata_hex_offset(),
+            Some(0x8044),
+            "{}",
+            harness.state().test_metadata_live_mapping_diagnostic()
+        );
+        harness.get_by_label("Hex row 0000000000008040");
+        harness.get_by_label("縦波形シークバー");
+        harness
+            .render()
+            .expect("render Metadata Hex while playing")
+            .save(out_dir.join("04_metadata_hex_playing.png"))
+            .expect("save playing Metadata Hex");
+
+        let source_len = harness.state().test_audio_source_len();
+        assert!(source_len > 0);
+        harness.get_by_label("縦波形シークバー").click();
+        harness.run_steps(6);
+        let seeked = harness.state().test_audio_play_pos();
+        assert!(
+            seeked.abs_diff(source_len / 2) < source_len / 20,
+            "vertical waveform center click should seek near 50%: pos={seeked}, len={source_len}"
+        );
+        harness
+            .render()
+            .expect("render Metadata Hex after vertical waveform seek")
+            .save(out_dir.join("05_metadata_hex_waveform_seeked.png"))
+            .expect("save seeked Metadata Hex");
+        harness.state_mut().test_set_audio_playing_flag(false);
     }
 
     #[cfg(feature = "kittest_render")]
@@ -6828,7 +7299,7 @@ mod kittest_suite {
         harness.run_steps(4);
         assert!(harness.state_mut().test_set_active_tool(ToolKind::LoopEdit));
         harness.run_steps(2);
-        let loop_before = first_label_rect(&harness, "Loop inspector: -");
+        let loop_before = first_label_rect(&harness, "Seam Check");
         assert!(harness
             .state_mut()
             .test_set_mock_loop_detect_running(0.42, "Scoring loop candidates... 42%"));
@@ -6837,7 +7308,7 @@ mod kittest_suite {
         render_ui_stability_png(&mut harness, "processing_loop_detect.png");
         assert_rect_nearly_same(
             loop_before,
-            first_label_rect(&harness, "Loop inspector: -"),
+            first_label_rect(&harness, "Seam Check"),
             "loop detect inspector",
         );
         assert!(harness.state_mut().test_clear_mock_loop_detect());

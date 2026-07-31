@@ -305,6 +305,10 @@ impl crate::app::WavesPreviewer {
         // One copy per frame; the per-row closure below borrows self mutably,
         // and the order cannot change mid-frame.
         let column_order = self.list_column_order.clone();
+        let metadata_columns = self
+            .visible_metadata_columns()
+            .map(|(index, column)| (index, column.clone()))
+            .collect::<Vec<_>>();
 
         table
             .header(metrics.header_h, |mut header| {
@@ -350,6 +354,16 @@ impl crate::app::WavesPreviewer {
                                 if !self.transcript_ai_inflight.contains(&path_owned) {
                                     self.queue_transcript_for_path(&path_owned, true);
                                 }
+                            }
+                            if !metadata_columns.is_empty() {
+                                self.queue_metadata_summary_for_path(
+                                    &path_owned,
+                                    if near_selected {
+                                        crate::metadata::cache::SummaryPriority::Selected
+                                    } else {
+                                        crate::metadata::cache::SummaryPriority::Visible
+                                    },
+                                );
                             }
                         }
                         // Borrow the item once and extract only what the row
@@ -480,6 +494,8 @@ impl crate::app::WavesPreviewer {
                             }
                         });
                         let mut clicked_to_load = false;
+                        let mut interacted_with_control = false;
+                        let mut control_focus_id = None;
                         let mut clicked_to_select = false;
                         let is_dirty = self.has_edits_for_path(&path_owned);
                         for sorted_col in column_order.iter().copied() {
@@ -1342,14 +1358,31 @@ impl crate::app::WavesPreviewer {
                                     ui.visuals_mut().override_text_color = row_fg;
                                     let old = self.pending_gain_db_for_path(&path_owned);
                                     let mut g = old;
-                                    let resp = ui.add(
-                                        egui::DragValue::new(&mut g)
-                                            .range(-24.0..=24.0)
-                                            .speed(0.1)
-                                            .fixed_decimals(1)
-                                            .suffix(" dB"),
-                                    );
+                                    // Table internals may change their auto-ID
+                                    // sequence while async columns populate.
+                                    // Keep the editor ID bound to the file so
+                                    // click-to-text focus survives the next
+                                    // frame.
+                                    let resp = ui
+                                        .push_id(("list_gain", &path_owned), |ui| {
+                                            ui.add(
+                                                egui::DragValue::new(&mut g)
+                                                    .range(-24.0..=24.0)
+                                                    .speed(0.1)
+                                                    .fixed_decimals(1)
+                                                    .suffix(" dB"),
+                                            )
+                                        })
+                                        .inner;
                                     let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary)
+                                        || resp.has_focus()
+                                    {
+                                        interacted_with_control = true;
+                                    }
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        control_focus_id = Some(resp.id);
+                                    }
                                     if resp.changed() {
                                         let new = crate::app::WavesPreviewer::clamp_gain_db(g);
                                         let delta = new - old;
@@ -1468,6 +1501,61 @@ impl crate::app::WavesPreviewer {
                         }
                         }
 
+                        for (_, column) in &metadata_columns {
+                            let cell =
+                                self.metadata_cell_for_path(&path_owned, &column.key);
+                            let error = self
+                                .metadata_summary_errors
+                                .get(&path_owned)
+                                .cloned();
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let text = cell
+                                    .as_ref()
+                                    .map(|cell| cell.text.as_str())
+                                    .unwrap_or_else(|| {
+                                        if error.is_some() {
+                                            "!"
+                                        } else {
+                                            "..."
+                                        }
+                                    });
+                                let mut rich = RichText::new(text).monospace();
+                                if cell.as_ref().is_some_and(|cell| cell.conflict) {
+                                    rich = rich.color(self.palette().warning_text);
+                                } else if cell.as_ref().is_some_and(|cell| cell.partial) {
+                                    rich = rich.weak();
+                                }
+                                let response = ui
+                                    .add(
+                                        egui::Label::new(rich)
+                                            .sense(Sense::click())
+                                            .truncate()
+                                            .show_tooltip_when_elided(false),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let response = if let Some(cell) = &cell {
+                                    if cell.tooltip.is_empty() {
+                                        response
+                                    } else {
+                                        response.on_hover_text(&cell.tooltip)
+                                    }
+                                } else if let Some(error) = &error {
+                                    response.on_hover_text(error)
+                                } else {
+                                    response
+                                };
+                                let response =
+                                    self.attach_row_context_menu(response, row_idx, ctx);
+                                if response.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+
                         row.col(|ui| {
                             if let Some(bg) = row_bg {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1477,14 +1565,18 @@ impl crate::app::WavesPreviewer {
                         let resp = self.attach_row_context_menu(row.response(), row_idx, ctx);
                         let drag_started =
                             resp.drag_started_by(egui::PointerButton::Primary);
-                        if drag_started && self.queue_external_drag_for_row(row_idx) {
+                        if drag_started
+                            && !interacted_with_control
+                            && self.queue_external_drag_for_row(row_idx)
+                        {
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;
                             self.search_has_focus = false;
                             return;
                         }
                         let clicked_any = (resp.clicked_by(egui::PointerButton::Primary)
-                            && !resp.double_clicked())
+                            && !resp.double_clicked()
+                            && !interacted_with_control)
                             || clicked_to_load;
                         if clicked_to_select {
                             self.selected = Some(row_idx);
@@ -1507,6 +1599,10 @@ impl crate::app::WavesPreviewer {
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;
                             self.search_has_focus = false;
+                        }
+                        if let Some(control_focus_id) = control_focus_id {
+                            ctx.memory_mut(|memory| memory.request_focus(control_focus_id));
+                            list_has_focus = false;
                         }
                     } else {
                         // filler

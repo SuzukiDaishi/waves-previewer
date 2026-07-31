@@ -112,6 +112,7 @@ impl WavesPreviewer {
         if had_ui_input {
             self.debug.ui_input_started_at = Some(frame_started);
         }
+        self.tick_deferred_startup(ctx, frame_started, had_ui_input);
         self.suppress_list_enter = false;
         if ctx.dragged_id().is_some() && !ctx.input(|i| i.pointer.any_down()) {
             if self.debug.cfg.enabled {
@@ -122,6 +123,14 @@ impl WavesPreviewer {
         self.ensure_theme_visuals(ctx);
         self.tick_project_open();
         self.playback_sync_state_snapshot();
+        let protect_editor_playback = !self.is_list_workspace_active()
+            && (self.playback_is_playing_now() || self.playback_session.is_playing);
+        if let Some(pool) = self.meta_pool.as_ref() {
+            pool.set_paused(protect_editor_playback);
+        }
+        if let Some(pool) = self.metadata_summary_pool.as_ref() {
+            pool.set_paused(protect_editor_playback);
+        }
         self.sync_channel_masks_to_engine();
         self.meter_db = self.current_output_meter_db();
         self.update_channel_meters();
@@ -133,6 +142,10 @@ impl WavesPreviewer {
             }
         });
         trace_stage!("pump_list_meta_prefetch", self.pump_list_meta_prefetch());
+        trace_stage!(
+            "pump_metadata_summary_prefetch",
+            self.pump_metadata_summary_prefetch()
+        );
         self.process_ipc_requests();
         self.apply_pending_transcript_seek();
         self.process_tool_results();
@@ -181,6 +194,10 @@ impl WavesPreviewer {
         self.drain_music_preview_results(ctx);
         self.enforce_music_stem_cache_policy();
         trace_stage!("drain_meta_updates", self.drain_meta_updates(ctx));
+        trace_stage!(
+            "drain_metadata_summary_updates",
+            self.drain_metadata_summary_updates(ctx)
+        );
         self.drain_external_load_results(ctx);
         self.check_csv_export_completion();
         self.tick_bulk_resample();
@@ -553,6 +570,7 @@ impl WavesPreviewer {
         self.run_frame_quit_prompt(ctx);
         self.run_frame_first_save_prompt(ctx);
         self.ui_export_settings_window(ctx);
+        self.ui_list_columns_window(ctx);
         self.ui_shortcuts_window(ctx);
         self.ui_keymap_window(ctx);
         self.ui_undo_history_window(ctx);

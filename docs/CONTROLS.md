@@ -85,6 +85,7 @@
 - ツール一覧に **Invert Polarity**（位相反転）、**DC Offset**（DC 除去、測定値表示付き）、**Insert Silence**（無音挿入。選択開始位置 / 再生位置に挿入し、以降のマーカー・ループは右へシフト）が追加されています。
 - **De-click** ツール: Sensitivity を調整して Scan すると検出クリックが波形上に赤帯で表示され、Apply で修復（選択範囲があればその範囲のみ、Undo 対応）。
 - **De-noise** ツール: ノイズだけの区間を選択して「Learn from Selection」でプロファイル学習 → Reduction（最大減衰量）/ Strength を調整して Preview / Apply。選択範囲があればその範囲のみ処理（端はクロスフェード）。
+- **Edge Fade** ツール: START / FADE IN と END / FADE OUT を個別に有効化し、長さとカーブを設定します。波形上の青・オレンジのハンドルをドラッグして長さを直接調整でき、Preview 後の `Apply Edge Fades` は前後をまとめて1回のUndo操作として適用します。
 - カスタムチャンネルビュー（表示チャンネルを絞った状態）では、Gain / Normalize / Fade / Mute / Noise Gate / EQ / Compressor / DC / 位相反転などの範囲編集が表示中のチャンネルにのみ適用されます（インスペクタに「Applies to: ch N」表示。リストの Gain 列からのファイルゲインは常に全チャンネル）。
 - エディタのオーディオクリップボードは `Ctrl+V`（挿入）に加えて `Ctrl+Shift+V`（ミックス: 長さ不変で加算）/ `Ctrl+Alt+V`（クロスフェード挿入: 両接合部を等パワーで滑らかに）に対応。
 - 16bit 整数 PCM への書き出し（WAV/AIFF/FLAC）は Settings の「TPDF dither on 16-bit export」（デフォルト ON）でディザされます。

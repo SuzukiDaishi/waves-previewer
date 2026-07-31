@@ -5,6 +5,18 @@ use super::*;
 impl WavesPreviewer {
     pub(super) fn build_app(startup: StartupConfig, audio: AudioEngine) -> Self {
         audio.set_loop_enabled(false);
+        let metadata_cache_path = if cfg!(feature = "kittest") {
+            std::env::var_os("NEOWAVES_METADATA_CACHE")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+        } else {
+            std::env::var_os("NEOWAVES_METADATA_CACHE")
+                .filter(|value| !value.is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(crate::metadata::cache::default_cache_path)
+        };
+        let (metadata_summary_pool, metadata_summary_rx) =
+            crate::metadata::cache::MetadataSummaryPool::new(metadata_cache_path);
         let ipc_rx = startup.ipc_rx.clone();
         let startup_state = StartupState::new(startup.clone());
         let debug_state = DebugState::new(startup.debug.clone());
@@ -23,6 +35,11 @@ impl WavesPreviewer {
             audio_output_devices: Vec::new(),
             audio_output_error: None,
             audio_device_watch: AudioDeviceWatchState::default(),
+            audio_bootstrap_rx: None,
+            startup_paths_applied: false,
+            startup_maintenance_step: 0,
+            startup_maintenance_next_at: std::time::Instant::now()
+                + std::time::Duration::from_millis(300),
             playback_rate: 1.0,
             playback_session: PlaybackSessionState::default(),
             playback_fx_state: None,
@@ -169,6 +186,15 @@ impl WavesPreviewer {
             wave_row_h: 26.0,
             list_columns: ListColumnConfig::default(),
             list_column_order: crate::app::types::ColumnId::ALL.to_vec(),
+            metadata_list_columns: Vec::new(),
+            metadata_summary_pool: Some(metadata_summary_pool),
+            metadata_summary_rx: Some(metadata_summary_rx),
+            metadata_summary_cache: Default::default(),
+            metadata_summary_inflight: Default::default(),
+            metadata_summary_generation: 0,
+            metadata_summary_prefetch_cursor: 0,
+            metadata_summary_errors: Default::default(),
+            metadata_cache_hits: 0,
             list_col_widths: Default::default(),
             list_col_widths_seen: Vec::new(),
             list_table_ui_id: None,
@@ -333,6 +359,7 @@ impl WavesPreviewer {
                 codec: Default::default(),
             },
             show_export_settings: false,
+            show_list_columns_window: false,
             show_shortcuts_window: false,
             show_keymap_window: false,
             show_undo_history_window: false,
@@ -346,6 +373,7 @@ impl WavesPreviewer {
             show_transcription_settings: false,
             show_first_save_prompt: false,
             project_path: None,
+            session_path_mode: super::project::SessionPathMode::Absolute,
             recent_sessions: Vec::new(),
             project_open_pending: None,
             project_open_state: None,
@@ -424,21 +452,143 @@ impl WavesPreviewer {
             recording_tab: RecordingTabState::default(),
         };
         app.load_prefs();
-        app.cleanup_neowaves_temp_cache_files();
-        app.refresh_crash_reports_on_startup();
-        app.refresh_audio_output_devices();
-        if app.audio_output_device_name.is_some() {
-            let preferred = app.audio_output_device_name.clone();
-            let _ = app.apply_audio_output_device_selection(preferred, false);
-        }
-        app.refresh_transcript_ai_status();
-        app.refresh_music_ai_status();
-        app.reload_zoo_gif_frames();
-        app.load_tools_config();
-        app.load_effect_graph_library();
-        app.revalidate_effect_graph_draft();
-        app.apply_startup_paths();
-        app.setup_debug_automation();
+        app.load_metadata_column_registry();
         app
+    }
+
+    pub(super) fn finish_test_startup(&mut self) {
+        self.cleanup_neowaves_temp_cache_files();
+        self.refresh_crash_reports_on_startup();
+        self.refresh_audio_output_devices();
+        if self.audio_output_device_name.is_some() {
+            let preferred = self.audio_output_device_name.clone();
+            let _ = self.apply_audio_output_device_selection(preferred, false);
+        }
+        self.refresh_transcript_ai_status();
+        self.refresh_music_ai_status();
+        self.reload_zoo_gif_frames();
+        self.load_tools_config();
+        self.load_effect_graph_library();
+        self.revalidate_effect_graph_draft();
+        self.apply_startup_paths();
+        self.setup_debug_automation();
+        self.startup_paths_applied = true;
+        self.startup_maintenance_step = 7;
+    }
+
+    pub(super) fn begin_native_audio_bootstrap(&mut self) {
+        let preferred = self.audio_output_device_name.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.audio_bootstrap_rx = Some(rx);
+        let spawn = std::thread::Builder::new()
+            .name("neowaves-audio-bootstrap".to_string())
+            .spawn(move || {
+                let result = if let Some(requested) = preferred {
+                    match crate::audio::AudioEngine::new_with_output_device_name(Some(&requested)) {
+                        Ok(engine) => Ok((engine, Some(requested), None)),
+                        Err(preferred_error) => match crate::audio::AudioEngine::new() {
+                            Ok(engine) => Ok((
+                                engine,
+                                None,
+                                Some(format!(
+                                    "Preferred output device could not be opened; using the default device: {preferred_error}"
+                                )),
+                            )),
+                            Err(default_error) => Err(format!(
+                                "Audio initialization failed. Preferred device: {preferred_error}; default device: {default_error}"
+                            )),
+                        },
+                    }
+                } else {
+                    crate::audio::AudioEngine::new()
+                        .map(|engine| (engine, None, None))
+                        .map_err(|error| format!("Audio initialization failed: {error}"))
+                };
+                let _ = tx.send(result);
+            });
+        if let Err(error) = spawn {
+            self.audio_bootstrap_rx = None;
+            self.audio_output_error = Some(format!("Audio initialization thread failed: {error}"));
+            self.finish_native_startup_paths();
+        }
+    }
+
+    fn finish_native_startup_paths(&mut self) {
+        if self.startup_paths_applied {
+            return;
+        }
+        self.apply_startup_paths();
+        self.setup_debug_automation();
+        self.startup_paths_applied = true;
+        self.startup_maintenance_next_at =
+            std::time::Instant::now() + std::time::Duration::from_millis(250);
+    }
+
+    pub(super) fn tick_deferred_startup(
+        &mut self,
+        ctx: &egui::Context,
+        now: std::time::Instant,
+        had_ui_input: bool,
+    ) {
+        if let Some(rx) = self.audio_bootstrap_rx.take() {
+            match rx.try_recv() {
+                Ok(Ok((engine, selected_device, warning))) => {
+                    let device_label = engine.output_device_name().map(str::to_string);
+                    self.audio = engine;
+                    self.audio_output_device_name = selected_device;
+                    self.audio_output_error = warning;
+                    self.audio_output_devices = device_label.into_iter().collect();
+                    self.sync_after_audio_engine_replaced();
+                    self.finish_native_startup_paths();
+                }
+                Ok(Err(error)) => {
+                    self.audio_output_error = Some(error);
+                    self.finish_native_startup_paths();
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.audio_bootstrap_rx = Some(rx);
+                    ctx.request_repaint_after(std::time::Duration::from_millis(10));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.audio_output_error =
+                        Some("Audio initialization thread disconnected.".to_string());
+                    self.finish_native_startup_paths();
+                }
+            }
+        }
+
+        if !self.startup_paths_applied
+            || self.startup_maintenance_step >= 7
+            || now < self.startup_maintenance_next_at
+        {
+            return;
+        }
+        if had_ui_input
+            || self.scan_in_progress
+            || self.playback_is_playing_now()
+            || self.playback_session.is_playing
+        {
+            self.startup_maintenance_next_at = now + std::time::Duration::from_millis(150);
+            return;
+        }
+        match self.startup_maintenance_step {
+            0 => self.cleanup_neowaves_temp_cache_files(),
+            1 => self.refresh_crash_reports_on_startup(),
+            2 => self.refresh_transcript_ai_status(),
+            3 => self.refresh_music_ai_status(),
+            4 => self.reload_zoo_gif_frames(),
+            5 => self.load_tools_config(),
+            6 => {
+                self.load_effect_graph_library();
+                self.revalidate_effect_graph_draft();
+            }
+            _ => {}
+        }
+        self.startup_maintenance_step = self.startup_maintenance_step.saturating_add(1);
+        self.startup_maintenance_next_at =
+            std::time::Instant::now() + std::time::Duration::from_millis(75);
+        if self.startup_maintenance_step < 7 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(75));
+        }
     }
 }

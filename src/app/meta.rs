@@ -149,6 +149,7 @@ struct MetaQueue {
     inner: Mutex<QueueInner>,
     cv: Condvar,
     stop: AtomicBool,
+    paused: AtomicBool,
     /// Blank Pad threshold in dBFS, stored as `f32::to_bits`. Kept out of
     /// `MetaTask` on purpose: the queue dedupes tasks by path, so a payload
     /// carrying the threshold would silently keep whichever copy landed first.
@@ -160,6 +161,13 @@ pub struct MetaPool {
 }
 
 impl MetaPool {
+    pub fn set_paused(&self, paused: bool) {
+        let changed = self.shared.paused.swap(paused, Ordering::Relaxed) != paused;
+        if changed && !paused {
+            self.shared.cv.notify_all();
+        }
+    }
+
     pub fn enqueue(&self, task: MetaTask) {
         let path = task_path(&task).clone();
         let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -530,6 +538,7 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
         }),
         cv: Condvar::new(),
         stop: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
         blank_threshold_bits: AtomicU32::new(
             crate::app::inspection::DEFAULT_BLANK_THRESHOLD_DBFS.to_bits(),
         ),
@@ -547,6 +556,13 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                 let popped = {
                     let mut guard = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
                     loop {
+                        if shared.stop.load(Ordering::Relaxed) {
+                            break None;
+                        }
+                        if shared.paused.load(Ordering::Relaxed) {
+                            guard = shared.cv.wait(guard).unwrap();
+                            continue;
+                        }
                         let next_path = loop {
                             if let Some(p) = guard.hi.pop_front() {
                                 guard.promoted.remove(&p);
@@ -568,9 +584,6 @@ pub fn spawn_meta_pool(workers: usize) -> (MetaPool, std::sync::mpsc::Receiver<M
                             let cancel = Arc::new(AtomicBool::new(false));
                             guard.running.insert(p, Arc::clone(&cancel));
                             break Some((task, cancel));
-                        }
-                        if shared.stop.load(Ordering::Relaxed) {
-                            break None;
                         }
                         guard = shared.cv.wait(guard).unwrap();
                     }
@@ -668,7 +681,7 @@ fn run_meta_task(
 
 #[cfg(test)]
 mod tests {
-    use super::read_wave_annotation_fracs;
+    use super::{read_wave_annotation_fracs, spawn_meta_pool, MetaTask};
     use crate::markers::MarkerEntry;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -706,6 +719,25 @@ mod tests {
 
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() <= 0.03
+    }
+
+    #[test]
+    fn meta_pool_pause_keeps_queued_work_off_playback_path() {
+        let (pool, rx) = spawn_meta_pool(1);
+        pool.set_paused(true);
+        pool.enqueue(MetaTask::HeaderOnly(
+            std::env::temp_dir().join("neowaves-paused-missing.wav"),
+        ));
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(40))
+                .is_err(),
+            "paused pool must not begin queued list work"
+        );
+        pool.set_paused(false);
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(2)).is_ok(),
+            "queued work must resume after playback protection ends"
+        );
     }
 
     fn write_annotations_and_read(

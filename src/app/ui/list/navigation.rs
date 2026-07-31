@@ -61,7 +61,7 @@ impl WavesPreviewer {
             ctx.input(|i| {
                 i.key_pressed(egui::Key::ArrowDown)
                     || i.key_pressed(egui::Key::ArrowUp)
-                    || i.key_pressed(egui::Key::Enter)
+                    || (!has_non_list_focus && i.key_pressed(egui::Key::Enter))
                     || i.key_pressed(egui::Key::ArrowLeft)
                     || i.key_pressed(egui::Key::ArrowRight)
                     || i.key_pressed(egui::Key::PageDown)
@@ -124,7 +124,7 @@ impl WavesPreviewer {
             pressed_down |= raw_arrow.0;
             pressed_up |= raw_arrow.1;
         }
-        let pressed_enter = if allow_list_keys {
+        let pressed_enter = if allow_list_keys && !has_non_list_focus {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         } else {
             false
@@ -285,6 +285,7 @@ impl WavesPreviewer {
         self.show_rename_dialog
             || self.show_batch_rename_dialog
             || self.show_export_settings
+            || self.show_list_columns_window
             || self.show_transcription_settings
             || self.show_resample_dialog
             || self.show_leave_prompt

@@ -389,10 +389,17 @@ impl super::WavesPreviewer {
         };
         let mut updates: Vec<meta::MetaUpdate> = Vec::new();
         let mut drained = 0usize;
+        let playback_guard = self.playback_is_playing_now() || self.playback_session.is_playing;
+        let update_budget = if playback_guard {
+            16
+        } else {
+            crate::app::META_UPDATE_FRAME_BUDGET
+        };
+        let time_budget_micros = if playback_guard { 250 } else { 1_000 };
         // Cap by count AND wall time: applying an update allocates (meta box,
         // art eviction), and a deep backlog must not own the frame.
         let drain_started = std::time::Instant::now();
-        while drained < crate::app::META_UPDATE_FRAME_BUDGET {
+        while drained < update_budget {
             match rx.try_recv() {
                 Ok(update) => {
                     updates.push(update);
@@ -401,7 +408,7 @@ impl super::WavesPreviewer {
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
-            if drained % 32 == 0 && drain_started.elapsed().as_micros() > 1_000 {
+            if drained % 8 == 0 && drain_started.elapsed().as_micros() > time_budget_micros {
                 break;
             }
         }
@@ -476,7 +483,7 @@ impl super::WavesPreviewer {
             // list visibly filling in while leaving CPU to the workers.
             ctx.request_repaint_after(std::time::Duration::from_millis(66));
         }
-        if drained >= crate::app::META_UPDATE_FRAME_BUDGET {
+        if drained >= update_budget {
             // Avoid a stall by continuing to consume backlog in future frames.
             ctx.request_repaint();
         }

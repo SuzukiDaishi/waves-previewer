@@ -958,15 +958,13 @@ impl WavesPreviewer {
                             continue;
                         }
                         let n_in = fade_in_samples.min(channel.len());
-                        for idx in 0..n_in {
-                            let t = idx as f32 / n_in.max(1) as f32;
-                            channel[idx] *= Self::fade_weight(fade_in_shape, t);
+                        if n_in > 0 {
+                            Self::apply_fade_in_to_slice(&mut channel[..n_in], fade_in_shape);
                         }
                         let n_out = fade_out_samples.min(channel.len());
-                        let start = channel.len().saturating_sub(n_out);
-                        for idx in 0..n_out {
-                            let t = idx as f32 / n_out.max(1) as f32;
-                            channel[start + idx] *= Self::fade_weight_out(fade_out_shape, t);
+                        if n_out > 0 {
+                            let start = channel.len().saturating_sub(n_out);
+                            Self::apply_fade_out_to_slice(&mut channel[start..], fade_out_shape);
                         }
                     }
                 }
@@ -1169,6 +1167,7 @@ impl WavesPreviewer {
         };
         let path = tab.path.clone();
         let fallback_channels = tab.ch_samples_arc.clone();
+        let base_timeline_len = tab.samples_len.max(1);
         let sample_rate = self.audio.shared.out_sample_rate.max(1);
         let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         let bit_depth = self.bit_depth_override.get(&path).copied();
@@ -1224,6 +1223,17 @@ impl WavesPreviewer {
                 return;
             }
 
+            // Pitch shifting preserves the timeline. Publish a cheap source
+            // overview before the expensive render so long clips get immediate
+            // visual feedback while both the audition buffer and the exact
+            // full-sample overlay are still pending.
+            let overview = Self::build_overview_bins_from_channels(&channels);
+            if !overview.is_empty() {
+                let overlay =
+                    Self::preview_overlay_from_overview(overview, tool, base_timeline_len);
+                let _ = overlay_tx.send((path.clone(), tool, overlay, overlay_gen, false));
+            }
+
             let playback = crate::wave::process_pitchshift_curve_multi_spliced(
                 &channels,
                 sample_rate,
@@ -1235,11 +1245,8 @@ impl WavesPreviewer {
                 return;
             }
             let timeline_len = playback.first().map(Vec::len).unwrap_or(1);
-            let overview = Self::build_overview_bins_from_channels(&playback);
-            if !overview.is_empty() {
-                let overlay = Self::preview_overlay_from_overview(overview, tool, timeline_len);
-                let _ = overlay_tx.send((path.clone(), tool, overlay, overlay_gen, true));
-            }
+            let overlay = Self::preview_overlay_from_channels(playback.clone(), tool, timeline_len);
+            let _ = overlay_tx.send((path.clone(), tool, overlay, overlay_gen, true));
             let _ = preview_tx.send((
                 path,
                 tool,
@@ -1405,7 +1412,6 @@ impl WavesPreviewer {
         };
         let samples_len = tab.samples_len;
         let buffer_sample_rate = tab.buffer_sample_rate.max(1);
-        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
         let out_sample_rate = self.audio.shared.out_sample_rate.max(1);
         let decode_failed = self.is_decode_failed_path(&tab.path);
         // Custom channel view scopes destructive range edits; light previews
@@ -1469,8 +1475,9 @@ impl WavesPreviewer {
                     return;
                 }
                 let mut overlay = ch_samples.clone();
-                let n_in = ((fade_in_ms / 1000.0) * sr).round() as usize;
-                let n_out = ((fade_out_ms / 1000.0) * sr).round() as usize;
+                let fade_sr = buffer_sample_rate as f32;
+                let n_in = ((fade_in_ms / 1000.0) * fade_sr).round() as usize;
+                let n_out = ((fade_out_ms / 1000.0) * fade_sr).round() as usize;
                 if !allow_light_preview {
                     self.spawn_long_processed_preview_for_tab(
                         tab_idx,
@@ -1490,10 +1497,8 @@ impl WavesPreviewer {
                             continue;
                         }
                         let nn = n_in.min(ch.len());
-                        for i in 0..nn {
-                            let t = i as f32 / nn.max(1) as f32;
-                            let w = Self::fade_weight(fade_in_shape, t);
-                            ch[i] *= w;
+                        if nn > 0 {
+                            Self::apply_fade_in_to_slice(&mut ch[..nn], fade_in_shape);
                         }
                     }
                 }
@@ -1504,11 +1509,8 @@ impl WavesPreviewer {
                         }
                         let len = ch.len();
                         let nn = n_out.min(len);
-                        for i in 0..nn {
-                            let t = i as f32 / nn.max(1) as f32;
-                            let w = Self::fade_weight_out(fade_out_shape, t);
-                            let idx = len - nn + i;
-                            ch[idx] *= w;
+                        if nn > 0 {
+                            Self::apply_fade_out_to_slice(&mut ch[len - nn..], fade_out_shape);
                         }
                     }
                 }

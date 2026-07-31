@@ -91,6 +91,22 @@ mod ui_focus_input_regressions {
             .unwrap_or_else(|| panic!("text input not found for value: {value}"))
     }
 
+    fn lowest_node_by_value<'a>(
+        harness: &'a Harness<'static, WavesPreviewer>,
+        value: &'a str,
+    ) -> egui_kittest::Node<'a> {
+        harness
+            .query_all_by_value(value)
+            .max_by(|a, b| {
+                a.rect()
+                    .min
+                    .y
+                    .partial_cmp(&b.rect().min.y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or_else(|| panic!("node not found for value: {value}"))
+    }
+
     #[test]
     fn topbar_speed_dragvalue_accepts_text_input() {
         let dir = make_temp_dir("topbar_rate");
@@ -206,23 +222,22 @@ mod ui_focus_input_regressions {
         write_fixture_wav(&wav, 48_000, 0.6);
 
         let mut harness = harness_with_folder(dir.clone());
+        harness.set_size(egui::vec2(1600.0, 900.0));
         wait_for_scan(&mut harness);
         harness.state_mut().test_set_list_gain_column_visible(true);
+        harness.state_mut().test_move_list_gain_column_first();
         assert!(harness.state_mut().test_select_and_load_row(0));
         harness.run_steps(2);
 
         {
-            let gain_node = harness.get_by_value("0.0 dB");
+            let gain_node = lowest_node_by_value(&harness, "0.0 dB");
             gain_node.click();
         }
-        harness.run_steps(1);
+        harness.run_steps(2);
         for _ in 0..8 {
             harness.key_press(Key::Backspace);
         }
-        {
-            let gain_node = harness.get_by_value("0.0 dB");
-            gain_node.type_text("-6.0");
-        }
+        harness.event(egui::Event::Text("-6.0".to_owned()));
         harness.key_press(Key::Enter);
         harness.run_steps(3);
 

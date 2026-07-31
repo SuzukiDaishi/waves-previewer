@@ -275,6 +275,7 @@ pub enum SortKey {
     CreatedAt,
     ModifiedAt,
     External(usize),
+    Metadata(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -334,7 +335,7 @@ pub struct ListUndoAction {
 
 /// Stable identity for every list column; display order is a Vec<ColumnId>
 /// (position-keyed orders break the moment a column is added).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ColumnId {
     Edited,
     CoverArt,
@@ -364,6 +365,55 @@ pub enum ColumnId {
     ModifiedAt,
     Gain,
     Wave,
+}
+
+/// Unified, stable identity for built-in and metadata-derived list columns.
+///
+/// Existing built-in names deliberately keep their historical serialization
+/// contract. Metadata keys are self-describing and can therefore be shared by
+/// the GUI, sessions, and headless list commands without numeric IDs.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "key", rename_all = "snake_case")]
+pub enum ColumnKey {
+    Builtin(ColumnId),
+    Normalized(String),
+    Raw(String),
+}
+
+impl ColumnKey {
+    pub fn serialized_name(&self) -> String {
+        match self {
+            Self::Builtin(column) => column.name().to_string(),
+            Self::Normalized(key) => {
+                if key.starts_with("normalized:") {
+                    key.clone()
+                } else {
+                    format!("normalized:{key}")
+                }
+            }
+            Self::Raw(key) => key.clone(),
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        if let Some(column) = ColumnId::from_name(value) {
+            return Some(Self::Builtin(column));
+        }
+        if let Some(key) = value.strip_prefix("normalized:") {
+            return Some(Self::Normalized(key.to_string()));
+        }
+        value
+            .starts_with("raw:")
+            .then(|| Self::Raw(value.to_string()))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetadataListColumn {
+    pub key: ColumnKey,
+    pub label: String,
+    pub visible: bool,
+    pub width: f32,
 }
 
 impl ColumnId {
@@ -504,6 +554,40 @@ impl ColumnId {
             ColumnId::ModifiedAt => cols.modified_at,
             ColumnId::Gain => cols.gain,
             ColumnId::Wave => cols.wave,
+        }
+    }
+
+    /// Update the visibility flag corresponding to this stable column id.
+    pub fn set_enabled(self, cols: &mut ListColumnConfig, enabled: bool) {
+        match self {
+            ColumnId::Edited => cols.edited = enabled,
+            ColumnId::CoverArt => cols.cover_art = enabled,
+            ColumnId::File => cols.file = enabled,
+            ColumnId::Folder => cols.folder = enabled,
+            ColumnId::Transcript => cols.transcript = enabled,
+            ColumnId::TranscriptLanguage => cols.transcript_language = enabled,
+            ColumnId::External => cols.external = enabled,
+            ColumnId::TypeBadge => cols.type_badge = enabled,
+            ColumnId::Length => cols.length = enabled,
+            ColumnId::Channels => cols.channels = enabled,
+            ColumnId::SampleRate => cols.sample_rate = enabled,
+            ColumnId::Bits => cols.bits = enabled,
+            ColumnId::BitRate => cols.bit_rate = enabled,
+            ColumnId::Peak => cols.peak = enabled,
+            ColumnId::Lufs => cols.lufs = enabled,
+            ColumnId::Dbtp => cols.dbtp = enabled,
+            ColumnId::LufsS => cols.lufs_s = enabled,
+            ColumnId::LufsM => cols.lufs_m = enabled,
+            ColumnId::SilenceLead => cols.silence_lead = enabled,
+            ColumnId::SilenceTail => cols.silence_tail = enabled,
+            ColumnId::EdgeZero => cols.edge_zero = enabled,
+            ColumnId::OverPeak => cols.over_peak = enabled,
+            ColumnId::BlankPad => cols.blank_pad = enabled,
+            ColumnId::Bpm => cols.bpm = enabled,
+            ColumnId::CreatedAt => cols.created_at = enabled,
+            ColumnId::ModifiedAt => cols.modified_at = enabled,
+            ColumnId::Gain => cols.gain = enabled,
+            ColumnId::Wave => cols.wave = enabled,
         }
     }
 }
@@ -659,6 +743,37 @@ pub enum EditorPrimaryView {
     Wave,
     Spec,
     Other,
+    Metadata,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MetadataSubView {
+    #[default]
+    Structure,
+    Hex,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MetadataDetailTab {
+    #[default]
+    Properties,
+    Decoded,
+    Text,
+    Waveform,
+    Hex,
+}
+
+#[derive(Clone)]
+pub struct MetadataHexPage {
+    pub start: u64,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+
+pub enum MetadataActionResult {
+    Search(Vec<u64>),
+    Hash(String),
+    Extracted(std::path::PathBuf),
+    CopyHex(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -691,6 +806,7 @@ impl EditorPrimaryView {
             Self::Wave => ViewMode::Waveform,
             Self::Spec => ViewMode::Spectrogram,
             Self::Other => ViewMode::Tempogram,
+            Self::Metadata => ViewMode::Waveform,
         }
     }
 }
@@ -852,7 +968,7 @@ impl ToolKind {
             ToolKind::LoopEdit => "Loop Edit",
             ToolKind::Markers => "Markers",
             ToolKind::Trim => "Trim",
-            ToolKind::Fade => "Fade",
+            ToolKind::Fade => "Edge Fade",
             ToolKind::Gain => "Gain",
             ToolKind::Normalize => "Normalize",
             ToolKind::PitchShift => "Pitch Shift",
@@ -1517,6 +1633,12 @@ pub enum MarkerKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FadeDragEdge {
+    In,
+    Out,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RightDragMode {
     Seek,
     SelectRange,
@@ -1782,24 +1904,66 @@ pub struct EditorTab {
     pub fade_out_range: Option<(usize, usize)>,
     pub fade_in_shape: FadeShape,
     pub fade_out_shape: FadeShape,
+    pub fade_drag_edge: Option<FadeDragEdge>,
     pub primary_view: EditorPrimaryView, // high-level editor view
     pub spec_sub_view: EditorSpecSubView, // Spec subtree selection
     pub other_sub_view: EditorOtherSubView, // Other subtree selection
-    pub show_waveform_overlay: bool,     // draw waveform overlay in feature views
-    pub channel_view: ChannelView,       // Mixdown / All / Custom
-    pub bpm_enabled: bool,               // grid toggle in editor
-    pub bpm_value: f32,                  // current BPM for grid
-    pub bpm_user_set: bool,              // user-overridden BPM
-    pub bpm_offset_sec: f32,             // grid offset in seconds
-    pub time_sig_numerator: u8,          // time signature numerator (e.g. 4)
-    pub time_sig_denominator: u8,        // time signature denominator (e.g. 4)
+    pub metadata_sub_view: MetadataSubView,
+    pub metadata_document: Option<std::sync::Arc<crate::metadata::MetadataDocument>>,
+    pub metadata_loading: bool,
+    pub metadata_error: Option<String>,
+    pub metadata_scan_rx: Option<
+        std::sync::mpsc::Receiver<std::result::Result<crate::metadata::MetadataDocument, String>>,
+    >,
+    pub metadata_selected_node: Option<crate::metadata::NodeId>,
+    pub metadata_detail_tab: MetadataDetailTab,
+    pub metadata_text_encoding: usize,
+    pub metadata_hex_offset: u64,
+    pub metadata_hex_selection: Option<crate::metadata::SourceRange>,
+    pub metadata_hex_bytes_per_row: usize,
+    pub metadata_follow_playback: bool,
+    /// Last explicit cursor position in the Metadata Hex waveform. Playback
+    /// source time takes precedence while it is available.
+    pub metadata_hex_seek_fraction: Option<f64>,
+    /// One-shot Hex scroll target used by waveform seeking. Unlike Follow
+    /// playback this does not keep taking control away from manual scrolling.
+    pub metadata_hex_scroll_target: Option<u64>,
+    pub metadata_hex_page: Option<MetadataHexPage>,
+    pub metadata_hex_pages: std::collections::VecDeque<MetadataHexPage>,
+    pub metadata_hex_page_requested: Option<u64>,
+    pub metadata_hex_page_rx:
+        Option<std::sync::mpsc::Receiver<std::result::Result<Vec<(u64, Vec<u8>)>, String>>>,
+    pub metadata_search_query: String,
+    pub metadata_search_kind: usize,
+    pub metadata_search_results: Vec<u64>,
+    pub metadata_action_status: Option<String>,
+    pub metadata_action_rx:
+        Option<std::sync::mpsc::Receiver<std::result::Result<MetadataActionResult, String>>>,
+    pub metadata_action_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub metadata_action_progress: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    pub metadata_action_total: u64,
+    pub metadata_artwork_requested: Option<crate::metadata::NodeId>,
+    pub metadata_artwork_rx: Option<
+        std::sync::mpsc::Receiver<
+            std::result::Result<(crate::metadata::NodeId, egui::ColorImage), String>,
+        >,
+    >,
+    pub metadata_artwork_texture: Option<(crate::metadata::NodeId, egui::TextureHandle)>,
+    pub show_waveform_overlay: bool, // draw waveform overlay in feature views
+    pub channel_view: ChannelView,   // Mixdown / All / Custom
+    pub bpm_enabled: bool,           // grid toggle in editor
+    pub bpm_value: f32,              // current BPM for grid
+    pub bpm_user_set: bool,          // user-overridden BPM
+    pub bpm_offset_sec: f32,         // grid offset in seconds
+    pub time_sig_numerator: u8,      // time signature numerator (e.g. 4)
+    pub time_sig_denominator: u8,    // time signature denominator (e.g. 4)
     pub seek_hold: Option<SeekHoldState>, // key repeat state for seek
-    pub snap_zero_cross: bool,           // enable zero-cross snapping
+    pub snap_zero_cross: bool,       // enable zero-cross snapping
     pub selection_anchor_sample: Option<usize>, // shared Shift/click/drag anchor
     pub right_drag_mode: Option<RightDragMode>, // transient mode while secondary drag
-    pub active_tool: ToolKind,           // current editing tool
-    pub tool_state: ToolState,           // simple per-tool parameters
-    pub loop_mode: LoopMode,             // Off / On (whole) / Marker
+    pub active_tool: ToolKind,       // current editing tool
+    pub tool_state: ToolState,       // simple per-tool parameters
+    pub loop_mode: LoopMode,         // Off / On (whole) / Marker
     pub dragging_marker: Option<MarkerKind>, // transient while dragging A/B
     // Preview audio state (non-destructive): tool-driven preview, cleared on tool/tab/view changes
     pub preview_audio_tool: Option<ToolKind>,
@@ -2000,9 +2164,39 @@ impl EditorTab {
             fade_out_range: None,
             fade_in_shape: crate::app::types::FadeShape::SCurve,
             fade_out_shape: crate::app::types::FadeShape::SCurve,
+            fade_drag_edge: None,
             primary_view: crate::app::types::EditorPrimaryView::Wave,
             spec_sub_view: crate::app::types::EditorSpecSubView::Spec,
             other_sub_view: crate::app::types::EditorOtherSubView::Tempogram,
+            metadata_sub_view: crate::app::types::MetadataSubView::Structure,
+            metadata_document: None,
+            metadata_loading: false,
+            metadata_error: None,
+            metadata_scan_rx: None,
+            metadata_selected_node: None,
+            metadata_detail_tab: crate::app::types::MetadataDetailTab::Properties,
+            metadata_text_encoding: 0,
+            metadata_hex_offset: 0,
+            metadata_hex_selection: None,
+            metadata_hex_bytes_per_row: 16,
+            metadata_follow_playback: false,
+            metadata_hex_seek_fraction: None,
+            metadata_hex_scroll_target: None,
+            metadata_hex_page: None,
+            metadata_hex_pages: std::collections::VecDeque::new(),
+            metadata_hex_page_requested: None,
+            metadata_hex_page_rx: None,
+            metadata_search_query: String::new(),
+            metadata_search_kind: 0,
+            metadata_search_results: Vec::new(),
+            metadata_action_status: None,
+            metadata_action_rx: None,
+            metadata_action_cancel: None,
+            metadata_action_progress: None,
+            metadata_action_total: 0,
+            metadata_artwork_requested: None,
+            metadata_artwork_rx: None,
+            metadata_artwork_texture: None,
             show_waveform_overlay: false,
             channel_view: ChannelView::mixdown(),
             bpm_enabled: false,
@@ -2065,6 +2259,7 @@ impl EditorTab {
             EditorPrimaryView::Wave => ViewMode::Waveform,
             EditorPrimaryView::Spec => self.spec_sub_view.to_mode(),
             EditorPrimaryView::Other => self.other_sub_view.to_mode(),
+            EditorPrimaryView::Metadata => ViewMode::Waveform,
         }
     }
 
@@ -2078,6 +2273,7 @@ impl EditorTab {
             EditorPrimaryView::Other => {
                 self.other_sub_view = EditorOtherSubView::from_mode(mode);
             }
+            EditorPrimaryView::Metadata => {}
         }
     }
 }

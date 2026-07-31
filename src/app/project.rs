@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{
     ChannelView, ChannelViewMode, EditorOtherSubView, EditorPrimaryView, EditorSpecSubView,
-    FadeShape, FileMeta, LoopMode, LoopXfadeShape, MusicAnalysisDraft, MusicAnalysisResult,
-    MusicAnalysisSourceKind, PluginFxDraft, PluginParamUiState, SpectrogramConfig,
-    SpectrogramScale, ToolKind, ToolState, TranscriptAiConfig, ViewMode,
+    FadeShape, FileMeta, LoopMode, LoopXfadeShape, MetadataSubView, MusicAnalysisDraft,
+    MusicAnalysisResult, MusicAnalysisSourceKind, PluginFxDraft, PluginParamUiState,
+    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, TranscriptAiConfig, ViewMode,
 };
 use crate::markers::MarkerEntry;
 
@@ -16,6 +16,13 @@ use crate::markers::MarkerEntry;
 pub struct ProjectFile {
     pub version: u32,
     pub name: Option<String>,
+    /// Source-path serialization policy for the whole session.
+    ///
+    /// Older sessions omit this field. They are inferred as relative only when
+    /// every stored source path is relative; mixed/absolute legacy sessions
+    /// are normalized to absolute paths on the next save.
+    #[serde(default)]
+    pub path_mode: Option<String>,
     pub base_dir: Option<String>,
     pub list: ProjectList,
     pub app: ProjectApp,
@@ -24,6 +31,49 @@ pub struct ProjectFile {
     pub active_tab: Option<usize>,
     #[serde(default)]
     pub cached_edits: Vec<ProjectEdit>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionPathMode {
+    #[default]
+    Absolute,
+    Relative,
+}
+
+impl SessionPathMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Absolute => "absolute",
+            Self::Relative => "relative",
+        }
+    }
+
+    pub fn from_project(project: &ProjectFile) -> Self {
+        match project.path_mode.as_deref().map(str::trim) {
+            Some(raw) if raw.eq_ignore_ascii_case("relative") => Self::Relative,
+            Some(raw) if raw.eq_ignore_ascii_case("absolute") => Self::Absolute,
+            _ => {
+                if project_source_paths(project)
+                    .into_iter()
+                    .all(|raw| !Path::new(raw).is_absolute())
+                {
+                    Self::Relative
+                } else {
+                    Self::Absolute
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionPathRepair {
+    /// Number of stored references that were redirected to a file/folder next
+    /// to the session's new location. Duplicate logical references count
+    /// separately because each serialized field is updated independently.
+    pub relocated_references: usize,
+    /// Absolute source references that were still missing after fallback.
+    pub unresolved_references: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -302,6 +352,24 @@ pub struct ProjectListColumns {
     /// Per-project column widths by name; empty = keep the global widths.
     #[serde(default)]
     pub widths: Vec<(String, f32)>,
+    /// Session-local visibility/order for globally registered metadata
+    /// columns. Built-ins continue to use the legacy fields above.
+    #[serde(default)]
+    pub metadata: Vec<ProjectMetadataColumn>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectMetadataColumn {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub visible: bool,
+    #[serde(default = "default_metadata_column_width")]
+    pub width: f32,
+}
+
+fn default_metadata_column_width() -> f32 {
+    150.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -330,6 +398,8 @@ pub struct ProjectTab {
     pub spec_sub_view: Option<String>,
     #[serde(default)]
     pub other_sub_view: Option<String>,
+    #[serde(default)]
+    pub metadata_sub_view: Option<String>,
     pub view_mode: String,
     pub show_waveform_overlay: bool,
     pub channel_view: ProjectChannelView,
@@ -643,6 +713,41 @@ pub(super) fn rel_path(path: &Path, base: &Path) -> String {
         .to_string()
 }
 
+pub(super) fn can_store_relative(path: &Path, base: &Path) -> bool {
+    if !path.is_absolute() {
+        return true;
+    }
+    let base_abs = if base.is_absolute() {
+        base.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(base)
+    };
+    same_volume(path, &base_abs) && diff_paths(path, &base_abs).is_some()
+}
+
+/// Serialize a user/source path according to the session-wide policy.
+///
+/// Session-owned sidecars intentionally continue to use [`rel_path`] directly:
+/// they always live beside the `.nwsess` file and are not source-path policy
+/// entries.
+pub(super) fn session_path(path: &Path, base: &Path, mode: SessionPathMode) -> String {
+    match mode {
+        SessionPathMode::Relative => rel_path(path, base),
+        SessionPathMode::Absolute => {
+            let absolute = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(path)
+            };
+            absolute.to_string_lossy().to_string()
+        }
+    }
+}
+
 /// Resolve saved path:
 /// - absolute path => use as-is
 /// - relative path => resolve from the session file's parent directory
@@ -653,6 +758,241 @@ pub(super) fn resolve_path(raw: &str, base: &Path) -> PathBuf {
     } else {
         base.join(p)
     }
+}
+
+fn is_virtual_path(raw: &str) -> bool {
+    raw.contains("://")
+}
+
+fn project_source_paths(project: &ProjectFile) -> Vec<&str> {
+    let mut out = Vec::new();
+    if let Some(raw) = project.list.root.as_deref() {
+        out.push(raw);
+    }
+    out.extend(project.list.files.iter().map(String::as_str));
+    out.extend(project.list.items.iter().map(|item| item.path.as_str()));
+    out.extend(
+        project
+            .list
+            .sample_rate_overrides
+            .iter()
+            .map(|item| item.path.as_str()),
+    );
+    out.extend(
+        project
+            .list
+            .bit_depth_overrides
+            .iter()
+            .map(|item| item.path.as_str()),
+    );
+    out.extend(
+        project
+            .list
+            .format_overrides
+            .iter()
+            .map(|item| item.path.as_str()),
+    );
+    out.extend(
+        project
+            .list
+            .transcript_languages
+            .iter()
+            .map(|item| item.path.as_str()),
+    );
+    for item in &project.list.virtual_items {
+        if !is_virtual_path(&item.path) {
+            out.push(item.path.as_str());
+        }
+        if item.source.kind.eq_ignore_ascii_case("file") {
+            if let Some(raw) = item.source.path.as_deref() {
+                out.push(raw);
+            }
+        }
+    }
+    if let Some(raw) = project.app.selected_path.as_deref() {
+        out.push(raw);
+    }
+    if let Some(policy) = project.app.export_policy.as_ref() {
+        if let Some(raw) = policy.dest_folder.as_deref() {
+            out.push(raw);
+        }
+    }
+    if let Some(external) = project.app.external_state.as_ref() {
+        out.extend(external.sources.iter().map(|source| source.path.as_str()));
+    }
+    for tab in &project.tabs {
+        out.push(tab.path.as_str());
+        if let Some(raw) = tab
+            .music_analysis
+            .as_ref()
+            .and_then(|draft| draft.stems_dir_override.as_deref())
+        {
+            out.push(raw);
+        }
+    }
+    for edit in &project.cached_edits {
+        out.push(edit.path.as_str());
+        if let Some(raw) = edit
+            .music_analysis
+            .as_ref()
+            .and_then(|draft| draft.stems_dir_override.as_deref())
+        {
+            out.push(raw);
+        }
+    }
+    out
+}
+
+fn saved_session_base(project: &ProjectFile, session_dir: &Path) -> PathBuf {
+    project
+        .base_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .map(|base| {
+            if base.is_absolute() {
+                base
+            } else {
+                session_dir.join(base)
+            }
+        })
+        .unwrap_or_else(|| session_dir.to_path_buf())
+}
+
+fn repair_one_source_path(
+    raw: &mut String,
+    old_base: &Path,
+    session_dir: &Path,
+    report: &mut SessionPathRepair,
+) {
+    if raw.trim().is_empty() || is_virtual_path(raw) {
+        return;
+    }
+    let stored = PathBuf::from(raw.as_str());
+    if stored.is_absolute() {
+        if stored.exists() {
+            return;
+        }
+        if let Some(relative) = diff_paths(&stored, old_base) {
+            let candidate = session_dir.join(relative);
+            if candidate.exists() {
+                *raw = session_path(&candidate, session_dir, SessionPathMode::Absolute);
+                report.relocated_references = report.relocated_references.saturating_add(1);
+                return;
+            }
+        }
+        report.unresolved_references = report.unresolved_references.saturating_add(1);
+        return;
+    }
+
+    // Absolute-mode legacy sessions may still contain relative entries. Resolve
+    // them as one policy, preferring the current session location and retaining
+    // the original base only when the moved copy is absent.
+    let current_candidate = session_dir.join(&stored);
+    let original_candidate = old_base.join(&stored);
+    let resolved = if current_candidate.exists() {
+        current_candidate
+    } else {
+        original_candidate.clone()
+    };
+    if !resolved.exists() {
+        report.unresolved_references = report.unresolved_references.saturating_add(1);
+    } else if resolved != original_candidate || old_base != session_dir {
+        report.relocated_references = report.relocated_references.saturating_add(1);
+    }
+    *raw = session_path(&resolved, session_dir, SessionPathMode::Absolute);
+}
+
+/// Repair source references in an absolute-path session after the `.nwsess`
+/// file and its companion files have moved together.
+///
+/// Only source/user paths are touched. Session-owned sidecars remain relative
+/// to the `.nwsess` file. Missing entries stay in the document so a handful of
+/// unavailable files never prevents the remaining session from opening.
+pub(super) fn repair_project_source_paths(
+    project: &mut ProjectFile,
+    session_path: &Path,
+) -> SessionPathRepair {
+    let mode = SessionPathMode::from_project(project);
+    if mode != SessionPathMode::Absolute {
+        return SessionPathRepair::default();
+    }
+    let session_dir = session_path.parent().unwrap_or_else(|| Path::new("."));
+    let old_base = saved_session_base(project, session_dir);
+    let mut report = SessionPathRepair::default();
+    let mut repair = |raw: &mut String| {
+        repair_one_source_path(raw, &old_base, session_dir, &mut report);
+    };
+
+    if let Some(raw) = project.list.root.as_mut() {
+        repair(raw);
+    }
+    for raw in &mut project.list.files {
+        repair(raw);
+    }
+    for item in &mut project.list.items {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.sample_rate_overrides {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.bit_depth_overrides {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.format_overrides {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.transcript_languages {
+        repair(&mut item.path);
+    }
+    for item in &mut project.list.virtual_items {
+        if !is_virtual_path(&item.path) {
+            repair(&mut item.path);
+        }
+        if item.source.kind.eq_ignore_ascii_case("file") {
+            if let Some(raw) = item.source.path.as_mut() {
+                repair(raw);
+            }
+        }
+    }
+    if let Some(raw) = project.app.selected_path.as_mut() {
+        repair(raw);
+    }
+    if let Some(policy) = project.app.export_policy.as_mut() {
+        if let Some(raw) = policy.dest_folder.as_mut() {
+            repair(raw);
+        }
+    }
+    if let Some(external) = project.app.external_state.as_mut() {
+        for source in &mut external.sources {
+            repair(&mut source.path);
+        }
+    }
+    for tab in &mut project.tabs {
+        repair(&mut tab.path);
+        if let Some(raw) = tab
+            .music_analysis
+            .as_mut()
+            .and_then(|draft| draft.stems_dir_override.as_mut())
+        {
+            repair(raw);
+        }
+    }
+    for edit in &mut project.cached_edits {
+        repair(&mut edit.path);
+        if let Some(raw) = edit
+            .music_analysis
+            .as_mut()
+            .and_then(|draft| draft.stems_dir_override.as_mut())
+        {
+            repair(raw);
+        }
+    }
+
+    project.path_mode = Some(mode.as_str().to_string());
+    if report.relocated_references > 0 {
+        project.base_dir = Some(session_dir.to_string_lossy().to_string());
+    }
+    report
 }
 
 fn project_sidecar_dir(path: &Path) -> PathBuf {
@@ -874,15 +1214,17 @@ pub fn project_spectrogram_from_cfg(cfg: &SpectrogramConfig) -> ProjectSpectrogr
 pub fn project_tab_from_tab(
     tab: &super::types::EditorTab,
     base: &Path,
+    path_mode: SessionPathMode,
     edited_audio: Option<PathBuf>,
     preview_audio: Option<PathBuf>,
     preview_tool: Option<String>,
 ) -> ProjectTab {
     ProjectTab {
-        path: rel_path(&tab.path, base),
+        path: session_path(&tab.path, base, path_mode),
         primary_view: Some(project_primary_view_string(tab.primary_view)),
         spec_sub_view: Some(project_spec_sub_view_string(tab.spec_sub_view)),
         other_sub_view: Some(project_other_sub_view_string(tab.other_sub_view)),
+        metadata_sub_view: Some(project_metadata_sub_view_string(tab.metadata_sub_view)),
         view_mode: format!("{:?}", tab.leaf_view_mode()),
         show_waveform_overlay: tab.show_waveform_overlay,
         channel_view: ProjectChannelView {
@@ -968,13 +1310,18 @@ pub fn project_tab_from_tab(
         buffer_sample_rate: Some(tab.buffer_sample_rate.max(1)),
         edited_audio: edited_audio.map(|p| rel_path(&p, base)),
         plugin_fx_draft: project_plugin_fx_draft_from_draft(&tab.plugin_fx_draft),
-        music_analysis: project_music_analysis_from_draft(&tab.music_analysis_draft, base),
+        music_analysis: project_music_analysis_from_draft(
+            &tab.music_analysis_draft,
+            base,
+            path_mode,
+        ),
     }
 }
 
 pub fn project_music_analysis_from_draft(
     draft: &MusicAnalysisDraft,
     base: &Path,
+    path_mode: SessionPathMode,
 ) -> Option<ProjectMusicAnalysisDraft> {
     if draft.result.is_none()
         && draft.stems_dir_override.is_none()
@@ -993,7 +1340,7 @@ pub fn project_music_analysis_from_draft(
         stems_dir_override: draft
             .stems_dir_override
             .as_ref()
-            .map(|path| rel_path(path, base)),
+            .map(|path| session_path(path, base, path_mode)),
         last_error: draft.last_error.clone(),
         analysis_source_len: draft.analysis_source_len,
         analysis_source_kind: draft.analysis_source_kind,
@@ -1225,8 +1572,24 @@ pub fn project_primary_view_string(view: EditorPrimaryView) -> String {
         EditorPrimaryView::Wave => "wave",
         EditorPrimaryView::Spec => "spec",
         EditorPrimaryView::Other => "other",
+        EditorPrimaryView::Metadata => "metadata",
     }
     .to_string()
+}
+
+pub fn project_metadata_sub_view_string(view: MetadataSubView) -> String {
+    match view {
+        MetadataSubView::Structure => "structure",
+        MetadataSubView::Hex => "hex",
+    }
+    .to_string()
+}
+
+pub fn metadata_sub_view_from_project(value: Option<&str>) -> MetadataSubView {
+    match value.map(|raw| raw.trim().to_ascii_lowercase()) {
+        Some(value) if value == "hex" => MetadataSubView::Hex,
+        _ => MetadataSubView::Structure,
+    }
 }
 
 pub fn project_spec_sub_view_string(view: EditorSpecSubView) -> String {
@@ -1258,6 +1621,7 @@ pub fn primary_view_from_project(
         Some(v) if v == "spec" => EditorPrimaryView::Spec,
         Some(v) if v == "other" => EditorPrimaryView::Other,
         Some(v) if v == "wave" => EditorPrimaryView::Wave,
+        Some(v) if v == "metadata" => EditorPrimaryView::Metadata,
         _ => EditorPrimaryView::from_mode(legacy_mode),
     };
     let spec_view = match spec_sub_view.map(|v| v.trim().to_ascii_lowercase()) {
@@ -1359,6 +1723,12 @@ pub fn describe_missing(path: &Path) -> String {
 impl super::WavesPreviewer {
     pub(super) fn close_project(&mut self) {
         self.audio.stop();
+        // Detach in-flight preview receivers before tab indices and paths are
+        // reused by the next session. Worker threads may still finish, but
+        // their generation-bound results can no longer be installed into the
+        // newly opened project.
+        self.clear_heavy_preview_state();
+        self.clear_heavy_overlay_state();
         self.tabs.clear();
         self.active_tab = None;
         self.workspace_view = super::types::WorkspaceView::List;
@@ -1380,6 +1750,7 @@ impl super::WavesPreviewer {
         self.list_redo_stack.clear();
         self.overwrite_undo_stack.clear();
         self.project_path = None;
+        self.session_path_mode = SessionPathMode::Absolute;
     }
 
     pub(super) fn reset_list_from_project(&mut self, raw_paths: &[String], base_dir: &Path) {
@@ -1708,6 +2079,21 @@ wave = true
         );
     }
 
+    #[test]
+    fn metadata_view_and_subview_restore_without_changing_legacy_view_mode() {
+        let restored = primary_view_from_project(Some("metadata"), Some("spec"), None, "Waveform");
+        assert_eq!(restored.0, EditorPrimaryView::Metadata);
+        assert_eq!(
+            metadata_sub_view_from_project(Some("hex")),
+            MetadataSubView::Hex
+        );
+        assert_eq!(
+            metadata_sub_view_from_project(None),
+            MetadataSubView::Structure
+        );
+        assert_eq!(view_mode_from_str("Metadata"), ViewMode::Waveform);
+    }
+
     // ── TOML serialization roundtrip (toml 1.1 migration) ────────────────────
 
     const MINIMAL_TOML: &str = r#"
@@ -1765,6 +2151,28 @@ show_note_labels = false
         assert_eq!(p.list.files, p2.list.files);
         assert_eq!(p.app.theme, p2.app.theme);
         assert_eq!(p.app.sort_key, p2.app.sort_key);
+    }
+
+    #[test]
+    fn dynamic_metadata_columns_roundtrip_with_stable_keys() {
+        let mut project = deserialize_project(MINIMAL_TOML).unwrap();
+        project
+            .app
+            .list_columns
+            .metadata
+            .push(ProjectMetadataColumn {
+                key: "normalized:ucs.cat_id".to_string(),
+                label: "CatID".to_string(),
+                visible: true,
+                width: 184.0,
+            });
+        let encoded = serialize_project(&project).unwrap();
+        let restored = deserialize_project(&encoded).unwrap();
+        let column = &restored.app.list_columns.metadata[0];
+        assert_eq!(column.key, "normalized:ucs.cat_id");
+        assert_eq!(column.label, "CatID");
+        assert!(column.visible);
+        assert_eq!(column.width, 184.0);
     }
 
     #[test]

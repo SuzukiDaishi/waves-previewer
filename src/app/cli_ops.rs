@@ -18,6 +18,7 @@ use super::project::{
     project_spec_sub_view_string, project_tool_state_to_tool_state, serialize_project, ProjectApp,
     ProjectChannelView, ProjectExportPolicy, ProjectFile, ProjectList, ProjectListColumns,
     ProjectListItem, ProjectMarker, ProjectPluginFxDraft, ProjectTab, ProjectToolState,
+    SessionPathMode,
 };
 use super::render::spectrogram;
 use super::types::{
@@ -54,6 +55,9 @@ use crate::cli::{
     ExternalRenderArgs, ExternalRowsArgs, ExternalSourceAddArgs, ExternalSourceClearArgs,
     ExternalSourceCommand, ExternalSourceListArgs, ExternalSourceReloadArgs,
     ExternalSourceRemoveArgs, ItemArtworkArgs, ItemCommand, ItemInspectArgs, ItemMetaArgs,
+    ItemMetadataCommand, ItemMetadataInspectArgs, ItemMetadataPayloadCommand,
+    ItemMetadataPayloadExtractArgs, ItemMetadataPayloadHashArgs, ItemMetadataPayloadReadArgs,
+    ItemMetadataPayloadSearchArgs, ItemMetadataPayloadSelectorArgs, ItemMetadataSummaryArgs,
     ListColumnsArgs, ListCommand, ListQueryArgs, ListRenderArgs, ListSaveQueryArgs, ListSearchArgs,
     ListSelectArgs, ListSortArgs, ListSourceArgs, MusicAiAnalyzeArgs, MusicAiApplyMarkersArgs,
     MusicAiCommand, MusicAiExportStemsArgs, MusicAiInspectArgs, MusicAiModelCommand,
@@ -104,6 +108,7 @@ struct CliCommandOutput {
 struct LoadedSession {
     path: PathBuf,
     base_dir: PathBuf,
+    path_mode: SessionPathMode,
     project: ProjectFile,
 }
 
@@ -244,6 +249,24 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         CliCommand::Session(SessionCommand::Inspect(_)) => "session.inspect",
         CliCommand::Item(ItemCommand::Inspect(_)) => "item.inspect",
         CliCommand::Item(ItemCommand::Meta(_)) => "item.meta",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Inspect(_))) => {
+            "item.metadata.inspect"
+        }
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Summary(_))) => {
+            "item.metadata.summary"
+        }
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Read(_),
+        ))) => "item.metadata.payload.read",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Search(_),
+        ))) => "item.metadata.payload.search",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Hash(_),
+        ))) => "item.metadata.payload.hash",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Extract(_),
+        ))) => "item.metadata.payload.extract",
         CliCommand::Item(ItemCommand::Artwork(_)) => "item.artwork",
         CliCommand::List(ListCommand::Columns(_)) => "list.columns",
         CliCommand::List(ListCommand::Query(_)) => "list.query",
@@ -470,7 +493,27 @@ fn dispatch_item(command: ItemCommand) -> Result<CliCommandOutput> {
     match command {
         ItemCommand::Inspect(args) => item_inspect(args),
         ItemCommand::Meta(args) => item_meta(args),
+        ItemCommand::Metadata(command) => dispatch_item_metadata(command),
         ItemCommand::Artwork(args) => item_artwork(args),
+    }
+}
+
+fn dispatch_item_metadata(command: ItemMetadataCommand) -> Result<CliCommandOutput> {
+    match command {
+        ItemMetadataCommand::Inspect(args) => item_metadata_inspect(args),
+        ItemMetadataCommand::Summary(args) => item_metadata_summary(args),
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Read(args)) => {
+            item_metadata_payload_read(args)
+        }
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Search(args)) => {
+            item_metadata_payload_search(args)
+        }
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Hash(args)) => {
+            item_metadata_payload_hash(args)
+        }
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Extract(args)) => {
+            item_metadata_payload_extract(args)
+        }
     }
 }
 
@@ -727,6 +770,8 @@ fn session_inspect(args: SessionInspectArgs) -> Result<CliCommandOutput> {
         result: json!({
             "session_path": absolute_string(&session.path)?,
             "project_version": session.project.version,
+            "path_mode": session.path_mode.as_str(),
+            "path_root": pathbuf_to_string(&session.base_dir),
             "file_count": entries.len(),
             "files": entries.iter().map(|entry| pathbuf_to_string(&entry.path)).collect::<Vec<_>>(),
             "tab_count": session.project.tabs.len(),
@@ -769,6 +814,274 @@ fn item_meta(args: ItemMetaArgs) -> Result<CliCommandOutput> {
             "meta": audio_info_json(&info),
         }),
         warnings: Vec::new(),
+    })
+}
+
+fn item_metadata_inspect(args: ItemMetadataInspectArgs) -> Result<CliCommandOutput> {
+    let path = absolute_existing_path(&args.input)?;
+    let document =
+        crate::metadata::inspect_path(&path, crate::metadata::InspectOptions::default())?;
+    let warnings = document
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level != crate::metadata::DiagnosticLevel::Info)
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    Ok(CliCommandOutput {
+        result: metadata_document_json(&document),
+        warnings,
+    })
+}
+
+fn item_metadata_summary(args: ItemMetadataSummaryArgs) -> Result<CliCommandOutput> {
+    let path = absolute_existing_path(&args.input)?;
+    let summary = crate::metadata::summarize_path(
+        &path,
+        crate::metadata::SummaryRequest {
+            fields: args.fields,
+            include_raw: args.include_raw,
+        },
+        crate::metadata::ScanBudget::selected(),
+        None,
+    )?;
+    let warnings = summary
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level != crate::metadata::DiagnosticLevel::Info)
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    Ok(CliCommandOutput {
+        result: metadata_summary_json(&summary),
+        warnings,
+    })
+}
+
+fn resolve_metadata_payload(
+    selector: &ItemMetadataPayloadSelectorArgs,
+) -> Result<(PathBuf, crate::metadata::PayloadRef)> {
+    let path = absolute_existing_path(&selector.input)?;
+    let document = crate::metadata::inspect_path(
+        &path,
+        crate::metadata::InspectOptions {
+            decode_xml: false,
+            decode_values: false,
+            ..Default::default()
+        },
+    )?;
+    let payload = crate::metadata::payload_for_selector(
+        &document,
+        selector.node_path.as_deref(),
+        selector.occurrence,
+        selector.offset,
+        selector.length,
+    )?;
+    Ok((path, payload))
+}
+
+fn item_metadata_payload_read(args: ItemMetadataPayloadReadArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let bytes = crate::metadata::read_payload(&path, payload, crate::metadata::PAYLOAD_COPY_LIMIT)?;
+    let encoding = args.format.trim().to_ascii_lowercase();
+    let data = match encoding.as_str() {
+        "hex" => bytes
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        "base64" => base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "text" | "utf8" => String::from_utf8_lossy(&bytes).to_string(),
+        _ => bail!("payload read format must be hex, base64, or text"),
+    };
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "offset": payload.file_offset.to_string(),
+            "offset_hex": format!("0x{:X}", payload.file_offset),
+            "length": payload.length.to_string(),
+            "length_hex": format!("0x{:X}", payload.length),
+            "format": encoding,
+            "data": data,
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn item_metadata_payload_search(args: ItemMetadataPayloadSearchArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let kind = match args.kind.trim().to_ascii_lowercase().as_str() {
+        "ascii" => crate::metadata::SearchKind::Ascii,
+        "utf8" | "utf-8" => crate::metadata::SearchKind::Utf8,
+        "hex" => crate::metadata::SearchKind::Hex,
+        "fourcc" => crate::metadata::SearchKind::FourCc,
+        _ => bail!("payload search kind must be ascii, utf8, hex, or fourcc"),
+    };
+    let pattern = crate::metadata::parse_search_pattern(kind, &args.query)?;
+    let limit = args
+        .limit
+        .clamp(1, crate::metadata::PAYLOAD_SEARCH_RESULT_LIMIT);
+    let hits = crate::metadata::search_payload(&path, payload, &pattern, limit, None)?;
+    let truncated = hits.len() >= limit;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "payload_offset": payload.file_offset.to_string(),
+            "payload_length": payload.length.to_string(),
+            "kind": args.kind,
+            "query": args.query,
+            "matches": hits.iter().map(|offset| json!({
+                "offset": offset.to_string(),
+                "offset_hex": format!("0x{offset:X}"),
+            })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }),
+        warnings: if truncated {
+            vec![format!("search results reached the limit of {limit}")]
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn item_metadata_payload_hash(args: ItemMetadataPayloadHashArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let algorithm = match args.algorithm.trim().to_ascii_lowercase().as_str() {
+        "md5" => crate::metadata::HashAlgorithm::Md5,
+        "sha256" | "sha-256" => crate::metadata::HashAlgorithm::Sha256,
+        _ => bail!("payload hash algorithm must be md5 or sha256"),
+    };
+    let digest = crate::metadata::hash_payload(&path, payload, algorithm, None)?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "offset": payload.file_offset.to_string(),
+            "length": payload.length.to_string(),
+            "algorithm": match algorithm {
+                crate::metadata::HashAlgorithm::Md5 => "md5",
+                crate::metadata::HashAlgorithm::Sha256 => "sha256",
+            },
+            "digest": digest,
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn item_metadata_payload_extract(args: ItemMetadataPayloadExtractArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let output = absolute_output_path(&args.output)?;
+    crate::metadata::extract_payload(&path, payload, &output, args.overwrite, None)?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "offset": payload.file_offset.to_string(),
+            "length": payload.length.to_string(),
+            "output": pathbuf_to_string(&output),
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn metadata_document_json(document: &crate::metadata::MetadataDocument) -> Value {
+    json!({
+        "schema_version": document.schema_version,
+        "path": pathbuf_to_string(&document.source),
+        "container": document.container.key(),
+        "file_length": document.file_len.to_string(),
+        "file_length_hex": format!("0x{:X}", document.file_len),
+        "completion": format!("{:?}", document.completion).to_ascii_lowercase(),
+        "roots": document.roots,
+        "nodes": document.nodes.iter().map(|node| json!({
+            "id": node.id,
+            "parent": node.parent,
+            "children": node.children,
+            "name": node.name,
+            "path": node.path,
+            "offset": node.offset.to_string(),
+            "offset_hex": format!("0x{:X}", node.offset),
+            "header_size": node.header_size.to_string(),
+            "declared_size": node.declared_size.to_string(),
+            "readable_size": node.readable_size.to_string(),
+            "payload": {
+                "offset": node.payload.file_offset.to_string(),
+                "offset_hex": format!("0x{:X}", node.payload.file_offset),
+                "length": node.payload.length.to_string(),
+                "length_hex": format!("0x{:X}", node.payload.length),
+            },
+            "content": format!("{:?}", node.content).to_ascii_lowercase(),
+            "known": node.known,
+            "status": format!("{:?}", node.status).to_ascii_lowercase(),
+            "summary": node.summary,
+        })).collect::<Vec<_>>(),
+        "normalized": document.normalized.iter().map(metadata_normalized_json).collect::<Vec<_>>(),
+        "diagnostics": document.diagnostics.iter().map(metadata_diagnostic_json).collect::<Vec<_>>(),
+        "audio_mapping": document.audio_mapping.as_ref().map(|mapping| json!({
+            "node_id": mapping.node_id,
+            "data_offset": mapping.data_offset.to_string(),
+            "data_offset_hex": format!("0x{:X}", mapping.data_offset),
+            "data_length": mapping.data_length.to_string(),
+            "sample_rate": mapping.sample_rate,
+            "channels": mapping.channels,
+            "block_align": mapping.block_align,
+            "container_bits": mapping.container_bits,
+            "valid_bits": mapping.valid_bits,
+            "format_tag": mapping.format_tag,
+            "format_subtype": mapping.format_subtype,
+            "format_name": mapping.format_name,
+            "frame_count": mapping.frame_count().to_string(),
+        })),
+    })
+}
+
+fn metadata_summary_json(summary: &crate::metadata::MetadataSummary) -> Value {
+    json!({
+        "schema_version": summary.schema_version,
+        "path": pathbuf_to_string(&summary.source),
+        "container": summary.container.key(),
+        "completion": format!("{:?}", summary.completion).to_ascii_lowercase(),
+        "fields": summary.fields.iter().map(|field| json!({
+            "key": field.key,
+            "values": field.values.iter().map(metadata_sourced_value_json).collect::<Vec<_>>(),
+            "resolved": field.resolved,
+            "conflict": field.conflict,
+        })).collect::<Vec<_>>(),
+        "raw_fields": summary.raw_fields,
+        "unknown_nodes": summary.unknown_nodes,
+        "coverage": summary.coverage,
+        "diagnostics": summary.diagnostics.iter().map(metadata_diagnostic_json).collect::<Vec<_>>(),
+    })
+}
+
+fn metadata_normalized_json(field: &crate::metadata::NormalizedField) -> Value {
+    json!({
+        "key": field.key,
+        "values": field.values.iter().map(metadata_sourced_value_json).collect::<Vec<_>>(),
+        "resolved_index": field.resolved_index,
+        "conflict": field.conflict,
+    })
+}
+
+fn metadata_sourced_value_json(value: &crate::metadata::SourcedValue) -> Value {
+    json!({
+        "value": value.value,
+        "source_path": value.source_path,
+        "source_node": value.source_node,
+        "source_range": {
+            "offset": value.source_range.offset.to_string(),
+            "offset_hex": format!("0x{:X}", value.source_range.offset),
+            "length": value.source_range.length.to_string(),
+        },
+        "encoding": value.encoding,
+        "guessed_encoding": value.guessed_encoding,
+    })
+}
+
+fn metadata_diagnostic_json(value: &crate::metadata::MetadataDiagnostic) -> Value {
+    json!({
+        "level": format!("{:?}", value.level).to_ascii_lowercase(),
+        "code": value.code,
+        "message": value.message,
+        "offset": value.offset.map(|offset| offset.to_string()),
+        "offset_hex": value.offset.map(|offset| format!("0x{offset:X}")),
+        "node": value.node,
     })
 }
 
@@ -947,6 +1260,10 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
         result: json!({
             "columns": columns,
             "default": DEFAULT_LIST_COLUMNS.split(',').collect::<Vec<_>>(),
+            "dynamic_column_syntax": {
+                "normalized": "normalized:<normalized-field-key>",
+                "raw": "raw:<format>:<percent-escaped-logical-path>",
+            },
         }),
         warnings: Vec::new(),
     })
@@ -958,6 +1275,7 @@ fn list_query(args: ListQueryArgs) -> Result<CliCommandOutput> {
     let source = load_list_source(&args.source)?;
     let mut warnings = Vec::new();
     let mut rows = list_rows_from_source(&source, args.include_overlays, &mut warnings)?;
+    populate_list_metadata_columns(&mut rows, &columns, &mut warnings);
     apply_list_query_filter_sort(
         &mut rows,
         filter.query.as_deref(),
@@ -1049,7 +1367,11 @@ fn list_select(args: ListSelectArgs) -> Result<CliCommandOutput> {
                 .context("selected row missing path")?,
         )
     };
-    session.project.app.selected_path = Some(project::rel_path(&selected, &session.base_dir));
+    session.project.app.selected_path = Some(project::session_path(
+        &selected,
+        &session.base_dir,
+        session.path_mode,
+    ));
     save_session(&session)?;
     Ok(CliCommandOutput {
         result: json!({
@@ -2628,8 +2950,18 @@ fn load_session(path: &Path) -> Result<LoadedSession> {
     let path = absolute_existing_path(path)?;
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("read session file: {}", path.display()))?;
-    let project = deserialize_project(&text)
+    let mut project = deserialize_project(&text)
         .with_context(|| format!("parse session file: {}", path.display()))?;
+    let path_mode = SessionPathMode::from_project(&project);
+    let repaired = project::repair_project_source_paths(&mut project, &path);
+    if repaired.relocated_references > 0 {
+        write_project_file(&path, &project).with_context(|| {
+            format!(
+                "update {} repaired session path reference(s)",
+                repaired.relocated_references
+            )
+        })?;
+    }
     let base_dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -2637,6 +2969,7 @@ fn load_session(path: &Path) -> Result<LoadedSession> {
     Ok(LoadedSession {
         path,
         base_dir,
+        path_mode,
         project,
     })
 }
@@ -2703,6 +3036,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
     Ok(ProjectFile {
         version: 1,
         name: None,
+        path_mode: Some(SessionPathMode::Absolute.as_str().to_string()),
         base_dir: None,
         list: ProjectList {
             root: None,
@@ -2818,13 +3152,18 @@ fn resolve_session_target_path(
     bail!("session does not contain any target audio")
 }
 
-fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<ProjectTab> {
+fn default_project_tab_for_path(
+    path: &Path,
+    session_base: &Path,
+    path_mode: SessionPathMode,
+) -> Result<ProjectTab> {
     let info = read_audio_info(path)?;
     Ok(ProjectTab {
-        path: project::rel_path(path, session_base),
+        path: project::session_path(path, session_base, path_mode),
         primary_view: Some("wave".to_string()),
         spec_sub_view: Some("spec".to_string()),
         other_sub_view: Some("tempogram".to_string()),
+        metadata_sub_view: Some("structure".to_string()),
         view_mode: "Waveform".to_string(),
         show_waveform_overlay: false,
         channel_view: ProjectChannelView {
@@ -2901,7 +3240,7 @@ fn ensure_project_tab_for_path(session: &mut LoadedSession, target: &Path) -> Re
         session.project.active_tab = Some(idx);
         return Ok(idx);
     }
-    let tab = default_project_tab_for_path(target, &session.base_dir)?;
+    let tab = default_project_tab_for_path(target, &session.base_dir, session.path_mode)?;
     session.project.tabs.push(tab);
     let idx = session.project.tabs.len().saturating_sub(1);
     session.project.active_tab = Some(idx);
@@ -3028,12 +3367,14 @@ fn project_for_list_render(
             let entries = slice_entries(session_list_entries(&session), offset, limit);
             session.project.list.files = entries
                 .iter()
-                .map(|entry| project::rel_path(&entry.path, &session.base_dir))
+                .map(|entry| {
+                    project::session_path(&entry.path, &session.base_dir, session.path_mode)
+                })
                 .collect();
             session.project.list.items = entries
                 .iter()
                 .map(|entry| ProjectListItem {
-                    path: project::rel_path(&entry.path, &session.base_dir),
+                    path: project::session_path(&entry.path, &session.base_dir, session.path_mode),
                     pending_gain_db: entry.pending_gain_db,
                 })
                 .collect();
@@ -3080,6 +3421,7 @@ fn resolve_editor_state(source: &EditorSourceArgs) -> Result<EditorTargetState> 
         EditorPrimaryView::Wave => ViewMode::Waveform,
         EditorPrimaryView::Spec => spec.to_mode(),
         EditorPrimaryView::Other => other.to_mode(),
+        EditorPrimaryView::Metadata => ViewMode::Waveform,
     };
     let markers = if tab.markers.is_empty() {
         markers_from_file
@@ -3268,15 +3610,15 @@ fn apply_list_query_filter_sort(
     if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
         let query = query.to_ascii_lowercase();
         rows.retain(|row| {
-            row.get("file")
-                .and_then(Value::as_str)
-                .map(|value| value.to_ascii_lowercase().contains(&query))
-                .unwrap_or(false)
-                || row
-                    .get("folder")
-                    .and_then(Value::as_str)
+            row.values().any(|value| {
+                value
+                    .as_str()
                     .map(|value| value.to_ascii_lowercase().contains(&query))
-                    .unwrap_or(false)
+                    .unwrap_or_else(|| {
+                        matches!(value, Value::Number(_) | Value::Bool(_))
+                            && value.to_string().to_ascii_lowercase().contains(&query)
+                    })
+            })
         });
     }
     if let Some(sort_key) = sort_key {
@@ -3399,7 +3741,7 @@ fn set_pending_gain_for_session_path(session: &mut LoadedSession, path: &Path, g
         }
     }
     session.project.list.items.push(ProjectListItem {
-        path: project::rel_path(path, &session.base_dir),
+        path: project::session_path(path, &session.base_dir, session.path_mode),
         pending_gain_db: gain_db,
     });
 }
@@ -4125,43 +4467,109 @@ fn opt_f32_csv(value: Option<f32>) -> String {
 }
 
 fn parse_list_column_keys(raw: &str) -> Result<Vec<String>> {
-    let cfg = parse_list_column_config(raw)?;
     let mut out = Vec::new();
-    for (key, enabled) in [
-        ("edited", cfg.edited),
-        ("cover_art", cfg.cover_art),
-        ("type_badge", cfg.type_badge),
-        ("file", cfg.file),
-        ("folder", cfg.folder),
-        ("transcript", cfg.transcript),
-        ("transcript_language", cfg.transcript_language),
-        ("external", cfg.external),
-        ("length", cfg.length),
-        ("channels", cfg.channels),
-        ("sample_rate", cfg.sample_rate),
-        ("bits", cfg.bits),
-        ("bit_rate", cfg.bit_rate),
-        ("peak", cfg.peak),
-        ("lufs", cfg.lufs),
-        ("dbtp", cfg.dbtp),
-        ("lufs_s", cfg.lufs_s),
-        ("lufs_m", cfg.lufs_m),
-        ("bpm", cfg.bpm),
-        ("silence_lead", cfg.silence_lead),
-        ("silence_tail", cfg.silence_tail),
-        ("edge_zero", cfg.edge_zero),
-        ("over_peak", cfg.over_peak),
-        ("blank_pad", cfg.blank_pad),
-        ("created_at", cfg.created_at),
-        ("modified_at", cfg.modified_at),
-        ("gain", cfg.gain),
-        ("wave", cfg.wave),
-    ] {
-        if enabled {
+    for key in raw.split(',').map(str::trim).filter(|key| !key.is_empty()) {
+        if crate::app::types::ColumnKey::parse(key).is_none() {
+            bail!("unknown list column key: {key}");
+        }
+        if !out.iter().any(|existing| existing == key) {
             out.push(key.to_string());
         }
     }
     Ok(out)
+}
+
+fn populate_list_metadata_columns(
+    rows: &mut [Map<String, Value>],
+    columns: &[String],
+    warnings: &mut Vec<String>,
+) {
+    let mut request = crate::metadata::SummaryRequest::default();
+    let metadata_columns = columns
+        .iter()
+        .filter_map(|key| {
+            crate::app::types::ColumnKey::parse(key)
+                .filter(|column| !matches!(column, crate::app::types::ColumnKey::Builtin(_)))
+                .map(|column| (key.clone(), column))
+        })
+        .collect::<Vec<_>>();
+    if metadata_columns.is_empty() {
+        return;
+    }
+    for (_, column) in &metadata_columns {
+        match column {
+            crate::app::types::ColumnKey::Normalized(key) => {
+                if !request.fields.contains(key) {
+                    request.fields.push(key.clone());
+                }
+            }
+            crate::app::types::ColumnKey::Raw(_) => request.include_raw = true,
+            crate::app::types::ColumnKey::Builtin(_) => {}
+        }
+    }
+    let mut cache = crate::metadata::cache::default_cache_path()
+        .as_deref()
+        .and_then(|path| crate::metadata::cache::MetadataCache::open(path).ok());
+    for row in rows {
+        let Some(path) = row.get("path").and_then(Value::as_str).map(PathBuf::from) else {
+            continue;
+        };
+        let result = if let Some(cache) = cache.as_mut() {
+            cache
+                .get_or_scan(
+                    &path,
+                    request.clone(),
+                    crate::metadata::ScanBudget::selected(),
+                    None,
+                )
+                .map(|lookup| lookup.summary)
+        } else {
+            crate::metadata::summarize_path(
+                &path,
+                request.clone(),
+                crate::metadata::ScanBudget::selected(),
+                None,
+            )
+        };
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                warnings.push(format!(
+                    "{}: metadata summary failed: {error:#}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        for (serialized, column) in &metadata_columns {
+            let value = match column {
+                crate::app::types::ColumnKey::Normalized(key) => summary
+                    .fields
+                    .iter()
+                    .find(|field| &field.key == key)
+                    .and_then(|field| field.resolved.as_ref())
+                    .map(metadata_value_json),
+                crate::app::types::ColumnKey::Raw(key) => summary
+                    .raw_fields
+                    .get(key)
+                    .map(|values| Value::Array(values.iter().map(metadata_value_json).collect())),
+                crate::app::types::ColumnKey::Builtin(_) => None,
+            }
+            .unwrap_or(Value::Null);
+            row.insert(serialized.clone(), value);
+        }
+    }
+}
+
+fn metadata_value_json(value: &crate::metadata::MetadataValue) -> Value {
+    match value {
+        crate::metadata::MetadataValue::Text(value)
+        | crate::metadata::MetadataValue::BinarySummary(value) => Value::String(value.clone()),
+        crate::metadata::MetadataValue::Signed(value) => json!(value),
+        crate::metadata::MetadataValue::Unsigned(value) => Value::String(value.to_string()),
+        crate::metadata::MetadataValue::Float(value) => json!(value),
+        crate::metadata::MetadataValue::Bool(value) => json!(value),
+    }
 }
 
 fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
@@ -4263,6 +4671,7 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         blank_pad: cfg.blank_pad,
         order: Vec::new(),
         widths: Vec::new(),
+        metadata: Vec::new(),
     }
 }
 
@@ -4732,6 +5141,7 @@ fn build_editor_render_session(args: &RenderEditorArgs) -> Result<PathBuf> {
             .map(|item| Path::new(&item.path))
             .context("missing render editor source")?,
         &cli_render_dir()?.join("sessions"),
+        SessionPathMode::Absolute,
     )?;
     if let Some(mode) = args.view_mode {
         let mode: ViewMode = mode.into();
@@ -4786,6 +5196,7 @@ fn debug_session_target(source: &EditorSourceArgs) -> Result<(PathBuf, bool)> {
             .map(|item| Path::new(&item.path))
             .context("missing debug source")?,
         &cli_render_dir()?.join("sessions"),
+        SessionPathMode::Absolute,
     )?;
     if let Ok(info) = read_audio_info(&input_path) {
         if let Ok(markers) = read_markers_in_file_space(&input_path, &info) {

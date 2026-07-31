@@ -211,6 +211,15 @@ impl WavesPreviewer {
                 }
             }
         }
+        for (_, column) in self.visible_metadata_columns() {
+            table = table.column(
+                egui_extras::Column::initial(
+                    self.list_col_w(&column.key.serialized_name(), column.width),
+                )
+                .resizable(true),
+            );
+            filler_cols += 1;
+        }
 
         table = table
             .column(egui_extras::Column::remainder())
@@ -271,7 +280,7 @@ impl WavesPreviewer {
             if !width.is_finite() || width < 10.0 {
                 continue;
             }
-            let effective = self.list_col_w(key, Self::list_col_default(key));
+            let effective = self.list_col_w(&key, Self::list_col_default(&key));
             if (effective - width).abs() > 0.5 {
                 self.list_col_widths.insert(key.to_string(), width);
                 changed = true;
@@ -317,7 +326,8 @@ impl WavesPreviewer {
         macro_rules! sized_col {
             ($key:expr, $body:expr) => {{
                 let (rect, _resp) = header.col($body);
-                self.list_col_widths_seen.push(($key, rect.width()));
+                self.list_col_widths_seen
+                    .push((($key).to_string(), rect.width()));
             }};
         }
         for sorted_col in self.list_column_order.clone() {
@@ -414,6 +424,23 @@ impl WavesPreviewer {
                 }
                 _ => unreachable!("sortable columns handled above"),
             }
+        }
+        let metadata_headers = self
+            .visible_metadata_columns()
+            .map(|(index, column)| (index, column.key.serialized_name(), column.label.clone()))
+            .collect::<Vec<_>>();
+        for (index, width_key, label) in metadata_headers {
+            let (rect, _response) = header.col(|ui| {
+                *sort_changed |= sortable_header(
+                    ui,
+                    &label,
+                    &mut self.sort_key,
+                    &mut self.sort_dir,
+                    SortKey::Metadata(index),
+                    true,
+                );
+            });
+            self.list_col_widths_seen.push((width_key, rect.width()));
         }
 
         header.col(|_ui| {});

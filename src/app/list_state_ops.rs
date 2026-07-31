@@ -537,6 +537,10 @@ impl WavesPreviewer {
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),
+            SortKey::Metadata(index) => self
+                .metadata_list_columns
+                .get(index)
+                .is_some_and(|column| column.visible),
         };
         if key_visible {
             return;

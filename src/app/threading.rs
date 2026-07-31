@@ -1,5 +1,5 @@
 #[cfg(windows)]
-pub(super) fn lower_current_thread_priority() {
+pub(crate) fn lower_current_thread_priority() {
     use windows_sys::Win32::System::Threading::{
         GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
         THREAD_PRIORITY_BELOW_NORMAL,
@@ -16,7 +16,7 @@ pub(super) fn lower_current_thread_priority() {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn lower_current_thread_priority() {
+pub(crate) fn lower_current_thread_priority() {
     // On Linux, setpriority(PRIO_PROCESS, tid) adjusts the niceness of a
     // single thread (a Linux extension - "process" here means kernel task).
     // Nice 10 keeps decode workers well below the UI thread without starving
@@ -28,7 +28,7 @@ pub(super) fn lower_current_thread_priority() {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn lower_current_thread_priority() {
+pub(crate) fn lower_current_thread_priority() {
     // Utility QoS: explicitly background work the user is not waiting on
     // synchronously. The scheduler keeps the (user-interactive) main thread
     // ahead of these workers.
@@ -38,4 +38,4 @@ pub(super) fn lower_current_thread_priority() {
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-pub(super) fn lower_current_thread_priority() {}
+pub(crate) fn lower_current_thread_priority() {}

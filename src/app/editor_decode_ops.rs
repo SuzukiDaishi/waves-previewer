@@ -747,7 +747,15 @@ impl super::WavesPreviewer {
                                 Self::editor_clamp_ranges(tab);
                                 Self::invalidate_editor_viewport_cache(tab);
                                 decode_update_tab = Some(idx);
-                                decode_refresh_preview = Some(idx);
+                                // A session may restore the active tool and its
+                                // parameters without persisting a lightweight
+                                // overview-only preview. Do not implicitly
+                                // recreate that transient preview when decode
+                                // finishes. Existing/full previews (or previews
+                                // requested while loading) are rebuilt below.
+                                if had_preview {
+                                    decode_refresh_preview = Some(idx);
+                                }
                                 if had_preview && self.active_tab == Some(idx) {
                                     decode_cancel_preview = true;
                                 }
@@ -859,7 +867,13 @@ impl super::WavesPreviewer {
                     if tab.loop_region.is_none() && tab.loop_markers_saved.is_none() {
                         Self::set_loop_region_from_file_markers(tab, &path, file_sr, out_sr);
                     }
-                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+                    // A reopened cached edit already carries the user's
+                    // unsaved markers. Do not replace those with the source
+                    // file's marker set when the ready-channel decode
+                    // finalizes.
+                    if !tab.markers_dirty {
+                        Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+                    }
                 }
             }
         }

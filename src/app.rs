@@ -74,6 +74,7 @@ mod loudnorm_batch_ops;
 mod loudnorm_ops;
 mod meta;
 mod meta_ops;
+mod metadata_list_ops;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
@@ -97,7 +98,7 @@ mod startup;
 mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
-mod threading;
+pub(crate) mod threading;
 mod toast_ops;
 mod tool_ops;
 mod tooling;
@@ -414,6 +415,8 @@ struct CrashReportState {
     status: Option<String>,
 }
 
+type AudioBootstrapMessage = Result<(AudioEngine, Option<String>, Option<String>), String>;
+
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
@@ -432,6 +435,12 @@ pub struct WavesPreviewer {
     audio_output_devices: Vec<String>,
     audio_output_error: Option<String>,
     audio_device_watch: AudioDeviceWatchState,
+    /// Real CPAL initialization runs after the native window can be shown.
+    /// Until it arrives, the lock-free test engine keeps every call site valid.
+    audio_bootstrap_rx: Option<std::sync::mpsc::Receiver<AudioBootstrapMessage>>,
+    startup_paths_applied: bool,
+    startup_maintenance_step: u8,
+    startup_maintenance_next_at: std::time::Instant,
     pub playback_rate: f32,
     playback_session: PlaybackSessionState,
     playback_fx_state: Option<PlaybackFxRenderState>,
@@ -612,10 +621,21 @@ pub struct WavesPreviewer {
     // Display order of list columns (always a sanitized permutation of
     // ColumnId::ALL; visibility stays in `list_columns`).
     pub list_column_order: Vec<types::ColumnId>,
+    /// User-selected metadata columns. Their keys are stable strings shared
+    /// with the metadata CLI and session format.
+    metadata_list_columns: Vec<types::MetadataListColumn>,
+    metadata_summary_pool: Option<crate::metadata::cache::MetadataSummaryPool>,
+    metadata_summary_rx: Option<std::sync::mpsc::Receiver<crate::metadata::cache::SummaryUpdate>>,
+    metadata_summary_cache: crate::metadata::cache::SummaryMemoryCache,
+    metadata_summary_inflight: rustc_hash::FxHashMap<PathBuf, u64>,
+    metadata_summary_generation: u64,
+    metadata_summary_prefetch_cursor: usize,
+    metadata_summary_errors: rustc_hash::FxHashMap<PathBuf, String>,
+    metadata_cache_hits: u64,
     // persisted per-column widths (prefs.txt); key = column id in table.rs
     list_col_widths: std::collections::BTreeMap<String, f32>,
     // widths observed while rendering the current frame's header
-    list_col_widths_seen: Vec<(&'static str, f32)>,
+    list_col_widths_seen: Vec<(String, f32)>,
     list_table_ui_id: Option<egui::Id>,
     list_table_col_count: usize,
     /// Longest duration seen since the list was last loaded, which decides
@@ -824,6 +844,7 @@ pub struct WavesPreviewer {
     // export/save settings (simple, in-memory)
     export_cfg: ExportConfig,
     show_export_settings: bool,
+    show_list_columns_window: bool,
     show_shortcuts_window: bool,
     show_keymap_window: bool,
     show_undo_history_window: bool,
@@ -844,6 +865,9 @@ pub struct WavesPreviewer {
     show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,
+    /// One source-path policy applies to every user file in the current
+    /// `.nwsess`; session-owned sidecars remain session-relative.
+    session_path_mode: project::SessionPathMode,
     recent_sessions: Vec<PathBuf>,
     project_open_pending: Option<PathBuf>,
     project_open_state: Option<ProjectOpenState>,
@@ -2820,22 +2844,29 @@ impl WavesPreviewer {
 
     pub fn new(cc: &eframe::CreationContext<'_>, startup: StartupConfig) -> Result<Self> {
         Self::init_egui_style(&cc.egui_ctx);
-        let audio = AudioEngine::new()?;
-        let app = Self::build_app(startup, audio);
+        // Native audio/device discovery can block for hundreds of milliseconds
+        // on drivers and Bluetooth stacks. Show the window with a valid silent
+        // engine first, then swap in the real engine from a worker.
+        let audio = AudioEngine::new_for_test();
+        let mut app = Self::build_app(startup, audio);
+        app.begin_native_audio_bootstrap();
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
     }
 
     pub fn new_headless(startup: StartupConfig) -> Result<Self> {
         let audio = AudioEngine::new_for_test();
-        Ok(Self::build_app(startup, audio))
+        let mut app = Self::build_app(startup, audio);
+        app.finish_test_startup();
+        Ok(app)
     }
 
     #[cfg(any(test, feature = "kittest"))]
     pub fn new_for_test(cc: &eframe::CreationContext<'_>, startup: StartupConfig) -> Result<Self> {
         Self::init_egui_style(&cc.egui_ctx);
         let audio = AudioEngine::new_for_test();
-        let app = Self::build_app(startup, audio);
+        let mut app = Self::build_app(startup, audio);
+        app.finish_test_startup();
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
     }

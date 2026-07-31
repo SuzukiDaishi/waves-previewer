@@ -660,6 +660,9 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn request_workspace_play_toggle(&mut self) {
+        if self.audio_bootstrap_rx.is_some() {
+            return;
+        }
         if self.is_list_workspace_active() {
             let now_playing = self
                 .audio
@@ -2488,7 +2491,7 @@ impl super::WavesPreviewer {
             self.files = self
                 .items
                 .iter()
-                .filter(|item| Self::item_matches_filter(item, &q, regex.as_ref()))
+                .filter(|item| self.item_matches_filter(item, &q, regex.as_ref()))
                 .map(|item| item.id)
                 .collect();
         }

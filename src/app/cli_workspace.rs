@@ -70,8 +70,9 @@ impl CliWorkspace {
         let session_path = absolute_existing_path(session_path)?;
         let session_text = std::fs::read_to_string(&session_path)
             .with_context(|| format!("read session file: {}", session_path.display()))?;
-        let session_project = super::project::deserialize_project(&session_text)
+        let mut session_project = super::project::deserialize_project(&session_text)
             .with_context(|| format!("parse session file: {}", session_path.display()))?;
+        super::project::repair_project_source_paths(&mut session_project, &session_path);
         let session_base = session_path
             .parent()
             .map(Path::to_path_buf)
@@ -641,21 +642,18 @@ impl CliWorkspace {
         if fade_in_ms <= 0.0 && fade_out_ms <= 0.0 {
             bail!("fade apply requires fade-in or fade-out to be greater than zero");
         }
-        if fade_in_ms > 0.0 {
-            let frames = ((fade_in_ms / 1000.0) * sample_rate).round() as usize;
-            self.app.editor_apply_fade_in_explicit(
-                tab_idx,
-                (0, frames.min(samples_len)),
-                fade_in_shape,
-            );
-        }
-        if fade_out_ms > 0.0 {
-            let frames = ((fade_out_ms / 1000.0) * sample_rate).round() as usize;
-            self.app.editor_apply_fade_out_explicit(
-                tab_idx,
-                (0, frames.min(samples_len)),
-                fade_out_shape,
-            );
+        let fade_in_frames =
+            (((fade_in_ms / 1000.0) * sample_rate).round() as usize).min(samples_len);
+        let fade_out_frames =
+            (((fade_out_ms / 1000.0) * sample_rate).round() as usize).min(samples_len);
+        if !self.app.editor_apply_edge_fades(
+            tab_idx,
+            fade_in_frames,
+            fade_in_shape,
+            fade_out_frames,
+            fade_out_shape,
+        ) {
+            bail!("fade apply produced no editable range");
         }
         if let Some(tab) = self.app.tabs.get_mut(tab_idx) {
             tab.tool_state.fade_in_ms = 0.0;

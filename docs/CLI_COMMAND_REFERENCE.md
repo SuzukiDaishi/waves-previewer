@@ -66,8 +66,9 @@ neowaves --cli session inspect --session .\work.nwsess
 Result highlights:
 
 - `session_path`
-- `version`
-- `base_dir`
+- `project_version`
+- `path_mode` (`absolute` or `relative`, session-wide)
+- `path_root` (current `.nwsess` parent used for relative resolution)
 - `file_count`
 - `tab_count`
 - `active_tab`
@@ -99,6 +100,26 @@ Result highlights:
 ### `item meta`
 
 Returns metadata only.
+
+### `item metadata`
+
+Read-only physical container and embedded metadata inspection. Container type is
+detected from file content rather than the extension.
+
+```powershell
+neowaves --cli item metadata inspect --input .\demo.wav
+neowaves --cli item metadata summary --input .\demo.wav --field ucs.cat_id --include-raw
+neowaves --cli item metadata payload read --input .\demo.wav --node-path /RIFF/WAVE/iXML --format text
+neowaves --cli item metadata payload search --input .\demo.wav --offset 0 --length 65536 --kind fourcc --query iXML
+neowaves --cli item metadata payload hash --input .\demo.wav --offset 0 --length 65536 --algorithm sha256
+neowaves --cli item metadata payload extract --input .\demo.wav --node-path /RIFF/WAVE/iXML --output .\ixml.xml
+```
+
+Node selectors use stable logical `--node-path` plus zero-based
+`--occurrence`, or an explicit `--offset` and `--length`. Offset and size
+values in JSON are lossless decimal strings with corresponding `*_hex`
+fields. Payload extraction refuses an existing output unless `--overwrite`
+is supplied and never modifies the input audio.
 
 ### `item artwork`
 

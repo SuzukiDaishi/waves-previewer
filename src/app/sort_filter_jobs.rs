@@ -61,6 +61,14 @@ pub(super) struct FilterJob {
 }
 
 impl WavesPreviewer {
+    fn list_job_frame_budget_ms(&self) -> f64 {
+        if self.playback_is_playing_now() || self.playback_session.is_playing {
+            0.25
+        } else {
+            LIST_JOB_FRAME_BUDGET_MS
+        }
+    }
+
     pub(super) fn note_files_membership_changed(&mut self) {
         self.files_membership_revision = self.files_membership_revision.wrapping_add(1);
     }
@@ -169,6 +177,7 @@ impl WavesPreviewer {
                 Some(col) => OwnedKey::Str(item.external_value(col).cloned().unwrap_or_default()),
                 None => OwnedKey::Missing,
             },
+            SortKey::Metadata(index) => self.metadata_owned_sort_key(&item.path, index),
         }
     }
 
@@ -242,13 +251,15 @@ impl WavesPreviewer {
             return true;
         }
         let key = self.sort_key;
+        let frame_budget_ms = self.list_job_frame_budget_ms();
+        let chunk_size = if frame_budget_ms < 1.0 { 128 } else { 2_048 };
         let started = std::time::Instant::now();
         while job.cursor < job.ids.len() {
-            if started.elapsed().as_secs_f64() * 1000.0 >= LIST_JOB_FRAME_BUDGET_MS {
+            if started.elapsed().as_secs_f64() * 1000.0 >= frame_budget_ms {
                 break;
             }
             // Chunk the budget check: elapsed() per row would dominate.
-            let end = (job.cursor + 2_048).min(job.ids.len());
+            let end = (job.cursor + chunk_size).min(job.ids.len());
             for idx in job.cursor..end {
                 let id = job.ids[idx];
                 let entry = match self.item_for_id(id) {
@@ -389,14 +400,16 @@ impl WavesPreviewer {
     }
 
     pub(super) fn item_matches_filter(
+        &self,
         item: &MediaItem,
         query_lower: &str,
         regex: Option<&regex::Regex>,
     ) -> bool {
-        match regex {
+        let built_in = match regex {
             Some(re) => Self::item_matches_regex(item, re),
             None => Self::item_matches_query_lower(item, query_lower),
-        }
+        };
+        built_in || self.metadata_search_matches(&item.path, query_lower, regex)
     }
 
     /// Searchable one-line summary of a row's metadata (lowercase by
@@ -462,15 +475,17 @@ impl WavesPreviewer {
             self.refresh_filter_then_sort();
             return true;
         }
+        let frame_budget_ms = self.list_job_frame_budget_ms();
+        let chunk_size = if frame_budget_ms < 1.0 { 256 } else { 1_024 };
         let started = std::time::Instant::now();
         while job.cursor < self.items.len() {
-            if started.elapsed().as_secs_f64() * 1000.0 >= LIST_JOB_FRAME_BUDGET_MS {
+            if started.elapsed().as_secs_f64() * 1000.0 >= frame_budget_ms {
                 break;
             }
-            let end = (job.cursor + 1_024).min(self.items.len());
+            let end = (job.cursor + chunk_size).min(self.items.len());
             for idx in job.cursor..end {
                 let item = &self.items[idx];
-                if Self::item_matches_filter(item, &job.query_lower, job.regex.as_ref()) {
+                if self.item_matches_filter(item, &job.query_lower, job.regex.as_ref()) {
                     job.matched.push(item.id);
                 }
             }
@@ -505,12 +520,16 @@ impl WavesPreviewer {
         if len == 0 {
             return false;
         }
-        const DROP_BUDGET: usize = 16_384;
-        if len <= DROP_BUDGET {
+        let drop_budget = if self.playback_is_playing_now() || self.playback_session.is_playing {
+            1_024
+        } else {
+            16_384
+        };
+        if len <= drop_budget {
             // Also release the (tens of MB) backing buffer itself.
             self.deferred_list_drop = Vec::new();
         } else {
-            self.deferred_list_drop.truncate(len - DROP_BUDGET);
+            self.deferred_list_drop.truncate(len - drop_budget);
         }
         true
     }

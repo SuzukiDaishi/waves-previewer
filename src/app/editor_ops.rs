@@ -261,6 +261,79 @@ impl crate::app::WavesPreviewer {
         }
     }
 
+    pub(super) fn apply_fade_in_to_slice(samples: &mut [f32], shape: crate::app::types::FadeShape) {
+        let len = samples.len();
+        if len == 0 {
+            return;
+        }
+        let denom = len.saturating_sub(1).max(1) as f32;
+        for (index, sample) in samples.iter_mut().enumerate() {
+            let t = if len == 1 { 0.0 } else { index as f32 / denom };
+            *sample *= Self::fade_weight(shape, t);
+        }
+    }
+
+    pub(super) fn apply_fade_out_to_slice(
+        samples: &mut [f32],
+        shape: crate::app::types::FadeShape,
+    ) {
+        let len = samples.len();
+        if len == 0 {
+            return;
+        }
+        let denom = len.saturating_sub(1).max(1) as f32;
+        for (index, sample) in samples.iter_mut().enumerate() {
+            let t = if len == 1 { 1.0 } else { index as f32 / denom };
+            *sample *= Self::fade_weight_out(shape, t);
+        }
+    }
+
+    /// Apply start and end fades as one destructive edit and therefore one
+    /// undo step. The channel mask mirrors the Fade preview.
+    pub(super) fn editor_apply_edge_fades(
+        &mut self,
+        tab_idx: usize,
+        fade_in_samples: usize,
+        fade_in_shape: crate::app::types::FadeShape,
+        fade_out_samples: usize,
+        fade_out_shape: crate::app::types::FadeShape,
+    ) -> bool {
+        let undo_state = {
+            let Some(tab) = self.tabs.get_mut(tab_idx) else {
+                return false;
+            };
+            let fade_in_samples = fade_in_samples.min(tab.samples_len);
+            let fade_out_samples = fade_out_samples.min(tab.samples_len);
+            if fade_in_samples == 0 && fade_out_samples == 0 {
+                return false;
+            }
+
+            let undo_state = Self::capture_undo_state_labeled(tab, "Edge Fade");
+            let mask = Self::editor_channel_mask(tab);
+            for (channel_index, channel) in tab.ch_samples.iter_mut().enumerate() {
+                if mask
+                    .as_ref()
+                    .is_some_and(|selected| !selected[channel_index])
+                {
+                    continue;
+                }
+                if fade_in_samples > 0 {
+                    let fade_in_len = fade_in_samples.min(channel.len());
+                    Self::apply_fade_in_to_slice(&mut channel[..fade_in_len], fade_in_shape);
+                }
+                if fade_out_samples > 0 {
+                    let start = channel.len().saturating_sub(fade_out_samples);
+                    Self::apply_fade_out_to_slice(&mut channel[start..], fade_out_shape);
+                }
+            }
+            tab.dirty = true;
+            Self::editor_clamp_ranges(tab);
+            undo_state
+        };
+        self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        true
+    }
+
     pub(super) fn editor_apply_fade_in_explicit(
         &mut self,
         tab_idx: usize,
@@ -276,13 +349,15 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state_labeled(tab, "Fade In");
-            let dur = (e - s).max(1) as f32;
-            for ch in tab.ch_samples.iter_mut() {
-                for i in s..e {
-                    let t = (i - s) as f32 / dur;
-                    let w = Self::fade_weight(shape, t);
-                    ch[i] *= w;
+            let mask = Self::editor_channel_mask(tab);
+            for (channel_index, channel) in tab.ch_samples.iter_mut().enumerate() {
+                if mask
+                    .as_ref()
+                    .is_some_and(|selected| !selected[channel_index])
+                {
+                    continue;
                 }
+                Self::apply_fade_in_to_slice(&mut channel[s..e], shape);
             }
             tab.dirty = true;
             (tab.ch_samples.clone(), undo_state)
@@ -305,13 +380,15 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state_labeled(tab, "Fade Out");
-            let dur = (e - s).max(1) as f32;
-            for ch in tab.ch_samples.iter_mut() {
-                for i in s..e {
-                    let t = (i - s) as f32 / dur;
-                    let w = Self::fade_weight_out(shape, t);
-                    ch[i] *= w;
+            let mask = Self::editor_channel_mask(tab);
+            for (channel_index, channel) in tab.ch_samples.iter_mut().enumerate() {
+                if mask
+                    .as_ref()
+                    .is_some_and(|selected| !selected[channel_index])
+                {
+                    continue;
                 }
+                Self::apply_fade_out_to_slice(&mut channel[s..e], shape);
             }
             tab.dirty = true;
             (tab.ch_samples.clone(), undo_state)
@@ -3803,6 +3880,7 @@ impl crate::app::WavesPreviewer {
 
 #[cfg(test)]
 mod clear_edit_tests {
+    use crate::app::types::{ChannelView, ChannelViewMode, FadeShape};
     use crate::app::WavesPreviewer;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -3835,6 +3913,50 @@ mod clear_edit_tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn edge_fades_reach_silence_use_one_undo_and_respect_channel_scope() {
+        let dir = temp_dir("edge_fade");
+        let wav = dir.join("source.wav");
+        crate::wave::export_channels_audio(&[vec![0.8; 100], vec![0.4; 100]], 1_000, &wav)
+            .expect("write wav");
+
+        let mut app = WavesPreviewer::new_headless(Default::default()).expect("app");
+        app.open_or_activate_tab(&wav);
+        let tab_idx = app
+            .tabs
+            .iter()
+            .position(|tab| tab.path == wav)
+            .expect("tab opened");
+        wait_for_decode(&mut app, tab_idx);
+        app.tabs[tab_idx].channel_view = ChannelView {
+            mode: ChannelViewMode::Custom,
+            selected: vec![0],
+        };
+
+        let untouched = app.tabs[tab_idx].ch_samples[1].clone();
+        let undo_before = app.tabs[tab_idx].undo_stack.len();
+        assert!(app.editor_apply_edge_fades(tab_idx, 20, FadeShape::SCurve, 30, FadeShape::Linear,));
+
+        let tab = &app.tabs[tab_idx];
+        assert_eq!(
+            tab.undo_stack.len(),
+            undo_before + 1,
+            "both edges must be one undo operation"
+        );
+        assert!(
+            tab.ch_samples[0][0].abs() <= f32::EPSILON,
+            "fade-in must begin at silence"
+        );
+        assert!(
+            tab.ch_samples[0][99].abs() <= f32::EPSILON,
+            "fade-out must end at silence"
+        );
+        assert_eq!(
+            tab.ch_samples[1], untouched,
+            "unselected channels must remain untouched"
+        );
     }
 
     #[test]

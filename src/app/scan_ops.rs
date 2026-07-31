@@ -304,7 +304,13 @@ impl WavesPreviewer {
         }
 
         let start = Instant::now();
-        let budget = Duration::from_millis(3);
+        // Keep directory ingestion moving during playback, but do not let
+        // PathBuf allocation/hash-map growth consume an audio/UI frame.
+        let budget = if self.playback_is_playing_now() || self.playback_session.is_playing {
+            Duration::from_micros(350)
+        } else {
+            Duration::from_millis(3)
+        };
 
         loop {
             if start.elapsed() >= budget {
