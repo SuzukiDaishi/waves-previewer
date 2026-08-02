@@ -2,6 +2,21 @@
 
 All notable changes in this repository (hand-written).
 
+## 0.20260802.0 - 2026-08-02
+
+### Metadata inspection and scalable sessions
+- **Metadata Inspector**: added a dedicated GUI and CLI workflow for inspecting normalized and raw metadata, summarizing fields, searching payloads, hashing or extracting embedded data, and reviewing UCS-backed metadata at scale.
+- **Portable session restore**: strengthened relative/absolute path handling, virtual-audio persistence, list-column state, and editor-tab restoration so large sessions reopen more predictably across locations.
+
+### Large audio and editor reliability
+- **File-backed audio assets**: introduced stable asset/revision descriptors plus streaming WAV readers and writers, allowing long recordings and edits to stay file-backed instead of requiring every workflow to materialize the full clip in memory.
+- **Long-running workflows**: hardened recording, export, clipboard, preview/decode, native drag-and-drop, markers, loop metadata, and effect-graph handoff paths for large or virtual audio.
+- **Input focus routing**: centralized keyboard and scroll ownership across list, editor, dialogs, and tool surfaces, with expanded regression coverage for focus-sensitive shortcuts.
+- **Editor workflow polish**: improved edge-fade authoring, scalable waveform/editor behavior, list metadata integration, and recovery of in-progress or restored audio state.
+
+### Plugins
+- **Plugin catalog and worker sessions**: added a persistent plugin catalog, richer worker protocol/session state, chain metrics, and more reliable native VST3/CLAP probing, processing, timeout, and failure reporting.
+
 ## 0.20260729.0 - 2026-07-29
 
 ### List QA columns
