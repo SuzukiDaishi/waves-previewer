@@ -83,6 +83,14 @@ fn request_timeout(request: &WorkerRequest) -> Duration {
         WorkerRequest::Scan { .. } => Duration::from_millis(30_000),
         WorkerRequest::Probe { .. } => Duration::from_millis(30_000),
         WorkerRequest::ProcessFx { .. } => Duration::from_millis(120_000),
+        WorkerRequest::ProcessChain { .. } | WorkerRequest::ChainSessionProcess { .. } => {
+            Duration::from_millis(120_000)
+        }
+        WorkerRequest::ChainSessionOpen { .. }
+        | WorkerRequest::ChainSessionConfigure { .. }
+        | WorkerRequest::ChainSessionSeek { .. }
+        | WorkerRequest::ChainSessionFlush { .. }
+        | WorkerRequest::ChainSessionClose { .. } => Duration::from_millis(30_000),
         WorkerRequest::GuiSessionOpen { .. } => Duration::from_millis(30_000),
         WorkerRequest::GuiSessionPoll { .. } => Duration::from_millis(10_000),
         WorkerRequest::GuiSessionClose { .. } => Duration::from_millis(10_000),
@@ -272,6 +280,86 @@ pub fn run_request(request: &WorkerRequest) -> Result<WorkerResponse, String> {
             WorkerRequest::Ping => Ok(crate::plugin::worker::handle_request(request.clone())),
             _ => Err(err),
         },
+    }
+}
+
+/// Long-lived isolated worker used by render-ahead rack sessions. A plugin
+/// crash terminates this child, never the GUI process.
+pub struct RackWorkerClient {
+    child: Child,
+    stdin: ChildStdin,
+    rx: mpsc::Receiver<Result<WorkerResponse, String>>,
+    _reader_thread: std::thread::JoinHandle<()>,
+}
+
+impl RackWorkerClient {
+    pub fn spawn() -> Result<Self, String> {
+        let (worker_path, cleanup_temp) = prepare_worker_executable()?;
+        let mut command = Command::new(&worker_path);
+        apply_no_window(&mut command);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("spawn rack worker failed: {error}"))?;
+        if cleanup_temp {
+            let _ = std::fs::remove_file(worker_path);
+        }
+        let stdin = child.stdin.take().ok_or("rack worker stdin unavailable")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("rack worker stdout unavailable")?;
+        let (tx, rx) = mpsc::channel();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        let _ = tx.send(Err("rack worker exited".to_string()));
+                        break;
+                    }
+                    Ok(_) => {
+                        let response = serde_json::from_str::<WorkerResponse>(line.trim())
+                            .map_err(|error| format!("decode rack response failed: {error}"));
+                        if tx.send(response).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(format!("read rack response failed: {error}")));
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            child,
+            stdin,
+            rx,
+            _reader_thread: reader_thread,
+        })
+    }
+
+    pub fn request(&mut self, request: &WorkerRequest) -> Result<WorkerResponse, String> {
+        let mut payload = serde_json::to_vec(request)
+            .map_err(|error| format!("encode rack request failed: {error}"))?;
+        payload.push(b'\n');
+        self.stdin
+            .write_all(&payload)
+            .map_err(|error| format!("write rack request failed: {error}"))?;
+        self.stdin.flush().map_err(|error| error.to_string())?;
+        self.rx
+            .recv_timeout(request_timeout(request))
+            .map_err(|error| format!("rack worker response timeout/disconnect: {error}"))?
+    }
+
+    pub fn close(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

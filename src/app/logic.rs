@@ -81,8 +81,11 @@ impl super::WavesPreviewer {
         if !self.exact_stream_path_eligible_cached(path) {
             return false;
         }
+        let Some(stream_path) = self.resolved_audio_file_path(path) else {
+            return false;
+        };
         self.audio.stop();
-        match self.audio.set_streaming_wav_path(path) {
+        match self.audio.set_streaming_wav_path(&stream_path) {
             Ok(()) => {
                 let source_sr = self
                     .audio
@@ -150,7 +153,7 @@ impl super::WavesPreviewer {
     }
 
     pub(super) fn editor_display_samples_len(tab: &EditorTab) -> usize {
-        if tab.loading && tab.samples_len_visual > 0 {
+        if (tab.loading || tab.paged_asset) && tab.samples_len_visual > 0 {
             tab.samples_len_visual
         } else {
             tab.samples_len
@@ -161,16 +164,27 @@ impl super::WavesPreviewer {
         self.meta_for_path(path)
             .map(|meta| meta.sample_rate)
             .filter(|v| *v > 0)
+            .or_else(|| {
+                self.item_for_path(path)
+                    .map(|item| item.audio_asset.sample_rate)
+                    .filter(|value| *value > 0)
+            })
+    }
+
+    pub(super) fn resolved_audio_file_path(&self, path: &Path) -> Option<PathBuf> {
+        self.item_for_path(path)
+            .and_then(|item| item.audio_asset.backing.file_path().map(Path::to_path_buf))
+            .or_else(|| path.is_file().then(|| path.to_path_buf()))
     }
 
     fn exact_stream_path_eligible_cached(&self, path: &Path) -> bool {
         if self.playback_mode_needs_fx_buffer() {
             return false;
         }
-        if !path.is_file() {
+        let Some(stream_path) = self.resolved_audio_file_path(path) else {
             return false;
-        }
-        let ext = path
+        };
+        let ext = stream_path
             .extension()
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
@@ -178,7 +192,7 @@ impl super::WavesPreviewer {
         if ext != "wav" {
             return false;
         }
-        if self.is_virtual_path(path) || self.has_pending_gain(path) {
+        if self.has_pending_gain(path) {
             return false;
         }
         if self.sample_rate_override.contains_key(path)
@@ -204,9 +218,7 @@ impl super::WavesPreviewer {
         }
         if matches!(
             self.item_for_path(path).map(|item| item.source),
-            Some(
-                crate::app::types::MediaSource::Virtual | crate::app::types::MediaSource::External
-            )
+            Some(crate::app::types::MediaSource::External)
         ) {
             return false;
         }
@@ -228,8 +240,11 @@ impl super::WavesPreviewer {
             return false;
         }
         let tab_path = tab.path.clone();
+        let Some(stream_path) = self.resolved_audio_file_path(&tab_path) else {
+            return false;
+        };
         let target = ProcessingTarget::EditorTab(tab_path.clone());
-        if self.audio.is_streaming_wav_path(&tab_path) {
+        if self.audio.is_streaming_wav_path(&stream_path) {
             let source_sr = self
                 .audio
                 .streaming_wav_sample_rate()
@@ -247,7 +262,7 @@ impl super::WavesPreviewer {
             self.apply_effective_volume();
             return true;
         }
-        match self.audio.set_streaming_wav_path(&tab_path) {
+        match self.audio.set_streaming_wav_path(&stream_path) {
             Ok(()) => {
                 let source_sr = self
                     .audio
@@ -439,9 +454,9 @@ impl super::WavesPreviewer {
         let job_id = self.next_playback_fx_job_id();
         let path_spec = match &source {
             super::PlaybackSourceKind::EditorTab(path)
-            | super::PlaybackSourceKind::ListPreview(path) => {
-                Some((path.clone(), self.offline_render_spec_for_path(path)))
-            }
+            | super::PlaybackSourceKind::ListPreview(path) => self
+                .resolved_audio_file_path(path)
+                .map(|resolved| (resolved, self.offline_render_spec_for_path(path))),
             _ => None,
         };
         let base_audio = self
@@ -532,6 +547,7 @@ impl super::WavesPreviewer {
         source_time_sec: Option<f64>,
         resume_after_apply: bool,
     ) {
+        let previous_map = self.playback_session.timeline_map;
         self.prepared_playback_fx_audio = Some(audio.clone());
         self.prepared_playback_fx_generation = self.playback_source_generation;
         self.prepared_playback_fx_mode = Some(mode);
@@ -549,6 +565,18 @@ impl super::WavesPreviewer {
                 RateMode::PitchShift => 1.0,
                 RateMode::TimeStretch => playback_rate.max(0.25),
             },
+        );
+        let source_frames = previous_map.source_frames.max(
+            self.playback_base_audio
+                .as_ref()
+                .map(|buffer| buffer.len() as u64)
+                .unwrap_or(0),
+        );
+        self.playback_rebuild_timeline_map(
+            source_frames,
+            self.audio.current_source_len() as u64,
+            previous_map.source_sample_rate.max(1),
+            buffer_sr.max(1),
         );
         self.playback_refresh_rate_for_current_source();
         self.playback_session.last_applied_master_gain_db = f32::NAN;
@@ -1158,6 +1186,7 @@ impl super::WavesPreviewer {
                     tool_state: tab.tool_state,
                     active_tool: tab.active_tool,
                     plugin_fx_draft: tab.plugin_fx_draft.clone(),
+                    plugin_fx_chain: tab.plugin_fx_chain.clone(),
                     show_waveform_overlay: tab.show_waveform_overlay,
                     applied_effect_graph: None,
                 },
@@ -1567,6 +1596,7 @@ impl super::WavesPreviewer {
         tab.preview_offset_samples = None;
         tab.preview_overlay = None;
         tab.plugin_fx_draft = crate::app::types::PluginFxDraft::default();
+        tab.plugin_fx_chain = crate::app::types::PluginFxChainDraft::default();
         tab.pending_loop_unwrap = None;
         tab.undo_stack.clear();
         tab.undo_bytes = 0;
@@ -1979,6 +2009,12 @@ impl super::WavesPreviewer {
             self.cancel_list_preview_job();
             self.list_preview_pending_path = None;
             let Some(audio) = item_snapshot.virtual_audio else {
+                if self.try_activate_list_stream_transport(&p_owned) {
+                    if self.auto_play_list_nav {
+                        self.audio.play();
+                    }
+                    self.debug_mark_list_preview_ready(&p_owned);
+                }
                 return;
             };
             let channels = audio.channels.clone();

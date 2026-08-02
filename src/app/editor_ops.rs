@@ -176,6 +176,7 @@ impl crate::app::WavesPreviewer {
         }
         self.cancel_spectrogram_for_path(&path);
         self.cancel_feature_analysis_for_path(&path);
+        self.advance_asset_revision_for_path(&path);
     }
 
     /// Reverts a tab to the original file on disk, discarding all destructive
@@ -195,7 +196,10 @@ impl crate::app::WavesPreviewer {
         let bit_depth = self.bit_depth_override.get(&path).copied();
         let out_sr = self.audio.shared.out_sample_rate;
         let resample_quality = Self::to_wave_resample_quality(self.src_quality);
-        let Ok((chans, in_sr)) = crate::audio_io::decode_audio_multi(&path) else {
+        let decode_path = self
+            .resolved_audio_file_path(&path)
+            .unwrap_or_else(|| path.clone());
+        let Ok((chans, in_sr)) = crate::audio_io::decode_audio_multi(&decode_path) else {
             self.debug_log(format!("clear edit: decode failed for {}", path.display()));
             return;
         };
@@ -528,6 +532,9 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        if let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) {
+            self.mutate_transcript_document_for_path(&path, |document| document.mark_stale());
+        }
         self.audio.set_loop_crossfade(0, 0);
     }
 
@@ -1774,6 +1781,10 @@ impl crate::app::WavesPreviewer {
             rx,
             tab_id: apply_tab_id,
             undo,
+            tool: ToolKind::DeHum,
+            source_range: None,
+            source_len: 0,
+            source_sample_rate: 1,
         });
     }
 
@@ -2010,7 +2021,7 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn editor_apply_trim_range(&mut self, tab_idx: usize, range: (usize, usize)) {
-        let (_channels, undo_state) = {
+        let (_channels, undo_state, transcript_trim) = {
             let Some(tab) = self.tabs.get_mut(tab_idx) else {
                 return;
             };
@@ -2019,6 +2030,12 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let undo_state = Self::capture_undo_state_labeled(tab, "Trim");
+            let sr = tab.buffer_sample_rate.max(1) as u64;
+            let transcript_trim = Some((
+                tab.path.clone(),
+                (s as u64).saturating_mul(1000) / sr,
+                (e as u64).saturating_mul(1000) / sr,
+            ));
             for ch in tab.ch_samples.iter_mut() {
                 *ch = ch[s..e].to_vec();
             }
@@ -2070,9 +2087,14 @@ impl crate::app::WavesPreviewer {
             Self::update_markers_dirty(tab);
             Self::update_loop_markers_dirty(tab);
             Self::editor_clamp_ranges(tab);
-            (tab.ch_samples.clone(), undo_state)
+            (tab.ch_samples.clone(), undo_state, transcript_trim)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        if let Some((path, start_ms, end_ms)) = transcript_trim {
+            self.mutate_transcript_document_for_path(&path, |document| {
+                document.trim(start_ms, end_ms)
+            });
+        }
     }
 
     /// Trim to multiple ranges: keep only the audio inside each range, concatenated in order.
@@ -2164,6 +2186,9 @@ impl crate::app::WavesPreviewer {
             undo_state
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        if let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) {
+            self.mutate_transcript_document_for_path(&path, |document| document.mark_stale());
+        }
     }
 
     /// Cut multiple ranges: delete audio inside each range, join remaining parts.
@@ -2206,6 +2231,9 @@ impl crate::app::WavesPreviewer {
             undo_state
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        if let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) {
+            self.mutate_transcript_document_for_path(&path, |document| document.mark_stale());
+        }
     }
 
     pub(super) fn begin_trim_virtual_job(&mut self, tab_idx: usize, range: (usize, usize)) -> bool {
@@ -3309,6 +3337,7 @@ impl crate::app::WavesPreviewer {
         let range = range.filter(|(s, e)| *e > *s && *e <= tab.samples_len);
         let undo = Some(Self::capture_undo_state_labeled(tab, tool.label()));
         let tab_id = tab.tab_id;
+        let source_len = tab.samples_len;
         // Stop playback only when this tab is the audible source; playback of
         // other tabs / list previews keeps running during the apply.
         if matches!(&self.playback_session.source,
@@ -3436,6 +3465,10 @@ impl crate::app::WavesPreviewer {
             rx,
             tab_id,
             undo,
+            tool,
+            source_range: range,
+            source_len,
+            source_sample_rate: buffer_sr,
         });
     }
 
@@ -3487,14 +3520,30 @@ impl crate::app::WavesPreviewer {
     }
 
     pub(super) fn drain_editor_apply_jobs(&mut self, ctx: &egui::Context) {
-        let mut apply_done: Option<(EditorApplyResult, Option<EditorUndoState>, u64)> = None;
+        let mut apply_done: Option<(
+            EditorApplyResult,
+            Option<EditorUndoState>,
+            u64,
+            ToolKind,
+            Option<(usize, usize)>,
+            usize,
+            u32,
+        )> = None;
         let mut apply_dead = false;
         if let Some(state) = &mut self.editor_apply_state {
             match state.rx.try_recv() {
                 Ok(res) => {
                     let undo = state.undo.take();
                     let tab_id = state.tab_id;
-                    apply_done = Some((res, undo, tab_id));
+                    apply_done = Some((
+                        res,
+                        undo,
+                        tab_id,
+                        state.tool,
+                        state.source_range,
+                        state.source_len,
+                        state.source_sample_rate,
+                    ));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 // Worker died without sending (panic in the DSP): free the
@@ -3511,7 +3560,8 @@ impl crate::app::WavesPreviewer {
             ctx.request_repaint();
             return;
         }
-        if let Some((mut res, undo, tab_id)) = apply_done {
+        if let Some((mut res, undo, tab_id, tool, source_range, source_len, source_sr)) = apply_done
+        {
             // Resolve identity -> index at completion time; the tab may have
             // moved (another tab closed) or be gone entirely.
             let cur_idx = self.tabs.iter().position(|t| t.tab_id == tab_id);
@@ -3579,6 +3629,33 @@ impl crate::app::WavesPreviewer {
                 // user is hearing (or looking at); playback of another tab or
                 // a list preview must survive the apply untouched.
                 let tab_path = self.tabs.get(cur_idx).map(|t| t.path.clone());
+                if let Some(path) = tab_path.as_deref() {
+                    self.advance_asset_revision_for_path(path);
+                    if matches!(tool, ToolKind::TimeStretch | ToolKind::Speed) {
+                        let new_len = self
+                            .tabs
+                            .get(cur_idx)
+                            .map(|tab| tab.samples_len)
+                            .unwrap_or(source_len);
+                        let sr = source_sr.max(1) as u64;
+                        if let Some((start, end)) = source_range {
+                            let new_end = res.selection_after.map(|(_, end)| end).unwrap_or(end);
+                            let source_span = end.saturating_sub(start).max(1);
+                            let output_span = new_end.saturating_sub(start).max(1);
+                            let multiplier = output_span as f64 / source_span as f64;
+                            let start_ms = (start as u64).saturating_mul(1000) / sr;
+                            let end_ms = (end as u64).saturating_mul(1000) / sr;
+                            self.mutate_transcript_document_for_path(path, |document| {
+                                document.scale_range(start_ms, end_ms, multiplier)
+                            });
+                        } else {
+                            let multiplier = new_len as f64 / source_len.max(1) as f64;
+                            self.mutate_transcript_document_for_path(path, |document| {
+                                document.scale_time(multiplier)
+                            });
+                        }
+                    }
+                }
                 // "Active tab" alone is not enough: active_tab stays set while
                 // the user works in the list workspace, and adopting there
                 // would stop an unrelated list preview mid-listen.

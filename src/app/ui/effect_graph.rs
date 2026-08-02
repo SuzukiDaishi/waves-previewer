@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::app::helpers::db_to_color;
+use crate::app::input_focus::UiScrollTarget;
 use crate::app::types::{
     EffectGraphBitDepth, EffectGraphCombineMode, EffectGraphDebugPreview, EffectGraphNodeCategory,
     EffectGraphNodeData, EffectGraphNodeKind, EffectGraphNodeRunPhase, EffectGraphPlaybackTarget,
@@ -117,6 +118,7 @@ fn apply_preview_scroll(
     response: &egui::Response,
     scroll_x: &mut f32,
     _zoom: f32,
+    allow_wheel: bool,
 ) {
     if response.dragged_by(egui::PointerButton::Primary) {
         let drag_delta = ctx.input(|i| i.pointer.delta().x);
@@ -125,7 +127,7 @@ fn apply_preview_scroll(
                 (*scroll_x - drag_delta / response.rect.width().max(64.0) * 0.18).clamp(0.0, 1.0);
         }
     }
-    if response.hovered() {
+    if allow_wheel && response.hovered() {
         let raw_scroll = ctx.input(|i| i.smooth_scroll_delta);
         let dominant_scroll = if raw_scroll.x.abs() > raw_scroll.y.abs() {
             raw_scroll.x
@@ -967,6 +969,10 @@ impl crate::app::WavesPreviewer {
     fn ui_effect_graph_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (canvas_rect, canvas_resp) =
             ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        #[cfg(feature = "kittest")]
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("test_effect_graph_canvas_rect"), canvas_rect);
+        });
         ui.set_clip_rect(canvas_rect);
         canvas_resp.context_menu(|ui| {
             if ui.button("Auto Layout").clicked() {
@@ -1020,11 +1026,20 @@ impl crate::app::WavesPreviewer {
         if self.effect_graph.canvas.background_panning && !ctx.input(|i| i.pointer.primary_down()) {
             self.effect_graph.canvas.background_panning = false;
         }
-        if canvas_resp.hovered() && ctx.input(|i| i.modifiers.command) {
-            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.0 {
+        if self.ui_scroll_focus.is_active(UiScrollTarget::EffectGraph)
+            && canvas_resp.contains_pointer()
+            && ctx.input(|i| i.modifiers.command)
+        {
+            let (scroll, gesture_zoom) =
+                ctx.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta() as f32));
+            let zoom_factor = if scroll.abs() > 0.0 {
+                1.0 + scroll * 0.001
+            } else {
+                gesture_zoom
+            };
+            if zoom_factor.is_finite() && (zoom_factor - 1.0).abs() > 0.001 {
                 self.effect_graph_push_undo_snapshot();
-                self.effect_graph.canvas.zoom = (zoom * (1.0 + scroll * 0.001)).clamp(0.35, 2.0);
+                self.effect_graph.canvas.zoom = (zoom * zoom_factor).clamp(0.35, 2.0);
             }
         }
         if let Some(pointer) = ctx.pointer_hover_pos() {
@@ -2292,6 +2307,8 @@ impl crate::app::WavesPreviewer {
                                         &preview_resp,
                                         &mut debug_scroll_x,
                                         waveform_zoom.unwrap_or(1.0),
+                                        self.ui_scroll_focus
+                                            .is_active(UiScrollTarget::EffectGraph),
                                     );
                                     draw_waveform_preview(
                                         ui.painter(),
@@ -2361,6 +2378,8 @@ impl crate::app::WavesPreviewer {
                                         &preview_resp,
                                         &mut debug_scroll_x,
                                         spectrum_zoom.unwrap_or(1.0),
+                                        self.ui_scroll_focus
+                                            .is_active(UiScrollTarget::EffectGraph),
                                     );
                                     draw_spectrum_preview(
                                         ui.painter(),
@@ -2835,6 +2854,8 @@ impl crate::app::WavesPreviewer {
                                 egui::Id::new(("fx_eq_plot", idx)),
                                 &mut plot_params,
                                 48_000,
+                                self.ui_scroll_focus
+                                    .is_active(UiScrollTarget::EffectGraph),
                             ) {
                                 low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
                                 low_shelf_gain_db = plot_params.low_shelf_gain_db;
@@ -3120,7 +3141,9 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let pending_action = self.effect_graph.pending_action.clone();
-        egui::Window::new("Unsaved Effect Graph")
+        let scroll_target = self.begin_floating_scroll_surface("effect_graph_unsaved_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Unsaved Effect Graph")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -3160,5 +3183,9 @@ impl crate::app::WavesPreviewer {
                     });
                 }
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
     }
 }

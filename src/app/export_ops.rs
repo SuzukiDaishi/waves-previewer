@@ -11,6 +11,23 @@ struct EditAnnotationSnapshot {
     loop_region: Option<(usize, usize)>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::apply_export_name_template;
+
+    #[test]
+    fn gain_suffix_is_empty_at_zero_and_readable_otherwise() {
+        assert_eq!(
+            apply_export_name_template("{name}{gain_suffix}", "Recording", 0.0),
+            "Recording"
+        );
+        assert_eq!(
+            apply_export_name_template("{name}{gain_suffix}", "Recording", -6.0),
+            "Recording (gain-6.0dB)"
+        );
+    }
+}
+
 /// Resolve a non-colliding destination for `ConflictPolicy::Rename`. Counts
 /// `_01`.. `_999`; if all exist, falls back to a timestamp suffix so the
 /// Rename policy never silently overwrites an existing file.
@@ -44,6 +61,22 @@ fn next_renamed_export_path(orig: &Path) -> PathBuf {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     with_suffix(&stamp.to_string())
+}
+
+fn apply_export_name_template(template: &str, stem: &str, gain_db: f32) -> String {
+    let gain_suffix = if gain_db.abs() <= 0.0001 {
+        String::new()
+    } else {
+        format!(" (gain{gain_db:+.1}dB)")
+    };
+    template
+        .replace("{name}", stem)
+        .replace("{gain_suffix}", &gain_suffix)
+        // Keep old custom templates working. New defaults should use gain_suffix
+        // so zero dB does not leak a noisy implementation detail into filenames.
+        .replace("{gain:+.1}", &format!("{gain_db:+.1}"))
+        .replace("{gain:+0.0}", &format!("{gain_db:+.1}"))
+        .replace("{gain}", &format!("{gain_db:+.1}"))
 }
 
 impl super::WavesPreviewer {
@@ -199,7 +232,9 @@ impl super::WavesPreviewer {
         struct VirtualSaveTask {
             src: PathBuf,
             dst: PathBuf,
-            audio: std::sync::Arc<crate::audio::AudioBuffer>,
+            audio: Option<std::sync::Arc<crate::audio::AudioBuffer>>,
+            asset: crate::audio_asset::AudioAssetDescriptor,
+            can_materialize: bool,
             gain_db: f32,
             src_sr: u32,
             target_sr: u32,
@@ -229,9 +264,6 @@ impl super::WavesPreviewer {
                 let audio = self
                     .edited_audio_for_path(&p)
                     .or_else(|| item.virtual_audio.clone());
-                let Some(audio) = audio else {
-                    continue;
-                };
                 let parent = self
                     .export_cfg
                     .dest_folder
@@ -259,11 +291,7 @@ impl super::WavesPreviewer {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("out");
-                let mut name = self.export_cfg.name_template.clone();
-                name = name.replace("{name}", stem);
-                name = name.replace("{gain:+.1}", &format!("{:+.1}", db));
-                name = name.replace("{gain:+0.0}", &format!("{:+.1}", db));
-                name = name.replace("{gain}", &format!("{:+.1}", db));
+                let name = apply_export_name_template(&self.export_cfg.name_template, stem, db);
                 let name = crate::app::helpers::sanitize_filename_component(&name);
                 let mut dst = parent.join(name);
                 let target_ext = path_format_override
@@ -292,6 +320,18 @@ impl super::WavesPreviewer {
                     .copied()
                     .unwrap_or(sr)
                     .max(1);
+                let can_materialize = audio.is_none()
+                    && db.abs() <= 0.0001
+                    && target_sr == sr.max(1)
+                    && target_ext.eq_ignore_ascii_case("wav")
+                    && !self.bit_depth_override.contains_key(&p);
+                if audio.is_none() && !can_materialize {
+                    eprintln!(
+                        "virtual export requires a resident edit for requested conversion: {}",
+                        p.display()
+                    );
+                    continue;
+                }
                 // Honor the item's declared bit depth for WAV output so a clip
                 // from a 16/24-bit source isn't silently upgraded to 32-bit
                 // float (matches the list metadata and the file-save path).
@@ -325,6 +365,8 @@ impl super::WavesPreviewer {
                     src: p.clone(),
                     dst,
                     audio,
+                    asset: item.audio_asset.clone(),
+                    can_materialize,
                     gain_db: db,
                     src_sr: sr.max(1),
                     target_sr,
@@ -612,11 +654,7 @@ impl super::WavesPreviewer {
                                 .to_path_buf()
                         });
                         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-                        let mut name = cfg.name_template.clone();
-                        name = name.replace("{name}", stem);
-                        name = name.replace("{gain:+.1}", &format!("{:+.1}", db));
-                        name = name.replace("{gain:+0.0}", &format!("{:+.1}", db));
-                        name = name.replace("{gain}", &format!("{:+.1}", db));
+                        let name = apply_export_name_template(&cfg.name_template, stem, db);
                         let name = crate::app::helpers::sanitize_filename_component(&name);
                         let mut dst = parent.join(name);
                         let src_ext = src.extension().and_then(|e| e.to_str()).unwrap_or("wav");
@@ -682,11 +720,8 @@ impl super::WavesPreviewer {
                             .file_stem()
                             .and_then(|s| s.to_str())
                             .unwrap_or("out");
-                        let mut name = cfg.name_template.clone();
-                        name = name.replace("{name}", stem);
-                        name = name.replace("{gain:+.1}", &format!("{:+.1}", task.gain_db));
-                        name = name.replace("{gain:+0.0}", &format!("{:+.1}", task.gain_db));
-                        name = name.replace("{gain}", &format!("{:+.1}", task.gain_db));
+                        let name =
+                            apply_export_name_template(&cfg.name_template, stem, task.gain_db);
                         let name = crate::app::helpers::sanitize_filename_component(&name);
                         let mut dst = parent.join(name);
                         let src_ext = task
@@ -886,7 +921,57 @@ impl super::WavesPreviewer {
             for task in virtual_jobs {
                 let src = task.src;
                 let dst = task.dst;
-                let mut channels = task.audio.channels.clone();
+                if task.can_materialize {
+                    match task.asset.access().materialize_current_revision(&dst) {
+                        Ok(()) => {
+                            let mut marker_ok = true;
+                            if task.write_markers
+                                && crate::markers::write_markers(
+                                    &dst,
+                                    task.src_sr,
+                                    task.target_sr,
+                                    &task.markers,
+                                )
+                                .is_err()
+                            {
+                                marker_ok = false;
+                            }
+                            if task.write_loop_markers
+                                && crate::loop_markers::write_loop_markers(
+                                    &dst,
+                                    task.loop_region
+                                        .map(|(start, end)| (start as u64, end as u64)),
+                                )
+                                .is_err()
+                            {
+                                marker_ok = false;
+                            }
+                            if marker_ok {
+                                ok += 1;
+                                success_paths.push(dst.clone());
+                                write_transcript_sidecar(&src, &dst, &transcript_cache);
+                            } else {
+                                failed += 1;
+                                failed_paths.push(dst.clone());
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "virtual asset materialize failed {}: {err:#}",
+                                dst.display()
+                            );
+                            failed += 1;
+                            failed_paths.push(dst.clone());
+                        }
+                    }
+                    continue;
+                }
+                let Some(audio) = task.audio else {
+                    failed += 1;
+                    failed_paths.push(dst);
+                    continue;
+                };
+                let mut channels = audio.channels.clone();
                 if task.gain_db.abs() > 0.0001 {
                     let gain = 10.0f32.powf(task.gain_db / 20.0);
                     for ch in channels.iter_mut() {

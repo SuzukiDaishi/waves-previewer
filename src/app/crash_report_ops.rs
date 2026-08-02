@@ -37,7 +37,9 @@ impl WavesPreviewer {
         let mut close_requested = false;
         let mut reviewed_id = None;
 
-        egui::Window::new("Crash Reports")
+        let scroll_target = self.begin_floating_scroll_surface("crash_reports_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Crash Reports")
             .open(&mut open)
             .resizable(true)
             .default_width(520.0)
@@ -114,6 +116,10 @@ impl WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
 
         if let Some(id) = reviewed_id {
             match crate::crash_report::acknowledge_report(&id) {

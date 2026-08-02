@@ -313,11 +313,43 @@ impl WavesPreviewer {
         &mut self,
         tab_idx: usize,
         tool: ToolKind,
-        channels: Vec<Vec<f32>>,
+        mut channels: Vec<Vec<f32>>,
     ) {
         // Preview renders are already at the output rate on both sides of
         // the swap, so the time position maps 1:1.
         let sr = self.audio.shared.out_sample_rate.max(1);
+        // Keep dry audio running while render-ahead is prepared, then blend
+        // the first 10 ms after the live playhead into the new wet buffer.
+        // This avoids a discontinuity without delaying the transport or
+        // rewriting audio before the current position.
+        if let Some(dry) = self.audio.shared.samples.load_full() {
+            let start = self
+                .audio
+                .shared
+                .play_pos
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let fade_frames = ((sr as f32 * 0.010).round() as usize).max(1);
+            for (channel_index, wet_channel) in channels.iter_mut().enumerate() {
+                let dry_channel = dry
+                    .channels
+                    .get(channel_index)
+                    .or_else(|| dry.channels.last());
+                let Some(dry_channel) = dry_channel else {
+                    continue;
+                };
+                let available = wet_channel
+                    .len()
+                    .min(dry_channel.len())
+                    .saturating_sub(start)
+                    .min(fade_frames);
+                for offset in 0..available {
+                    let wet = (offset + 1) as f32 / available.max(1) as f32;
+                    let dry_mix = 1.0 - wet;
+                    wet_channel[start + offset] =
+                        dry_channel[start + offset] * dry_mix + wet_channel[start + offset] * wet;
+                }
+            }
+        }
         let preview_audio = std::sync::Arc::new(crate::audio::AudioBuffer::from_channels(channels));
         self.audio
             .set_samples_buffer_keep_time_pos(preview_audio.clone(), sr, sr);

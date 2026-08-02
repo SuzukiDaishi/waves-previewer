@@ -16,6 +16,57 @@ const PLUGIN_METRIC_CAP: usize = 256;
 const PLUGIN_GUI_POLL_MS: u64 = 16;
 
 impl crate::app::WavesPreviewer {
+    pub(super) fn load_cached_plugin_catalog() -> Vec<PluginCatalogEntry> {
+        #[cfg(test)]
+        {
+            return Vec::new();
+        }
+        #[cfg(not(test))]
+        crate::plugin::catalog::PluginCatalogDb::open_default()
+            .and_then(|db| db.load_entries())
+            .unwrap_or_default()
+    }
+
+    fn persist_plugin_catalog(&self) {
+        #[cfg(test)]
+        {
+            return;
+        }
+        #[cfg(not(test))]
+        let result = (|| -> anyhow::Result<()> {
+            let mut db = crate::plugin::catalog::PluginCatalogDb::open_default()?;
+            db.replace_search_paths(&self.plugin_search_paths)?;
+            db.upsert_entries(&self.plugin_catalog)?;
+            Ok(())
+        })();
+        #[cfg(not(test))]
+        if let Err(err) = result {
+            eprintln!("plugin catalog persistence failed: {err:#}");
+        }
+    }
+
+    fn record_plugin_probe_outcome(plugin_key: &str, error: Option<&str>) {
+        #[cfg(test)]
+        {
+            let _ = (plugin_key, error);
+            return;
+        }
+        #[cfg(not(test))]
+        let Ok(db) = crate::plugin::catalog::PluginCatalogDb::open_default() else {
+            return;
+        };
+        #[cfg(not(test))]
+        let result = if let Some(message) = error {
+            db.record_failure(plugin_key, "probe", message)
+        } else {
+            db.record_success(plugin_key)
+        };
+        #[cfg(not(test))]
+        if let Err(err) = result {
+            eprintln!("plugin probe catalog update failed: {err:#}");
+        }
+    }
+
     fn native_probe_fallback_hint(plugin_key: &str, params_empty: bool) -> Option<String> {
         let ext = Path::new(plugin_key)
             .extension()
@@ -31,7 +82,7 @@ impl crate::app::WavesPreviewer {
                 }
                 if params_empty {
                     return Some(
-                        "native VST3 probe failed for this plugin; generic fallback is active"
+                        "native VST3 probe did not expose a usable audio-effect interface"
                             .to_string(),
                     );
                 }
@@ -46,7 +97,7 @@ impl crate::app::WavesPreviewer {
                 }
                 if params_empty {
                     return Some(
-                        "native CLAP probe failed for this plugin; generic fallback is active"
+                        "native CLAP probe did not expose a usable audio-effect interface"
                             .to_string(),
                     );
                 }
@@ -135,6 +186,7 @@ impl crate::app::WavesPreviewer {
         self.plugin_catalog.push(entry.clone());
         self.plugin_catalog
             .sort_by(|a, b| a.name.cmp(&b.name).then(a.path.cmp(&b.path)));
+        self.persist_plugin_catalog();
         Some(entry)
     }
 
@@ -264,6 +316,7 @@ impl crate::app::WavesPreviewer {
         let changed = merged != self.plugin_search_paths;
         if changed || merged.len() != before {
             self.plugin_search_paths = merged;
+            self.persist_plugin_catalog();
         }
         changed
     }
@@ -273,11 +326,13 @@ impl crate::app::WavesPreviewer {
             return false;
         }
         self.plugin_search_paths.remove(index);
+        self.persist_plugin_catalog();
         true
     }
 
     pub(super) fn reset_plugin_search_paths_to_default(&mut self) {
         self.plugin_search_paths = Self::default_plugin_search_paths();
+        self.persist_plugin_catalog();
     }
 
     fn plugin_next_job_id(&mut self) -> u64 {
@@ -1269,10 +1324,22 @@ impl crate::app::WavesPreviewer {
     }
 
     fn spawn_plugin_process_for_tab(&mut self, tab_idx: usize, is_apply: bool, is_auto: bool) {
+        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+            if tab.plugin_fx_chain.slots.len() <= 1 {
+                tab.plugin_fx_chain
+                    .replace_slot_zero_from_legacy(&tab.plugin_fx_draft);
+            }
+            tab.plugin_fx_chain.clamp_render_ahead();
+        }
         let Some(tab) = self.tabs.get(tab_idx) else {
             return;
         };
-        let Some(plugin_key) = tab.plugin_fx_draft.plugin_key.clone() else {
+        let chain = tab.plugin_fx_chain.clone();
+        let Some(plugin_key) = chain
+            .slots
+            .first()
+            .and_then(|slot| slot.draft.plugin_key.clone())
+        else {
             if let Some(tab) = self.tabs.get_mut(tab_idx) {
                 tab.plugin_fx_draft.last_error = Some("plugin not selected".to_string());
             }
@@ -1295,6 +1362,35 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let draft = tab.plugin_fx_draft.clone();
+        let mut chain_slots = Vec::with_capacity(chain.slots.len());
+        for slot in &chain.slots {
+            let Some(key) = slot.draft.plugin_key.as_deref() else {
+                continue;
+            };
+            let path = self.plugin_key_to_path(key);
+            if !path.exists() {
+                if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                    tab.plugin_fx_draft.last_error = Some(format!(
+                        "plugin not found in slot {}: {}",
+                        slot.id,
+                        path.display()
+                    ));
+                }
+                return;
+            }
+            chain_slots.push(crate::plugin::PluginChainSlotConfig {
+                slot_id: slot.id,
+                plugin_path: path.to_string_lossy().to_string(),
+                enabled: slot.draft.enabled,
+                bypass: slot.draft.bypass,
+                state_blob_b64: slot
+                    .draft
+                    .state_blob
+                    .as_ref()
+                    .map(|bytes| base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)),
+                params: Self::draft_params_to_worker(&slot.draft.params),
+            });
+        }
         let undo = if is_apply {
             self.tabs.get(tab_idx).map(Self::capture_undo_state)
         } else {
@@ -1336,56 +1432,131 @@ impl crate::app::WavesPreviewer {
             let _ = std::fs::remove_file(&output_path);
             return;
         }
-        let params: Vec<PluginParamValue> = draft
-            .params
-            .iter()
-            .map(|p| PluginParamValue {
-                id: p.id.clone(),
-                normalized: p.normalized.clamp(0.0, 1.0),
-            })
-            .collect();
-        let plugin_path_text = plugin_path.to_string_lossy().to_string();
         let input_path_text = input_path.to_string_lossy().to_string();
         let output_path_text = output_path.to_string_lossy().to_string();
+        let use_render_ahead =
+            !is_apply && chain.preview_engine == super::types::PluginPreviewEngine::RenderAhead;
+        let render_ahead_ms = chain.render_ahead_ms.clamp(100, 500);
+        let chain_bypass = chain.bypass;
+        let rack_worker = std::sync::Arc::clone(&self.plugin_rack_worker);
         let (tx, rx) = mpsc::channel::<PluginProcessResult>();
         std::thread::spawn(move || {
-            let req = WorkerRequest::ProcessFx {
-                plugin_path: plugin_path_text,
-                input_audio_path: input_path_text,
+            let offline_req = WorkerRequest::ProcessChain {
+                slots: chain_slots.clone(),
+                input_audio_path: input_path_text.clone(),
                 output_audio_path: output_path_text.clone(),
                 sample_rate: out_sr,
                 max_block_size: 1024,
-                enabled: draft.enabled,
-                bypass: draft.bypass,
-                state_blob_b64: draft
-                    .state_blob
-                    .as_ref()
-                    .map(|bytes| base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)),
-                params,
+                chain_bypass,
             };
             let mut error: Option<String> = None;
             let mut channels_out: Vec<Vec<f32>> = Vec::new();
             let mut state_blob_out: Option<Vec<u8>> = None;
+            let mut slot_state_blobs = Vec::new();
+            let mut latency_samples = 0;
+            let mut underruns = 0;
+            let mut failed_slot = None;
             let mut backend = crate::plugin::PluginHostBackend::Generic;
             let mut backend_note: Option<String> = None;
-            match crate::plugin::client::run_request(&req) {
-                Ok(WorkerResponse::ProcessResult {
+            let response = if use_render_ahead {
+                let mut guard = match rack_worker.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        error = Some("plugin rack worker lock poisoned".to_string());
+                        let _ = tx.send(PluginProcessResult {
+                            job_id,
+                            tab_idx,
+                            is_apply,
+                            is_auto,
+                            channels: channels_out,
+                            state_blob: state_blob_out,
+                            slot_state_blobs,
+                            latency_samples,
+                            underruns,
+                            failed_slot,
+                            backend,
+                            backend_note,
+                            error,
+                        });
+                        return;
+                    }
+                };
+                if guard.is_none() {
+                    *guard = crate::plugin::client::RackWorkerClient::spawn().ok();
+                }
+                let session_id = job_id.max(1);
+                let result = if let Some(client) = guard.as_mut() {
+                    client
+                        .request(&WorkerRequest::ChainSessionOpen {
+                            session_id,
+                            slots: chain_slots.clone(),
+                            sample_rate: out_sr,
+                            channels: channels.len().max(1) as u16,
+                            max_block_size: 1024,
+                            render_ahead_ms,
+                        })
+                        .and_then(|_| {
+                            client.request(&WorkerRequest::ChainSessionConfigure {
+                                session_id,
+                                slots: chain_slots.clone(),
+                                chain_bypass,
+                            })
+                        })
+                        .and_then(|_| {
+                            client.request(&WorkerRequest::ChainSessionProcess {
+                                session_id,
+                                input_audio_path: input_path_text.clone(),
+                                output_audio_path: output_path_text.clone(),
+                            })
+                        })
+                } else {
+                    Err("could not start isolated rack worker".to_string())
+                };
+                if result.is_err() {
+                    // A crashed/hung plugin only invalidates this child. The
+                    // caller keeps playing the existing dry buffer.
+                    if let Some(client) = guard.take() {
+                        client.close();
+                    }
+                }
+                result
+            } else {
+                crate::plugin::client::run_request(&offline_req)
+            };
+            match response {
+                Ok(WorkerResponse::ChainProcessResult {
                     output_audio_path,
-                    state_blob_b64,
-                    backend: b,
+                    slot_state_blobs_b64,
+                    latency_samples: latency,
+                    underruns: underrun_count,
+                    failed_slot: failed,
                     backend_note: note,
                 }) => {
-                    backend = b;
                     backend_note = note;
+                    latency_samples = latency;
+                    underruns = underrun_count;
+                    failed_slot = failed;
+                    slot_state_blobs = slot_state_blobs_b64
+                        .into_iter()
+                        .map(|(id, raw)| {
+                            (
+                                id,
+                                raw.and_then(|value| {
+                                    base64::engine::general_purpose::STANDARD_NO_PAD
+                                        .decode(value.as_bytes())
+                                        .ok()
+                                }),
+                            )
+                        })
+                        .collect();
+                    state_blob_out = slot_state_blobs.first().and_then(|(_, blob)| blob.clone());
+                    backend = draft
+                        .backend
+                        .unwrap_or(crate::plugin::PluginHostBackend::Generic);
                     let out_path = PathBuf::from(output_audio_path);
                     match crate::audio_io::decode_audio_multi(&out_path) {
                         Ok((channels, _sr)) => {
                             channels_out = channels;
-                            state_blob_out = state_blob_b64.and_then(|raw| {
-                                base64::engine::general_purpose::STANDARD_NO_PAD
-                                    .decode(raw.as_bytes())
-                                    .ok()
-                            });
                         }
                         Err(err) => {
                             error = Some(format!("plugin output decode failed: {err}"));
@@ -1411,6 +1582,10 @@ impl crate::app::WavesPreviewer {
                 is_auto,
                 channels: channels_out,
                 state_blob: state_blob_out,
+                slot_state_blobs,
+                latency_samples,
+                underruns,
+                failed_slot,
                 backend,
                 backend_note,
                 error,
@@ -1889,6 +2064,7 @@ impl crate::app::WavesPreviewer {
                     } else {
                         self.plugin_catalog = result.plugins;
                         self.plugin_scan_error = None;
+                        self.persist_plugin_catalog();
                     }
                     let elapsed_ms = state.started_at.elapsed().as_secs_f32() * 1000.0;
                     Self::plugin_push_metric(&mut self.debug.plugin_scan_ms, elapsed_ms);
@@ -1904,6 +2080,7 @@ impl crate::app::WavesPreviewer {
         if let Some(state) = self.plugin_probe_state.take() {
             match state.rx.try_recv() {
                 Ok(result) => {
+                    Self::record_plugin_probe_outcome(&result.plugin_key, result.error.as_deref());
                     let elapsed_ms = state.started_at.elapsed().as_secs_f32() * 1000.0;
                     Self::plugin_push_metric(&mut self.debug.plugin_probe_ms, elapsed_ms);
                     if result.job_id != state.job_id {
@@ -1961,6 +2138,20 @@ impl crate::app::WavesPreviewer {
                                 }
                                 tab.plugin_fx_draft.last_backend_log =
                                     Self::join_backend_log_lines(lines);
+                            }
+                            let latest_draft = tab.plugin_fx_draft.clone();
+                            if let Some(slot) =
+                                tab.plugin_fx_chain.selected_slot_id.and_then(|id| {
+                                    tab.plugin_fx_chain
+                                        .slots
+                                        .iter_mut()
+                                        .find(|slot| slot.id == id)
+                                })
+                            {
+                                slot.draft = latest_draft;
+                            } else {
+                                tab.plugin_fx_chain
+                                    .replace_slot_zero_from_legacy(&latest_draft);
                             }
                         }
                     }
@@ -2135,6 +2326,55 @@ impl crate::app::WavesPreviewer {
                         ctx.request_repaint();
                         return;
                     }
+                    if let Some(tab) = self.tabs.get_mut(result.tab_idx) {
+                        let previous_underruns = tab.plugin_fx_chain.underrun_count;
+                        if !result.is_apply
+                            && tab.plugin_fx_chain.preview_engine
+                                == super::types::PluginPreviewEngine::RenderAhead
+                        {
+                            if result.underruns > previous_underruns {
+                                tab.plugin_fx_chain.render_ahead_ms = tab
+                                    .plugin_fx_chain
+                                    .render_ahead_ms
+                                    .saturating_add(25)
+                                    .min(500);
+                            } else if result.underruns == 0
+                                && tab.plugin_fx_chain.render_ahead_ms > 150
+                            {
+                                tab.plugin_fx_chain.render_ahead_ms = tab
+                                    .plugin_fx_chain
+                                    .render_ahead_ms
+                                    .saturating_sub(5)
+                                    .max(150);
+                            }
+                        }
+                        tab.plugin_fx_chain.latency_samples = result.latency_samples;
+                        tab.plugin_fx_chain.underrun_count = result.underruns;
+                        for (slot_id, state_blob) in &result.slot_state_blobs {
+                            if let Some(slot) = tab
+                                .plugin_fx_chain
+                                .slots
+                                .iter_mut()
+                                .find(|slot| slot.id == *slot_id)
+                            {
+                                slot.draft.state_blob = state_blob.clone();
+                                slot.failure_reason = None;
+                            }
+                        }
+                        if let Some(failed_slot) = result.failed_slot {
+                            if let Some(slot) = tab
+                                .plugin_fx_chain
+                                .slots
+                                .iter_mut()
+                                .find(|slot| slot.id == failed_slot)
+                            {
+                                slot.failure_reason = Some("plugin worker reported failure".into());
+                            }
+                        }
+                        if let Some(first) = tab.plugin_fx_chain.slots.first() {
+                            tab.plugin_fx_draft = first.draft.clone();
+                        }
+                    }
                     if result.is_apply {
                         let editor_channels_before = self
                             .tabs
@@ -2203,6 +2443,11 @@ impl crate::app::WavesPreviewer {
                             }
                             tab.plugin_fx_draft.last_backend_log =
                                 Self::join_backend_log_lines(lines);
+                        }
+                        if let Some(path) =
+                            self.tabs.get(result.tab_idx).map(|tab| tab.path.clone())
+                        {
+                            self.advance_asset_revision_for_path(&path);
                         }
                         if let Some((path, buffer_sr, channels)) =
                             self.tabs.get(result.tab_idx).map(|tab| {

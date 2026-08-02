@@ -7,12 +7,73 @@ use crate::markers::MarkerEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 pub type MediaId = u64;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaybackTimelineMap {
+    pub source_frames: u64,
+    pub transport_frames: u64,
+    pub source_sample_rate: u32,
+    pub transport_sample_rate: u32,
+    pub actual_time_multiplier: f64,
+    pub generation: u64,
+}
+
+impl PlaybackTimelineMap {
+    pub fn new(
+        source_frames: u64,
+        transport_frames: u64,
+        source_sample_rate: u32,
+        transport_sample_rate: u32,
+        generation: u64,
+    ) -> Self {
+        let source_duration = source_frames as f64 / source_sample_rate.max(1) as f64;
+        let transport_duration = transport_frames as f64 / transport_sample_rate.max(1) as f64;
+        Self {
+            source_frames,
+            transport_frames,
+            source_sample_rate: source_sample_rate.max(1),
+            transport_sample_rate: transport_sample_rate.max(1),
+            actual_time_multiplier: if transport_duration > 0.0 {
+                source_duration / transport_duration
+            } else {
+                1.0
+            },
+            generation,
+        }
+    }
+
+    pub fn source_time_for_transport_frame(self, transport_frame: f64) -> f64 {
+        if self.source_frames == 0 || self.transport_frames == 0 {
+            return transport_frame.max(0.0) / self.transport_sample_rate.max(1) as f64;
+        }
+        let source_frame =
+            transport_frame.max(0.0) * self.source_frames as f64 / self.transport_frames as f64;
+        source_frame / self.source_sample_rate.max(1) as f64
+    }
+
+    pub fn transport_frame_for_source_time(self, source_time: f64) -> usize {
+        if self.source_frames == 0 || self.transport_frames == 0 {
+            return (source_time.max(0.0) * self.transport_sample_rate.max(1) as f64).round()
+                as usize;
+        }
+        let source_frame = source_time.max(0.0) * self.source_sample_rate.max(1) as f64;
+        (source_frame * self.transport_frames as f64 / self.source_frames as f64)
+            .round()
+            .clamp(0.0, self.transport_frames as f64) as usize
+    }
+}
+
+impl Default for PlaybackTimelineMap {
+    fn default() -> Self {
+        Self::new(0, 0, 48_000, 48_000, 0)
+    }
+}
 
 /// Path -> MediaId index for very large lists.
 ///
@@ -185,6 +246,8 @@ pub struct VirtualState {
 #[derive(Clone, Debug)]
 pub struct MediaItem {
     pub id: MediaId,
+    /// Stable identity/current revision; `path` is only a UI/list handle.
+    pub audio_asset: crate::audio_asset::AudioAssetDescriptor,
     pub path: PathBuf,
     pub display_name: String,
     /// Interned per parent directory: at 1M files the folder string is
@@ -199,6 +262,7 @@ pub struct MediaItem {
     /// Arc so cloning a `MediaItem` (the list view clones one per visible row)
     /// does not deep-copy the full transcript text and segments.
     pub transcript: Option<Arc<Transcript>>,
+    pub transcript_document: Option<Arc<TranscriptDocument>>,
     pub transcript_language: Option<String>,
     /// External CSV/Excel row values. Boxed option: most rows have none and
     /// an inline empty HashMap cost 48 bytes per item at 1M files.
@@ -237,17 +301,119 @@ pub struct ExternalSource {
     pub data_row: Option<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TranscriptSegment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Transcript {
     pub segments: Vec<TranscriptSegment>,
     pub full_text: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TranscriptFreshness {
+    Fresh,
+    Stale,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TranscriptDocument {
+    pub segments: Vec<TranscriptSegment>,
+    pub full_text: String,
+    pub language: Option<String>,
+    pub asset_id: crate::audio_asset::AudioAssetId,
+    pub asset_revision: crate::audio_asset::AssetRevision,
+    pub freshness: TranscriptFreshness,
+}
+
+impl TranscriptDocument {
+    pub fn from_transcript(
+        transcript: &Transcript,
+        language: Option<String>,
+        asset_id: crate::audio_asset::AudioAssetId,
+        asset_revision: crate::audio_asset::AssetRevision,
+    ) -> Self {
+        Self {
+            segments: transcript.segments.clone(),
+            full_text: transcript.full_text.clone(),
+            language,
+            asset_id,
+            asset_revision,
+            freshness: TranscriptFreshness::Fresh,
+        }
+    }
+
+    pub fn transcript(&self) -> Transcript {
+        Transcript {
+            segments: self.segments.clone(),
+            full_text: self.full_text.clone(),
+        }
+    }
+
+    pub fn trim(&mut self, start_ms: u64, end_ms: u64) {
+        self.segments = self
+            .segments
+            .iter()
+            .filter_map(|segment| {
+                let start = segment.start_ms.max(start_ms);
+                let end = segment.end_ms.min(end_ms);
+                (end > start).then(|| TranscriptSegment {
+                    start_ms: start.saturating_sub(start_ms),
+                    end_ms: end.saturating_sub(start_ms),
+                    text: segment.text.clone(),
+                })
+            })
+            .collect();
+        self.full_text = self
+            .segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    pub fn scale_time(&mut self, multiplier: f64) {
+        if !multiplier.is_finite() || multiplier <= 0.0 {
+            self.freshness = TranscriptFreshness::Stale;
+            return;
+        }
+        for segment in &mut self.segments {
+            segment.start_ms = (segment.start_ms as f64 * multiplier).round().max(0.0) as u64;
+            segment.end_ms = (segment.end_ms as f64 * multiplier).round().max(0.0) as u64;
+        }
+    }
+
+    pub fn scale_range(&mut self, start_ms: u64, end_ms: u64, multiplier: f64) {
+        if end_ms <= start_ms || !multiplier.is_finite() || multiplier <= 0.0 {
+            self.mark_stale();
+            return;
+        }
+        let scaled_span = ((end_ms - start_ms) as f64 * multiplier).round() as u64;
+        let map = |time_ms: u64| {
+            if time_ms <= start_ms {
+                time_ms
+            } else if time_ms >= end_ms {
+                start_ms
+                    .saturating_add(scaled_span)
+                    .saturating_add(time_ms - end_ms)
+            } else {
+                start_ms.saturating_add(((time_ms - start_ms) as f64 * multiplier).round() as u64)
+            }
+        };
+        for segment in &mut self.segments {
+            segment.start_ms = map(segment.start_ms);
+            segment.end_ms = map(segment.end_ms).max(segment.start_ms);
+        }
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.freshness = TranscriptFreshness::Stale;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1474,6 +1640,109 @@ pub struct PluginFxDraft {
     pub auto_preview: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginPreviewEngine {
+    #[default]
+    RenderAhead,
+    Offline,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginFxSlot {
+    pub id: u64,
+    pub draft: PluginFxDraft,
+    pub latency_samples: u32,
+    pub failure_reason: Option<String>,
+}
+
+impl PluginFxSlot {
+    pub fn new(draft: PluginFxDraft) -> Self {
+        static NEXT_SLOT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_SLOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            draft,
+            latency_samples: 0,
+            failure_reason: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginFxChainDraft {
+    pub slots: Vec<PluginFxSlot>,
+    pub selected_slot_id: Option<u64>,
+    pub bypass: bool,
+    pub preview_engine: PluginPreviewEngine,
+    pub render_ahead_ms: u32,
+    pub latency_samples: u32,
+    pub underrun_count: u64,
+}
+
+impl Default for PluginFxChainDraft {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            selected_slot_id: None,
+            bypass: false,
+            preview_engine: PluginPreviewEngine::RenderAhead,
+            render_ahead_ms: 150,
+            latency_samples: 0,
+            underrun_count: 0,
+        }
+    }
+}
+
+impl PluginFxChainDraft {
+    pub fn from_legacy(draft: &PluginFxDraft) -> Self {
+        let mut chain = Self::default();
+        if draft.plugin_key.is_some() {
+            let slot = PluginFxSlot::new(draft.clone());
+            chain.selected_slot_id = Some(slot.id);
+            chain.slots.push(slot);
+        }
+        chain
+    }
+
+    pub fn replace_slot_zero_from_legacy(&mut self, draft: &PluginFxDraft) {
+        if let Some(slot) = self.slots.first_mut() {
+            slot.draft = draft.clone();
+            self.selected_slot_id = Some(slot.id);
+        } else if draft.plugin_key.is_some() {
+            let slot = PluginFxSlot::new(draft.clone());
+            self.selected_slot_id = Some(slot.id);
+            self.slots.push(slot);
+        }
+    }
+
+    pub fn total_latency_samples(&self) -> u32 {
+        if self.bypass {
+            0
+        } else {
+            self.slots
+                .iter()
+                .filter(|slot| slot.draft.enabled && !slot.draft.bypass)
+                .fold(0u32, |sum, slot| sum.saturating_add(slot.latency_samples))
+        }
+    }
+
+    pub fn clamp_render_ahead(&mut self) {
+        self.render_ahead_ms = self.render_ahead_ms.clamp(100, 500);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginProbeCapabilities {
+    pub architecture: String,
+    pub is_audio_effect: bool,
+    pub main_input_channels: Vec<u16>,
+    pub main_output_channels: Vec<u16>,
+    pub supports_state: bool,
+    pub supports_native_gui: bool,
+    pub reports_latency: bool,
+    pub supported: bool,
+    pub unsupported_reason: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum PluginGuiCommand {
     SyncNow,
@@ -1553,6 +1822,10 @@ pub struct PluginProcessResult {
     pub is_auto: bool,
     pub channels: Vec<Vec<f32>>,
     pub state_blob: Option<Vec<u8>>,
+    pub slot_state_blobs: Vec<(u64, Option<Vec<u8>>)>,
+    pub latency_samples: u32,
+    pub underruns: u64,
+    pub failed_slot: Option<u64>,
     pub backend: crate::plugin::PluginHostBackend,
     pub backend_note: Option<String>,
     pub error: Option<String>,
@@ -1834,6 +2107,8 @@ pub struct EditorTab {
     #[allow(dead_code)]
     pub loop_enabled: bool,
     pub loading: bool,
+    /// Large file-backed asset: overview is resident, PCM stays paged/mapped.
+    pub paged_asset: bool,
     pub ch_samples: Vec<Vec<f32>>, // per-channel samples (playback buffer SR)
     // Pencil edits are held separately from committed audio until Apply.
     pub pencil_draft: Option<PencilDraft>,
@@ -1977,6 +2252,7 @@ pub struct EditorTab {
     pub preview_overlay: Option<PreviewOverlay>,
     pub music_analysis_draft: MusicAnalysisDraft,
     pub plugin_fx_draft: PluginFxDraft,
+    pub plugin_fx_chain: PluginFxChainDraft,
     pub channel_routing_draft: ChannelRoutingDraft,
     pub pending_loop_unwrap: Option<u32>,
     pub undo_stack: Vec<EditorUndoState>,
@@ -2109,6 +2385,7 @@ impl EditorTab {
             waveform_pyramid: None,
             loop_enabled: false,
             loading: true,
+            paged_asset: false,
             ch_samples: Vec::new(),
             pencil_draft: None,
             pencil_last_point: None,
@@ -2220,6 +2497,7 @@ impl EditorTab {
             preview_overlay: None,
             music_analysis_draft: crate::app::types::MusicAnalysisDraft::default(),
             plugin_fx_draft: crate::app::types::PluginFxDraft::default(),
+            plugin_fx_chain: crate::app::types::PluginFxChainDraft::default(),
             channel_routing_draft: crate::app::types::ChannelRoutingDraft::default(),
             pending_loop_unwrap: None,
             undo_stack: Vec::new(),
@@ -2638,6 +2916,7 @@ pub struct ProcessingResult {
 pub enum SessionSidecarSource {
     Channels(Arc<Vec<Vec<f32>>>),
     Buffer(Arc<crate::audio::AudioBuffer>),
+    File(PathBuf),
 }
 
 impl SessionSidecarSource {
@@ -2645,6 +2924,7 @@ impl SessionSidecarSource {
         match self {
             Self::Channels(channels) => channels.as_slice(),
             Self::Buffer(buffer) => buffer.channels.as_slice(),
+            Self::File(_) => &[],
         }
     }
 }
@@ -2671,6 +2951,10 @@ pub struct EditorApplyState {
     /// result is discarded (not misapplied) if the tab was closed meanwhile.
     pub tab_id: u64,
     pub undo: Option<EditorUndoState>,
+    pub tool: ToolKind,
+    pub source_range: Option<(usize, usize)>,
+    pub source_len: usize,
+    pub source_sample_rate: u32,
 }
 
 pub struct EditorApplyResult {
@@ -2742,6 +3026,7 @@ pub enum EditorDecodeStrategy {
 pub enum EditorDecodeEvent {
     Progress,
     FinalReady,
+    PagedReady,
     Failed,
 }
 
@@ -2874,6 +3159,7 @@ pub struct CachedEdit {
     pub tool_state: ToolState,
     pub active_tool: ToolKind,
     pub plugin_fx_draft: PluginFxDraft,
+    pub plugin_fx_chain: PluginFxChainDraft,
     pub show_waveform_overlay: bool,
     pub applied_effect_graph: Option<AppliedEffectGraphStamp>,
 }
@@ -4066,6 +4352,7 @@ pub struct SeekHoldState {
 pub struct ClipboardItem {
     pub display_name: String,
     pub source_path: Option<PathBuf>,
+    pub audio_asset: Option<crate::audio_asset::AudioAssetDescriptor>,
     pub audio: Option<Arc<AudioBuffer>>,
     pub sample_rate: u32,
     pub bits_per_sample: u16,
@@ -4091,11 +4378,17 @@ pub enum ClipboardPrepAudio {
         sample_rate: u32,
         bits_per_sample: u16,
     },
+    /// A large file-backed virtual asset that must stay file-backed.
+    AssetReference {
+        sample_rate: u32,
+        bits_per_sample: u16,
+    },
 }
 
 pub struct ClipboardPrepItem {
     pub display_name: String,
     pub source_path: Option<PathBuf>,
+    pub audio_asset: Option<crate::audio_asset::AudioAssetDescriptor>,
     pub audio: ClipboardPrepAudio,
     /// Pending gain / sample-rate overrides (list-level, independent of any
     /// in-memory edited audio) applied on the worker thread so clipboard
@@ -4851,9 +5144,22 @@ pub enum RecordingWorkerMsg {
     /// Level update (peak L, peak R)
     Level(f32, f32),
     /// Waveform overview block (min, max)
-    WaveformBlock(f32, f32),
+    WaveformBlock {
+        min: f32,
+        max: f32,
+        start_frame: u64,
+        end_frame: u64,
+    },
+    /// Number of complete audio frames accepted by the writer.
+    WrittenFrames(u64),
     /// Recording finalized — path to temp WAV
-    Finalized(std::path::PathBuf),
+    Finalized {
+        path: std::path::PathBuf,
+        frames: u64,
+        partial: bool,
+    },
+    /// An explicitly discarded take was stopped and removed.
+    Discarded,
     /// Error from worker
     Error(String),
 }
@@ -4876,7 +5182,9 @@ pub struct RecordingTabState {
     /// capture buffers dropped because the worker fell behind (shared with the
     /// cpal callback)
     pub overrun_count: Arc<std::sync::atomic::AtomicUsize>,
-    pub waveform_overview: Vec<(f32, f32)>,
+    pub waveform_overview: VecDeque<(f32, f32)>,
+    /// Absolute frame represented by the first overview point.
+    pub waveform_start_frame: u64,
     /// duration in seconds represented by each waveform_overview block (for grid drawing)
     pub overview_block_secs: f32,
     pub progress_message: String,
@@ -4884,11 +5192,16 @@ pub struct RecordingTabState {
     /// channel for receiving events from the recording worker
     pub rx: Option<Receiver<RecordingWorkerMsg>>,
     /// cancel flag for the worker
-    pub cancel: Arc<AtomicBool>,
+    pub recording_command: Arc<AtomicU8>,
     /// pause flag for the worker (true while paused: capture is drained but not written)
     pub paused: Arc<AtomicBool>,
     /// elapsed timer start
     pub record_start: Option<std::time::Instant>,
+    /// Actual complete frames accepted by the recording writer.
+    pub written_frames: u64,
+    pub recording_sample_rate: u32,
+    /// Stable user-facing take name; the physical cache name is never shown.
+    pub recording_display_name: String,
     /// when the current pause began (None while not paused)
     pub pause_started_at: Option<std::time::Instant>,
     /// total time spent paused so far (excludes the current in-progress pause)
@@ -4914,17 +5227,119 @@ impl Default for RecordingTabState {
             peak_hold_r_at: None,
             confirm_discard: false,
             overrun_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            waveform_overview: Vec::new(),
+            waveform_overview: VecDeque::new(),
+            waveform_start_frame: 0,
             overview_block_secs: 0.0,
             progress_message: String::new(),
             last_recording_path: None,
             rx: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            recording_command: Arc::new(AtomicU8::new(0)),
             paused: Arc::new(AtomicBool::new(false)),
             record_start: None,
+            written_frames: 0,
+            recording_sample_rate: 0,
+            recording_display_name: String::new(),
             pause_started_at: None,
             paused_accum: std::time::Duration::ZERO,
             tab_open: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod playback_timeline_tests {
+    use super::PlaybackTimelineMap;
+
+    #[test]
+    fn actual_buffer_lengths_roundtrip_source_positions_within_one_frame() {
+        for (source_frames, transport_frames) in [
+            (480_000u64, 240_000u64),
+            (480_000, 480_000),
+            (480_000, 960_003),
+        ] {
+            let map = PlaybackTimelineMap::new(source_frames, transport_frames, 48_000, 48_000, 1);
+            for source_frame in [0u64, 1, 12_345, source_frames / 2, source_frames - 1] {
+                let source_time = source_frame as f64 / 48_000.0;
+                let transport = map.transport_frame_for_source_time(source_time);
+                let restored_time = map.source_time_for_transport_frame(transport as f64);
+                let restored_frame = (restored_time * 48_000.0).round() as i64;
+                assert!((restored_frame - source_frame as i64).abs() <= 1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod transcript_document_tests {
+    use super::*;
+
+    fn document() -> TranscriptDocument {
+        TranscriptDocument::from_transcript(
+            &Transcript {
+                segments: vec![
+                    TranscriptSegment {
+                        start_ms: 500,
+                        end_ms: 1_500,
+                        text: "one".into(),
+                    },
+                    TranscriptSegment {
+                        start_ms: 2_000,
+                        end_ms: 3_000,
+                        text: "two".into(),
+                    },
+                ],
+                full_text: "one two".into(),
+            },
+            Some("en".into()),
+            crate::audio_asset::AudioAssetId(42),
+            crate::audio_asset::AssetRevision(3),
+        )
+    }
+
+    #[test]
+    fn trim_clips_shifts_and_rebuilds_text_without_staling() {
+        let mut value = document();
+        value.trim(1_000, 2_500);
+        assert_eq!(
+            value.segments,
+            vec![
+                TranscriptSegment {
+                    start_ms: 0,
+                    end_ms: 500,
+                    text: "one".into(),
+                },
+                TranscriptSegment {
+                    start_ms: 1_000,
+                    end_ms: 1_500,
+                    text: "two".into(),
+                }
+            ]
+        );
+        assert_eq!(value.full_text, "one two");
+        assert_eq!(value.freshness, TranscriptFreshness::Fresh);
+    }
+
+    #[test]
+    fn stretch_range_maps_inside_and_shifts_following_segments() {
+        let mut value = document();
+        value.scale_range(1_000, 2_000, 2.0);
+        assert_eq!(
+            (value.segments[0].start_ms, value.segments[0].end_ms),
+            (500, 2_000)
+        );
+        assert_eq!(
+            (value.segments[1].start_ms, value.segments[1].end_ms),
+            (3_000, 4_000)
+        );
+        assert_eq!(value.freshness, TranscriptFreshness::Fresh);
+    }
+
+    #[test]
+    fn invalid_time_mapping_retains_content_and_marks_stale() {
+        let mut value = document();
+        let segments = value.segments.clone();
+        value.scale_time(0.0);
+        assert_eq!(value.segments, segments);
+        assert_eq!(value.freshness, TranscriptFreshness::Stale);
     }
 }

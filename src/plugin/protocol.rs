@@ -31,6 +31,16 @@ pub struct PluginParamValue {
     pub normalized: f32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginChainSlotConfig {
+    pub slot_id: u64,
+    pub plugin_path: String,
+    pub enabled: bool,
+    pub bypass: bool,
+    pub state_blob_b64: Option<String>,
+    pub params: Vec<PluginParamValue>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PluginHostBackend {
     Generic,
@@ -74,6 +84,42 @@ pub enum WorkerRequest {
         state_blob_b64: Option<String>,
         params: Vec<PluginParamValue>,
     },
+    ProcessChain {
+        slots: Vec<PluginChainSlotConfig>,
+        input_audio_path: String,
+        output_audio_path: String,
+        sample_rate: u32,
+        max_block_size: usize,
+        chain_bypass: bool,
+    },
+    ChainSessionOpen {
+        session_id: u64,
+        slots: Vec<PluginChainSlotConfig>,
+        sample_rate: u32,
+        channels: u16,
+        max_block_size: usize,
+        render_ahead_ms: u32,
+    },
+    ChainSessionConfigure {
+        session_id: u64,
+        slots: Vec<PluginChainSlotConfig>,
+        chain_bypass: bool,
+    },
+    ChainSessionProcess {
+        session_id: u64,
+        input_audio_path: String,
+        output_audio_path: String,
+    },
+    ChainSessionSeek {
+        session_id: u64,
+        source_frame: u64,
+    },
+    ChainSessionFlush {
+        session_id: u64,
+    },
+    ChainSessionClose {
+        session_id: u64,
+    },
     GuiSessionOpen {
         session_id: u64,
         plugin_path: String,
@@ -115,6 +161,23 @@ pub enum WorkerResponse {
         backend: PluginHostBackend,
         #[serde(default)]
         backend_note: Option<String>,
+    },
+    ChainProcessResult {
+        output_audio_path: String,
+        slot_state_blobs_b64: Vec<(u64, Option<String>)>,
+        latency_samples: u32,
+        underruns: u64,
+        failed_slot: Option<u64>,
+        backend_note: Option<String>,
+    },
+    ChainSessionOpened {
+        session_id: u64,
+        render_ahead_ms: u32,
+    },
+    ChainSessionAck {
+        session_id: u64,
+        latency_samples: u32,
+        underruns: u64,
     },
     GuiOpened {
         session_id: u64,

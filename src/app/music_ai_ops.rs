@@ -136,8 +136,11 @@ impl crate::app::WavesPreviewer {
             return;
         };
         let path = tab.path.clone();
+        let source_path = self
+            .resolved_audio_file_path(&path)
+            .unwrap_or_else(|| path.clone());
         let stems_dir_override = tab.music_analysis_draft.stems_dir_override.clone();
-        let stems = resolve_stem_paths(path.as_path(), stems_dir_override.as_deref());
+        let stems = resolve_stem_paths(source_path.as_path(), stems_dir_override.as_deref());
         let demucs_model_path = self
             .music_ai_demucs_model_path
             .clone()
@@ -194,7 +197,7 @@ impl crate::app::WavesPreviewer {
                 return;
             }
             let loaded = match load_or_demix_stems_for_preview(
-                path.as_path(),
+                source_path.as_path(),
                 &stems,
                 demucs_model_path.as_deref(),
                 target_sr,

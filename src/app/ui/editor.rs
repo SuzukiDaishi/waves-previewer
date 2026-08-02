@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::app::input_focus::UiScrollTarget;
 use crate::app::music_onnx;
 use crate::app::render::overlay as ov;
 use crate::app::render::waveform_pyramid as wf_cache;
@@ -2388,6 +2389,8 @@ impl crate::app::WavesPreviewer {
         ctx: &egui::Context,
         tab_idx: usize,
     ) {
+        let editor_scroll_active = self.ui_scroll_focus.is_active(UiScrollTarget::Editor);
+        let editor_scroll_source = self.scroll_source_for(UiScrollTarget::Editor);
         if self.tabs[tab_idx].primary_view == EditorPrimaryView::Metadata {
             self.ui_metadata_inspector(ui, ctx, tab_idx);
             return;
@@ -4327,7 +4330,9 @@ impl crate::app::WavesPreviewer {
 
             // Detect hover using pointer position against our canvas rect (robust across senses)
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-            let pointer_over_waveform = pointer_pos.map_or(false, |p| {
+            let pointer_over_waveform = editor_scroll_active
+                && ui.rect_contains_pointer(rect)
+                && pointer_pos.is_some_and(|p| {
                 rect.contains(p)
                     && amplitude_nav_rect
                         .map(|amp_rect| !amp_rect.contains(p))
@@ -7716,6 +7721,7 @@ impl crate::app::WavesPreviewer {
                     ui.heading("Inspector");
                     ui.separator();
                     egui::ScrollArea::vertical()
+                        .scroll_source(editor_scroll_source)
                         .id_salt(("editor_inspector_scroll", tab_idx))
                         // Shrink to content height instead of always filling
                         // `inspector_area_h`, so short content (e.g. Loop Edit
@@ -8758,6 +8764,7 @@ impl crate::app::WavesPreviewer {
                                             let mut resort = false;
                                             let mut dirty = false;
                                             egui::ScrollArea::vertical()
+                                                .scroll_source(editor_scroll_source)
                                                 .id_salt(("editor_markers_scroll", tab_idx))
                                                 .max_height(160.0)
                                                 .show(ui, |ui| {
@@ -9940,6 +9947,7 @@ impl crate::app::WavesPreviewer {
                                             egui::Id::new(("eq_plot", tab_idx)),
                                             &mut plot_params,
                                             tab.buffer_sample_rate.max(1),
+                                            editor_scroll_active,
                                         ) {
                                             low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
                                             low_shelf_gain_db = plot_params.low_shelf_gain_db;
@@ -10668,6 +10676,138 @@ impl crate::app::WavesPreviewer {
                                                     .color(egui::Color32::LIGHT_RED),
                                             );
                                         }
+                                        if tab.plugin_fx_chain.slots.is_empty()
+                                            && tab.plugin_fx_draft.plugin_key.is_some()
+                                        {
+                                            tab.plugin_fx_chain =
+                                                PluginFxChainDraft::from_legacy(&tab.plugin_fx_draft);
+                                        }
+                                        let mut remove_slot = None;
+                                        let mut move_slot = None;
+                                        ui.group(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.strong("FX Rack");
+                                                ui.checkbox(
+                                                    &mut tab.plugin_fx_chain.bypass,
+                                                    "Chain Bypass",
+                                                );
+                                                ui.label(format!(
+                                                    "Latency {} smp · Underruns {}",
+                                                    tab.plugin_fx_chain.latency_samples,
+                                                    tab.plugin_fx_chain.underrun_count
+                                                ));
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Preview engine");
+                                                ui.selectable_value(
+                                                    &mut tab.plugin_fx_chain.preview_engine,
+                                                    PluginPreviewEngine::RenderAhead,
+                                                    "Render-ahead",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut tab.plugin_fx_chain.preview_engine,
+                                                    PluginPreviewEngine::Offline,
+                                                    "Offline",
+                                                );
+                                                ui.add_enabled(
+                                                    tab.plugin_fx_chain.preview_engine
+                                                        == PluginPreviewEngine::RenderAhead,
+                                                    egui::Slider::new(
+                                                        &mut tab.plugin_fx_chain.render_ahead_ms,
+                                                        100..=500,
+                                                    )
+                                                    .suffix(" ms"),
+                                                );
+                                            });
+                                            let slot_count = tab.plugin_fx_chain.slots.len();
+                                            for index in 0..slot_count {
+                                                let slot_id = tab.plugin_fx_chain.slots[index].id;
+                                                let selected = tab.plugin_fx_chain.selected_slot_id
+                                                    == Some(slot_id);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let slot =
+                                                        &mut tab.plugin_fx_chain.slots[index];
+                                                    ui.checkbox(&mut slot.draft.enabled, "");
+                                                    let label = if slot.draft.plugin_name.is_empty() {
+                                                        format!("{}  (Select plugin)", index + 1)
+                                                    } else {
+                                                        format!(
+                                                            "{}  {}",
+                                                            index + 1,
+                                                            slot.draft.plugin_name
+                                                        )
+                                                    };
+                                                    if ui
+                                                        .selectable_label(selected, label)
+                                                        .clicked()
+                                                    {
+                                                        tab.plugin_fx_chain.selected_slot_id =
+                                                            Some(slot_id);
+                                                    }
+                                                    ui.checkbox(&mut slot.draft.bypass, "Bypass");
+                                                    if ui.small_button("↑").clicked() && index > 0 {
+                                                        move_slot = Some((index, index - 1));
+                                                    }
+                                                    if ui.small_button("↓").clicked()
+                                                        && index + 1 < slot_count
+                                                    {
+                                                        move_slot = Some((index, index + 1));
+                                                    }
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove_slot = Some(slot_id);
+                                                    }
+                                                    if let Some(reason) =
+                                                        slot.failure_reason.as_deref()
+                                                    {
+                                                        ui.label(
+                                                            RichText::new(reason)
+                                                                .small()
+                                                                .color(Color32::LIGHT_RED),
+                                                        );
+                                                    }
+                                                });
+                                            }
+                                            if ui.button("+ Add Slot").clicked() {
+                                                let slot =
+                                                    PluginFxSlot::new(PluginFxDraft::default());
+                                                tab.plugin_fx_chain.selected_slot_id = Some(slot.id);
+                                                tab.plugin_fx_chain.slots.push(slot);
+                                            }
+                                        });
+                                        if let Some((from, to)) = move_slot {
+                                            tab.plugin_fx_chain.slots.swap(from, to);
+                                        }
+                                        if let Some(slot_id) = remove_slot {
+                                            tab.plugin_fx_chain
+                                                .slots
+                                                .retain(|slot| slot.id != slot_id);
+                                            if tab.plugin_fx_chain.selected_slot_id == Some(slot_id)
+                                            {
+                                                tab.plugin_fx_chain.selected_slot_id = tab
+                                                    .plugin_fx_chain
+                                                    .slots
+                                                    .first()
+                                                    .map(|slot| slot.id);
+                                            }
+                                        }
+                                        if tab.plugin_fx_chain.selected_slot_id.is_none() {
+                                            tab.plugin_fx_chain.selected_slot_id = tab
+                                                .plugin_fx_chain
+                                                .slots
+                                                .first()
+                                                .map(|slot| slot.id);
+                                        }
+                                        tab.plugin_fx_draft = tab
+                                            .plugin_fx_chain
+                                            .selected_slot_id
+                                            .and_then(|id| {
+                                                tab.plugin_fx_chain
+                                                    .slots
+                                                    .iter()
+                                                    .find(|slot| slot.id == id)
+                                            })
+                                            .map(|slot| slot.draft.clone())
+                                            .unwrap_or_default();
                                         let mut plugin_params_dirty = false;
                                         let draft = &mut tab.plugin_fx_draft;
                                         let mut selected_changed = false;
@@ -10803,6 +10943,7 @@ impl crate::app::WavesPreviewer {
                                                 }
                                             });
                                             egui::ScrollArea::vertical()
+                                                .scroll_source(editor_scroll_source)
                                                 .id_salt(("plugin_search_paths_scroll", tab_idx))
                                                 .max_height(120.0)
                                                 .show(ui, |ui| {
@@ -11030,6 +11171,7 @@ impl crate::app::WavesPreviewer {
                                         }
                                         let filter = draft.filter.trim().to_ascii_lowercase();
                                         egui::ScrollArea::vertical()
+                                            .scroll_source(editor_scroll_source)
                                             .id_salt(("plugin_param_scroll", tab_idx))
                                             .max_height(320.0)
                                             .show(ui, |ui| {
@@ -11126,9 +11268,21 @@ impl crate::app::WavesPreviewer {
                                                 need_restore_preview = true;
                                             }
                                         });
-                                        if plugin_params_dirty
-                                            && tab.plugin_fx_draft.auto_preview
+                                        let updated_draft = draft.clone();
+                                        let auto_preview = updated_draft.auto_preview;
+                                        if let Some(slot) = tab
+                                            .plugin_fx_chain
+                                            .selected_slot_id
+                                            .and_then(|id| {
+                                                tab.plugin_fx_chain
+                                                    .slots
+                                                    .iter_mut()
+                                                    .find(|slot| slot.id == id)
+                                            })
                                         {
+                                            slot.draft = updated_draft;
+                                        }
+                                        if plugin_params_dirty && auto_preview {
                                             tab.plugin_fx_param_dirty_at =
                                                 Some(std::time::Instant::now());
                                         }

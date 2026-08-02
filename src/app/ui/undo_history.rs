@@ -11,7 +11,9 @@ impl crate::app::WavesPreviewer {
         }
         let mut open = true;
         let mut jump: Option<(bool, usize)> = None; // (redo, steps)
-        egui::Window::new("Edit History")
+        let scroll_target = self.begin_floating_scroll_surface("edit_history_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Edit History")
             .open(&mut open)
             .default_width(300.0)
             .default_height(420.0)
@@ -67,6 +69,10 @@ impl crate::app::WavesPreviewer {
                     }
                 }
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if let Some((redo, steps)) = jump {
             self.undo_history_jump(redo, steps);
         }

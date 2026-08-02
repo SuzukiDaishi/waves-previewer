@@ -41,7 +41,9 @@ impl WavesPreviewer {
             return;
         }
         let mut open = self.show_quit_prompt;
-        egui::Window::new("Quit NeoWaves?")
+        let scroll_target = self.begin_floating_scroll_surface("quit_prompt_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Quit NeoWaves?")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -62,6 +64,10 @@ impl WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if !open {
             self.show_quit_prompt = false;
         }
@@ -93,6 +99,8 @@ impl WavesPreviewer {
         frame_started: Instant,
         had_ui_input: bool,
     ) {
+        let scroll_target = self.current_ui_scroll_target();
+        self.ui_scroll_focus.begin_frame(ctx, scroll_target);
         // Coarse per-stage tracing for benchmark hunts (NEOWAVES_BENCH_TRACE=1).
         macro_rules! trace_stage {
             ($name:expr, $body:expr) => {{
@@ -372,18 +380,26 @@ impl WavesPreviewer {
                 }
             });
             ui.separator();
-            if self.is_effect_graph_workspace_active() {
-                self.ui_effect_graph_view(ui, &ctx);
-            } else if self.workspace_view == WorkspaceView::Recording {
-                self.ui_recording_view(ui, &ctx);
-            } else if let Some(tab_idx) = self
-                .active_tab
-                .filter(|_| self.workspace_view == WorkspaceView::Editor)
+            let scroll_target = self.current_ui_scroll_target();
+            self.ui_scroll_focus.begin_surface(scroll_target);
+            let workspace_rect = ui.available_rect_before_wrap();
             {
-                self.ui_editor_view(ui, &ctx, tab_idx);
-            } else {
-                self.ui_list_view(ui, &ctx);
+                let _scroll_guard = self.pointer_scroll_input_guard(scroll_target, &ctx);
+                if self.is_effect_graph_workspace_active() {
+                    self.ui_effect_graph_view(ui, &ctx);
+                } else if self.workspace_view == WorkspaceView::Recording {
+                    self.ui_recording_view(ui, &ctx);
+                } else if let Some(tab_idx) = self
+                    .active_tab
+                    .filter(|_| self.workspace_view == WorkspaceView::Editor)
+                {
+                    self.ui_editor_view(ui, &ctx, tab_idx);
+                } else {
+                    self.ui_list_view(ui, &ctx);
+                }
             }
+            self.ui_scroll_focus
+                .register_region(scroll_target, ui.layer_id(), workspace_rect);
         });
         activate_path
     }
@@ -605,7 +621,9 @@ impl WavesPreviewer {
         }
         let mut open = self.show_leave_prompt;
         let mut cancel_like_close = false;
-        egui::Window::new("Leave Editor?")
+        let scroll_target = self.begin_floating_scroll_surface("leave_editor_prompt_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Leave Editor?")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -642,6 +660,10 @@ impl WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if cancel_like_close {
             open = false;
         }
@@ -657,7 +679,9 @@ impl WavesPreviewer {
         }
         let mut open = self.show_first_save_prompt;
         let mut close_prompt = false;
-        egui::Window::new("First Export Option")
+        let scroll_target = self.begin_floating_scroll_surface("first_export_option_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("First Export Option")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -682,6 +706,10 @@ impl WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if close_prompt {
             open = false;
         }
@@ -693,7 +721,9 @@ impl WavesPreviewer {
             let mut do_rename = false;
             let mut open = self.show_rename_dialog;
             let mut cancel_like_close = false;
-            egui::Window::new("Rename File")
+            let scroll_target = self.begin_floating_scroll_surface("rename_file_window");
+            let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+            let shown = egui::Window::new("Rename File")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -725,6 +755,10 @@ impl WavesPreviewer {
                         }
                     });
                 });
+            drop(scroll_guard);
+            if let Some(shown) = shown.as_ref() {
+                self.register_scroll_surface(scroll_target, &shown.response);
+            }
             if do_rename {
                 let name = self.rename_input.clone();
                 if let Some(path) = self.rename_target.clone() {
@@ -757,7 +791,9 @@ impl WavesPreviewer {
             let mut do_rename = false;
             let mut open = self.show_batch_rename_dialog;
             let mut cancel_like_close = false;
-            egui::Window::new("Batch Rename")
+            let scroll_target = self.begin_floating_scroll_surface("batch_rename_window");
+            let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+            let shown = egui::Window::new("Batch Rename")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -819,6 +855,10 @@ impl WavesPreviewer {
                         }
                     });
                 });
+            drop(scroll_guard);
+            if let Some(shown) = shown.as_ref() {
+                self.register_scroll_surface(scroll_target, &shown.response);
+            }
             if do_rename {
                 match self.batch_rename_paths() {
                     Ok(()) => {
@@ -849,7 +889,9 @@ impl WavesPreviewer {
         let mut do_apply = false;
         let mut open = self.show_resample_dialog;
         let mut cancel_like_close = false;
-        egui::Window::new("Sample Rate Convert")
+        let scroll_target = self.begin_floating_scroll_surface("sample_rate_convert_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Sample Rate Convert")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -876,6 +918,10 @@ impl WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if do_apply {
             match self.apply_resample_dialog() {
                 Ok(()) => {
@@ -899,6 +945,8 @@ impl WavesPreviewer {
     }
 
     fn run_frame_finish(&mut self, ctx: &egui::Context, frame_started: Instant) {
+        let scroll_target = self.current_ui_scroll_target();
+        self.ui_scroll_focus.finish_frame(scroll_target);
         let playing = self
             .audio
             .shared

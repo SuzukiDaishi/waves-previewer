@@ -57,7 +57,8 @@ impl WavesPreviewer {
             item.display_folder = std::sync::Arc::from(Self::display_folder_for_path(&new_path));
             item.source = MediaSource::File;
             item.virtual_audio = None;
-            item.transcript = None;
+            item.audio_asset.backing =
+                crate::audio_asset::AudioBacking::ExternalFile(new_path.clone());
             item.set_external(external.unwrap_or_default());
         }
         self.path_index.remove(from);

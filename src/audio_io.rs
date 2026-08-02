@@ -226,6 +226,32 @@ fn read_audio_info_wav(
     modified_at: Option<SystemTime>,
     file_size: Option<u64>,
 ) -> Result<AudioInfo> {
+    if let Some(info) = crate::wav_stream::read_wave_pcm_info(path)? {
+        let duration_secs = Some(info.frame_count as f64 / info.sample_rate.max(1) as f64)
+            .map(|seconds| seconds as f32);
+        let bit_rate_bps = if let (Some(secs), Some(bytes)) = (duration_secs, file_size) {
+            (secs.is_finite() && secs > 0.0).then(|| {
+                (((bytes as f64) * 8.0 / secs as f64).round() as u64).min(u32::MAX as u64) as u32
+            })
+        } else {
+            None
+        };
+        return Ok(AudioInfo {
+            channels: info.channels,
+            sample_rate: info.sample_rate,
+            bits_per_sample: info.bits_per_sample,
+            sample_value_kind: if info.audio_format == 3 {
+                SampleValueKind::Float
+            } else {
+                SampleValueKind::Int
+            },
+            bit_rate_bps,
+            duration_secs,
+            total_frames: Some(info.frame_count),
+            created_at,
+            modified_at,
+        });
+    }
     let reader =
         hound::WavReader::open(path).with_context(|| format!("open wav: {}", path.display()))?;
     let spec = reader.spec();
@@ -320,72 +346,17 @@ fn proxy_output_sample_rate(
 }
 
 fn read_wav_proxy_header(path: &Path) -> Result<Option<WavProxyHeader>> {
-    let mut file =
-        File::open(path).with_context(|| format!("open wav proxy header: {}", path.display()))?;
-    let mut riff = [0u8; 12];
-    file.read_exact(&mut riff)
-        .with_context(|| format!("read wav header: {}", path.display()))?;
-    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
-        return Ok(None);
-    }
-    let mut fmt_audio_format = 0u16;
-    let mut fmt_channels = 0u16;
-    let mut fmt_sample_rate = 0u32;
-    let mut fmt_bits = 0u16;
-    let mut fmt_block_align = 0u16;
-    let mut data_offset = None;
-    let mut data_len = 0u64;
-    loop {
-        let mut chunk_header = [0u8; 8];
-        match file.read_exact(&mut chunk_header) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("read wav chunk header: {}", path.display()))
-            }
-        }
-        let id = &chunk_header[0..4];
-        let size = u32::from_le_bytes([
-            chunk_header[4],
-            chunk_header[5],
-            chunk_header[6],
-            chunk_header[7],
-        ]) as u64;
-        let chunk_data_pos = file.stream_position()?;
-        if id == b"fmt " {
-            let mut fmt = vec![0u8; size as usize];
-            file.read_exact(&mut fmt)
-                .with_context(|| format!("read wav fmt chunk: {}", path.display()))?;
-            if fmt.len() >= 16 {
-                fmt_audio_format = u16::from_le_bytes([fmt[0], fmt[1]]);
-                fmt_channels = u16::from_le_bytes([fmt[2], fmt[3]]);
-                fmt_sample_rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
-                fmt_block_align = u16::from_le_bytes([fmt[12], fmt[13]]);
-                fmt_bits = u16::from_le_bytes([fmt[14], fmt[15]]);
-            }
-        } else if id == b"data" {
-            data_offset = Some(chunk_data_pos);
-            data_len = size;
-            break;
-        }
-        let next = chunk_data_pos.saturating_add(size).saturating_add(size & 1);
-        file.seek(SeekFrom::Start(next))?;
-    }
-    let Some(data_offset) = data_offset else {
+    let Some(info) = crate::wav_stream::read_wave_pcm_info(path)? else {
         return Ok(None);
     };
-    if fmt_channels == 0 || fmt_sample_rate == 0 || fmt_bits == 0 || fmt_block_align == 0 {
-        return Ok(None);
-    }
     Ok(Some(WavProxyHeader {
-        audio_format: fmt_audio_format,
-        channels: fmt_channels,
-        sample_rate: fmt_sample_rate,
-        bits_per_sample: fmt_bits,
-        block_align: fmt_block_align,
-        data_offset,
-        data_len,
+        audio_format: info.audio_format,
+        channels: info.channels,
+        sample_rate: info.sample_rate,
+        bits_per_sample: info.bits_per_sample,
+        block_align: info.block_align,
+        data_offset: info.data_offset,
+        data_len: info.data_len,
     }))
 }
 

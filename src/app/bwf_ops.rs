@@ -67,7 +67,9 @@ impl crate::app::WavesPreviewer {
             })
             .count();
         let total = self.selected_paths().len();
-        egui::Window::new("Edit BWF Metadata")
+        let scroll_target = self.begin_floating_scroll_surface("bwf_metadata_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Edit BWF Metadata")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -134,6 +136,10 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if apply_clicked {
             self.show_bwf_dialog = false;
             let fields = self.bwf_fields.clone();

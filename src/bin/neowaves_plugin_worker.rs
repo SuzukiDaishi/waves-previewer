@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{BufRead, Write};
 
 #[cfg(windows)]
 struct ComInitGuard {
@@ -32,28 +32,39 @@ fn main() {
     #[cfg(windows)]
     let _com = ComInitGuard::init();
 
-    let mut input = Vec::new();
-    if let Err(e) = std::io::stdin().read_to_end(&mut input) {
-        eprintln!("read stdin failed: {e}");
-        std::process::exit(1);
-    }
-    let req: neowaves::plugin::WorkerRequest = match serde_json::from_slice(&input) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("invalid request: {e}");
-            std::process::exit(2);
+    let stdin = std::io::stdin();
+    let mut reader = std::io::BufReader::new(stdin.lock());
+    let stdout = std::io::stdout();
+    let mut writer = std::io::BufWriter::new(stdout.lock());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("read stdin failed: {error}");
+                std::process::exit(1);
+            }
         }
-    };
-    let resp = neowaves::plugin::worker::handle_request(req);
-    let output = match serde_json::to_vec(&resp) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("encode response failed: {e}");
-            std::process::exit(3);
+        let request: neowaves::plugin::WorkerRequest = match serde_json::from_str(line.trim()) {
+            Ok(value) => value,
+            Err(error) => {
+                let response = neowaves::plugin::WorkerResponse::Error {
+                    message: format!("invalid request: {error}"),
+                };
+                let _ = serde_json::to_writer(&mut writer, &response);
+                let _ = writer.write_all(b"\n");
+                let _ = writer.flush();
+                continue;
+            }
+        };
+        let response = neowaves::plugin::worker::handle_request(request);
+        if serde_json::to_writer(&mut writer, &response).is_err()
+            || writer.write_all(b"\n").is_err()
+            || writer.flush().is_err()
+        {
+            std::process::exit(4);
         }
-    };
-    if let Err(e) = std::io::Write::write_all(&mut std::io::stdout(), &output) {
-        eprintln!("write stdout failed: {e}");
-        std::process::exit(4);
     }
 }

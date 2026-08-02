@@ -1,7 +1,98 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use super::*;
+
+const RECORDING_COMMAND_RUN: u8 = 0;
+const RECORDING_COMMAND_STOP: u8 = 1;
+const RECORDING_COMMAND_DISCARD: u8 = 2;
+const LIVE_WAVEFORM_WINDOW_SECS: f32 = 40.0;
+
+fn write_recording_buffer(
+    writer: &mut crate::wav_stream::StreamingWaveWriter,
+    interleaved: &[f32],
+    channels: u16,
+    overview_block: usize,
+    waveform_buf: &mut Vec<f32>,
+    waveform_start_frame: &mut Option<u64>,
+    tx: &std::sync::mpsc::Sender<crate::app::types::RecordingWorkerMsg>,
+) -> anyhow::Result<()> {
+    use crate::app::types::RecordingWorkerMsg;
+
+    let ch = channels.max(1) as usize;
+    let frame_count = interleaved.len() / ch;
+    let complete_samples = frame_count.saturating_mul(ch);
+    let buffer_start_frame = writer.frames();
+    writer.write_interleaved_f32(&interleaved[..complete_samples])?;
+
+    let peak_l = (0..frame_count)
+        .map(|i| interleaved[i * ch].abs())
+        .fold(0.0f32, f32::max);
+    let peak_r = if ch >= 2 {
+        (0..frame_count)
+            .map(|i| interleaved[i * ch + 1].abs())
+            .fold(0.0f32, f32::max)
+    } else {
+        peak_l
+    };
+    let _ = tx.send(RecordingWorkerMsg::Level(peak_l, peak_r));
+
+    for frame in 0..frame_count {
+        if waveform_buf.is_empty() {
+            *waveform_start_frame = Some(buffer_start_frame + frame as u64);
+        }
+        let mono = (0..ch)
+            .map(|channel| interleaved[frame * ch + channel])
+            .sum::<f32>()
+            / ch as f32;
+        waveform_buf.push(mono);
+        if waveform_buf.len() >= overview_block {
+            flush_recording_waveform(waveform_buf, waveform_start_frame, tx);
+        }
+    }
+    let _ = tx.send(RecordingWorkerMsg::WrittenFrames(writer.frames()));
+    Ok(())
+}
+
+fn flush_recording_waveform(
+    waveform_buf: &mut Vec<f32>,
+    waveform_start_frame: &mut Option<u64>,
+    tx: &std::sync::mpsc::Sender<crate::app::types::RecordingWorkerMsg>,
+) {
+    use crate::app::types::RecordingWorkerMsg;
+    if waveform_buf.is_empty() {
+        return;
+    }
+    let start_frame = waveform_start_frame.take().unwrap_or(0);
+    let end_frame = start_frame.saturating_add(waveform_buf.len() as u64);
+    let min = waveform_buf.iter().copied().fold(f32::MAX, f32::min);
+    let max = waveform_buf.iter().copied().fold(f32::MIN, f32::max);
+    let _ = tx.send(RecordingWorkerMsg::WaveformBlock {
+        min,
+        max,
+        start_frame,
+        end_frame,
+    });
+    waveform_buf.clear();
+}
+
+fn push_live_waveform_block(
+    overview: &mut std::collections::VecDeque<(f32, f32)>,
+    first_frame: &mut u64,
+    block_frames: u64,
+    capacity: usize,
+    start_frame: u64,
+    value: (f32, f32),
+) {
+    if overview.is_empty() {
+        *first_frame = start_frame;
+    }
+    overview.push_back(value);
+    while overview.len() > capacity.max(1) {
+        overview.pop_front();
+        *first_frame = first_frame.saturating_add(block_frames);
+    }
+}
 
 impl super::WavesPreviewer {
     pub(super) fn recording_refresh_devices(&mut self) {
@@ -14,8 +105,8 @@ impl super::WavesPreviewer {
         use crate::app::types::{RecordingSourceKind, RecordingState, RecordingWorkerMsg};
         use crate::audio_capture;
 
-        let cancel = Arc::new(AtomicBool::new(false));
-        let cancel_worker = cancel.clone();
+        let recording_command = Arc::new(AtomicU8::new(RECORDING_COMMAND_RUN));
+        let command_worker = recording_command.clone();
         let paused = Arc::new(AtomicBool::new(false));
         let paused_worker = paused.clone();
 
@@ -68,8 +159,9 @@ impl super::WavesPreviewer {
         // Worker thread: drain cap_rx → write temp WAV, update level/waveform
         let worker_tx_clone = worker_tx.clone();
         std::thread::spawn(move || {
-            // keep capture stream alive in this thread
-            let _cap = capture_stream;
+            // The worker owns the stream so Stop can close capture before it
+            // drains every buffer already queued by the callback.
+            let mut capture_stream = Some(capture_stream);
 
             let Some(tmp_path) =
                 super::temp_audio_ops::allocate_neowaves_temp_cache_path("recording", "wav")
@@ -80,13 +172,11 @@ impl super::WavesPreviewer {
                 return;
             };
 
-            let spec = hound::WavSpec {
+            let mut writer = match crate::wav_stream::StreamingWaveWriter::create_float32(
+                &tmp_path,
                 channels,
                 sample_rate,
-                bits_per_sample: 32,
-                sample_format: hound::SampleFormat::Float,
-            };
-            let mut writer = match hound::WavWriter::create(&tmp_path, spec) {
+            ) {
                 Ok(w) => w,
                 Err(e) => {
                     let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(e.to_string()));
@@ -95,19 +185,52 @@ impl super::WavesPreviewer {
             };
 
             let mut waveform_buf: Vec<f32> = Vec::new();
+            let mut waveform_start_frame: Option<u64> = None;
             let overview_block = (sample_rate as usize / 50).max(512); // ~50 blocks/s
+            let mut last_checkpoint = std::time::Instant::now();
+            let mut stopping = false;
+            let mut partial_error: Option<String> = None;
+            let mut error_reported = false;
+            let mut writer_failed = false;
 
             loop {
-                if cancel_worker.load(Ordering::Relaxed) {
-                    break;
+                match command_worker.load(Ordering::Acquire) {
+                    RECORDING_COMMAND_DISCARD => {
+                        capture_stream.take();
+                        drop(writer);
+                        let _ = std::fs::remove_file(&tmp_path);
+                        let _ = worker_tx_clone.send(RecordingWorkerMsg::Discarded);
+                        return;
+                    }
+                    RECORDING_COMMAND_STOP if !stopping => {
+                        capture_stream.take();
+                        stopping = true;
+                    }
+                    _ => {}
                 }
-                if let Ok(msg) = err_rx.try_recv() {
-                    // Stream broke (e.g. device unplugged): report it and stop,
-                    // finalizing whatever was captured so far.
-                    let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(msg));
-                    break;
+                if !stopping {
+                    if let Ok(msg) = err_rx.try_recv() {
+                        // Stream broke (e.g. device unplugged): report it and stop,
+                        // finalizing whatever was captured so far.
+                        let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(msg.clone()));
+                        error_reported = true;
+                        partial_error = Some(msg);
+                        capture_stream.take();
+                        stopping = true;
+                    }
                 }
-                match cap_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                let received = if stopping {
+                    // Dropping the capture stream drops the last sender. A
+                    // blocking receive therefore drains every already-queued
+                    // callback buffer and then returns Disconnected, including
+                    // a callback that was in flight when Stop was pressed.
+                    cap_rx
+                        .recv()
+                        .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+                } else {
+                    cap_rx.recv_timeout(std::time::Duration::from_millis(100))
+                };
+                match received {
                     Ok(interleaved) => {
                         if paused_worker.load(Ordering::Relaxed) {
                             // Discard captured audio while paused: keep draining the
@@ -116,43 +239,45 @@ impl super::WavesPreviewer {
                             // so resuming continues the file with no gap or glitch.
                             continue;
                         }
-
-                        // Write samples
-                        for &s in &interleaved {
-                            let _ = writer.write_sample(s);
+                        if writer_failed {
+                            continue;
                         }
 
-                        // Level (peak L/R)
-                        let ch = channels as usize;
-                        let n = interleaved.len() / ch.max(1);
-                        let peak_l = (0..n)
-                            .map(|i| interleaved[i * ch].abs())
-                            .fold(0.0f32, f32::max);
-                        let peak_r = if ch >= 2 {
-                            (0..n)
-                                .map(|i| interleaved[i * ch + 1].abs())
-                                .fold(0.0f32, f32::max)
-                        } else {
-                            peak_l
-                        };
-                        let _ = worker_tx_clone.send(RecordingWorkerMsg::Level(peak_l, peak_r));
-
-                        // Waveform overview (mono downmix)
-                        for i in 0..n {
-                            let mono =
-                                (0..ch).map(|c| interleaved[i * ch + c]).sum::<f32>() / ch as f32;
-                            waveform_buf.push(mono);
-                            if waveform_buf.len() >= overview_block {
-                                let min = waveform_buf.iter().cloned().fold(f32::MAX, f32::min);
-                                let max = waveform_buf.iter().cloned().fold(f32::MIN, f32::max);
+                        if let Err(err) = write_recording_buffer(
+                            &mut writer,
+                            &interleaved,
+                            channels,
+                            overview_block,
+                            &mut waveform_buf,
+                            &mut waveform_start_frame,
+                            &worker_tx_clone,
+                        ) {
+                            let message = format!("recording write failed: {err}");
+                            let _ =
+                                worker_tx_clone.send(RecordingWorkerMsg::Error(message.clone()));
+                            error_reported = true;
+                            writer_failed = true;
+                            partial_error = Some(message);
+                            capture_stream.take();
+                            stopping = true;
+                        } else if last_checkpoint.elapsed() >= std::time::Duration::from_secs(1) {
+                            if let Err(err) = writer.checkpoint() {
+                                let message = format!("recording checkpoint failed: {err}");
                                 let _ = worker_tx_clone
-                                    .send(RecordingWorkerMsg::WaveformBlock(min, max));
-                                waveform_buf.clear();
+                                    .send(RecordingWorkerMsg::Error(message.clone()));
+                                error_reported = true;
+                                writer_failed = true;
+                                partial_error = Some(message);
+                                capture_stream.take();
+                                stopping = true;
                             }
+                            last_checkpoint = std::time::Instant::now();
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // normal idle, loop
+                        if stopping {
+                            break;
+                        }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         break;
@@ -160,22 +285,49 @@ impl super::WavesPreviewer {
                 }
             }
 
-            // Finalize WAV
-            match writer.finalize() {
-                Ok(_) => {
-                    let _ = worker_tx_clone.send(RecordingWorkerMsg::Finalized(tmp_path));
+            flush_recording_waveform(
+                &mut waveform_buf,
+                &mut waveform_start_frame,
+                &worker_tx_clone,
+            );
+            let frames_before_finalize = writer.frames();
+            let final_state = match writer.finalize() {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    partial_error.get_or_insert_with(|| format!("finalize failed: {err}"));
+                    None
                 }
-                Err(e) => {
-                    let _ = worker_tx_clone
-                        .send(RecordingWorkerMsg::Error(format!("finalize failed: {e}")));
+            };
+            let frames = final_state
+                .map(|state| state.frames)
+                .unwrap_or(frames_before_finalize);
+            let block_align = channels.max(1) as u64 * 4;
+            if let Ok(metadata) = std::fs::metadata(&tmp_path) {
+                let file_frames = metadata.len().saturating_sub(80) / block_align;
+                if file_frames != frames {
+                    partial_error.get_or_insert_with(|| {
+                        format!(
+                            "recording frame verification failed: writer={frames}, file={file_frames}"
+                        )
+                    });
                 }
             }
+            if !error_reported {
+                if let Some(error) = partial_error.as_ref() {
+                    let _ = worker_tx_clone.send(RecordingWorkerMsg::Error(error.clone()));
+                }
+            }
+            let _ = worker_tx_clone.send(RecordingWorkerMsg::Finalized {
+                path: tmp_path,
+                frames,
+                partial: partial_error.is_some(),
+            });
         });
 
         let overview_block = (sample_rate as usize / 50).max(512);
 
         self.recording_tab.state = RecordingState::Recording;
-        self.recording_tab.cancel = cancel;
+        self.recording_tab.recording_command = recording_command;
         self.recording_tab.paused = paused;
         self.recording_tab.paused.store(false, Ordering::Relaxed);
         self.recording_tab.pause_started_at = None;
@@ -183,7 +335,14 @@ impl super::WavesPreviewer {
         self.recording_tab.rx = Some(app_rx);
         self.recording_tab.record_start = Some(std::time::Instant::now());
         self.recording_tab.waveform_overview.clear();
+        self.recording_tab.waveform_start_frame = 0;
         self.recording_tab.overview_block_secs = overview_block as f32 / sample_rate.max(1) as f32;
+        self.recording_tab.written_frames = 0;
+        self.recording_tab.recording_sample_rate = sample_rate;
+        self.recording_tab.recording_display_name = format!(
+            "Recording {}.wav",
+            chrono::Local::now().format("%Y-%m-%d %H-%M-%S")
+        );
         self.recording_tab.level_l = 0.0;
         self.recording_tab.level_r = 0.0;
         self.recording_tab.peak_hold_l = 0.0;
@@ -197,7 +356,9 @@ impl super::WavesPreviewer {
 
     pub(super) fn stop_recording(&mut self) {
         use crate::app::types::RecordingState;
-        self.recording_tab.cancel.store(true, Ordering::Relaxed);
+        self.recording_tab
+            .recording_command
+            .store(RECORDING_COMMAND_STOP, Ordering::Release);
         self.recording_tab.state = RecordingState::Finalizing;
         self.recording_tab.progress_message = "Finalizing…".to_string();
     }
@@ -228,20 +389,22 @@ impl super::WavesPreviewer {
 
     pub(super) fn discard_recording(&mut self) {
         use crate::app::types::RecordingState;
-        self.recording_tab.cancel.store(true, Ordering::Relaxed);
+        self.recording_tab
+            .recording_command
+            .store(RECORDING_COMMAND_DISCARD, Ordering::Release);
         self.recording_tab.paused.store(false, Ordering::Relaxed);
         self.recording_tab.pause_started_at = None;
         self.recording_tab.paused_accum = std::time::Duration::ZERO;
-        self.recording_tab.state = RecordingState::Idle;
+        self.recording_tab.state = RecordingState::Finalizing;
         self.recording_tab.last_recording_path = None;
-        self.recording_tab.rx = None;
         self.recording_tab.waveform_overview.clear();
+        self.recording_tab.waveform_start_frame = 0;
         self.recording_tab.confirm_discard = false;
         self.recording_tab.level_l = 0.0;
         self.recording_tab.level_r = 0.0;
         self.recording_tab.peak_hold_l = 0.0;
         self.recording_tab.peak_hold_r = 0.0;
-        self.recording_tab.progress_message = String::new();
+        self.recording_tab.progress_message = "Discarding recording...".to_string();
     }
 
     /// Copies the finished temp recording to a user-chosen location.
@@ -250,11 +413,12 @@ impl super::WavesPreviewer {
         let Some(src) = self.recording_tab.last_recording_path.clone() else {
             return;
         };
-        let default_name = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("recording.wav");
-        let Some(dest) = self.pick_recording_save_dialog(default_name) else {
+        let default_name = if self.recording_tab.recording_display_name.is_empty() {
+            "Recording.wav".to_string()
+        } else {
+            self.recording_tab.recording_display_name.clone()
+        };
+        let Some(dest) = self.pick_recording_save_dialog(&default_name) else {
             return;
         };
         // The temp take is a WAV byte stream; copying it under another
@@ -286,15 +450,6 @@ impl super::WavesPreviewer {
         let mut error_msg: Option<String> = None;
 
         let Some(rx) = &self.recording_tab.rx else {
-            // update elapsed
-            if self.recording_tab.state == RecordingState::Recording {
-                if let Some(start) = self.recording_tab.record_start {
-                    self.recording_tab.elapsed_secs = start
-                        .elapsed()
-                        .saturating_sub(self.recording_tab.paused_accum)
-                        .as_secs_f32();
-                }
-            }
             return;
         };
 
@@ -306,15 +461,55 @@ impl super::WavesPreviewer {
                         self.recording_tab.level_l = self.recording_tab.level_l * 0.85 + l * 0.15;
                         self.recording_tab.level_r = self.recording_tab.level_r * 0.85 + r * 0.15;
                     }
-                    RecordingWorkerMsg::WaveformBlock(min, max) => {
-                        self.recording_tab.waveform_overview.push((min, max));
-                        // cap overview length
-                        if self.recording_tab.waveform_overview.len() > 2000 {
-                            self.recording_tab.waveform_overview.drain(0..500);
-                        }
+                    RecordingWorkerMsg::WaveformBlock {
+                        min,
+                        max,
+                        start_frame,
+                        end_frame,
+                    } => {
+                        let capacity = (LIVE_WAVEFORM_WINDOW_SECS
+                            / self.recording_tab.overview_block_secs.max(0.0001))
+                        .ceil()
+                        .max(1.0) as usize;
+                        let block_frames = (self.recording_tab.overview_block_secs
+                            * self.recording_tab.recording_sample_rate.max(1) as f32)
+                            .round() as u64;
+                        push_live_waveform_block(
+                            &mut self.recording_tab.waveform_overview,
+                            &mut self.recording_tab.waveform_start_frame,
+                            block_frames,
+                            capacity,
+                            start_frame,
+                            (min, max),
+                        );
+                        self.recording_tab.written_frames =
+                            self.recording_tab.written_frames.max(end_frame);
                     }
-                    RecordingWorkerMsg::Finalized(path) => {
+                    RecordingWorkerMsg::WrittenFrames(frames) => {
+                        self.recording_tab.written_frames = frames;
+                        self.recording_tab.elapsed_secs =
+                            frames as f32 / self.recording_tab.recording_sample_rate.max(1) as f32;
+                    }
+                    RecordingWorkerMsg::Finalized {
+                        path,
+                        frames,
+                        partial,
+                    } => {
+                        self.recording_tab.written_frames = frames;
+                        self.recording_tab.elapsed_secs =
+                            frames as f32 / self.recording_tab.recording_sample_rate.max(1) as f32;
+                        if partial && error_msg.is_none() {
+                            error_msg =
+                                Some("Recording ended with a recoverable partial take".into());
+                        }
                         finalized_path = Some(path);
+                    }
+                    RecordingWorkerMsg::Discarded => {
+                        self.recording_tab.state = RecordingState::Idle;
+                        self.recording_tab.last_recording_path = None;
+                        self.recording_tab.rx = None;
+                        self.recording_tab.progress_message.clear();
+                        break;
                     }
                     RecordingWorkerMsg::Error(msg) => {
                         error_msg = Some(msg);
@@ -351,16 +546,6 @@ impl super::WavesPreviewer {
             // receiver so we stop polling a disconnected channel every frame.
             self.recording_tab.rx = None;
         }
-
-        // update elapsed
-        if self.recording_tab.state == RecordingState::Recording {
-            if let Some(start) = self.recording_tab.record_start {
-                self.recording_tab.elapsed_secs = start
-                    .elapsed()
-                    .saturating_sub(self.recording_tab.paused_accum)
-                    .as_secs_f32();
-            }
-        }
     }
 
     pub(super) fn open_recording_in_editor(&mut self, _ctx: &egui::Context) {
@@ -395,20 +580,23 @@ impl super::WavesPreviewer {
             return Some(item.path.clone());
         }
 
-        let (audio, sample_rate, bits_per_sample) = self.decode_audio_for_virtual(tmp_path)?;
-        let stem = tmp_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("recording");
-        let name = self.unique_virtual_display_name(&format!("{stem}.wav"));
+        let asset = crate::audio_asset::AudioAssetDescriptor::managed(tmp_path.to_path_buf());
+        let sample_rate = asset.sample_rate.max(1);
+        let bits_per_sample = asset.bits_per_sample.max(1);
+        let logical_name = if self.recording_tab.recording_display_name.is_empty() {
+            "Recording.wav"
+        } else {
+            self.recording_tab.recording_display_name.as_str()
+        };
+        let name = self.unique_virtual_display_name(logical_name);
         let virtual_state = Some(VirtualState {
             source: VirtualSourceRef::FilePath(tmp_path.to_path_buf()),
             op_chain: Vec::new(),
             sample_rate,
-            channels: audio.channels.len().max(1) as u16,
+            channels: asset.channels.max(1),
             bits_per_sample,
         });
-        let item = self.make_virtual_item(name, audio, sample_rate, bits_per_sample, virtual_state);
+        let item = self.make_virtual_item_with_asset(name, asset, None, None, virtual_state);
         let item_path = item.path.clone();
         let before = self.capture_list_selection_snapshot();
         self.add_virtual_item(item, None);
@@ -416,5 +604,34 @@ impl super::WavesPreviewer {
         self.record_list_insert_from_paths(&[item_path.clone()], before);
         self.recording_temp_files.push(tmp_path.to_path_buf());
         Some(item_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_waveform_scrolls_one_block_without_500_point_jump() {
+        let mut overview = std::collections::VecDeque::new();
+        let mut first_frame = 0u64;
+        let block_frames = 960u64;
+        let capacity = 2_000usize;
+        for index in 0..2_500u64 {
+            let previous_first = first_frame;
+            push_live_waveform_block(
+                &mut overview,
+                &mut first_frame,
+                block_frames,
+                capacity,
+                index * block_frames,
+                (-0.5, 0.5),
+            );
+            assert!(overview.len() <= capacity);
+            assert!(first_frame.saturating_sub(previous_first) <= block_frames);
+        }
+        assert_eq!(overview.len(), capacity);
+        assert_eq!(first_frame, 500 * block_frames);
+        assert_eq!(overview.len() as u64 * block_frames, 40 * 48_000);
     }
 }

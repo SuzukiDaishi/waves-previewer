@@ -6,25 +6,58 @@ use crate::ipc;
 
 use super::external_ops;
 use super::project::{
-    can_store_relative, describe_missing, deserialize_project, fade_shape_from_str,
-    load_sidecar_audio, loop_mode_from_str, loop_shape_from_str, marker_entry_to_project,
-    metadata_sub_view_from_project, missing_file_meta, primary_view_from_project,
-    project_channel_view_to_channel_view, project_marker_to_entry, project_music_analysis_to_draft,
-    project_plugin_fx_draft_from_draft, project_plugin_fx_draft_to_draft, project_region_to_entry,
-    project_spectrogram_from_cfg, project_tab_from_tab, project_tool_state_to_tool_state,
-    region_entry_to_project, rel_path, repair_project_source_paths, resolve_path,
-    serialize_project, session_path, sidecar_audio_dst, spectro_config_from_project,
-    tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph, ProjectBitDepthOverride,
-    ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy, ProjectExternalSource,
-    ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList, ProjectListColumns,
-    ProjectListItem, ProjectSampleRateOverride, ProjectToolState, ProjectTranscriptLanguage,
-    ProjectVirtualItem, ProjectVirtualOp, ProjectVirtualSource, SessionPathMode,
+    asset_audio_dst, can_store_relative, describe_missing, deserialize_project,
+    fade_shape_from_str, load_sidecar_audio, loop_mode_from_str, loop_shape_from_str,
+    marker_entry_to_project, metadata_sub_view_from_project, missing_file_meta,
+    primary_view_from_project, project_channel_view_to_channel_view, project_marker_to_entry,
+    project_music_analysis_to_draft, project_plugin_fx_chain_from_draft,
+    project_plugin_fx_chain_to_draft, project_plugin_fx_draft_from_draft,
+    project_plugin_fx_draft_to_draft, project_region_to_entry, project_spectrogram_from_cfg,
+    project_tab_from_tab, project_tool_state_to_tool_state, region_entry_to_project, rel_path,
+    repair_project_source_paths, resolve_path, serialize_project, session_path, sidecar_audio_dst,
+    spectro_config_from_project, tool_kind_from_str, ProjectApp, ProjectAppliedEffectGraph,
+    ProjectAsset, ProjectBitDepthOverride, ProjectEdit, ProjectEffectGraphUi, ProjectExportPolicy,
+    ProjectExternalSource, ProjectExternalState, ProjectFile, ProjectFormatOverride, ProjectList,
+    ProjectListColumns, ProjectListItem, ProjectSampleRateOverride, ProjectToolState,
+    ProjectTranscriptDocument, ProjectTranscriptLanguage, ProjectVirtualItem, ProjectVirtualOp,
+    ProjectVirtualSource, SessionPathMode,
 };
 use super::types::{LoopXfadeShape, MediaSource, VirtualOp, VirtualSourceRef, VirtualState};
 
 pub(super) struct ProjectOpenState {
     pub started_at: Instant,
     pub shown: bool,
+}
+
+#[cfg(windows)]
+fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination_wide: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let ok = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
 }
 
 fn external_key_rule_to_project(rule: super::types::ExternalKeyRule) -> &'static str {
@@ -71,7 +104,7 @@ mod tests {
         assert!(session.is_file(), "session should be written before close");
         assert_eq!(app.project_path, None);
         let text = std::fs::read_to_string(&session).expect("read session");
-        assert!(text.contains("version = 1"));
+        assert!(text.contains("version = 2"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -638,7 +671,7 @@ impl super::WavesPreviewer {
             .collect();
         format_overrides.sort_by(|a, b| a.path.cmp(&b.path));
         let mut virtual_items: Vec<ProjectVirtualItem> = Vec::new();
-        let mut virtual_sidecar_index = 0usize;
+        let mut assets: Vec<ProjectAsset> = Vec::new();
         for item in self
             .items
             .iter()
@@ -665,27 +698,6 @@ impl super::WavesPreviewer {
             let current_audio = self
                 .edited_audio_for_path(&item.path)
                 .or_else(|| item.virtual_audio.clone());
-            let needs_sidecar = current_audio.is_some();
-            if needs_sidecar {
-                if let Some(audio) = current_audio.as_ref() {
-                    let sr = item
-                        .virtual_state
-                        .as_ref()
-                        .map(|s| s.sample_rate)
-                        .or_else(|| item.meta.as_ref().map(|m| m.sample_rate))
-                        .filter(|v| *v > 0)
-                        .unwrap_or(self.audio.shared.out_sample_rate.max(1));
-                    let dst = sidecar_audio_dst(&path, "cache", 100_000 + virtual_sidecar_index);
-                    sidecar_jobs.push(SessionSidecarJob {
-                        dst: dst.clone(),
-                        source: SessionSidecarSource::Buffer(audio.clone()),
-                        sample_rate: sr,
-                        label: "virtual sidecar audio",
-                    });
-                    sidecar_audio = Some(rel_path(&dst, base_dir));
-                    virtual_sidecar_index = virtual_sidecar_index.saturating_add(1);
-                }
-            }
             let channels = item
                 .virtual_state
                 .as_ref()
@@ -704,6 +716,39 @@ impl super::WavesPreviewer {
                 .map(|state| state.bits_per_sample)
                 .or_else(|| item.meta.as_ref().map(|m| m.bits_per_sample))
                 .unwrap_or(32);
+            let asset_dst = asset_audio_dst(&path, item.audio_asset.id, item.audio_asset.revision);
+            if let Some(audio) = current_audio.as_ref() {
+                sidecar_jobs.push(SessionSidecarJob {
+                    dst: asset_dst.clone(),
+                    source: SessionSidecarSource::Buffer(audio.clone()),
+                    sample_rate,
+                    label: "managed virtual asset",
+                });
+                sidecar_audio = Some(rel_path(&asset_dst, base_dir));
+            } else if let Some(source_path) = item.audio_asset.backing.file_path() {
+                sidecar_jobs.push(SessionSidecarJob {
+                    dst: asset_dst.clone(),
+                    source: SessionSidecarSource::File(source_path.to_path_buf()),
+                    sample_rate,
+                    label: "managed virtual asset",
+                });
+                sidecar_audio = Some(rel_path(&asset_dst, base_dir));
+            }
+            assets.push(ProjectAsset {
+                id: item.audio_asset.id.to_hex(),
+                revision: item.audio_asset.revision.0.max(1),
+                item_path: if item.path.to_string_lossy().contains("://") {
+                    item.path.to_string_lossy().to_string()
+                } else {
+                    session_path(&item.path, base_dir, path_mode)
+                },
+                backing: "managed".to_string(),
+                location: rel_path(&asset_dst, base_dir),
+                sample_rate,
+                channels,
+                bits_per_sample,
+                frame_count: item.audio_asset.frame_count,
+            });
             virtual_items.push(ProjectVirtualItem {
                 path: if item.path.to_string_lossy().contains("://") {
                     item.path.to_string_lossy().to_string()
@@ -717,8 +762,31 @@ impl super::WavesPreviewer {
                 source,
                 op_chain,
                 sidecar_audio,
+                asset_id: Some(item.audio_asset.id.to_hex()),
+                asset_revision: Some(item.audio_asset.revision.0.max(1)),
             });
         }
+        for item in self
+            .items
+            .iter()
+            .filter(|item| item.source == MediaSource::File)
+        {
+            let Some(location) = item.audio_asset.backing.file_path() else {
+                continue;
+            };
+            assets.push(ProjectAsset {
+                id: item.audio_asset.id.to_hex(),
+                revision: item.audio_asset.revision.0.max(1),
+                item_path: session_path(&item.path, base_dir, path_mode),
+                backing: "external".to_string(),
+                location: session_path(location, base_dir, path_mode),
+                sample_rate: item.audio_asset.sample_rate,
+                channels: item.audio_asset.channels,
+                bits_per_sample: item.audio_asset.bits_per_sample,
+                frame_count: item.audio_asset.frame_count,
+            });
+        }
+        assets.sort_by(|left, right| left.item_path.cmp(&right.item_path));
         virtual_items.sort_by(|a, b| a.path.cmp(&b.path));
         let mut transcript_languages: Vec<ProjectTranscriptLanguage> = self
             .items
@@ -735,6 +803,31 @@ impl super::WavesPreviewer {
             })
             .collect();
         transcript_languages.sort_by(|a, b| a.path.cmp(&b.path));
+        let transcripts: Vec<ProjectTranscriptDocument> = self
+            .items
+            .iter()
+            .filter_map(|item| {
+                item.transcript_document
+                    .as_ref()
+                    .map(|document| ProjectTranscriptDocument {
+                        item_path: session_path(&item.path, base_dir, path_mode),
+                        document: document.as_ref().clone(),
+                    })
+                    .or_else(|| {
+                        item.transcript
+                            .as_ref()
+                            .map(|transcript| ProjectTranscriptDocument {
+                                item_path: session_path(&item.path, base_dir, path_mode),
+                                document: super::types::TranscriptDocument::from_transcript(
+                                    transcript,
+                                    item.transcript_language.clone(),
+                                    item.audio_asset.id,
+                                    item.audio_asset.revision,
+                                ),
+                            })
+                    })
+            })
+            .collect();
         let list = ProjectList {
             root: self
                 .root
@@ -1034,6 +1127,7 @@ impl super::WavesPreviewer {
                 time_sig_numerator: cached.time_sig_numerator,
                 time_sig_denominator: cached.time_sig_denominator,
                 plugin_fx_draft: project_plugin_fx_draft_from_draft(&cached.plugin_fx_draft),
+                plugin_fx_chain: project_plugin_fx_chain_from_draft(&cached.plugin_fx_chain),
                 applied_effect_graph: cached.applied_effect_graph.as_ref().map(|stamp| {
                     ProjectAppliedEffectGraph {
                         template_id: stamp.template_id.clone(),
@@ -1046,7 +1140,9 @@ impl super::WavesPreviewer {
         }
 
         let project = ProjectFile {
-            version: 1,
+            version: 2,
+            assets,
+            transcripts,
             name: path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -1071,25 +1167,81 @@ impl super::WavesPreviewer {
         project: &ProjectFile,
         jobs: &[crate::app::types::SessionSidecarJob],
     ) -> Result<(), String> {
+        let nonce = format!(
+            "{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let mut staged = Vec::<(PathBuf, PathBuf)>::new();
         for job in jobs {
             if let Some(parent) = job.dst.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("Failed to save {}: {e}", job.label))?;
             }
-            let channels = job.source.channels();
-            let len = channels.get(0).map(|c| c.len()).unwrap_or(0);
-            crate::wave::export_selection_wav(channels, job.sample_rate, (0, len), &job.dst)
-                .map_err(|e| format!("Failed to save {}: {e}", job.label))?;
+            let extension = job
+                .dst
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("wav");
+            let stage = job.dst.with_extension(format!("{extension}.{nonce}.stage"));
+            let result = match &job.source {
+                crate::app::types::SessionSidecarSource::File(source) => {
+                    if std::fs::hard_link(source, &stage).is_ok() {
+                        Ok(())
+                    } else {
+                        std::fs::copy(source, &stage)
+                            .map(|_| ())
+                            .map_err(anyhow::Error::from)
+                    }
+                }
+                crate::app::types::SessionSidecarSource::Channels(_)
+                | crate::app::types::SessionSidecarSource::Buffer(_) => {
+                    let channels = job.source.channels();
+                    let len = channels.first().map(Vec::len).unwrap_or(0);
+                    crate::wave::export_selection_wav(channels, job.sample_rate, (0, len), &stage)
+                }
+            };
+            if let Err(error) = result {
+                for (pending, _) in &staged {
+                    let _ = std::fs::remove_file(pending);
+                }
+                let _ = std::fs::remove_file(&stage);
+                return Err(format!("Failed to stage {}: {error}", job.label));
+            }
+            staged.push((stage, job.dst.clone()));
         }
         let text = serialize_project(project).map_err(|e| e.to_string())?;
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::write(path, text).map_err(|e| e.to_string())?;
+        for (stage, destination) in &staged {
+            atomic_replace_file(stage, destination).map_err(|error| {
+                format!(
+                    "Failed to commit session asset {}: {error}",
+                    destination.display()
+                )
+            })?;
+        }
+        let session_temp = path.with_extension(format!("nwsess.{nonce}.tmp"));
+        std::fs::write(&session_temp, text).map_err(|e| e.to_string())?;
+        atomic_replace_file(&session_temp, path).map_err(|e| e.to_string())?;
         Ok(())
     }
 
     fn finish_session_save(&mut self, path: PathBuf) {
+        for item in self
+            .items
+            .iter_mut()
+            .filter(|item| item.source == MediaSource::Virtual)
+        {
+            let managed = asset_audio_dst(&path, item.audio_asset.id, item.audio_asset.revision);
+            if managed.is_file() {
+                item.audio_asset.backing = crate::audio_asset::AudioBacking::ManagedFile(managed);
+            }
+        }
         self.project_path = Some(path.clone());
         self.add_recent_session_path(&path);
         // Recorded virtual items have just been persisted as sidecar audio;
@@ -1168,7 +1320,7 @@ impl super::WavesPreviewer {
         };
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let mut project = deserialize_project(&text).map_err(|e| e.to_string())?;
-        if project.version != 1 {
+        if project.version != 1 && project.version != 2 {
             return Err(format!("Unsupported session version: {}", project.version));
         }
         let session_path_mode = SessionPathMode::from_project(&project);
@@ -1370,6 +1522,89 @@ impl super::WavesPreviewer {
                     let path = resolve_path(&entry.path, &base_dir);
                     let source = virtual_source_from_project(&entry.source, &base_dir);
                     let op_chain = virtual_ops_from_project(&entry.op_chain);
+                    if project.version >= 2 {
+                        let manifest = entry
+                            .asset_id
+                            .as_deref()
+                            .and_then(|id| project.assets.iter().find(|asset| asset.id == id));
+                        if let Some(manifest) = manifest.filter(|asset| asset.backing == "managed")
+                        {
+                            let managed_path = resolve_path(&manifest.location, &base_dir);
+                            if managed_path.is_file() {
+                                let mut descriptor =
+                                    crate::audio_asset::AudioAssetDescriptor::managed(managed_path);
+                                if let Some(id) =
+                                    crate::audio_asset::AudioAssetId::from_hex(&manifest.id)
+                                {
+                                    descriptor.id = id;
+                                }
+                                descriptor.revision =
+                                    crate::audio_asset::AssetRevision(manifest.revision.max(1));
+                                descriptor.sample_rate =
+                                    manifest.sample_rate.max(descriptor.sample_rate);
+                                descriptor.channels = manifest.channels.max(descriptor.channels);
+                                descriptor.bits_per_sample =
+                                    manifest.bits_per_sample.max(descriptor.bits_per_sample);
+                                descriptor.frame_count =
+                                    manifest.frame_count.or(descriptor.frame_count);
+                                let resident_cache = if descriptor.may_reside_in_memory() {
+                                    crate::audio_io::decode_audio_multi(
+                                        descriptor.backing.file_path().unwrap_or(Path::new("")),
+                                    )
+                                    .ok()
+                                    .map(|(channels, _)| {
+                                        std::sync::Arc::new(AudioBuffer::from_channels(channels))
+                                    })
+                                } else {
+                                    None
+                                };
+                                let mut item =
+                                    if let Some(existing) = self.item_for_path(&path).cloned() {
+                                        existing
+                                    } else {
+                                        self.make_media_item(path.clone())
+                                    };
+                                item.path = path.clone();
+                                item.display_name = if entry.display_name.trim().is_empty() {
+                                    item.display_name
+                                } else {
+                                    entry.display_name.clone()
+                                };
+                                item.display_folder = std::sync::Arc::from("(virtual)");
+                                item.source = MediaSource::Virtual;
+                                item.status = super::types::MediaStatus::Ok;
+                                item.audio_asset = descriptor;
+                                item.meta = resident_cache.as_ref().map(|audio| {
+                                    Box::new(super::WavesPreviewer::build_meta_from_audio(
+                                        &audio.channels,
+                                        manifest.sample_rate.max(1),
+                                        manifest.bits_per_sample.max(16),
+                                        self.blank_threshold_dbfs,
+                                    ))
+                                });
+                                item.virtual_audio = resident_cache;
+                                item.virtual_state = Some(VirtualState {
+                                    source: source.clone(),
+                                    op_chain: op_chain.clone(),
+                                    sample_rate: manifest.sample_rate.max(1),
+                                    channels: manifest.channels.max(1),
+                                    bits_per_sample: manifest.bits_per_sample.max(16),
+                                });
+                                if self.item_for_path(&path).is_some() {
+                                    if let Some(existing) = self.item_for_path_mut(&path) {
+                                        *existing = item;
+                                    }
+                                } else {
+                                    let id = item.id;
+                                    self.path_index.insert(path.clone(), id);
+                                    self.item_index.insert(id, self.items.len());
+                                    self.items.push(item);
+                                }
+                                progressed = true;
+                                continue;
+                            }
+                        }
+                    }
                     let mut channels_opt: Option<Vec<Vec<f32>>> = None;
                     // The op_chain only reconstructs the final audio from a *raw*
                     // source (decoded file / parent virtual). The sidecar, by
@@ -1497,6 +1732,22 @@ impl super::WavesPreviewer {
                         bits_per_sample,
                         self.blank_threshold_dbfs,
                     )));
+                    item.audio_asset = crate::audio_asset::AudioAssetDescriptor::resident(
+                        audio.clone(),
+                        sample_rate,
+                        bits_per_sample,
+                    );
+                    if let Some(id) = entry
+                        .asset_id
+                        .as_deref()
+                        .and_then(crate::audio_asset::AudioAssetId::from_hex)
+                    {
+                        item.audio_asset.id = id;
+                    }
+                    if let Some(revision) = entry.asset_revision {
+                        item.audio_asset.revision =
+                            crate::audio_asset::AssetRevision(revision.max(1));
+                    }
                     item.virtual_audio = Some(audio);
                     item.virtual_state = Some(VirtualState {
                         source: source.clone(),
@@ -1573,6 +1824,32 @@ impl super::WavesPreviewer {
             self.refresh_filter_then_sort();
         }
 
+        // Rebind external items to the stable ids/revisions recorded by v2.
+        for manifest in &project.assets {
+            let item_path = resolve_path(&manifest.item_path, &base_dir);
+            let Some(item) = self.item_for_path_mut(&item_path) else {
+                continue;
+            };
+            if item.source == MediaSource::Virtual {
+                continue;
+            }
+            let location = resolve_path(&manifest.location, &base_dir);
+            let mut descriptor = if manifest.backing == "managed" {
+                crate::audio_asset::AudioAssetDescriptor::managed(location)
+            } else {
+                crate::audio_asset::AudioAssetDescriptor::external(location)
+            };
+            if let Some(id) = crate::audio_asset::AudioAssetId::from_hex(&manifest.id) {
+                descriptor.id = id;
+            }
+            descriptor.revision = crate::audio_asset::AssetRevision(manifest.revision.max(1));
+            descriptor.sample_rate = manifest.sample_rate.max(descriptor.sample_rate);
+            descriptor.channels = manifest.channels.max(descriptor.channels);
+            descriptor.bits_per_sample = manifest.bits_per_sample.max(descriptor.bits_per_sample);
+            descriptor.frame_count = manifest.frame_count.or(descriptor.frame_count);
+            item.audio_asset = descriptor;
+        }
+
         for item in project.list.items.iter() {
             let path = resolve_path(&item.path, &base_dir);
             if let Some(list_item) = self.item_for_path_mut(&path) {
@@ -1582,6 +1859,14 @@ impl super::WavesPreviewer {
         for item in project.list.transcript_languages.iter() {
             let path = resolve_path(&item.path, &base_dir);
             self.set_transcript_language_for_path(&path, Some(item.language.clone()));
+        }
+        for stored in &project.transcripts {
+            let path = resolve_path(&stored.item_path, &base_dir);
+            if let Some(item) = self.item_for_path_mut(&path) {
+                item.transcript = Some(std::sync::Arc::new(stored.document.transcript()));
+                item.transcript_language = stored.document.language.clone();
+                item.transcript_document = Some(std::sync::Arc::new(stored.document.clone()));
+            }
         }
         self.sample_rate_override.clear();
         for override_item in project.list.sample_rate_overrides.iter() {
@@ -1721,6 +2006,10 @@ impl super::WavesPreviewer {
                     tool_state: project_tool_state_to_tool_state(&edit.tool_state),
                     active_tool: tool_kind_from_str(&edit.active_tool),
                     plugin_fx_draft: project_plugin_fx_draft_to_draft(&edit.plugin_fx_draft),
+                    plugin_fx_chain: project_plugin_fx_chain_to_draft(
+                        &edit.plugin_fx_chain,
+                        &edit.plugin_fx_draft,
+                    ),
                     show_waveform_overlay: edit.show_waveform_overlay,
                     bpm_enabled: edit.bpm_enabled,
                     bpm_value: edit.bpm_value,
@@ -1802,6 +2091,10 @@ impl super::WavesPreviewer {
                         tool_state: project_tool_state_to_tool_state(&tab.tool_state),
                         active_tool: tool_kind_from_str(&tab.active_tool),
                         plugin_fx_draft: project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft),
+                        plugin_fx_chain: project_plugin_fx_chain_to_draft(
+                            &tab.plugin_fx_chain,
+                            &tab.plugin_fx_draft,
+                        ),
                         show_waveform_overlay: tab.show_waveform_overlay,
                         bpm_enabled: tab.bpm_enabled,
                         bpm_value: tab.bpm_value,
@@ -1885,6 +2178,10 @@ impl super::WavesPreviewer {
                     t.active_tool = tool_kind_from_str(&tab.active_tool);
                     t.tool_state = project_tool_state_to_tool_state(&tab.tool_state);
                     t.plugin_fx_draft = project_plugin_fx_draft_to_draft(&tab.plugin_fx_draft);
+                    t.plugin_fx_chain = project_plugin_fx_chain_to_draft(
+                        &tab.plugin_fx_chain,
+                        &tab.plugin_fx_draft,
+                    );
                     t.music_analysis_draft = tab
                         .music_analysis
                         .as_ref()
@@ -2069,7 +2366,9 @@ impl super::WavesPreviewer {
                 } else if is_external && external_path.is_none() {
                     external_path = Some(p);
                 } else if !is_project {
-                    paths.push(p);
+                    if !self.try_restore_virtual_drag_path(&p) {
+                        paths.push(p);
+                    }
                 }
             }
         }

@@ -64,7 +64,9 @@ use crate::cli::{
     MusicAiModelDownloadArgs, MusicAiModelStatusArgs, MusicAiModelUninstallArgs, PluginCommand,
     PluginListArgs, PluginProbeArgs, PluginScanArgs, PluginSearchPathAddArgs,
     PluginSearchPathCommand, PluginSearchPathListArgs, PluginSearchPathRemoveArgs,
-    PluginSearchPathResetArgs, PluginSessionApplyArgs, PluginSessionClearArgs,
+    PluginSearchPathResetArgs, PluginSessionApplyArgs, PluginSessionChainAddArgs,
+    PluginSessionChainCommand, PluginSessionChainListArgs, PluginSessionChainMoveArgs,
+    PluginSessionChainRemoveArgs, PluginSessionChainSetArgs, PluginSessionClearArgs,
     PluginSessionCommand, PluginSessionInspectArgs, PluginSessionPreviewArgs, PluginSessionSetArgs,
     RenderCommand, RenderEditorArgs, RenderListArgs, RenderSpectrumArgs, RenderWaveformArgs,
     SessionCommand, SessionInspectArgs, SessionNewArgs, TranscriptBatchCommand,
@@ -426,6 +428,15 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         CliCommand::Plugin(PluginCommand::Session(PluginSessionCommand::Clear(_))) => {
             "plugin.session.clear"
         }
+        CliCommand::Plugin(PluginCommand::Session(PluginSessionCommand::Chain(command))) => {
+            match command {
+                PluginSessionChainCommand::List(_) => "plugin.session.chain.list",
+                PluginSessionChainCommand::Add(_) => "plugin.session.chain.add",
+                PluginSessionChainCommand::Remove(_) => "plugin.session.chain.remove",
+                PluginSessionChainCommand::Move(_) => "plugin.session.chain.move",
+                PluginSessionChainCommand::Set(_) => "plugin.session.chain.set",
+            }
+        }
         CliCommand::Render(RenderCommand::Waveform(_)) => "render.waveform",
         CliCommand::Render(RenderCommand::Spectrum(_)) => "render.spectrum",
         CliCommand::Render(RenderCommand::Editor(_)) => "render.editor",
@@ -684,6 +695,13 @@ fn dispatch_plugin(command: PluginCommand) -> Result<CliCommandOutput> {
         PluginCommand::Session(PluginSessionCommand::Preview(args)) => plugin_session_preview(args),
         PluginCommand::Session(PluginSessionCommand::Apply(args)) => plugin_session_apply(args),
         PluginCommand::Session(PluginSessionCommand::Clear(args)) => plugin_session_clear(args),
+        PluginCommand::Session(PluginSessionCommand::Chain(command)) => match command {
+            PluginSessionChainCommand::List(args) => plugin_session_chain_list(args),
+            PluginSessionChainCommand::Add(args) => plugin_session_chain_add(args),
+            PluginSessionChainCommand::Remove(args) => plugin_session_chain_remove(args),
+            PluginSessionChainCommand::Move(args) => plugin_session_chain_move(args),
+            PluginSessionChainCommand::Set(args) => plugin_session_chain_set(args),
+        },
     }
 }
 
@@ -3034,7 +3052,9 @@ fn session_entries_from_sources(
 fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<ProjectFile> {
     let cols = parse_list_column_config(DEFAULT_LIST_COLUMNS)?;
     Ok(ProjectFile {
-        version: 1,
+        version: 2,
+        assets: Vec::new(),
+        transcripts: Vec::new(),
         name: None,
         path_mode: Some(SessionPathMode::Absolute.as_str().to_string()),
         base_dir: None,
@@ -3071,7 +3091,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
                 conflict: "rename".to_string(),
                 backup_bak: true,
                 export_srt: false,
-                name_template: "{name} (gain{gain:+.1}dB)".to_string(),
+                name_template: "{name}{gain_suffix}".to_string(),
                 dest_folder: None,
             }),
             external_state: None,
@@ -3231,6 +3251,7 @@ fn default_project_tab_for_path(
         buffer_sample_rate: Some(info.sample_rate.max(1)),
         edited_audio: None,
         plugin_fx_draft: ProjectPluginFxDraft::default(),
+        plugin_fx_chain: super::project::ProjectPluginFxChainDraft::default(),
         music_analysis: None,
     })
 }
@@ -5716,15 +5737,29 @@ fn external_config_set(args: ExternalConfigSetArgs) -> Result<CliCommandOutput> 
 
 fn transcript_inspect(args: TranscriptInspectArgs) -> Result<CliCommandOutput> {
     let (audio_path, language) = resolve_transcript_target_and_language(&args)?;
-    let srt_path = super::transcript::srt_path_for_audio(&audio_path)
-        .context("transcript inspect requires an audio file path")?;
-    let transcript = super::transcript::load_srt(&srt_path);
+    let mut freshness = None;
+    let transcript = if let Some(session) = args.session.as_deref() {
+        let workspace = CliWorkspace::load(session)?;
+        if let Some(item) = workspace.app.item_for_path(&audio_path) {
+            freshness = item
+                .transcript_document
+                .as_ref()
+                .map(|document| format!("{:?}", document.freshness).to_ascii_lowercase());
+        }
+        workspace.app.transcript_for_path(&audio_path).cloned()
+    } else {
+        super::transcript::srt_path_for_audio(&audio_path)
+            .and_then(|srt_path| super::transcript::load_srt(&srt_path))
+    };
+    let imported_srt_path =
+        super::transcript::srt_path_for_audio(&audio_path).filter(|path| path.is_file());
     Ok(CliCommandOutput {
         result: json!({
             "audio_path": pathbuf_to_string(&audio_path),
-            "srt_path": pathbuf_to_string(&srt_path),
+            "srt_path": imported_srt_path.as_ref().map(|path| pathbuf_to_string(path)),
             "exists": transcript.is_some(),
             "language": language,
+            "freshness": freshness,
             "segments": transcript.as_ref().map(|value| value.segments.iter().map(transcript_segment_json).collect::<Vec<_>>()).unwrap_or_default(),
             "full_text": transcript.as_ref().map(|value| value.full_text.clone()).unwrap_or_default(),
         }),
@@ -5861,12 +5896,8 @@ fn transcript_config_set(args: TranscriptConfigSetArgs) -> Result<CliCommandOutp
 fn transcript_generate(args: TranscriptGenerateArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(&args.session)?;
     let path = workspace.resolve_target_path(args.path.as_deref())?;
-    let srt_path = super::transcript::srt_path_for_audio(&path)
-        .context("transcript generate requires an audio file path")?;
-    let existed_before = srt_path.is_file();
-    if args.overwrite_existing {
-        workspace.app.transcript_ai_cfg.overwrite_existing_srt = true;
-    }
+    let existed_before = workspace.app.transcript_for_path(&path).is_some();
+    workspace.app.transcript_ai_cfg.overwrite_existing_srt = args.overwrite_existing;
     workspace
         .app
         .run_transcript_ai_for_selected(vec![path.clone()]);
@@ -5875,15 +5906,28 @@ fn transcript_generate(args: TranscriptGenerateArgs) -> Result<CliCommandOutput>
     } else if let Some(err) = workspace.app.transcript_ai_last_error.clone() {
         bail!(err);
     }
+    let transcript = workspace.app.transcript_for_path(&path).cloned();
+    let mut output_srt_paths = Vec::new();
+    if args.write_srt {
+        let transcript = transcript
+            .as_ref()
+            .context("transcript generation did not produce an in-memory document")?;
+        let srt_path = super::transcript::srt_path_for_audio(&path)
+            .context("transcript --write-srt requires an audio-like target path")?;
+        ensure_parent_dir(&srt_path)?;
+        super::transcript::write_srt(&srt_path, transcript)
+            .with_context(|| format!("write srt: {}", srt_path.display()))?;
+        output_srt_paths.push(pathbuf_to_string(&srt_path));
+    }
     workspace.save()?;
-    let completed = srt_path.is_file() && (args.overwrite_existing || !existed_before);
-    let skipped = srt_path.is_file() && existed_before && !args.overwrite_existing;
+    let completed = transcript.is_some() && (args.overwrite_existing || !existed_before);
+    let skipped = transcript.is_some() && existed_before && !args.overwrite_existing;
     Ok(CliCommandOutput {
         result: json!({
             "completed_paths": if completed { vec![pathbuf_to_string(&path)] } else { Vec::<String>::new() },
             "skipped_paths": if skipped { vec![pathbuf_to_string(&path)] } else { Vec::<String>::new() },
-            "failed_paths": if !srt_path.is_file() { vec![json!({"path": pathbuf_to_string(&path), "error": "SRT was not produced"})] } else { Vec::<Value>::new() },
-            "output_srt_paths": if srt_path.is_file() { vec![pathbuf_to_string(&srt_path)] } else { Vec::<String>::new() },
+            "failed_paths": if transcript.is_none() { vec![json!({"path": pathbuf_to_string(&path), "error": "Transcript document was not produced"})] } else { Vec::<Value>::new() },
+            "output_srt_paths": output_srt_paths,
         }),
         warnings: Vec::new(),
     })
@@ -5907,45 +5951,44 @@ fn transcript_batch_generate(args: TranscriptBatchGenerateArgs) -> Result<CliCom
             warnings: Vec::new(),
         });
     }
+    let mut workspace = CliWorkspace::load(&args.session)?;
     let existed_before: HashSet<String> = paths
         .iter()
-        .filter_map(|path| super::transcript::srt_path_for_audio(path))
-        .filter(|path| path.is_file())
-        .map(|path| path_key(&path))
+        .filter(|path| workspace.app.transcript_for_path(path).is_some())
+        .map(|path| path_key(path))
         .collect();
-    let mut workspace = CliWorkspace::load(&args.session)?;
-    if args.overwrite_existing {
-        workspace.app.transcript_ai_cfg.overwrite_existing_srt = true;
-    }
+    workspace.app.transcript_ai_cfg.overwrite_existing_srt = args.overwrite_existing;
     workspace.app.run_transcript_ai_for_selected(paths.clone());
     if workspace.app.transcript_ai_state.is_some() {
         workspace.wait_for_transcript_ai()?;
     } else if let Some(err) = workspace.app.transcript_ai_last_error.clone() {
         bail!(err);
     }
-    workspace.save()?;
     let mut completed_paths = Vec::new();
     let mut skipped_paths = Vec::new();
     let mut failed_paths = Vec::new();
     let mut output_srt_paths = Vec::new();
     for path in paths {
-        let Some(srt_path) = super::transcript::srt_path_for_audio(&path) else {
-            failed_paths
-                .push(json!({"path": pathbuf_to_string(&path), "error": "not an audio path"}));
-            continue;
-        };
-        if srt_path.is_file() {
-            output_srt_paths.push(pathbuf_to_string(&srt_path));
-            if !args.overwrite_existing && existed_before.contains(&path_key(&srt_path)) {
+        if let Some(transcript) = workspace.app.transcript_for_path(&path) {
+            if args.write_srt {
+                if let Some(srt_path) = super::transcript::srt_path_for_audio(&path) {
+                    ensure_parent_dir(&srt_path)?;
+                    super::transcript::write_srt(&srt_path, transcript)
+                        .with_context(|| format!("write srt: {}", srt_path.display()))?;
+                    output_srt_paths.push(pathbuf_to_string(&srt_path));
+                }
+            }
+            if !args.overwrite_existing && existed_before.contains(&path_key(&path)) {
                 skipped_paths.push(pathbuf_to_string(&path));
             } else {
                 completed_paths.push(pathbuf_to_string(&path));
             }
         } else {
             failed_paths
-                .push(json!({"path": pathbuf_to_string(&path), "error": "SRT was not produced"}));
+                .push(json!({"path": pathbuf_to_string(&path), "error": "Transcript document was not produced"}));
         }
     }
+    workspace.save()?;
     Ok(CliCommandOutput {
         result: json!({
             "completed_paths": completed_paths,
@@ -5959,10 +6002,14 @@ fn transcript_batch_generate(args: TranscriptBatchGenerateArgs) -> Result<CliCom
 
 fn transcript_export_srt(args: TranscriptExportSrtArgs) -> Result<CliCommandOutput> {
     let (audio_path, _) = resolve_transcript_export_target(&args)?;
-    let srt_path = super::transcript::srt_path_for_audio(&audio_path)
-        .context("transcript export requires an audio file path")?;
-    let transcript = super::transcript::load_srt(&srt_path)
-        .with_context(|| format!("transcript not found: {}", srt_path.display()))?;
+    let transcript = if let Some(session) = args.session.as_deref() {
+        let workspace = CliWorkspace::load(session)?;
+        workspace.app.transcript_for_path(&audio_path).cloned()
+    } else {
+        super::transcript::srt_path_for_audio(&audio_path)
+            .and_then(|srt_path| super::transcript::load_srt(&srt_path))
+    }
+    .with_context(|| format!("transcript not found for: {}", audio_path.display()))?;
     let output = absolute_output_path(&args.output)?;
     ensure_parent_dir(&output)?;
     super::transcript::write_srt(&output, &transcript)
@@ -5970,7 +6017,6 @@ fn transcript_export_srt(args: TranscriptExportSrtArgs) -> Result<CliCommandOutp
     Ok(CliCommandOutput {
         result: json!({
             "audio_path": pathbuf_to_string(&audio_path),
-            "source_srt_path": pathbuf_to_string(&srt_path),
             "output_srt_path": absolute_string(&output)?,
             "segment_count": transcript.segments.len(),
         }),
@@ -6783,6 +6829,24 @@ fn plugin_draft_json(draft: &super::types::PluginFxDraft) -> Value {
     })
 }
 
+fn plugin_chain_json(chain: &super::types::PluginFxChainDraft) -> Value {
+    json!({
+        "bypass": chain.bypass,
+        "preview_engine": format!("{:?}", chain.preview_engine).to_ascii_lowercase(),
+        "render_ahead_ms": chain.render_ahead_ms,
+        "latency_samples": chain.latency_samples,
+        "underruns": chain.underrun_count,
+        "selected_slot_id": chain.selected_slot_id,
+        "slots": chain.slots.iter().enumerate().map(|(index, slot)| json!({
+            "index": index,
+            "slot_id": slot.id,
+            "latency_samples": slot.latency_samples,
+            "failure_reason": slot.failure_reason,
+            "draft": plugin_draft_json(&slot.draft),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn resolve_plugin_probe_path(app: &mut WavesPreviewer, plugin: &str) -> Result<PathBuf> {
     let plugin_path = Path::new(plugin);
     if plugin_path.components().count() > 1 || plugin_path.is_absolute() {
@@ -7091,6 +7155,7 @@ fn plugin_session_inspect(args: PluginSessionInspectArgs) -> Result<CliCommandOu
         result: json!({
             "path": pathbuf_to_string(&tab.path),
             "draft": plugin_draft_json(&tab.plugin_fx_draft),
+            "chain": plugin_chain_json(&tab.plugin_fx_chain),
         }),
         warnings: Vec::new(),
     })
@@ -7150,6 +7215,8 @@ fn plugin_session_set(args: PluginSessionSetArgs) -> Result<CliCommandOutput> {
                     .with_context(|| "decode plugin state blob")?,
             );
         }
+        tab.plugin_fx_chain
+            .replace_slot_zero_from_legacy(&tab.plugin_fx_draft);
     }
     workspace.save()?;
     let tab = workspace
@@ -7270,6 +7337,7 @@ fn plugin_session_clear(args: PluginSessionClearArgs) -> Result<CliCommandOutput
         .get_mut(tab_idx)
         .context("missing target tab")?;
     tab.plugin_fx_draft = super::types::PluginFxDraft::default();
+    tab.plugin_fx_chain = super::types::PluginFxChainDraft::default();
     tab.preview_audio_tool = None;
     tab.preview_overlay = None;
     workspace.save()?;
@@ -7284,6 +7352,205 @@ fn plugin_session_clear(args: PluginSessionClearArgs) -> Result<CliCommandOutput
             "after": plugin_draft_json(&tab.plugin_fx_draft),
             "mutated_paths": [pathbuf_to_string(&tab.path)],
         }),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_list(args: PluginSessionChainListArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&tab.path),
+            "chain": plugin_chain_json(&tab.plugin_fx_chain),
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_draft_from_probe(
+    probe: (
+        String,
+        String,
+        Vec<super::types::PluginParamUiState>,
+        Option<Vec<u8>>,
+        crate::plugin::PluginHostBackend,
+        crate::plugin::GuiCapabilities,
+        Option<String>,
+    ),
+) -> super::types::PluginFxDraft {
+    let (key, name, params, state_blob, backend, capabilities, backend_note) = probe;
+    let mut draft = super::types::PluginFxDraft::default();
+    draft.plugin_key = Some(key);
+    draft.plugin_name = name;
+    draft.params = params;
+    draft.state_blob = state_blob;
+    draft.backend = Some(backend);
+    draft.gui_capabilities = capabilities;
+    draft.enabled = true;
+    draft.bypass = false;
+    draft.last_backend_note = backend_note;
+    draft
+}
+
+fn sync_legacy_plugin_from_chain(tab: &mut super::types::EditorTab) {
+    tab.plugin_fx_draft = tab
+        .plugin_fx_chain
+        .slots
+        .first()
+        .map(|slot| slot.draft.clone())
+        .unwrap_or_default();
+}
+
+fn plugin_session_chain_add(args: PluginSessionChainAddArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let plugin_path = resolve_plugin_probe_path(&mut workspace.app, &args.plugin)?;
+    let draft = plugin_draft_from_probe(probe_plugin_path(&plugin_path)?);
+    let slot = super::types::PluginFxSlot::new(draft);
+    let slot_id = slot.id;
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let index = args
+        .index
+        .unwrap_or(tab.plugin_fx_chain.slots.len())
+        .min(tab.plugin_fx_chain.slots.len());
+    tab.plugin_fx_chain.slots.insert(index, slot);
+    tab.plugin_fx_chain.selected_slot_id = Some(slot_id);
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&tab.path),
+            "added_slot_id": slot_id,
+            "chain": plugin_chain_json(&tab.plugin_fx_chain),
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_remove(args: PluginSessionChainRemoveArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let before = tab.plugin_fx_chain.slots.len();
+    tab.plugin_fx_chain
+        .slots
+        .retain(|slot| slot.id != args.slot_id);
+    if before == tab.plugin_fx_chain.slots.len() {
+        bail!("plugin chain slot not found: {}", args.slot_id);
+    }
+    if tab.plugin_fx_chain.selected_slot_id == Some(args.slot_id) {
+        tab.plugin_fx_chain.selected_slot_id =
+            tab.plugin_fx_chain.slots.first().map(|slot| slot.id);
+    }
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_move(args: PluginSessionChainMoveArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let from = tab
+        .plugin_fx_chain
+        .slots
+        .iter()
+        .position(|slot| slot.id == args.slot_id)
+        .with_context(|| format!("plugin chain slot not found: {}", args.slot_id))?;
+    let slot = tab.plugin_fx_chain.slots.remove(from);
+    let index = args.index.min(tab.plugin_fx_chain.slots.len());
+    tab.plugin_fx_chain.slots.insert(index, slot);
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_set(args: PluginSessionChainSetArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let replacement = if let Some(plugin) = args.plugin.as_deref() {
+        let path = resolve_plugin_probe_path(&mut workspace.app, plugin)?;
+        Some(plugin_draft_from_probe(probe_plugin_path(&path)?))
+    } else {
+        None
+    };
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let slot = tab
+        .plugin_fx_chain
+        .slots
+        .iter_mut()
+        .find(|slot| slot.id == args.slot_id)
+        .with_context(|| format!("plugin chain slot not found: {}", args.slot_id))?;
+    if let Some(draft) = replacement {
+        slot.draft = draft;
+    }
+    if let Some(enabled) = args.enabled {
+        slot.draft.enabled = enabled.into_bool();
+    }
+    if let Some(bypass) = args.bypass {
+        slot.draft.bypass = bypass.into_bool();
+    }
+    apply_plugin_param_overrides(&mut slot.draft, &args.params)?;
+    if let Some(raw) = args.state_blob_b64.as_deref() {
+        slot.draft.state_blob = Some(
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(raw.as_bytes())
+                .context("decode plugin state blob")?,
+        );
+    }
+    tab.plugin_fx_chain.selected_slot_id = Some(args.slot_id);
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
         warnings: Vec::new(),
     })
 }

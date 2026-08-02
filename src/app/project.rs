@@ -7,14 +7,19 @@ use serde::{Deserialize, Serialize};
 use super::types::{
     ChannelView, ChannelViewMode, EditorOtherSubView, EditorPrimaryView, EditorSpecSubView,
     FadeShape, FileMeta, LoopMode, LoopXfadeShape, MetadataSubView, MusicAnalysisDraft,
-    MusicAnalysisResult, MusicAnalysisSourceKind, PluginFxDraft, PluginParamUiState,
-    SpectrogramConfig, SpectrogramScale, ToolKind, ToolState, TranscriptAiConfig, ViewMode,
+    MusicAnalysisResult, MusicAnalysisSourceKind, PluginFxChainDraft, PluginFxDraft, PluginFxSlot,
+    PluginParamUiState, PluginPreviewEngine, SpectrogramConfig, SpectrogramScale, ToolKind,
+    ToolState, TranscriptAiConfig, ViewMode,
 };
 use crate::markers::MarkerEntry;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectFile {
     pub version: u32,
+    #[serde(default)]
+    pub assets: Vec<ProjectAsset>,
+    #[serde(default)]
+    pub transcripts: Vec<ProjectTranscriptDocument>,
     pub name: Option<String>,
     /// Source-path serialization policy for the whole session.
     ///
@@ -31,6 +36,29 @@ pub struct ProjectFile {
     pub active_tab: Option<usize>,
     #[serde(default)]
     pub cached_edits: Vec<ProjectEdit>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectAsset {
+    pub id: String,
+    pub revision: u64,
+    pub item_path: String,
+    pub backing: String,
+    pub location: String,
+    #[serde(default)]
+    pub sample_rate: u32,
+    #[serde(default)]
+    pub channels: u16,
+    #[serde(default)]
+    pub bits_per_sample: u16,
+    #[serde(default)]
+    pub frame_count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectTranscriptDocument {
+    pub item_path: String,
+    pub document: super::types::TranscriptDocument,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -140,6 +168,10 @@ pub struct ProjectVirtualItem {
     pub op_chain: Vec<ProjectVirtualOp>,
     #[serde(default)]
     pub sidecar_audio: Option<String>,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub asset_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -201,6 +233,8 @@ pub struct ProjectEdit {
     pub time_sig_denominator: u8,
     #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
+    #[serde(default)]
+    pub plugin_fx_chain: ProjectPluginFxChainDraft,
     #[serde(default)]
     pub applied_effect_graph: Option<ProjectAppliedEffectGraph>,
     #[serde(default)]
@@ -452,6 +486,8 @@ pub struct ProjectTab {
     #[serde(default)]
     pub plugin_fx_draft: ProjectPluginFxDraft,
     #[serde(default)]
+    pub plugin_fx_chain: ProjectPluginFxChainDraft,
+    #[serde(default)]
     pub music_analysis: Option<ProjectMusicAnalysisDraft>,
 }
 
@@ -497,6 +533,38 @@ pub struct ProjectPluginFxDraft {
     pub last_error: Option<String>,
     #[serde(default)]
     pub last_backend_log: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectPluginFxChainDraft {
+    #[serde(default)]
+    pub slots: Vec<ProjectPluginFxSlot>,
+    #[serde(default)]
+    pub selected_slot_id: Option<u64>,
+    #[serde(default)]
+    pub bypass: bool,
+    #[serde(default = "default_plugin_preview_engine")]
+    pub preview_engine: String,
+    #[serde(default = "default_render_ahead_ms")]
+    pub render_ahead_ms: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectPluginFxSlot {
+    pub id: u64,
+    pub draft: ProjectPluginFxDraft,
+    #[serde(default)]
+    pub latency_samples: u32,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+}
+
+fn default_plugin_preview_engine() -> String {
+    "render_ahead".to_string()
+}
+
+fn default_render_ahead_ms() -> u32 {
+    150
 }
 
 fn default_vertical_zoom() -> f32 {
@@ -1012,6 +1080,10 @@ fn project_data_dir(path: &Path) -> PathBuf {
     project_sidecar_dir(path).join("data")
 }
 
+fn project_assets_dir(path: &Path) -> PathBuf {
+    project_sidecar_dir(path).join("assets")
+}
+
 fn default_loop_repeat() -> u32 {
     2
 }
@@ -1125,7 +1197,7 @@ fn default_export_srt() -> bool {
 }
 
 fn default_export_name_template() -> String {
-    "{name} (gain{gain:+.1}dB)".to_string()
+    "{name}{gain_suffix}".to_string()
 }
 
 pub fn serialize_project(project: &ProjectFile) -> Result<String> {
@@ -1310,6 +1382,7 @@ pub fn project_tab_from_tab(
         buffer_sample_rate: Some(tab.buffer_sample_rate.max(1)),
         edited_audio: edited_audio.map(|p| rel_path(&p, base)),
         plugin_fx_draft: project_plugin_fx_draft_from_draft(&tab.plugin_fx_draft),
+        plugin_fx_chain: project_plugin_fx_chain_from_draft(&tab.plugin_fx_chain),
         music_analysis: project_music_analysis_from_draft(
             &tab.music_analysis_draft,
             base,
@@ -1443,6 +1516,62 @@ pub fn project_plugin_fx_draft_to_draft(draft: &ProjectPluginFxDraft) -> PluginF
         ab_active_b: false,
         auto_preview: false,
     }
+}
+
+pub fn project_plugin_fx_chain_from_draft(chain: &PluginFxChainDraft) -> ProjectPluginFxChainDraft {
+    ProjectPluginFxChainDraft {
+        slots: chain
+            .slots
+            .iter()
+            .map(|slot| ProjectPluginFxSlot {
+                id: slot.id,
+                draft: project_plugin_fx_draft_from_draft(&slot.draft),
+                latency_samples: slot.latency_samples,
+                failure_reason: slot.failure_reason.clone(),
+            })
+            .collect(),
+        selected_slot_id: chain.selected_slot_id,
+        bypass: chain.bypass,
+        preview_engine: match chain.preview_engine {
+            PluginPreviewEngine::RenderAhead => "render_ahead",
+            PluginPreviewEngine::Offline => "offline",
+        }
+        .to_string(),
+        render_ahead_ms: chain.render_ahead_ms.clamp(100, 500),
+    }
+}
+
+pub fn project_plugin_fx_chain_to_draft(
+    stored: &ProjectPluginFxChainDraft,
+    legacy: &ProjectPluginFxDraft,
+) -> PluginFxChainDraft {
+    if stored.slots.is_empty() {
+        return PluginFxChainDraft::from_legacy(&project_plugin_fx_draft_to_draft(legacy));
+    }
+    let mut chain = PluginFxChainDraft {
+        slots: stored
+            .slots
+            .iter()
+            .map(|slot| PluginFxSlot {
+                id: slot.id,
+                draft: project_plugin_fx_draft_to_draft(&slot.draft),
+                latency_samples: slot.latency_samples,
+                failure_reason: slot.failure_reason.clone(),
+            })
+            .collect(),
+        selected_slot_id: stored.selected_slot_id,
+        bypass: stored.bypass,
+        preview_engine: if stored.preview_engine.eq_ignore_ascii_case("offline") {
+            PluginPreviewEngine::Offline
+        } else {
+            PluginPreviewEngine::RenderAhead
+        },
+        render_ahead_ms: stored.render_ahead_ms.clamp(100, 500),
+        latency_samples: 0,
+        underrun_count: 0,
+    };
+    chain.latency_samples = chain.total_latency_samples();
+    chain
 }
 
 pub fn project_marker_to_entry(m: &ProjectMarker) -> MarkerEntry {
@@ -1705,6 +1834,16 @@ pub fn sidecar_audio_dst(project_path: &Path, prefix: &str, index: usize) -> Pat
     project_data_dir(project_path).join(format!("{prefix}_{index:04}.wav"))
 }
 
+pub fn asset_audio_dst(
+    project_path: &Path,
+    id: crate::audio_asset::AudioAssetId,
+    revision: crate::audio_asset::AssetRevision,
+) -> PathBuf {
+    project_assets_dir(project_path)
+        .join(id.to_hex())
+        .join(format!("{}.wav", revision.0.max(1)))
+}
+
 pub fn load_sidecar_audio(
     project_path: &Path,
     raw_path: &str,
@@ -1862,6 +2001,8 @@ files = []
                     end: Some(1000),
                 }],
                 sidecar_audio: Some("data/virtual_0001.wav".to_string()),
+                asset_id: None,
+                asset_revision: None,
             }],
         };
         let text = toml::to_string(&list).expect("serialize ProjectList");

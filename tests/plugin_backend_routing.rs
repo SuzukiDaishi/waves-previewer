@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use neowaves::plugin::{PluginHostBackend, WorkerRequest, WorkerResponse};
+use neowaves::plugin::{WorkerRequest, WorkerResponse};
 
 fn unique_temp_dir(tag: &str) -> PathBuf {
     let stamp = std::time::SystemTime::now()
@@ -24,7 +24,7 @@ fn write_test_wav(path: &Path) {
 }
 
 #[test]
-fn probe_backend_routes_by_extension() {
+fn probe_backend_rejects_invalid_native_plugins_by_extension() {
     let dir = unique_temp_dir("plugin_route_probe");
     let vst = dir.join("DemoRoute.vst3");
     let clap = dir.join("DemoRoute.clap");
@@ -34,34 +34,26 @@ fn probe_backend_routes_by_extension() {
     let vst_resp = neowaves::plugin::worker::handle_request(WorkerRequest::Probe {
         plugin_path: vst.to_string_lossy().to_string(),
     });
-    match vst_resp {
-        WorkerResponse::ProbeResult { backend, .. } => {
-            assert!(matches!(
-                backend,
-                PluginHostBackend::Generic | PluginHostBackend::NativeVst3
-            ));
-        }
-        other => panic!("unexpected response: {other:?}"),
-    }
+    assert!(matches!(
+        vst_resp,
+        WorkerResponse::Error { ref message }
+            if message.contains("native VST3 probe failed")
+    ));
 
     let clap_resp = neowaves::plugin::worker::handle_request(WorkerRequest::Probe {
         plugin_path: clap.to_string_lossy().to_string(),
     });
-    match clap_resp {
-        WorkerResponse::ProbeResult { backend, .. } => {
-            assert!(matches!(
-                backend,
-                PluginHostBackend::Generic | PluginHostBackend::NativeClap
-            ));
-        }
-        other => panic!("unexpected response: {other:?}"),
-    }
+    assert!(matches!(
+        clap_resp,
+        WorkerResponse::Error { ref message }
+            if message.contains("native CLAP probe failed")
+    ));
 
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn process_backend_fallback_stays_deterministic() {
+fn process_backend_does_not_report_generic_success_for_invalid_native_plugin() {
     let dir = unique_temp_dir("plugin_route_process");
     let input = dir.join("in.wav");
     let output = dir.join("out.wav");
@@ -80,20 +72,12 @@ fn process_backend_fallback_stays_deterministic() {
         state_blob_b64: None,
         params: Vec::new(),
     });
-    match resp {
-        WorkerResponse::ProcessResult {
-            output_audio_path,
-            backend,
-            ..
-        } => {
-            assert!(PathBuf::from(output_audio_path).is_file());
-            assert!(matches!(
-                backend,
-                PluginHostBackend::Generic | PluginHostBackend::NativeClap
-            ));
-        }
-        other => panic!("unexpected response: {other:?}"),
-    }
+    assert!(matches!(
+        resp,
+        WorkerResponse::Error { ref message }
+            if message.contains("native CLAP process failed")
+    ));
+    assert!(!output.is_file());
 
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -1103,6 +1103,79 @@ pub enum PluginSessionCommand {
     Preview(PluginSessionPreviewArgs),
     Apply(PluginSessionApplyArgs),
     Clear(PluginSessionClearArgs),
+    #[command(subcommand)]
+    Chain(PluginSessionChainCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginSessionChainCommand {
+    List(PluginSessionChainListArgs),
+    Add(PluginSessionChainAddArgs),
+    Remove(PluginSessionChainRemoveArgs),
+    Move(PluginSessionChainMoveArgs),
+    Set(PluginSessionChainSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainListArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainAddArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "plugin")]
+    pub plugin: String,
+    #[arg(long)]
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainRemoveArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "slot-id")]
+    pub slot_id: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainMoveArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "slot-id")]
+    pub slot_id: u64,
+    #[arg(long)]
+    pub index: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainSetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "slot-id")]
+    pub slot_id: u64,
+    #[arg(long = "plugin")]
+    pub plugin: Option<String>,
+    #[arg(long)]
+    pub enabled: Option<CliToggle>,
+    #[arg(long)]
+    pub bypass: Option<CliToggle>,
+    #[arg(long = "param")]
+    pub params: Vec<String>,
+    #[arg(long = "state-blob-b64")]
+    pub state_blob_b64: Option<String>,
 }
 
 #[derive(Debug, Args)]

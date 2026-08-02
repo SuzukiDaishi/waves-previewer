@@ -16,7 +16,9 @@ impl crate::app::WavesPreviewer {
         let mut add_path: Option<PathBuf> = None;
         let mut remove_index: Option<usize> = None;
         let mut reset_paths = false;
-        egui::Window::new("Plugin Manager")
+        let scroll_target = self.begin_floating_scroll_surface("plugin_manager_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Plugin Manager")
             .open(&mut open)
             .default_width(600.0)
             .default_height(520.0)
@@ -137,6 +139,10 @@ impl crate::app::WavesPreviewer {
                         }
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if pick_folder {
             if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                 add_path = Some(folder);

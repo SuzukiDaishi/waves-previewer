@@ -3,10 +3,31 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use super::types::{MediaId, MediaSource};
 use super::{ExternalDragTempFile, PendingExternalDrag, WavesPreviewer};
 
 const DRAG_TEMP_RETENTION: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct VirtualDragProvenance {
+    schema_version: u32,
+    asset_id: String,
+    revision: u64,
+    display_name: String,
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+}
+
+fn provenance_path(audio_path: &Path) -> PathBuf {
+    let file_name = audio_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("audio.wav");
+    audio_path.with_file_name(format!("{file_name}.neowaves-asset.json"))
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct PreparedExternalDrag {
@@ -118,13 +139,59 @@ impl WavesPreviewer {
                 .item_for_id(*id)
                 .cloned()
                 .ok_or_else(|| format!("item not found: {id}"))?;
-            let path = if self.external_drag_should_materialize(&item.path, item.source) {
+            let has_transform = self.has_edits_for_path(&item.path)
+                || self.pending_gain_db_for_path(&item.path).abs() > 0.0001
+                || self.sample_rate_override.contains_key(&item.path)
+                || self.bit_depth_override.contains_key(&item.path)
+                || self.format_override.contains_key(&item.path);
+            let path = if item.source == MediaSource::Virtual && !has_transform {
+                let path = self.allocate_readable_drag_wav(&item.display_name)?;
+                if let Err(asset_err) = item
+                    .audio_asset
+                    .access()
+                    .materialize_current_revision(&path)
+                {
+                    // v1 sessions and in-progress resident drafts may not yet
+                    // have a physical backing. Keep their asset identity while
+                    // materializing the compatibility resident buffer.
+                    let _ = std::fs::remove_file(&path);
+                    let audio = item
+                        .virtual_audio
+                        .as_ref()
+                        .ok_or_else(|| format!("{}: {asset_err:#}", item.display_name))?;
+                    let sample_rate = item
+                        .audio_asset
+                        .sample_rate
+                        .max(
+                            item.virtual_state
+                                .as_ref()
+                                .map(|s| s.sample_rate)
+                                .unwrap_or(0),
+                        )
+                        .max(1);
+                    crate::wave::export_selection_wav(
+                        &audio.channels,
+                        sample_rate,
+                        (0, audio.len()),
+                        &path,
+                    )
+                    .map_err(|err| format!("{}: {err:#}", item.display_name))?;
+                }
+                let manifest_path = self.write_virtual_drag_provenance(&item, &path)?;
+                temp_paths.push(path.clone());
+                temp_paths.push(manifest_path);
+                path
+            } else if self.external_drag_should_materialize(&item.path, item.source) {
                 let (audio, sample_rate) = self
                     .external_drag_audio_for_item(&item.path, item.source)
                     .map_err(|err| format!("{}: {err}", item.display_name))?;
                 let path =
                     self.export_audio_to_drag_wav(&item.display_name, &audio, sample_rate)?;
                 temp_paths.push(path.clone());
+                if item.source == MediaSource::Virtual {
+                    let manifest_path = self.write_virtual_drag_provenance(&item, &path)?;
+                    temp_paths.push(manifest_path);
+                }
                 path
             } else {
                 canonical_file_path(&item.path)
@@ -235,9 +302,7 @@ impl WavesPreviewer {
         if audio.is_empty() {
             return Err(format!("{display_name}: audio is empty"));
         }
-        let _ = display_name;
-        let path = super::temp_audio_ops::allocate_neowaves_temp_cache_path("drag", "wav")
-            .ok_or_else(|| "could not allocate unique drag temp path".to_string())?;
+        let path = self.allocate_readable_drag_wav(display_name)?;
         crate::wave::export_selection_wav(
             &audio.channels,
             sample_rate.max(1),
@@ -246,6 +311,98 @@ impl WavesPreviewer {
         )
         .map_err(|err| format!("export drag wav failed: {err}"))?;
         Ok(path)
+    }
+
+    fn allocate_readable_drag_wav(&self, display_name: &str) -> Result<PathBuf, String> {
+        let dir = super::temp_audio_ops::neowaves_temp_cache_dir("drag");
+        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        let stem = Path::new(display_name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("NeoWaves Audio");
+        let stem = crate::app::helpers::sanitize_filename_component(stem);
+        for suffix in 0..1000u32 {
+            let name = if suffix == 0 {
+                format!("{stem}.wav")
+            } else {
+                format!("{stem} ({suffix}).wav")
+            };
+            let path = dir.join(name);
+            if !path.exists() && !provenance_path(&path).exists() {
+                return Ok(path);
+            }
+        }
+        Err("could not allocate unique readable drag filename".to_string())
+    }
+
+    fn write_virtual_drag_provenance(
+        &self,
+        item: &super::types::MediaItem,
+        audio_path: &Path,
+    ) -> Result<PathBuf, String> {
+        let manifest = VirtualDragProvenance {
+            schema_version: 1,
+            asset_id: item.audio_asset.id.to_hex(),
+            revision: item.audio_asset.revision.0,
+            display_name: item.display_name.clone(),
+            sample_rate: item.audio_asset.sample_rate,
+            channels: item.audio_asset.channels,
+            bits_per_sample: item.audio_asset.bits_per_sample,
+        };
+        let manifest_path = provenance_path(audio_path);
+        let json = serde_json::to_vec_pretty(&manifest).map_err(|err| err.to_string())?;
+        std::fs::write(&manifest_path, json).map_err(|err| err.to_string())?;
+        Ok(manifest_path)
+    }
+
+    pub(super) fn try_restore_virtual_drag_path(&mut self, audio_path: &Path) -> bool {
+        let manifest_path = provenance_path(audio_path);
+        let Ok(bytes) = std::fs::read(&manifest_path) else {
+            return false;
+        };
+        let Ok(manifest) = serde_json::from_slice::<VirtualDragProvenance>(&bytes) else {
+            return false;
+        };
+        if manifest.schema_version != 1 || !audio_path.is_file() {
+            return false;
+        }
+        let Some(managed_path) =
+            super::temp_audio_ops::allocate_neowaves_temp_cache_path("virtual_import", "wav")
+        else {
+            return false;
+        };
+        if std::fs::hard_link(audio_path, &managed_path).is_err()
+            && std::fs::copy(audio_path, &managed_path).is_err()
+        {
+            return false;
+        }
+        let mut asset = crate::audio_asset::AudioAssetDescriptor::managed(managed_path.clone());
+        if let Some(id) = crate::audio_asset::AudioAssetId::from_hex(&manifest.asset_id) {
+            asset.id = id;
+        }
+        asset.revision = crate::audio_asset::AssetRevision(manifest.revision.max(1));
+        asset.sample_rate = manifest.sample_rate.max(asset.sample_rate);
+        asset.channels = manifest.channels.max(asset.channels);
+        asset.bits_per_sample = manifest.bits_per_sample.max(asset.bits_per_sample);
+        let name = self.unique_virtual_display_name(&manifest.display_name);
+        let virtual_state = Some(super::types::VirtualState {
+            source: super::types::VirtualSourceRef::Sidecar(
+                manifest_path.to_string_lossy().to_string(),
+            ),
+            op_chain: Vec::new(),
+            sample_rate: asset.sample_rate.max(1),
+            channels: asset.channels.max(1),
+            bits_per_sample: asset.bits_per_sample,
+        });
+        let item = self.make_virtual_item_with_asset(name, asset, None, None, virtual_state);
+        let added_path = item.path.clone();
+        self.add_virtual_item(item, None);
+        self.recording_temp_files.push(managed_path);
+        self.after_add_refresh();
+        if let Some(row) = self.row_for_path(&added_path) {
+            self.update_selection_on_click(row, egui::Modifiers::NONE);
+        }
+        true
     }
 
     fn cleanup_external_drag_temp_files(&mut self) {
@@ -376,6 +533,7 @@ mod tests {
         );
         let item = MediaItem {
             id,
+            audio_asset: crate::audio_asset::AudioAssetDescriptor::external(path.clone()),
             path: path.clone(),
             display_name,
             display_folder,
@@ -384,6 +542,7 @@ mod tests {
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
+            transcript_document: None,
             transcript_language: None,
             external: Default::default(),
             virtual_audio: None,
@@ -428,7 +587,7 @@ mod tests {
             .expect("prepare");
 
         assert_eq!(prepared.paths.len(), 1);
-        assert_eq!(prepared.temp_paths.len(), 1);
+        assert_eq!(prepared.temp_paths.len(), 2);
         assert!(prepared.paths[0].is_file());
         assert_eq!(
             prepared.paths[0].extension().and_then(|s| s.to_str()),
@@ -455,12 +614,12 @@ mod tests {
         assert_ne!(prepared.paths[0], std::fs::canonicalize(&wav).unwrap());
         assert!(prepared.paths[0].is_file());
         assert!(
-            !prepared.paths[0]
+            prepared.paths[0]
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .contains("source"),
-            "drag cache file name should not expose source file name"
+            "drag materialization should use a readable logical name"
         );
     }
 
@@ -521,7 +680,7 @@ mod tests {
             .expect("prepare");
 
         assert_eq!(prepared.paths.len(), 2);
-        assert_eq!(prepared.temp_paths.len(), 2);
+        assert_eq!(prepared.temp_paths.len(), 4);
         assert_ne!(prepared.paths[0], prepared.paths[1]);
         assert!(prepared.paths.iter().all(|path| path.is_file()));
     }

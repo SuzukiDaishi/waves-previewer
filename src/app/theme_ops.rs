@@ -47,7 +47,7 @@ impl WavesPreviewer {
             first_prompt: true,
             save_mode: SaveMode::NewFile,
             dest_folder: None,
-            name_template: "{name} (gain{gain:+.1}dB)".into(),
+            name_template: "{name}{gain_suffix}".into(),
             format_override: None,
             conflict: ConflictPolicy::Rename,
             backup_bak: true,
@@ -696,6 +696,9 @@ impl WavesPreviewer {
             }
         }
         Self::normalize_spectro_cfg(&mut self.spectro_cfg);
+        if self.export_cfg.name_template == "{name} (gain{gain:+.1}dB)" {
+            self.export_cfg.name_template = "{name}{gain_suffix}".to_string();
+        }
         if !plugin_paths.is_empty() {
             self.plugin_search_paths = plugin_paths;
             Self::normalize_plugin_search_paths(&mut self.plugin_search_paths);

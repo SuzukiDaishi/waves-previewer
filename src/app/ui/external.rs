@@ -30,7 +30,9 @@ impl crate::app::WavesPreviewer {
         let content_max_width = (window_max.x - 24.0).max(1.0);
         let content_max_height = (window_max.y - 44.0).max(120.0);
         let mut open = self.show_external_dialog;
-        egui::Window::new("External Data")
+        let scroll_target = self.begin_floating_scroll_surface("external_data_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("External Data")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -539,6 +541,10 @@ impl crate::app::WavesPreviewer {
                         ));
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         self.show_external_dialog = open;
     }
 }

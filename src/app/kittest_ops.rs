@@ -526,6 +526,24 @@ impl super::WavesPreviewer {
         self.list_scroll_row
     }
 
+    pub fn test_ui_scroll_focus_name(&self) -> &'static str {
+        match self.ui_scroll_focus.active() {
+            Some(super::input_focus::UiScrollTarget::List) => "list",
+            Some(super::input_focus::UiScrollTarget::Editor) => "editor",
+            Some(super::input_focus::UiScrollTarget::EffectGraph) => "effect_graph",
+            Some(super::input_focus::UiScrollTarget::Recording) => "recording",
+            Some(super::input_focus::UiScrollTarget::Floating(_)) => "floating",
+            None => "none",
+        }
+    }
+
+    pub fn test_ui_scroll_focus_is_floating(&self, id: &str) -> bool {
+        self.ui_scroll_focus.active()
+            == Some(super::input_focus::UiScrollTarget::Floating(egui::Id::new(
+                id,
+            )))
+    }
+
     pub fn test_sort_job_active(&self) -> bool {
         self.sort_job_active() || self.filter_job_active()
     }
@@ -3179,6 +3197,10 @@ impl super::WavesPreviewer {
 
     pub fn test_open_effect_graph_workspace(&mut self) {
         self.open_effect_graph_workspace();
+    }
+
+    pub fn test_effect_graph_canvas_zoom(&self) -> f32 {
+        self.effect_graph.canvas.zoom
     }
 
     pub fn test_effect_graph_predicted_output_summary(&mut self) -> Option<String> {

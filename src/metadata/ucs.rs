@@ -14,7 +14,7 @@ pub const SOURCE_WORKBOOK: &str = "UCS v8.2.1 Full List.xlsx";
 pub const SOURCE_WORKBOOK_SHA256: &str =
     "e67a664803fe83e0cdf20947fb960a255f9dc087cc0df00187231891c47d76d6";
 /// SHA-256 identity of the generated embedded TSV.
-pub const DATA_SHA256: &str = "c002a0eb3f13c0d4e8181801819cf0ce21ad1e34f28e038ebb7980cf43a33f80";
+pub const DATA_SHA256: &str = "a75dd623f118954f5969369e4ccfd2c4f1f2b77dc83771fcd313f6da606e7773";
 /// Kept as the cache-key name used by the first Metadata Inspector schema.
 pub const ALIAS_TABLE_SHA256: &str = DATA_SHA256;
 

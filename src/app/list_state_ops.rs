@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::types::{
     ColumnId, FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SortDir, SortKey,
-    Transcript,
+    Transcript, TranscriptDocument,
 };
 use super::WavesPreviewer;
 
@@ -358,8 +358,19 @@ impl WavesPreviewer {
         transcript: Option<Transcript>,
     ) -> bool {
         let has_transcript = transcript.is_some();
+        let document = self.item_for_path(path).and_then(|item| {
+            transcript.as_ref().map(|value| {
+                std::sync::Arc::new(crate::app::types::TranscriptDocument::from_transcript(
+                    value,
+                    item.transcript_language.clone(),
+                    item.audio_asset.id,
+                    item.audio_asset.revision,
+                ))
+            })
+        });
         if let Some(item) = self.item_for_path_mut(path) {
             item.transcript = transcript.map(std::sync::Arc::new);
+            item.transcript_document = document;
             if item.transcript.is_none() {
                 item.transcript_language = None;
             }
@@ -388,7 +399,10 @@ impl WavesPreviewer {
             .filter(|v| !v.is_empty());
         let has_language = normalized.is_some();
         if let Some(item) = self.item_for_path_mut(path) {
-            item.transcript_language = normalized;
+            item.transcript_language = normalized.clone();
+            if let Some(document) = item.transcript_document.as_mut() {
+                std::sync::Arc::make_mut(document).language = normalized;
+            }
         } else {
             return false;
         }
@@ -398,9 +412,33 @@ impl WavesPreviewer {
         true
     }
 
+    pub(super) fn advance_asset_revision_for_path(&mut self, path: &Path) {
+        if let Some(item) = self.item_for_path_mut(path) {
+            item.audio_asset.revision = item.audio_asset.revision.next();
+            if let Some(document) = item.transcript_document.as_mut() {
+                std::sync::Arc::make_mut(document).asset_revision = item.audio_asset.revision;
+            }
+        }
+    }
+
+    pub(super) fn mutate_transcript_document_for_path<F>(&mut self, path: &Path, mutate: F)
+    where
+        F: FnOnce(&mut TranscriptDocument),
+    {
+        if let Some(item) = self.item_for_path_mut(path) {
+            if let Some(document) = item.transcript_document.as_mut() {
+                let document = std::sync::Arc::make_mut(document);
+                mutate(document);
+                item.transcript = Some(std::sync::Arc::new(document.transcript()));
+                item.transcript_language = document.language.clone();
+            }
+        }
+    }
+
     pub(super) fn clear_transcript_for_path(&mut self, path: &Path) {
         if let Some(item) = self.item_for_path_mut(path) {
             item.transcript = None;
+            item.transcript_document = None;
             item.transcript_language = None;
         }
     }

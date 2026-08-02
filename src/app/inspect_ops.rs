@@ -53,7 +53,9 @@ impl WavesPreviewer {
         let mut open = true;
         let mut run_clicked = false;
         let target_count = self.inspection_target_paths().len();
-        egui::Window::new("Inspect Files (QA)")
+        let scroll_target = self.begin_floating_scroll_surface("inspection_dialog_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Inspect Files (QA)")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -166,6 +168,10 @@ impl WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if run_clicked {
             self.show_inspection_dialog = false;
             self.save_prefs();

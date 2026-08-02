@@ -20,7 +20,9 @@ impl crate::app::WavesPreviewer {
         }
         let mut open = true;
         let mut do_apply: Option<Option<f32>> = None;
-        egui::Window::new("Harmonics")
+        let scroll_target = self.begin_floating_scroll_surface("harmonics_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Harmonics")
             .open(&mut open)
             .default_width(280.0)
             .collapsible(false)
@@ -63,6 +65,10 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if self.harmonic_action.is_some() {
             self.harmonic_action = Some(action);
         }

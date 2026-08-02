@@ -271,13 +271,34 @@ impl crate::app::WavesPreviewer {
             );
             paths.truncate(Self::MIX_AUDITION_MAX_FILES);
         }
-        let count = paths.len();
+        let sources: Vec<_> = paths
+            .into_iter()
+            .map(|logical_path| {
+                let asset = self
+                    .item_for_path(&logical_path)
+                    .map(|item| item.audio_asset.clone())
+                    .unwrap_or_else(|| {
+                        crate::audio_asset::AudioAssetDescriptor::external(logical_path.clone())
+                    });
+                (logical_path, asset)
+            })
+            .collect();
+        let count = sources.len();
         let out_sr = self.audio.shared.out_sample_rate.max(1);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut decoded: Vec<Vec<Vec<f32>>> = Vec::with_capacity(paths.len());
-            for path in &paths {
-                match crate::audio_io::decode_audio_multi(path) {
+            let mut decoded: Vec<Vec<Vec<f32>>> = Vec::with_capacity(sources.len());
+            for (logical_path, asset) in &sources {
+                let decoded_asset = match &asset.backing {
+                    crate::audio_asset::AudioBacking::ResidentBuffer(audio) => {
+                        Ok((audio.channels.clone(), asset.sample_rate.max(1)))
+                    }
+                    backing => backing
+                        .file_path()
+                        .ok_or_else(|| anyhow::anyhow!("asset has no readable backing"))
+                        .and_then(crate::audio_io::decode_audio_multi),
+                };
+                match decoded_asset {
                     Ok((chans, sr)) => {
                         let chans = if sr != out_sr {
                             crate::wave::resample_channels_quality(
@@ -292,7 +313,7 @@ impl crate::app::WavesPreviewer {
                         decoded.push(chans);
                     }
                     Err(err) => {
-                        let _ = tx.send(Err(format!("{}: {err}", path.display())));
+                        let _ = tx.send(Err(format!("{}: {err}", logical_path.display())));
                         return;
                     }
                 }

@@ -897,6 +897,10 @@ impl crate::app::WavesPreviewer {
             rx,
             tab_id: apply_tab_id,
             undo,
+            tool: crate::app::types::ToolKind::SpectralWarp,
+            source_range: None,
+            source_len: 0,
+            source_sample_rate: 1,
         });
     }
 
@@ -1027,6 +1031,10 @@ impl crate::app::WavesPreviewer {
             rx,
             tab_id: apply_tab_id,
             undo,
+            tool: crate::app::types::ToolKind::SpectralBrush,
+            source_range: None,
+            source_len: 0,
+            source_sample_rate: 1,
         });
     }
 
@@ -1238,6 +1246,10 @@ impl crate::app::WavesPreviewer {
             rx,
             tab_id: apply_tab_id,
             undo,
+            tool: crate::app::types::ToolKind::DeNoise,
+            source_range: None,
+            source_len: 0,
+            source_sample_rate: 1,
         });
     }
 
@@ -1328,6 +1340,10 @@ impl crate::app::WavesPreviewer {
             rx,
             tab_id: apply_tab_id,
             undo,
+            tool: crate::app::types::ToolKind::SpectralBrush,
+            source_range: None,
+            source_len: 0,
+            source_sample_rate: 1,
         });
     }
 

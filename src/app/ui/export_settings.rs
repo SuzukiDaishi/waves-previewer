@@ -8,13 +8,16 @@ impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_export_settings_window(&mut self, ctx: &egui::Context) {
         if self.show_export_settings {
             let mut open = self.show_export_settings;
-            egui::Window::new("Settings")
+            let scroll_target = self.begin_floating_scroll_surface("settings_window");
+            let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+            let shown = egui::Window::new("Settings")
                 .open(&mut open)
                 .resizable(true)
                 .default_size(egui::vec2(760.0, 640.0))
                 .show(ctx, |ui| {
                     let max_h = (ctx.content_rect().height() * 0.78).max(360.0);
-                    egui::ScrollArea::vertical()
+                    let _scroll_output = egui::ScrollArea::vertical()
+                        .id_salt("settings_window_scroll")
                         .auto_shrink([false, false])
                         .max_height(max_h)
                         .show(ui, |ui| {
@@ -709,7 +712,25 @@ impl crate::app::WavesPreviewer {
                                 self.apply_spectro_config(next_cfg);
                             }
                         });
+                    #[cfg(feature = "kittest")]
+                    ctx.data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::new("test_settings_scroll_offset"),
+                            _scroll_output.state.offset.y,
+                        );
+                    });
                 });
+            drop(scroll_guard);
+            if let Some(shown) = shown.as_ref() {
+                self.register_scroll_surface(scroll_target, &shown.response);
+                #[cfg(feature = "kittest")]
+                ctx.data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::new("test_settings_window_rect"),
+                        shown.response.rect,
+                    );
+                });
+            }
             self.show_export_settings = open;
         }
     }

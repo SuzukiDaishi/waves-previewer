@@ -6,7 +6,9 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let mut open = self.debug.show_window;
-        egui::Window::new("Debug")
+        let scroll_target = self.begin_floating_scroll_surface("debug_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Debug")
             .open(&mut open)
             .resizable(true)
             .default_width(380.0)
@@ -337,6 +339,10 @@ impl crate::app::WavesPreviewer {
                     ui.label(format!("auto-run steps: {}", auto.steps.len()));
                 }
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         self.debug.show_window = open;
     }
 }

@@ -7,7 +7,9 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let mut open = true;
-        egui::Window::new("Keyboard Shortcuts")
+        let scroll_target = self.begin_floating_scroll_surface("keyboard_shortcuts_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Keyboard Shortcuts")
             .open(&mut open)
             .default_width(460.0)
             .default_height(480.0)
@@ -44,6 +46,10 @@ impl crate::app::WavesPreviewer {
                 ui.separator();
                 ui.label("Tool-specific canvas gestures are described in docs/CONTROLS.md.");
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         self.show_shortcuts_window = open;
     }
 }
