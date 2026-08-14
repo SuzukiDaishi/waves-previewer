@@ -5,6 +5,21 @@ use egui::{Align, Color32, RichText};
 use crate::app::types::{EffectGraphRunMode, ToolKind};
 use crate::app::WavesPreviewer;
 
+// Fixed widths of the top-bar meter group's parts. They live here rather than
+// inline so `topbar_meter_group_width` and the widgets themselves can never
+// disagree about how much room the group needs.
+const TOPBAR_VOLUME_W: f32 = 210.0;
+const TOPBAR_VOLUME_W_COMPACT: f32 = 128.0;
+const TOPBAR_METER_BAR_W: f32 = 150.0;
+const TOPBAR_METER_BAR_W_COMPACT: f32 = 90.0;
+/// Fits the widest readout, "-79.9 dBFS" / "-inf dBFS".
+const TOPBAR_METER_DB_LABEL_W: f32 = 88.0;
+/// Fits "-79 dB" / "-inf".
+const TOPBAR_METER_DB_LABEL_W_COMPACT: f32 = 48.0;
+const TOPBAR_LOUDNESS_READOUT_W: f32 = 152.0;
+/// egui's `separator()` in a horizontal layout.
+const TOPBAR_SEPARATOR_W: f32 = 6.0;
+
 struct EffectGraphApplyStatus {
     elapsed: Duration,
     visible: bool,
@@ -48,7 +63,11 @@ impl WavesPreviewer {
         let available_w = ui.available_width();
         let compact = available_w < 760.0;
         ui.horizontal(|ui| {
-            let right_w = if compact { 280.0_f32 } else { 450.0_f32 }.min(ui.available_width());
+            // Must match what the group actually lays out. A reservation
+            // smaller than the content pushes the tail of the group past the
+            // panel's right margin, where the window clips it.
+            let right_w = Self::topbar_meter_group_width(ui.spacing().item_spacing.x, compact)
+                .min(ui.available_width());
             let status_w = if compact {
                 (ui.available_width() - right_w).max(180.0)
             } else {
@@ -555,8 +574,37 @@ impl WavesPreviewer {
         }
     }
 
+    /// Width the meter group needs, derived from the same fixed sizes its
+    /// children allocate rather than a separate constant — the two drifting
+    /// apart is what clipped the dBFS readout off the right edge.
+    fn topbar_meter_group_width(spacing_x: f32, compact: bool) -> f32 {
+        let volume_w = if compact {
+            TOPBAR_VOLUME_W_COMPACT
+        } else {
+            TOPBAR_VOLUME_W
+        };
+        let bar_w = if compact {
+            TOPBAR_METER_BAR_W_COMPACT
+        } else {
+            TOPBAR_METER_BAR_W
+        };
+        let db_label_w = if compact {
+            TOPBAR_METER_DB_LABEL_W_COMPACT
+        } else {
+            TOPBAR_METER_DB_LABEL_W
+        };
+        // volume | sep | bar | dB label  (+ loudness readout when roomy)
+        let mut w =
+            volume_w + spacing_x + TOPBAR_SEPARATOR_W + spacing_x + bar_w + spacing_x + db_label_w;
+        if !compact {
+            w += spacing_x + TOPBAR_LOUDNESS_READOUT_W;
+        }
+        w
+    }
+
     fn ui_topbar_meter_group(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, compact: bool) {
-        let group_w = if compact { 270.0 } else { 440.0 };
+        let group_w = Self::topbar_meter_group_width(ui.spacing().item_spacing.x, compact)
+            .min(ui.available_width());
         ui.allocate_ui_with_layout(
             egui::vec2(group_w, 26.0),
             egui::Layout::left_to_right(Align::Center),
@@ -594,11 +642,16 @@ impl WavesPreviewer {
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
         let text = Self::format_loudness_readout(m, s, tp);
-        ui.label(egui::RichText::new(text).monospace().size(10.5).weak())
-            .on_hover_text(
-                "Realtime loudness of what's playing: M = momentary LUFS (400 ms), \
+        ui.add_sized(
+            [TOPBAR_LOUDNESS_READOUT_W, 16.0],
+            egui::Label::new(egui::RichText::new(text).monospace().size(10.5).weak())
+                .truncate()
+                .halign(Align::LEFT),
+        )
+        .on_hover_text(
+            "Realtime loudness of what's playing: M = momentary LUFS (400 ms), \
                  S = short-term LUFS (3 s), TP = true peak (dBTP, 4x oversampled)",
-            );
+        );
         if m.is_some() || s.is_some() || tp.is_some() {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(120));
@@ -823,7 +876,24 @@ impl WavesPreviewer {
         } else {
             format!("{db:.1} dBFS")
         };
-        ui.label(RichText::new(db_label).monospace());
+        // Painted into an exact allocation instead of a plain label: the group
+        // is right-aligned against the panel edge, so a label that measures
+        // wider than its budget would be clipped by the window.
+        let label_w = if compact {
+            TOPBAR_METER_DB_LABEL_W_COMPACT
+        } else {
+            TOPBAR_METER_DB_LABEL_W
+        };
+        let (label_rect, _) =
+            ui.allocate_exact_size(egui::vec2(label_w, bar_h), egui::Sense::empty());
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        ui.painter_at(label_rect).text(
+            egui::pos2(label_rect.left(), label_rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            db_label,
+            font,
+            ui.visuals().text_color(),
+        );
     }
 }
 

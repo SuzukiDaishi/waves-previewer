@@ -498,9 +498,12 @@ impl super::super::WavesPreviewer {
 
         // Time grid (labelled vertical gridlines covering the visible window)
         let block_secs = self.recording_tab.overview_block_secs.max(0.0001);
-        let span_secs = n as f32 * block_secs;
         let now_secs = self.recording_tab.elapsed_secs;
-        let start_secs = (now_secs - span_secs).max(0.0);
+        let start_secs = self.recording_tab.waveform_start_frame as f32
+            / self.recording_tab.recording_sample_rate.max(1) as f32;
+        let span_secs = (now_secs - start_secs)
+            .max(n as f32 * block_secs)
+            .min(40.0 + block_secs);
         let step = recording_grid_time_step(span_secs);
         if step > 0.0 && span_secs > 0.0 {
             let first_tick = (start_secs / step).ceil() * step;

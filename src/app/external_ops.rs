@@ -59,6 +59,9 @@ impl WavesPreviewer {
             }
             let mut item = MediaItem {
                 id: self.next_media_id,
+                audio_asset: crate::audio_asset::AudioAssetDescriptor::external(
+                    self.external_unmatched_path_for_row(row_idx),
+                ),
                 path: self.external_unmatched_path_for_row(row_idx),
                 display_name: key.clone(),
                 display_folder: std::sync::Arc::from("(external)"),
@@ -67,6 +70,7 @@ impl WavesPreviewer {
                 pending_gain_db: 0.0,
                 status: crate::app::types::MediaStatus::Ok,
                 transcript: None,
+                transcript_document: None,
                 transcript_language: None,
                 ai_metadata: None,
                 external: None,

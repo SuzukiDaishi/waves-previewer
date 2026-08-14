@@ -167,15 +167,21 @@ impl WavesPreviewer {
         } else {
             "Play (Space)"
         };
-        let play_enabled =
-            !self.is_editor_workspace_active() || self.active_editor_exact_audio_ready() || playing;
-        if ui
-            .add_enabled(
-                play_enabled,
-                egui::Button::new(play_text).min_size(egui::vec2(110.0, 22.0)),
-            )
-            .clicked()
-        {
+        let audio_ready = self.audio_bootstrap_rx.is_none();
+        let play_enabled = audio_ready
+            && (!self.is_editor_workspace_active()
+                || self.active_editor_exact_audio_ready()
+                || playing);
+        let play_response = ui.add_enabled(
+            play_enabled,
+            egui::Button::new(play_text).min_size(egui::vec2(110.0, 22.0)),
+        );
+        let play_response = if audio_ready {
+            play_response
+        } else {
+            play_response.on_hover_text("Starting audio output...")
+        };
+        if play_response.clicked() {
             self.request_workspace_play_toggle();
         }
         if ui

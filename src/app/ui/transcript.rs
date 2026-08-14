@@ -6,7 +6,9 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let mut open = self.show_transcript_window;
-        egui::Window::new("Transcript")
+        let scroll_target = self.begin_floating_scroll_surface("transcript_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Transcript")
             .resizable(true)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
             .open(&mut open)
@@ -60,6 +62,10 @@ impl crate::app::WavesPreviewer {
                     self.request_transcript_seek(&path, ms);
                 }
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         self.show_transcript_window = open;
     }
 }

@@ -8,13 +8,16 @@ impl crate::app::WavesPreviewer {
     pub(in crate::app) fn ui_export_settings_window(&mut self, ctx: &egui::Context) {
         if self.show_export_settings {
             let mut open = self.show_export_settings;
-            egui::Window::new("Settings")
+            let scroll_target = self.begin_floating_scroll_surface("settings_window");
+            let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+            let shown = egui::Window::new("Settings")
                 .open(&mut open)
                 .resizable(true)
                 .default_size(egui::vec2(760.0, 640.0))
                 .show(ctx, |ui| {
                     let max_h = (ctx.content_rect().height() * 0.78).max(360.0);
-                    egui::ScrollArea::vertical()
+                    let _scroll_output = egui::ScrollArea::vertical()
+                        .id_salt("settings_window_scroll")
                         .auto_shrink([false, false])
                         .max_height(max_h)
                         .show(ui, |ui| {
@@ -369,120 +372,46 @@ impl crate::app::WavesPreviewer {
                                 }
                             }
                             ui.separator();
-                            ui.label("List Columns:");
-                            let mut next_cols = self.list_columns;
-                            ui.horizontal_wrapped(|ui| {
-                                ui.checkbox(&mut next_cols.edited, "Edited");
-                                ui.checkbox(&mut next_cols.cover_art, "Art");
-                                ui.checkbox(&mut next_cols.type_badge, "Type");
-                                ui.checkbox(&mut next_cols.file, "File");
-                                ui.checkbox(&mut next_cols.folder, "Folder");
-                                ui.checkbox(&mut next_cols.transcript, "Transcript");
-                                ui.checkbox(&mut next_cols.transcript_language, "Lang");
-                                if self.external_visible_columns.is_empty() {
-                                    ui.add_enabled(
-                                        false,
-                                        egui::Checkbox::new(&mut next_cols.external, "External"),
-                                    );
-                                } else {
-                                    ui.checkbox(&mut next_cols.external, "External");
-                                }
-                                ui.checkbox(&mut next_cols.length, "Length");
-                                ui.checkbox(&mut next_cols.channels, "Ch");
-                                ui.checkbox(&mut next_cols.sample_rate, "SR");
-                                ui.checkbox(&mut next_cols.bits, "Bits");
-                                ui.checkbox(&mut next_cols.bit_rate, "Bitrate");
-                                ui.checkbox(&mut next_cols.peak, "Peak");
-                                ui.checkbox(&mut next_cols.lufs, "LUFS");
-                                ui.checkbox(&mut next_cols.dbtp, "dBTP");
-                                ui.checkbox(&mut next_cols.lufs_s, "LUFS-S");
-                                ui.checkbox(&mut next_cols.lufs_m, "LUFS-M");
-                                ui.checkbox(&mut next_cols.bpm, "BPM");
-                                ui.checkbox(&mut next_cols.created_at, "Created");
-                                ui.checkbox(&mut next_cols.modified_at, "Modified");
-                                ui.checkbox(&mut next_cols.gain, "Gain");
-                                ui.checkbox(&mut next_cols.silence_lead, "Sil.Head")
-                                    .on_hover_text(
-                                        "Leading silence (ms, -60 dBFS threshold); computed on full decode",
-                                    );
-                                ui.checkbox(&mut next_cols.silence_tail, "Sil.Tail")
-                                    .on_hover_text(
-                                        "Trailing silence (ms, -60 dBFS threshold); computed on full decode",
-                                    );
-                                ui.checkbox(&mut next_cols.wave, "Wave");
-                            });
-                            let external_available = !self.external_visible_columns.is_empty();
-                            let any_visible = next_cols.edited
-                                || next_cols.cover_art
-                                || next_cols.type_badge
-                                || next_cols.file
-                                || next_cols.folder
-                                || next_cols.transcript
-                                || next_cols.transcript_language
-                                || (next_cols.external && external_available)
-                                || next_cols.length
-                                || next_cols.channels
-                                || next_cols.sample_rate
-                                || next_cols.bits
-                                || next_cols.bit_rate
-                                || next_cols.peak
-                                || next_cols.lufs
-                                || next_cols.dbtp
-                                || next_cols.lufs_s
-                                || next_cols.lufs_m
-                                || next_cols.bpm
-                                || next_cols.created_at
-                                || next_cols.modified_at
-                                || next_cols.gain
-                                || next_cols.wave
-                                || next_cols.silence_lead
-                                || next_cols.silence_tail;
-                            if !any_visible {
-                                next_cols.file = true;
-                            }
-                            if next_cols != self.list_columns {
-                                self.list_columns = next_cols;
-                                self.ensure_sort_key_visible();
-                                self.request_sort();
-                            }
-                            ui.collapsing("Column Order", |ui| {
-                                ui.label(
-                                    RichText::new(
-                                        "Move columns up (left) / down (right). Hidden columns keep \
-                                         their slot for when they're re-enabled.",
-                                    )
-                                    .weak(),
+                            ui.label("Blank Pad column:");
+                            ui.horizontal(|ui| {
+                                ui.label("Threshold:");
+                                let mut th = self.blank_threshold_dbfs;
+                                let resp = ui.add(
+                                    egui::DragValue::new(&mut th)
+                                        .range(-120.0..=0.0)
+                                        .speed(0.5)
+                                        .fixed_decimals(1)
+                                        .suffix(" dBFS"),
                                 );
-                                let order = self.list_column_order.clone();
-                                let mut moved: Option<(usize, isize)> = None;
-                                for (i, col) in order.iter().enumerate() {
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .add_enabled(i > 0, egui::Button::new("^").small())
-                                            .clicked()
-                                        {
-                                            moved = Some((i, -1));
-                                        }
-                                        if ui
-                                            .add_enabled(
-                                                i + 1 < order.len(),
-                                                egui::Button::new("v").small(),
-                                            )
-                                            .clicked()
-                                        {
-                                            moved = Some((i, 1));
-                                        }
-                                        ui.label(col.label());
-                                    });
+                                // Commit on release: every intermediate drag
+                                // value would mark all visible rows stale and
+                                // churn full-decode jobs.
+                                let committed = resp.drag_stopped()
+                                    || resp.lost_focus()
+                                    || (resp.changed() && !resp.dragged());
+                                if resp.changed() {
+                                    self.blank_threshold_dbfs = th.clamp(-120.0, 0.0);
                                 }
-                                if let Some((i, d)) = moved {
-                                    let j = (i as isize + d) as usize;
-                                    self.list_column_order.swap(i, j);
+                                if committed {
+                                    self.push_blank_threshold_to_meta_pool();
                                     self.save_prefs();
                                 }
-                                if ui.button("Reset Order").clicked() {
-                                    self.list_column_order =
-                                        crate::app::types::ColumnId::ALL.to_vec();
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Min length:");
+                                let mut min_ms = self.blank_min_ms;
+                                // Display-side only, so this needs no re-decode.
+                                if ui
+                                    .add(
+                                        egui::DragValue::new(&mut min_ms)
+                                            .range(0.0..=60_000.0)
+                                            .speed(1.0)
+                                            .fixed_decimals(0)
+                                            .suffix(" ms"),
+                                    )
+                                    .changed()
+                                {
+                                    self.blank_min_ms = min_ms.clamp(0.0, 60_000.0);
                                     self.save_prefs();
                                 }
                             });
@@ -783,7 +712,25 @@ impl crate::app::WavesPreviewer {
                                 self.apply_spectro_config(next_cfg);
                             }
                         });
+                    #[cfg(feature = "kittest")]
+                    ctx.data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::new("test_settings_scroll_offset"),
+                            _scroll_output.state.offset.y,
+                        );
+                    });
                 });
+            drop(scroll_guard);
+            if let Some(shown) = shown.as_ref() {
+                self.register_scroll_surface(scroll_target, &shown.response);
+                #[cfg(feature = "kittest")]
+                ctx.data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::new("test_settings_window_rect"),
+                        shown.response.rect,
+                    );
+                });
+            }
             self.show_export_settings = open;
         }
     }

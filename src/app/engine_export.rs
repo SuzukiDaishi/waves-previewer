@@ -163,7 +163,9 @@ impl crate::app::WavesPreviewer {
         let mut open = true;
         let mut do_export = false;
         let target_count = self.inspection_target_paths().len();
-        egui::Window::new("Export Engine Metadata")
+        let scroll_target = self.begin_floating_scroll_surface("engine_export_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Export Engine Metadata")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -189,6 +191,10 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if do_export {
             let profile = self.engine_export_profile;
             let Some(out_path) = rfd::FileDialog::new()

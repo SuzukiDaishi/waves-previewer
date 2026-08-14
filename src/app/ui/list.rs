@@ -270,13 +270,18 @@ impl crate::app::WavesPreviewer {
 
     pub(in crate::app) fn ui_list_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         use crate::app::helpers::{
-            amp_to_color, db_to_amp, db_to_color, format_duration, format_system_time_local,
+            amp_to_color, db_to_amp, db_to_color, format_duration_scaled, format_system_time_local,
             highlight_text_job_with_regex,
         };
+        use crate::app::list_state_ops::QaStatus;
         if self.ui_list_empty_state(ui) {
             return;
         }
         let cols = self.list_columns;
+        // Hoisted out of the row loop: read once per frame, and needed inside
+        // the closure that borrows self mutably.
+        let uses_hours = self.list_length_uses_hours();
+        let blank_threshold_dbfs = self.blank_threshold_dbfs;
         // Compile the search highlight regex once per frame instead of per row.
         let highlight_re = self.cached_highlight_regex();
         let metrics = self.list_view_metrics(ui);
@@ -300,6 +305,10 @@ impl crate::app::WavesPreviewer {
         // One copy per frame; the per-row closure below borrows self mutably,
         // and the order cannot change mid-frame.
         let column_order = self.list_column_order.clone();
+        let metadata_columns = self
+            .visible_metadata_columns()
+            .map(|(index, column)| (index, column.clone()))
+            .collect::<Vec<_>>();
 
         table
             .header(metrics.header_h, |mut header| {
@@ -345,6 +354,16 @@ impl crate::app::WavesPreviewer {
                                 if !self.transcript_ai_inflight.contains(&path_owned) {
                                     self.queue_transcript_for_path(&path_owned, true);
                                 }
+                            }
+                            if !metadata_columns.is_empty() {
+                                self.queue_metadata_summary_for_path(
+                                    &path_owned,
+                                    if near_selected {
+                                        crate::metadata::cache::SummaryPriority::Selected
+                                    } else {
+                                        crate::metadata::cache::SummaryPriority::Visible
+                                    },
+                                );
                             }
                         }
                         // Borrow the item once and extract only what the row
@@ -406,7 +425,22 @@ impl crate::app::WavesPreviewer {
                                         .meta
                                         .as_ref()
                                         .and_then(|m| m.silence_lead_ms)
-                                        .is_none()));
+                                        .is_none())
+                                || (cols.edge_zero
+                                    && item.meta.as_ref().and_then(|m| m.edge_abs).is_none())
+                                // The header pass only estimates the peak off a
+                                // 0.25 s prefix, which is not enough to call a
+                                // file over 0 dBFS either way.
+                                || (cols.over_peak
+                                    && item.meta.as_ref().map_or(true, |m| m.peak_db_estimate))
+                                // A measurement taken at a threshold the user
+                                // has since changed is stale, not missing.
+                                || (cols.blank_pad
+                                    && item.meta.as_ref().map_or(true, |m| {
+                                        m.blank_pad.map_or(true, |b| {
+                                            b.threshold_dbfs != blank_threshold_dbfs
+                                        })
+                                    })));
                             (
                                 needs_bg_full,
                                 needs_wave_meta,
@@ -460,6 +494,8 @@ impl crate::app::WavesPreviewer {
                             }
                         });
                         let mut clicked_to_load = false;
+                        let mut interacted_with_control = false;
+                        let mut control_focus_id = None;
                         let mut clicked_to_select = false;
                         let is_dirty = self.has_edits_for_path(&path_owned);
                         for sorted_col in column_order.iter().copied() {
@@ -851,7 +887,7 @@ impl crate::app::WavesPreviewer {
                                         .and_then(|m| m.duration_secs)
                                         .unwrap_or(f32::NAN);
                                     let text = if secs.is_finite() {
-                                        format_duration(secs)
+                                        format_duration_scaled(secs, uses_hours)
                                     } else {
                                         "...".into()
                                     };
@@ -1189,6 +1225,55 @@ impl crate::app::WavesPreviewer {
                                     }
                                 });
                             }
+                            // QA columns share one renderer: a passing file gets
+                            // an empty cell so only the problems draw the eye.
+                            C::EdgeZero | C::OverPeak | C::BlankPad => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    // Copy the verdict out before touching
+                                    // &mut self below.
+                                    let status =
+                                        self.qa_status_for_column(sorted_col, &path_owned);
+                                    let ng_fill = self.palette().error_text;
+                                    let weak = ui.visuals().weak_text_color();
+                                    let (rect2, resp2) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_h * 0.9),
+                                        Sense::click(),
+                                    );
+                                    let fid = egui::TextStyle::Monospace.resolve(ui.style());
+                                    let resp2 = match status {
+                                        QaStatus::Pass => resp2,
+                                        QaStatus::Unknown => {
+                                            ui.painter().text(
+                                                rect2.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "...",
+                                                fid,
+                                                weak,
+                                            );
+                                            resp2
+                                        }
+                                        QaStatus::Fail(reason) => {
+                                            ui.painter().rect_filled(rect2, 4.0, ng_fill);
+                                            ui.painter().text(
+                                                rect2.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "NG",
+                                                fid,
+                                                egui::Color32::WHITE,
+                                            );
+                                            resp2.on_hover_text(reason)
+                                        }
+                                    };
+                                    let resp2 = self.attach_row_context_menu(resp2, row_idx, ctx);
+                                    if resp2.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
                             C::Bpm => {
                                 row.col(|ui| {
                                     if let Some(bg) = row_bg {
@@ -1273,14 +1358,31 @@ impl crate::app::WavesPreviewer {
                                     ui.visuals_mut().override_text_color = row_fg;
                                     let old = self.pending_gain_db_for_path(&path_owned);
                                     let mut g = old;
-                                    let resp = ui.add(
-                                        egui::DragValue::new(&mut g)
-                                            .range(-24.0..=24.0)
-                                            .speed(0.1)
-                                            .fixed_decimals(1)
-                                            .suffix(" dB"),
-                                    );
+                                    // Table internals may change their auto-ID
+                                    // sequence while async columns populate.
+                                    // Keep the editor ID bound to the file so
+                                    // click-to-text focus survives the next
+                                    // frame.
+                                    let resp = ui
+                                        .push_id(("list_gain", &path_owned), |ui| {
+                                            ui.add(
+                                                egui::DragValue::new(&mut g)
+                                                    .range(-24.0..=24.0)
+                                                    .speed(0.1)
+                                                    .fixed_decimals(1)
+                                                    .suffix(" dB"),
+                                            )
+                                        })
+                                        .inner;
                                     let resp = self.attach_row_context_menu(resp, row_idx, ctx);
+                                    if resp.clicked_by(egui::PointerButton::Primary)
+                                        || resp.has_focus()
+                                    {
+                                        interacted_with_control = true;
+                                    }
+                                    if resp.clicked_by(egui::PointerButton::Primary) {
+                                        control_focus_id = Some(resp.id);
+                                    }
                                     if resp.changed() {
                                         let new = crate::app::WavesPreviewer::clamp_gain_db(g);
                                         let delta = new - old;
@@ -1399,6 +1501,61 @@ impl crate::app::WavesPreviewer {
                         }
                         }
 
+                        for (_, column) in &metadata_columns {
+                            let cell =
+                                self.metadata_cell_for_path(&path_owned, &column.key);
+                            let error = self
+                                .metadata_summary_errors
+                                .get(&path_owned)
+                                .cloned();
+                            row.col(|ui| {
+                                if let Some(bg) = row_bg {
+                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                }
+                                ui.visuals_mut().override_text_color = row_fg;
+                                let text = cell
+                                    .as_ref()
+                                    .map(|cell| cell.text.as_str())
+                                    .unwrap_or_else(|| {
+                                        if error.is_some() {
+                                            "!"
+                                        } else {
+                                            "..."
+                                        }
+                                    });
+                                let mut rich = RichText::new(text).monospace();
+                                if cell.as_ref().is_some_and(|cell| cell.conflict) {
+                                    rich = rich.color(self.palette().warning_text);
+                                } else if cell.as_ref().is_some_and(|cell| cell.partial) {
+                                    rich = rich.weak();
+                                }
+                                let response = ui
+                                    .add(
+                                        egui::Label::new(rich)
+                                            .sense(Sense::click())
+                                            .truncate()
+                                            .show_tooltip_when_elided(false),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                let response = if let Some(cell) = &cell {
+                                    if cell.tooltip.is_empty() {
+                                        response
+                                    } else {
+                                        response.on_hover_text(&cell.tooltip)
+                                    }
+                                } else if let Some(error) = &error {
+                                    response.on_hover_text(error)
+                                } else {
+                                    response
+                                };
+                                let response =
+                                    self.attach_row_context_menu(response, row_idx, ctx);
+                                if response.clicked_by(egui::PointerButton::Primary) {
+                                    clicked_to_load = true;
+                                }
+                            });
+                        }
+
                         row.col(|ui| {
                             if let Some(bg) = row_bg {
                                 ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
@@ -1408,14 +1565,18 @@ impl crate::app::WavesPreviewer {
                         let resp = self.attach_row_context_menu(row.response(), row_idx, ctx);
                         let drag_started =
                             resp.drag_started_by(egui::PointerButton::Primary);
-                        if drag_started && self.queue_external_drag_for_row(row_idx) {
+                        if drag_started
+                            && !interacted_with_control
+                            && self.queue_external_drag_for_row(row_idx)
+                        {
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;
                             self.search_has_focus = false;
                             return;
                         }
                         let clicked_any = (resp.clicked_by(egui::PointerButton::Primary)
-                            && !resp.double_clicked())
+                            && !resp.double_clicked()
+                            && !interacted_with_control)
                             || clicked_to_load;
                         if clicked_to_select {
                             self.selected = Some(row_idx);
@@ -1438,6 +1599,10 @@ impl crate::app::WavesPreviewer {
                             ctx.memory_mut(|m| m.request_focus(list_focus_id));
                             list_has_focus = true;
                             self.search_has_focus = false;
+                        }
+                        if let Some(control_focus_id) = control_focus_id {
+                            ctx.memory_mut(|memory| memory.request_focus(control_focus_id));
+                            list_has_focus = false;
                         }
                     } else {
                         // filler

@@ -360,6 +360,10 @@ impl super::WavesPreviewer {
             rx,
             tab_id: apply_tab_id,
             undo,
+            tool: crate::app::types::ToolKind::PitchShift,
+            source_range: None,
+            source_len: 0,
+            source_sample_rate: 1,
         });
     }
 

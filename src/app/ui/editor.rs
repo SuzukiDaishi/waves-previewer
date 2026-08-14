@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::app::input_focus::UiScrollTarget;
 use crate::app::music_onnx;
 use crate::app::render::overlay as ov;
 use crate::app::render::waveform_pyramid as wf_cache;
@@ -2388,6 +2389,12 @@ impl crate::app::WavesPreviewer {
         ctx: &egui::Context,
         tab_idx: usize,
     ) {
+        let editor_scroll_active = self.ui_scroll_focus.is_active(UiScrollTarget::Editor);
+        let editor_scroll_source = self.scroll_source_for(UiScrollTarget::Editor);
+        if self.tabs[tab_idx].primary_view == EditorPrimaryView::Metadata {
+            self.ui_metadata_inspector(ui, ctx, tab_idx);
+            return;
+        }
         let editor_panel_rect = ui.max_rect();
         let mut apply_pending_loop = false;
         let mut do_commit_loop = false;
@@ -2534,6 +2541,10 @@ impl crate::app::WavesPreviewer {
                         ui.selectable_value(&mut selected_view, ViewMode::Tempogram, "Tempogram");
                         ui.selectable_value(&mut selected_view, ViewMode::Chromagram, "Chromagram");
                         ui.selectable_value(&mut selected_view, ViewMode::World, "World (F0/Env)");
+                        ui.separator();
+                        if ui.selectable_label(false, "Metadata").clicked() {
+                            tab.primary_view = EditorPrimaryView::Metadata;
+                        }
                     });
             });
             if selected_view != prev_view {
@@ -3004,6 +3015,7 @@ impl crate::app::WavesPreviewer {
         let mut pending_denoise_learn = false;
         let mut pending_denoise_preview = false;
         let mut pending_denoise_apply = false;
+        let mut pending_channel_routing_apply = false;
         let mut do_mute: Option<(usize, usize)> = None;
         let mut do_mute_extra: Vec<(usize, usize)> = Vec::new();
         let mut do_play_selection = false;
@@ -3017,8 +3029,12 @@ impl crate::app::WavesPreviewer {
         let mut do_cancel_loop_detect: Option<usize> = None;
         let mut do_apply_loop_candidate: Option<(usize, usize)> = None; // (tab_idx, candidate_idx)
                                                                         // Loop/marker apply handled via commit flags below.
-        let mut do_fade_in: Option<((usize, usize), crate::app::types::FadeShape)> = None;
-        let mut do_fade_out: Option<((usize, usize), crate::app::types::FadeShape)> = None;
+        let mut do_edge_fades: Option<(
+            usize,
+            crate::app::types::FadeShape,
+            usize,
+            crate::app::types::FadeShape,
+        )> = None;
         let mut stop_playback = false;
         // Snapshot busy state and prepare deferred overlay job.
         // IMPORTANT: Do NOT call `self.*` (which takes &mut self) while holding `let tab = &mut self.tabs[...]`.
@@ -4315,7 +4331,8 @@ impl crate::app::WavesPreviewer {
 
             // Detect hover using pointer position against our canvas rect (robust across senses)
             let pointer_pos = ui.input(|i| i.pointer.hover_pos());
-            let pointer_over_waveform = ui.is_enabled()
+            let pointer_over_waveform = editor_scroll_active
+                && ui.rect_contains_pointer(rect)
                 && pointer_pos.is_some_and(|p| {
                     rect.contains(p)
                         && amplitude_nav_rect
@@ -5283,6 +5300,104 @@ impl crate::app::WavesPreviewer {
                 }
                 if right_drag_stopped {
                     tab.right_drag_mode = None;
+                }
+            }
+            // Edge Fade owns a narrow draggable handle at each file edge.
+            // Dragging updates only the draft; audio changes on Apply.
+            if (pointer_over_waveform || tab.fade_drag_edge.is_some())
+                && !world_f0_editing
+                && matches!(tab.active_tool, ToolKind::Fade)
+                && display_samples_len > 0
+            {
+                let pointer_pressed =
+                    ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+                let pointer_down =
+                    ui.input(|i| i.pointer.button_down(egui::PointerButton::Primary));
+                let pointer_released =
+                    ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
+                let sr = tab.buffer_sample_rate.max(1) as f32;
+                let to_x = |sample: usize| geom.sample_boundary_x(sample);
+                let fade_in_samples =
+                    ((tab.tool_state.fade_in_ms.max(0.0) / 1000.0) * sr).round() as usize;
+                let fade_out_samples =
+                    ((tab.tool_state.fade_out_ms.max(0.0) / 1000.0) * sr).round() as usize;
+                let fade_in_x = to_x(fade_in_samples.min(display_samples_len));
+                let fade_out_x =
+                    to_x(display_samples_len.saturating_sub(fade_out_samples));
+
+                if pointer_pressed && tab.fade_drag_edge.is_none() {
+                    if let Some(pos) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .or_else(|| resp.interact_pointer_pos())
+                    {
+                        let hit_radius = 10.0;
+                        let mut nearest: Option<(FadeDragEdge, f32)> = None;
+                        for (edge, handle_x) in [
+                            (FadeDragEdge::In, fade_in_x),
+                            (FadeDragEdge::Out, fade_out_x),
+                        ] {
+                            let distance = (pos.x - handle_x).abs();
+                            if distance <= hit_radius
+                                && nearest
+                                    .as_ref()
+                                    .is_none_or(|(_, best)| distance < *best)
+                            {
+                                nearest = Some((edge, distance));
+                            }
+                        }
+                        if let Some((edge, _)) = nearest {
+                            tab.fade_drag_edge = Some(edge);
+                            tool_gesture_active = true;
+                            suppress_seek = true;
+                            stop_playback = true;
+                        }
+                    }
+                }
+
+                if pointer_down {
+                    if let Some(edge) = tab.fade_drag_edge {
+                        if let Some(pos) = ui
+                            .input(|i| i.pointer.hover_pos())
+                            .or_else(|| resp.interact_pointer_pos())
+                        {
+                            let sample = geom
+                                .x_to_display_sample(pos.x.clamp(wave_left, wave_left + wave_w));
+                            let duration_samples = match edge {
+                                FadeDragEdge::In => sample,
+                                FadeDragEdge::Out => {
+                                    display_samples_len.saturating_sub(sample)
+                                }
+                            };
+                            let duration_ms = duration_samples as f32 / sr * 1000.0;
+                            match edge {
+                                FadeDragEdge::In => {
+                                    tab.tool_state.fade_in_ms = duration_ms;
+                                }
+                                FadeDragEdge::Out => {
+                                    tab.tool_state.fade_out_ms = duration_ms;
+                                }
+                            }
+                        }
+                        tool_gesture_active = true;
+                        suppress_seek = true;
+                    }
+                }
+
+                if pointer_released {
+                    if tab.fade_drag_edge.take().is_some() {
+                        tool_gesture_active = true;
+                        suppress_seek = true;
+                        if tab.preview_audio_tool == Some(ToolKind::Fade)
+                            || tab
+                                .preview_overlay
+                                .as_ref()
+                                .is_some_and(|overlay| overlay.source_tool == ToolKind::Fade)
+                        {
+                            request_preview_refresh = true;
+                        }
+                    }
+                } else if !pointer_down {
+                    tab.fade_drag_edge = None;
                 }
             }
             if pointer_over_waveform
@@ -6912,6 +7027,7 @@ impl crate::app::WavesPreviewer {
                                 Color32::from_rgb(80, 180, 255),
                             );
                             fade_in_handle = Some(x1);
+                            draw_handle(x1, Color32::from_rgb(80, 180, 255));
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let secs = (end as f32) / sr;
                             painter.text(
@@ -6940,11 +7056,12 @@ impl crate::app::WavesPreviewer {
                                 Color32::from_rgb(255, 160, 90),
                             );
                             fade_out_handle = Some(x0);
+                            draw_handle(x0, Color32::from_rgb(255, 160, 90));
                             let fid = TextStyle::Monospace.resolve(ui.style());
                             let secs = (n_out as f32) / sr;
                             painter.text(
-                                egui::pos2(x0 + 6.0, rect.bottom() - 18.0),
-                                egui::Align2::LEFT_BOTTOM,
+                                egui::pos2(x1 - 6.0, rect.bottom() - 18.0),
+                                egui::Align2::RIGHT_BOTTOM,
                                 format!(
                                     "Fade Out {}",
                                     crate::app::helpers::format_time_s(secs)
@@ -7605,6 +7722,7 @@ impl crate::app::WavesPreviewer {
                     ui.heading("Inspector");
                     ui.separator();
                     egui::ScrollArea::vertical()
+                        .scroll_source(editor_scroll_source)
                         .id_salt(("editor_inspector_scroll", tab_idx))
                         // Shrink to content height instead of always filling
                         // `inspector_area_h`, so short content (e.g. Loop Edit
@@ -7819,7 +7937,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::LoopEdit => "Loop Edit",
                                 ToolKind::Markers => "Markers",
                                 ToolKind::Trim => "Trim",
-                                ToolKind::Fade => "Fade",
+                                ToolKind::Fade => "Edge Fade",
                                 ToolKind::Gain => "Gain",
                                 ToolKind::Normalize => "Normalize",
                                 ToolKind::PitchShift => "Pitch Shift",
@@ -7844,6 +7962,7 @@ impl crate::app::WavesPreviewer {
                                 // the Waveform tool list.
                                 ToolKind::SpectralWarp => "Spectral Warp",
                                 ToolKind::SpectralBrush => "Spectral Brush",
+                                ToolKind::ChannelRouting => "Channel Routing",
                             };
                             // Grouped icon toolbar; wraps in narrow panels so
                             // every tool stays one click away. Selection still
@@ -7876,6 +7995,7 @@ impl crate::app::WavesPreviewer {
                                 ToolKind::DeNoise => "≈",
                                 ToolKind::SpectralWarp => "🌀",
                                 ToolKind::SpectralBrush => "🖌",
+                                ToolKind::ChannelRouting => "⇄",
                             };
                             const TOOL_GROUPS: [&[ToolKind]; 4] = [
                                 // Navigate / annotate / basic level edits
@@ -7913,6 +8033,7 @@ impl crate::app::WavesPreviewer {
                                     ToolKind::DeClip,
                                     ToolKind::DeHum,
                                     ToolKind::DeNoise,
+                                    ToolKind::ChannelRouting,
                                 ],
                             ];
                             ui.horizontal_wrapped(|ui| {
@@ -7972,6 +8093,15 @@ impl crate::app::WavesPreviewer {
                                     // Trim-specific range display should not persist after leaving Trim.
                                     tab.trim_range = None;
                                 }
+                                if matches!(tab.active_tool, ToolKind::Fade) {
+                                    tab.fade_drag_edge = None;
+                                }
+                                if matches!(tab.active_tool, ToolKind::ChannelRouting) {
+                                    // Drop a half-drawn cable; the matrix
+                                    // itself is cheap to keep and is re-seeded
+                                    // whenever the channel count changes.
+                                    tab.channel_routing_draft.connecting_from = None;
+                                }
                                 if matches!(tab.active_tool, ToolKind::Pencil) {
                                     // Pencil lives entirely in the green draft.
                                     // Leaving the tool discards it without
@@ -8010,6 +8140,22 @@ impl crate::app::WavesPreviewer {
                                 tab.stretch_drag_target = None;
                                 stop_playback = true;
                                 tab.active_tool = tool;
+                                if tool == ToolKind::Fade
+                                    && tab.tool_state.fade_in_ms <= 0.0
+                                    && tab.tool_state.fade_out_ms <= 0.0
+                                    && tab.samples_len > 0
+                                {
+                                    let clip_ms = tab.samples_len as f32
+                                        / tab.buffer_sample_rate.max(1) as f32
+                                        * 1000.0;
+                                    let default_ms =
+                                        (clip_ms * 0.1).min(250.0).max(1.0).min(clip_ms * 0.5);
+                                    tab.tool_state = ToolState {
+                                        fade_in_ms: default_ms,
+                                        fade_out_ms: default_ms,
+                                        ..tab.tool_state
+                                    };
+                                }
                             }
                             Self::inspector_section(ui, tool_label(tab.active_tool));
                             // Custom channel view scopes destructive range
@@ -8619,6 +8765,7 @@ impl crate::app::WavesPreviewer {
                                             let mut resort = false;
                                             let mut dirty = false;
                                             egui::ScrollArea::vertical()
+                                                .scroll_source(editor_scroll_source)
                                                 .id_salt(("editor_markers_scroll", tab_idx))
                                                 .max_height(160.0)
                                                 .show(ui, |ui| {
@@ -9117,7 +9264,6 @@ impl crate::app::WavesPreviewer {
                                     });
                                 }
                                 ToolKind::Fade => {
-                                    // Simplified: duration (seconds) from start/end + Apply
                                     ui.scope(|ui| {
                                         let s = ui.style_mut();
                                         s.spacing.item_spacing = egui::vec2(6.0, 6.0);
@@ -9125,172 +9271,308 @@ impl crate::app::WavesPreviewer {
                                         if let Some(note) = simplified_preview_note {
                                             ui.label(RichText::new(note).weak());
                                         }
-                                        let sr = self.audio.shared.out_sample_rate.max(1) as f32;
-                                        let shape_label = |shape: crate::app::types::FadeShape| match shape {
-                                            crate::app::types::FadeShape::Linear => "Linear",
-                                            crate::app::types::FadeShape::EqualPower => "Equal",
-                                            crate::app::types::FadeShape::Cosine => "Cosine",
-                                            crate::app::types::FadeShape::SCurve => "S-Curve",
-                                            crate::app::types::FadeShape::Quadratic => "Quadratic",
-                                            crate::app::types::FadeShape::Cubic => "Cubic",
-                                        };
-                                        // Fade In
-                                        ui.label("Fade In");
-                                        ui.horizontal_wrapped(|ui| {
-                                            let mut secs = tab.tool_state.fade_in_ms / 1000.0;
-                                            if !secs.is_finite() { secs = 0.0; }
-                                            ui.label("duration (s)");
-                                            let mut changed = ui
-                                                .add(
-                                                    egui::DragValue::new(&mut secs)
-                                                        .range(0.0..=600.0)
-                                                        .speed(0.05)
-                                                        .fixed_decimals(2),
-                                                )
-                                                .changed();
-                                            ui.label("shape");
-                                            let mut shape = tab.fade_in_shape;
-                                            egui::ComboBox::from_id_salt(("fade_in_shape", tab_idx))
-                                                .selected_text(shape_label(shape))
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Linear,
-                                                        "Linear",
+                                        ui.label(
+                                            RichText::new(
+                                                "Drag the blue and orange handles on the waveform. \
+                                                 Both fades stay anchored to the file edges.",
+                                            )
+                                            .weak(),
+                                        );
+
+                                        let sr = tab.buffer_sample_rate.max(1) as f32;
+                                        let clip_ms = tab.samples_len as f32 / sr * 1000.0;
+                                        let default_ms =
+                                            (clip_ms * 0.1).min(250.0).max(1.0).min(clip_ms * 0.5);
+                                        let shape_label =
+                                            |shape: crate::app::types::FadeShape| match shape {
+                                                crate::app::types::FadeShape::Linear => "Linear",
+                                                crate::app::types::FadeShape::EqualPower => "Equal",
+                                                crate::app::types::FadeShape::Cosine => "Cosine",
+                                                crate::app::types::FadeShape::SCurve => "S-Curve",
+                                                crate::app::types::FadeShape::Quadratic => {
+                                                    "Quadratic"
+                                                }
+                                                crate::app::types::FadeShape::Cubic => "Cubic",
+                                            };
+                                        let shape_picker =
+                                            |ui: &mut egui::Ui,
+                                             id: &'static str,
+                                             shape: &mut crate::app::types::FadeShape| {
+                                                egui::ComboBox::from_id_salt((id, tab_idx))
+                                                    .selected_text(shape_label(*shape))
+                                                    .show_ui(ui, |ui| {
+                                                        for (value, label) in [
+                                                            (
+                                                                crate::app::types::FadeShape::Linear,
+                                                                "Linear",
+                                                            ),
+                                                            (
+                                                                crate::app::types::FadeShape::EqualPower,
+                                                                "Equal",
+                                                            ),
+                                                            (
+                                                                crate::app::types::FadeShape::Cosine,
+                                                                "Cosine",
+                                                            ),
+                                                            (
+                                                                crate::app::types::FadeShape::SCurve,
+                                                                "S-Curve",
+                                                            ),
+                                                            (
+                                                                crate::app::types::FadeShape::Quadratic,
+                                                                "Quadratic",
+                                                            ),
+                                                            (
+                                                                crate::app::types::FadeShape::Cubic,
+                                                                "Cubic",
+                                                            ),
+                                                        ] {
+                                                            ui.selectable_value(shape, value, label);
+                                                        }
+                                                    });
+                                            };
+                                        let mut fade_changed = false;
+
+                                        let mut fade_in_ms =
+                                            tab.tool_state.fade_in_ms.max(0.0).min(clip_ms);
+                                        let mut fade_in_enabled = fade_in_ms > 0.0;
+                                        let mut fade_in_shape = tab.fade_in_shape;
+                                        egui::Frame::NONE
+                                            .fill(Color32::from_rgba_unmultiplied(65, 155, 235, 20))
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                Color32::from_rgba_unmultiplied(80, 180, 255, 120),
+                                            ))
+                                            .corner_radius(6.0)
+                                            .inner_margin(egui::Margin::same(8))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new("START  ·  FADE IN")
+                                                            .strong()
+                                                            .color(Color32::from_rgb(
+                                                                105, 195, 255,
+                                                            )),
                                                     );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::EqualPower,
-                                                        "Equal",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Cosine,
-                                                        "Cosine",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::SCurve,
-                                                        "S-Curve",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Quadratic,
-                                                        "Quadratic",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Cubic,
-                                                        "Cubic",
-                                                    );
-                                                });
-                                            if shape != tab.fade_in_shape {
-                                                tab.fade_in_shape = shape;
-                                                changed = true;
-                                            }
-                                            if changed {
-                                                tab.tool_state = ToolState{ fade_in_ms: (secs*1000.0).max(0.0), ..tab.tool_state };
-                                            }
-                                        });
-                                        ui.separator();
-                                        // Fade Out
-                                        ui.label("Fade Out");
-                                        ui.horizontal_wrapped(|ui| {
-                                            let mut secs = tab.tool_state.fade_out_ms / 1000.0;
-                                            if !secs.is_finite() { secs = 0.0; }
-                                            ui.label("duration (s)");
-                                            let mut changed = ui
-                                                .add(
-                                                    egui::DragValue::new(&mut secs)
-                                                        .range(0.0..=600.0)
-                                                        .speed(0.05)
-                                                        .fixed_decimals(2),
-                                                )
-                                                .changed();
-                                            ui.label("shape");
-                                            let mut shape = tab.fade_out_shape;
-                                            egui::ComboBox::from_id_salt(("fade_out_shape", tab_idx))
-                                                .selected_text(shape_label(shape))
-                                                .show_ui(ui, |ui| {
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Linear,
-                                                        "Linear",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::EqualPower,
-                                                        "Equal",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Cosine,
-                                                        "Cosine",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::SCurve,
-                                                        "S-Curve",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Quadratic,
-                                                        "Quadratic",
-                                                    );
-                                                    ui.selectable_value(
-                                                        &mut shape,
-                                                        crate::app::types::FadeShape::Cubic,
-                                                        "Cubic",
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            if ui
+                                                                .checkbox(
+                                                                    &mut fade_in_enabled,
+                                                                    "Enabled",
+                                                                )
+                                                                .changed()
+                                                            {
+                                                                fade_in_ms = if fade_in_enabled {
+                                                                    default_ms
+                                                                } else {
+                                                                    0.0
+                                                                };
+                                                                fade_changed = true;
+                                                            }
+                                                        },
                                                     );
                                                 });
-                                            if shape != tab.fade_out_shape {
-                                                tab.fade_out_shape = shape;
-                                                changed = true;
+                                                ui.add_enabled_ui(fade_in_enabled, |ui| {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.label("Length");
+                                                        if ui
+                                                            .add(
+                                                                egui::DragValue::new(
+                                                                    &mut fade_in_ms,
+                                                                )
+                                                                .range(0.0..=clip_ms)
+                                                                .speed(5.0)
+                                                                .fixed_decimals(1)
+                                                                .suffix(" ms"),
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            fade_changed = true;
+                                                        }
+                                                        ui.label("Curve");
+                                                        let before = fade_in_shape;
+                                                        shape_picker(
+                                                            ui,
+                                                            "edge_fade_in_shape",
+                                                            &mut fade_in_shape,
+                                                        );
+                                                        fade_changed |=
+                                                            before != fade_in_shape;
+                                                    });
+                                                });
+                                            });
+
+                                        let mut fade_out_ms =
+                                            tab.tool_state.fade_out_ms.max(0.0).min(clip_ms);
+                                        let mut fade_out_enabled = fade_out_ms > 0.0;
+                                        let mut fade_out_shape = tab.fade_out_shape;
+                                        egui::Frame::NONE
+                                            .fill(Color32::from_rgba_unmultiplied(235, 125, 55, 20))
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                Color32::from_rgba_unmultiplied(255, 160, 90, 120),
+                                            ))
+                                            .corner_radius(6.0)
+                                            .inner_margin(egui::Margin::same(8))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new("END  ·  FADE OUT")
+                                                            .strong()
+                                                            .color(Color32::from_rgb(
+                                                                255, 175, 105,
+                                                            )),
+                                                    );
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            if ui
+                                                                .checkbox(
+                                                                    &mut fade_out_enabled,
+                                                                    "Enabled",
+                                                                )
+                                                                .changed()
+                                                            {
+                                                                fade_out_ms = if fade_out_enabled {
+                                                                    default_ms
+                                                                } else {
+                                                                    0.0
+                                                                };
+                                                                fade_changed = true;
+                                                            }
+                                                        },
+                                                    );
+                                                });
+                                                ui.add_enabled_ui(fade_out_enabled, |ui| {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        ui.label("Length");
+                                                        if ui
+                                                            .add(
+                                                                egui::DragValue::new(
+                                                                    &mut fade_out_ms,
+                                                                )
+                                                                .range(0.0..=clip_ms)
+                                                                .speed(5.0)
+                                                                .fixed_decimals(1)
+                                                                .suffix(" ms"),
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            fade_changed = true;
+                                                        }
+                                                        ui.label("Curve");
+                                                        let before = fade_out_shape;
+                                                        shape_picker(
+                                                            ui,
+                                                            "edge_fade_out_shape",
+                                                            &mut fade_out_shape,
+                                                        );
+                                                        fade_changed |=
+                                                            before != fade_out_shape;
+                                                    });
+                                                });
+                                            });
+
+                                        if fade_changed {
+                                            tab.tool_state = ToolState {
+                                                fade_in_ms: fade_in_ms.max(0.0).min(clip_ms),
+                                                fade_out_ms: fade_out_ms.max(0.0).min(clip_ms),
+                                                ..tab.tool_state
+                                            };
+                                            tab.fade_in_shape = fade_in_shape;
+                                            tab.fade_out_shape = fade_out_shape;
+                                            if tab.preview_audio_tool == Some(ToolKind::Fade) {
+                                                request_preview_refresh = true;
                                             }
-                                            if changed {
-                                                tab.tool_state = ToolState{ fade_out_ms: (secs*1000.0).max(0.0), ..tab.tool_state };
-                                            }
-                                        });
+                                        }
+
                                         let has_fade = tab.tool_state.fade_in_ms > 0.0
                                             || tab.tool_state.fade_out_ms > 0.0;
+                                        let n_in =
+                                            ((tab.tool_state.fade_in_ms / 1000.0) * sr).round()
+                                                as usize;
+                                        let n_out =
+                                            ((tab.tool_state.fade_out_ms / 1000.0) * sr).round()
+                                                as usize;
+                                        if n_in.saturating_add(n_out) > tab.samples_len {
+                                            ui.label(
+                                                RichText::new(
+                                                    "The fades overlap; both curves will be \
+                                                     multiplied in the overlap.",
+                                                )
+                                                .small()
+                                                .color(Color32::from_rgb(235, 185, 95)),
+                                            );
+                                        }
                                         ui.horizontal_wrapped(|ui| {
                                             if ui
                                                 .add_enabled(
                                                     preview_button_enabled && has_fade,
-                                                    egui::Button::new("Preview"),
+                                                    egui::Button::new(
+                                                        if tab.preview_audio_tool
+                                                            == Some(ToolKind::Fade)
+                                                        {
+                                                            "Refresh Preview"
+                                                        } else {
+                                                            "Preview"
+                                                        },
+                                                    ),
                                                 )
                                                 .clicked()
                                             {
                                                 request_preview_refresh = true;
                                             }
                                             if ui
-                                                .add_enabled(has_fade, egui::Button::new("Apply"))
+                                                .add_enabled(
+                                                    has_fade && !apply_busy,
+                                                    egui::Button::new("Apply Edge Fades"),
+                                                )
                                                 .clicked()
                                             {
-                                                let n_in = ((tab.tool_state.fade_in_ms / 1000.0) * sr)
-                                                    .round() as usize;
-                                                let n_out =
-                                                    ((tab.tool_state.fade_out_ms / 1000.0) * sr)
-                                                        .round() as usize;
-                                                if n_in > 0 {
-                                                    do_fade_in = Some((
-                                                        (0, n_in.min(tab.samples_len)),
-                                                        tab.fade_in_shape,
-                                                    ));
-                                                }
-                                                if n_out > 0 {
-                                                    do_fade_out = Some((
-                                                        (0, n_out.min(tab.samples_len)),
-                                                        tab.fade_out_shape,
-                                                    ));
-                                                }
+                                                do_edge_fades = Some((
+                                                    n_in.min(tab.samples_len),
+                                                    tab.fade_in_shape,
+                                                    n_out.min(tab.samples_len),
+                                                    tab.fade_out_shape,
+                                                ));
                                                 tab.preview_audio_tool = None;
                                                 tab.preview_overlay = None;
+                                                tab.fade_drag_edge = None;
                                                 tab.tool_state = ToolState {
                                                     fade_in_ms: 0.0,
                                                     fade_out_ms: 0.0,
                                                     ..tab.tool_state
                                                 };
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    has_fade,
+                                                    egui::Button::new("Clear Draft"),
+                                                )
+                                                .clicked()
+                                            {
+                                                tab.tool_state = ToolState {
+                                                    fade_in_ms: 0.0,
+                                                    fade_out_ms: 0.0,
+                                                    ..tab.tool_state
+                                                };
+                                                tab.fade_drag_edge = None;
+                                                if tab.preview_audio_tool
+                                                    == Some(ToolKind::Fade)
+                                                    || tab.preview_overlay.as_ref().is_some_and(
+                                                        |overlay| {
+                                                            overlay.source_tool == ToolKind::Fade
+                                                        },
+                                                    )
+                                                {
+                                                    need_restore_preview = true;
+                                                }
                                             }
                                         });
                                     });
@@ -9666,6 +9948,7 @@ impl crate::app::WavesPreviewer {
                                             egui::Id::new(("eq_plot", tab_idx)),
                                             &mut plot_params,
                                             tab.buffer_sample_rate.max(1),
+                                            editor_scroll_active,
                                         ) {
                                             low_shelf_freq_hz = plot_params.low_shelf_freq_hz;
                                             low_shelf_gain_db = plot_params.low_shelf_gain_db;
@@ -10394,6 +10677,138 @@ impl crate::app::WavesPreviewer {
                                                     .color(egui::Color32::LIGHT_RED),
                                             );
                                         }
+                                        if tab.plugin_fx_chain.slots.is_empty()
+                                            && tab.plugin_fx_draft.plugin_key.is_some()
+                                        {
+                                            tab.plugin_fx_chain =
+                                                PluginFxChainDraft::from_legacy(&tab.plugin_fx_draft);
+                                        }
+                                        let mut remove_slot = None;
+                                        let mut move_slot = None;
+                                        ui.group(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.strong("FX Rack");
+                                                ui.checkbox(
+                                                    &mut tab.plugin_fx_chain.bypass,
+                                                    "Chain Bypass",
+                                                );
+                                                ui.label(format!(
+                                                    "Latency {} smp · Underruns {}",
+                                                    tab.plugin_fx_chain.latency_samples,
+                                                    tab.plugin_fx_chain.underrun_count
+                                                ));
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label("Preview engine");
+                                                ui.selectable_value(
+                                                    &mut tab.plugin_fx_chain.preview_engine,
+                                                    PluginPreviewEngine::RenderAhead,
+                                                    "Render-ahead",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut tab.plugin_fx_chain.preview_engine,
+                                                    PluginPreviewEngine::Offline,
+                                                    "Offline",
+                                                );
+                                                ui.add_enabled(
+                                                    tab.plugin_fx_chain.preview_engine
+                                                        == PluginPreviewEngine::RenderAhead,
+                                                    egui::Slider::new(
+                                                        &mut tab.plugin_fx_chain.render_ahead_ms,
+                                                        100..=500,
+                                                    )
+                                                    .suffix(" ms"),
+                                                );
+                                            });
+                                            let slot_count = tab.plugin_fx_chain.slots.len();
+                                            for index in 0..slot_count {
+                                                let slot_id = tab.plugin_fx_chain.slots[index].id;
+                                                let selected = tab.plugin_fx_chain.selected_slot_id
+                                                    == Some(slot_id);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    let slot =
+                                                        &mut tab.plugin_fx_chain.slots[index];
+                                                    ui.checkbox(&mut slot.draft.enabled, "");
+                                                    let label = if slot.draft.plugin_name.is_empty() {
+                                                        format!("{}  (Select plugin)", index + 1)
+                                                    } else {
+                                                        format!(
+                                                            "{}  {}",
+                                                            index + 1,
+                                                            slot.draft.plugin_name
+                                                        )
+                                                    };
+                                                    if ui
+                                                        .selectable_label(selected, label)
+                                                        .clicked()
+                                                    {
+                                                        tab.plugin_fx_chain.selected_slot_id =
+                                                            Some(slot_id);
+                                                    }
+                                                    ui.checkbox(&mut slot.draft.bypass, "Bypass");
+                                                    if ui.small_button("↑").clicked() && index > 0 {
+                                                        move_slot = Some((index, index - 1));
+                                                    }
+                                                    if ui.small_button("↓").clicked()
+                                                        && index + 1 < slot_count
+                                                    {
+                                                        move_slot = Some((index, index + 1));
+                                                    }
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove_slot = Some(slot_id);
+                                                    }
+                                                    if let Some(reason) =
+                                                        slot.failure_reason.as_deref()
+                                                    {
+                                                        ui.label(
+                                                            RichText::new(reason)
+                                                                .small()
+                                                                .color(Color32::LIGHT_RED),
+                                                        );
+                                                    }
+                                                });
+                                            }
+                                            if ui.button("+ Add Slot").clicked() {
+                                                let slot =
+                                                    PluginFxSlot::new(PluginFxDraft::default());
+                                                tab.plugin_fx_chain.selected_slot_id = Some(slot.id);
+                                                tab.plugin_fx_chain.slots.push(slot);
+                                            }
+                                        });
+                                        if let Some((from, to)) = move_slot {
+                                            tab.plugin_fx_chain.slots.swap(from, to);
+                                        }
+                                        if let Some(slot_id) = remove_slot {
+                                            tab.plugin_fx_chain
+                                                .slots
+                                                .retain(|slot| slot.id != slot_id);
+                                            if tab.plugin_fx_chain.selected_slot_id == Some(slot_id)
+                                            {
+                                                tab.plugin_fx_chain.selected_slot_id = tab
+                                                    .plugin_fx_chain
+                                                    .slots
+                                                    .first()
+                                                    .map(|slot| slot.id);
+                                            }
+                                        }
+                                        if tab.plugin_fx_chain.selected_slot_id.is_none() {
+                                            tab.plugin_fx_chain.selected_slot_id = tab
+                                                .plugin_fx_chain
+                                                .slots
+                                                .first()
+                                                .map(|slot| slot.id);
+                                        }
+                                        tab.plugin_fx_draft = tab
+                                            .plugin_fx_chain
+                                            .selected_slot_id
+                                            .and_then(|id| {
+                                                tab.plugin_fx_chain
+                                                    .slots
+                                                    .iter()
+                                                    .find(|slot| slot.id == id)
+                                            })
+                                            .map(|slot| slot.draft.clone())
+                                            .unwrap_or_default();
                                         let mut plugin_params_dirty = false;
                                         let draft = &mut tab.plugin_fx_draft;
                                         let mut selected_changed = false;
@@ -10529,6 +10944,7 @@ impl crate::app::WavesPreviewer {
                                                 }
                                             });
                                             egui::ScrollArea::vertical()
+                                                .scroll_source(editor_scroll_source)
                                                 .id_salt(("plugin_search_paths_scroll", tab_idx))
                                                 .max_height(120.0)
                                                 .show(ui, |ui| {
@@ -10756,6 +11172,7 @@ impl crate::app::WavesPreviewer {
                                         }
                                         let filter = draft.filter.trim().to_ascii_lowercase();
                                         egui::ScrollArea::vertical()
+                                            .scroll_source(editor_scroll_source)
                                             .id_salt(("plugin_param_scroll", tab_idx))
                                             .max_height(320.0)
                                             .show(ui, |ui| {
@@ -10852,9 +11269,21 @@ impl crate::app::WavesPreviewer {
                                                 need_restore_preview = true;
                                             }
                                         });
-                                        if plugin_params_dirty
-                                            && tab.plugin_fx_draft.auto_preview
+                                        let updated_draft = draft.clone();
+                                        let auto_preview = updated_draft.auto_preview;
+                                        if let Some(slot) = tab
+                                            .plugin_fx_chain
+                                            .selected_slot_id
+                                            .and_then(|id| {
+                                                tab.plugin_fx_chain
+                                                    .slots
+                                                    .iter_mut()
+                                                    .find(|slot| slot.id == id)
+                                            })
                                         {
+                                            slot.draft = updated_draft;
+                                        }
+                                        if plugin_params_dirty && auto_preview {
                                             tab.plugin_fx_param_dirty_at =
                                                 Some(std::time::Instant::now());
                                         }
@@ -11423,6 +11852,28 @@ impl crate::app::WavesPreviewer {
                                                 tab.preview_overlay = None;
                                             }
                                         });
+                                    });
+                                }
+                                ToolKind::ChannelRouting => {
+                                    ui.scope(|ui| {
+                                        let s = ui.style_mut();
+                                        s.spacing.item_spacing = egui::vec2(6.0, 6.0);
+                                        s.spacing.button_padding = egui::vec2(6.0, 3.0);
+                                        ui.label(
+                                            RichText::new(
+                                                "Rewire, duplicate or drop channels. Applies to the whole file — the selection and channel view are ignored.",
+                                            )
+                                            .weak(),
+                                        );
+                                        let in_count = tab.ch_samples.len().max(1);
+                                        let apply = Self::ui_channel_routing_patchbay(
+                                            ui,
+                                            &mut tab.channel_routing_draft,
+                                            in_count,
+                                        );
+                                        if apply && !apply_busy && !tab.loading {
+                                            pending_channel_routing_apply = true;
+                                        }
                                     });
                                 }
                                 ToolKind::DeNoise => {
@@ -12326,6 +12777,9 @@ impl crate::app::WavesPreviewer {
                 if pending_denoise_apply {
                     self.spawn_denoise_apply_for_tab(tab_idx);
                 }
+                if pending_channel_routing_apply {
+                    self.editor_apply_channel_routing(tab_idx);
+                }
                 if pending_plugin_scan {
                     self.spawn_plugin_scan();
                 }
@@ -12668,19 +13122,21 @@ impl crate::app::WavesPreviewer {
         if let Some(((s, e), in_ms, out_ms)) = do_fade {
             self.editor_apply_fade_range(tab_idx, (s, e), in_ms, out_ms);
         }
-        if let Some(((s, e), shp)) = do_fade_in {
-            self.editor_apply_fade_in_explicit(tab_idx, (s, e), shp);
-        }
-        if let Some(((mut s, mut e), shp)) = do_fade_out {
-            // If range provided is (0, n) as length, anchor to end
-            if let Some(tab) = self.tabs.get(tab_idx) {
-                let len = tab.samples_len;
-                if s == 0 {
-                    s = len.saturating_sub(e);
-                    e = len;
-                }
+        if let Some((fade_in_samples, fade_in_shape, fade_out_samples, fade_out_shape)) =
+            do_edge_fades
+        {
+            if self.editor_apply_edge_fades(
+                tab_idx,
+                fade_in_samples,
+                fade_in_shape,
+                fade_out_samples,
+                fade_out_shape,
+            ) {
+                self.push_toast(
+                    crate::app::types::ToastSeverity::Info,
+                    "Applied edge fades (Ctrl+Z to undo)",
+                );
             }
-            self.editor_apply_fade_out_explicit(tab_idx, (s, e), shp);
         }
         if let Some(((s, e), gdb)) = do_gain {
             self.editor_apply_gain_range(tab_idx, (s, e), gdb);

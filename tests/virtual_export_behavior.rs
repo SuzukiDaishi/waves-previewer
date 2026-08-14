@@ -269,7 +269,7 @@ mod virtual_export_behavior {
             .state_mut()
             .test_force_load_selected_list_preview_for_play();
         harness.run_steps(3);
-        let virtual_len = harness.state().test_audio_buffer_len();
+        let virtual_len = harness.state().test_audio_source_len();
         assert!(virtual_len > 0);
 
         assert!(harness.state_mut().test_select_path(&src_long));
@@ -279,7 +279,9 @@ mod virtual_export_behavior {
         let start = Instant::now();
         let long_len = loop {
             harness.run_steps(1);
-            let len = harness.state().test_audio_buffer_len();
+            // A real WAV can use ExactStreamWav, where no in-memory callback
+            // buffer exists even though the transport has the full source.
+            let len = harness.state().test_audio_source_len();
             if len > virtual_len * 2 {
                 break len;
             }

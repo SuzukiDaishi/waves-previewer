@@ -23,6 +23,7 @@ File: `MySession.nwsess`
 version = 1
 name = "My Session"
 created_at = "2025-02-01T12:34:56Z"
+path_mode = "absolute"
 base_dir = "C:\\Audio\\Samples"
 open_first = true
 
@@ -67,7 +68,13 @@ error = "Source file missing"
 ```
 
 ### Notes
-- `base_dir`: used to resolve relative `tabs.path`. If absolute, keep as-is.
+- `path_mode`: source/user paths use one policy for the entire session:
+  `absolute` or `relative`. Per-file mixing is not written. New sessions default
+  to `absolute`; a relative session that cannot represent every source relative
+  to the `.nwsess` location is promoted as a whole to `absolute`.
+- `base_dir`: the `.nwsess` parent at the last save. In absolute mode it is also
+  the relocation root used to derive a fallback path after the session moves.
+- Display and runtime paths are absolute regardless of `path_mode`.
 - `edited_audio`: optional sidecar file for edited waveform (see below).
 - `missing`: set on load, not necessarily written on save (runtime check).
 
@@ -92,6 +99,14 @@ Current edits are destructive to in-memory samples. To restore "edited waveform"
 
 ## Missing Source Files
 On load:
+- For an absolute source that no longer exists, derive its old `base_dir`
+  relative suffix and try the same suffix from the current `.nwsess` parent.
+- A successful fallback becomes the runtime absolute path and is written back
+  to the session as the new absolute source path. A write-back failure does not
+  prevent the already-resolved session from opening.
+- Resolve every entry independently but keep the serialization policy at
+  session scope. A few unresolved files never abort restoration of the other
+  list rows, overrides, external sources, cached edits, or tabs.
 - If `tabs.path` cannot be found, create a placeholder item:
   - Show in list with "[Missing]" prefix and a warning color.
   - In editor, display a "Source file missing" banner.
@@ -151,4 +166,3 @@ Behavior:
 - Optional "Save edits" checkbox to avoid sidecar audio.
 - Portable sessions (path remapping dialog).
 - Compact storage using FLAC or OGG for edited audio.
-

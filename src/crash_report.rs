@@ -423,6 +423,7 @@ mod tests {
         result
     }
 
+    #[cfg(not(feature = "kittest"))]
     #[test]
     fn crash_report_dir_uses_appdata_then_localappdata_then_fallback() {
         let _lock = ENV_LOCK
@@ -470,6 +471,29 @@ mod tests {
         drop(app_guard);
         drop(report_guard);
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[cfg(feature = "kittest")]
+    #[test]
+    fn crash_report_dir_isolated_from_user_profile_in_kittest() {
+        let _lock = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let report_guard = EnvGuard {
+            key: ENV_REPORT_DIR,
+            old_value: env::var_os(ENV_REPORT_DIR),
+        };
+        env::remove_var(ENV_REPORT_DIR);
+
+        assert_eq!(
+            crash_report_dir(),
+            env::temp_dir()
+                .join("NeoWaves")
+                .join("crash-reports-kittest")
+        );
+
+        drop(report_guard);
     }
 
     #[test]

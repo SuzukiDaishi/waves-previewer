@@ -127,17 +127,17 @@ pub fn write_regions(
 }
 
 pub fn read_markers(path: &Path, out_sr: u32, file_sr: u32) -> Result<Vec<MarkerEntry>> {
-    if path
+    let is_wav = path
         .extension()
         .and_then(|s| s.to_str())
         .map(|s| s.eq_ignore_ascii_case("wav"))
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    let sidecar = sidecar_path(path);
+    if is_wav && !sidecar.is_file() && !crate::wav_stream::wave_metadata_requires_sidecar(path) {
         if let Ok(markers) = read_wav_markers(path) {
             return Ok(map_markers_to_output(markers, out_sr, file_sr));
         }
     }
-    let sidecar = sidecar_path(path);
     if !sidecar.is_file() {
         return Ok(Vec::new());
     }
@@ -175,14 +175,18 @@ pub fn write_markers(
     file_sr: u32,
     markers: &[MarkerEntry],
 ) -> Result<()> {
-    if path
+    let is_wav = path
         .extension()
         .and_then(|s| s.to_str())
         .map(|s| s.eq_ignore_ascii_case("wav"))
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    if is_wav && !crate::wav_stream::wave_metadata_requires_sidecar(path) {
         let mapped = map_markers_to_file(markers, out_sr, file_sr);
         write_wav_markers(path, &mapped)?;
+        let stale_sidecar = sidecar_path(path);
+        if stale_sidecar.is_file() {
+            let _ = std::fs::remove_file(stale_sidecar);
+        }
         return Ok(());
     }
     let sidecar = sidecar_path(path);
@@ -448,6 +452,26 @@ mod region_tests {
         assert!(read_regions(&path, 48_000, 24_000)
             .expect("read after remove")
             .is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn rf64_markers_use_64_bit_sidecar_positions() {
+        let path = temp_wav_path("rf64_markers");
+        std::fs::write(&path, b"RF64\xff\xff\xff\xffWAVE").expect("write RF64 root");
+        let expected = vec![MarkerEntry {
+            sample: u32::MAX as usize + 12_345,
+            label: "long take".into(),
+        }];
+        write_markers(&path, 48_000, 48_000, &expected).expect("write marker sidecar");
+        assert_eq!(
+            read_markers(&path, 48_000, 48_000).expect("read marker sidecar"),
+            expected
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("RF64 unchanged"),
+            b"RF64\xff\xff\xff\xffWAVE"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

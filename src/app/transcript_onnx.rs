@@ -127,7 +127,7 @@ pub(super) struct WhisperOnnxTranscriber {
 }
 
 pub(super) struct TranscriptRunOutput {
-    pub srt_path: PathBuf,
+    pub transcript: Transcript,
     pub detected_language: Option<String>,
 }
 
@@ -229,111 +229,71 @@ impl WhisperOnnxTranscriber {
         })
     }
 
-    pub(super) fn transcribe_to_srt(
+    pub(super) fn transcribe_document(
         &mut self,
         audio_path: &Path,
     ) -> Result<TranscriptRunOutput, String> {
-        let Some(base_srt_path) = super::transcript::srt_path_for_audio(audio_path) else {
-            return Err("Could not resolve .srt output path.".to_string());
-        };
-        if !self.cfg.overwrite_existing_srt && base_srt_path.exists() {
-            // Default policy: when an .srt already exists, skip regeneration and keep it.
-            return Ok(TranscriptRunOutput {
-                srt_path: base_srt_path,
-                detected_language: self.forced_language.clone(),
-            });
-        }
-        let srt_path = base_srt_path;
-        let (mono, src_sr) = crate::audio_io::decode_audio_mono(audio_path)
-            .map_err(|e| format!("Audio decode failed: {e}"))?;
-        let audio_16k = if src_sr == WHISPER_SR {
-            mono
-        } else {
-            resample_linear(&mono, src_sr, WHISPER_SR)
-        };
-        if audio_16k.is_empty() {
-            return Err("Audio decode returned no samples.".to_string());
-        }
-
         let max_window_ms = self.cfg.max_window_ms.clamp(1_000, 30_000);
         let max_window_samples = ((WHISPER_SR as usize) * max_window_ms / 1000).max(1);
-        let mut windows = if self.cfg.vad_enabled {
-            match self.vad.as_mut() {
-                Some(vad) => match detect_speech_segments(
-                    vad,
-                    &audio_16k,
-                    VadParams {
-                        threshold: self.cfg.vad_threshold.clamp(0.01, 0.99),
-                        min_speech_duration_ms: self.cfg.vad_min_speech_ms.clamp(10, 10_000),
-                        min_silence_duration_ms: self.cfg.vad_min_silence_ms.clamp(10, 10_000),
-                        speech_pad_ms: self.cfg.vad_speech_pad_ms.clamp(0, 5_000),
-                    },
-                    WHISPER_SR as usize,
-                ) {
-                    Ok(v) => v,
-                    Err(_) => vec![Segment {
-                        start: 0,
-                        end: audio_16k.len(),
-                    }],
-                },
-                None => vec![Segment {
-                    start: 0,
-                    end: audio_16k.len(),
-                }],
-            }
-        } else {
-            vec![Segment {
-                start: 0,
-                end: audio_16k.len(),
-            }]
-        };
-        if windows.is_empty() {
-            windows.push(Segment {
-                start: 0,
-                end: audio_16k.len(),
-            });
-        }
-        let mut split = Vec::new();
-        for seg in windows {
-            split.extend(split_segment(seg, max_window_samples));
-        }
-
         let mut segments = Vec::<TranscriptSegment>::new();
-        let mut detected_language = self.forced_language.clone();
         let mut language_scores: HashMap<String, f32> = HashMap::new();
-        for seg in split {
-            if seg.end <= seg.start {
-                continue;
-            }
-            let chunk = &audio_16k[seg.start..seg.end];
-            if chunk.is_empty() {
-                continue;
-            }
-            let features = log_mel_whisper_like(&self.preproc, &chunk)?;
-            let (text, maybe_lang) = self.decode_segment(features)?;
-            if let Some(est) = maybe_lang {
-                if est.confidence < SEGMENT_LANG_MIN_CONFIDENCE {
-                    continue;
+        let mut pending_16k = Vec::<f32>::with_capacity(max_window_samples);
+        let mut window_start = 0usize;
+        let mut processing_error: Option<String> = None;
+        crate::audio_io::decode_audio_multi_streaming_chunks(
+            audio_path,
+            0.5,
+            || false,
+            |channels, source_rate, _, _| {
+                let frames = channels.iter().map(Vec::len).min().unwrap_or(0);
+                let mut mono = Vec::with_capacity(frames);
+                for frame in 0..frames {
+                    mono.push(
+                        channels.iter().map(|channel| channel[frame]).sum::<f32>()
+                            / channels.len().max(1) as f32,
+                    );
                 }
-                let duration_sec = (seg.end.saturating_sub(seg.start) as f32) / (WHISPER_SR as f32);
-                let weight = duration_sec.clamp(0.5, 8.0);
-                *language_scores.entry(est.code).or_insert(0.0) +=
-                    est.confidence.max(0.001) * weight;
-            }
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let start_smp = seg.start;
-            let end_smp = seg.end.min(audio_16k.len());
-            let start_ms = ((start_smp as f64 / WHISPER_SR as f64) * 1000.0).round() as u64;
-            let end_ms = ((end_smp as f64 / WHISPER_SR as f64) * 1000.0).round() as u64;
-            segments.push(TranscriptSegment {
-                start_ms,
-                end_ms: end_ms.max(start_ms + 1),
-                text: trimmed.to_string(),
-            });
+                let converted = if source_rate == WHISPER_SR {
+                    mono
+                } else {
+                    resample_linear(&mono, source_rate, WHISPER_SR)
+                };
+                pending_16k.extend_from_slice(&converted);
+                while pending_16k.len() >= max_window_samples {
+                    let tail = pending_16k.split_off(max_window_samples);
+                    let window = std::mem::replace(&mut pending_16k, tail);
+                    if let Err(error) = self.transcribe_window(
+                        &window,
+                        window_start,
+                        max_window_samples,
+                        &mut segments,
+                        &mut language_scores,
+                    ) {
+                        processing_error = Some(error);
+                        return false;
+                    }
+                    window_start = window_start.saturating_add(window.len());
+                }
+                true
+            },
+        )
+        .map_err(|error| format!("Audio decode failed: {error}"))?;
+        if let Some(error) = processing_error {
+            return Err(error);
         }
+        if !pending_16k.is_empty() {
+            self.transcribe_window(
+                &pending_16k,
+                window_start,
+                max_window_samples,
+                &mut segments,
+                &mut language_scores,
+            )?;
+        }
+        if segments.is_empty() && window_start == 0 && pending_16k.is_empty() {
+            return Err("Audio decode returned no samples.".to_string());
+        }
+        let mut detected_language = self.forced_language.clone();
         if detected_language.is_none() {
             detected_language = language_scores
                 .into_iter()
@@ -355,12 +315,78 @@ impl WhisperOnnxTranscriber {
             segments,
             full_text,
         };
-        super::transcript::write_srt(&srt_path, &transcript)
-            .map_err(|e| format!("SRT write failed: {e}"))?;
         Ok(TranscriptRunOutput {
-            srt_path,
+            transcript,
             detected_language,
         })
+    }
+
+    fn transcribe_window(
+        &mut self,
+        audio_16k: &[f32],
+        absolute_start: usize,
+        max_window_samples: usize,
+        output: &mut Vec<TranscriptSegment>,
+        language_scores: &mut HashMap<String, f32>,
+    ) -> Result<(), String> {
+        let whole = Segment {
+            start: 0,
+            end: audio_16k.len(),
+        };
+        let mut windows = if self.cfg.vad_enabled {
+            match self.vad.as_mut() {
+                Some(vad) => detect_speech_segments(
+                    vad,
+                    audio_16k,
+                    VadParams {
+                        threshold: self.cfg.vad_threshold.clamp(0.01, 0.99),
+                        min_speech_duration_ms: self.cfg.vad_min_speech_ms.clamp(10, 10_000),
+                        min_silence_duration_ms: self.cfg.vad_min_silence_ms.clamp(10, 10_000),
+                        speech_pad_ms: self.cfg.vad_speech_pad_ms.clamp(0, 5_000),
+                    },
+                    WHISPER_SR as usize,
+                )
+                .unwrap_or_else(|_| vec![whole]),
+                None => vec![whole],
+            }
+        } else {
+            vec![whole]
+        };
+        if windows.is_empty() {
+            windows.push(whole);
+        }
+        for segment in windows
+            .into_iter()
+            .flat_map(|segment| split_segment(segment, max_window_samples))
+        {
+            if segment.end <= segment.start {
+                continue;
+            }
+            let features =
+                log_mel_whisper_like(&self.preproc, &audio_16k[segment.start..segment.end])?;
+            let (text, language) = self.decode_segment(features)?;
+            if let Some(estimate) = language {
+                if estimate.confidence >= SEGMENT_LANG_MIN_CONFIDENCE {
+                    let duration = (segment.end - segment.start) as f32 / WHISPER_SR as f32;
+                    *language_scores.entry(estimate.code).or_insert(0.0) +=
+                        estimate.confidence.max(0.001) * duration.clamp(0.5, 8.0);
+                }
+            }
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let start = absolute_start.saturating_add(segment.start);
+            let end = absolute_start.saturating_add(segment.end);
+            let start_ms = (start as f64 * 1000.0 / WHISPER_SR as f64).round() as u64;
+            let end_ms = (end as f64 * 1000.0 / WHISPER_SR as f64).round() as u64;
+            output.push(TranscriptSegment {
+                start_ms,
+                end_ms: end_ms.max(start_ms.saturating_add(1)),
+                text: text.to_string(),
+            });
+        }
+        Ok(())
     }
 
     fn decode_segment(

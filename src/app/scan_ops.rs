@@ -75,6 +75,7 @@ impl WavesPreviewer {
         self.sample_rate_probe_cache.clear();
         self.bit_depth_override.clear();
         self.format_override.clear();
+        self.list_max_duration_secs = 0.0;
         self.reset_meta_pool();
     }
 
@@ -97,6 +98,7 @@ impl WavesPreviewer {
         self.selected = None;
         self.selected_multi.clear();
         self.select_anchor = None;
+        self.list_max_duration_secs = 0.0;
         self.reset_meta_pool();
     }
 
@@ -302,7 +304,13 @@ impl WavesPreviewer {
         }
 
         let start = Instant::now();
-        let budget = Duration::from_millis(3);
+        // Keep directory ingestion moving during playback, but do not let
+        // PathBuf allocation/hash-map growth consume an audio/UI frame.
+        let budget = if self.playback_is_playing_now() || self.playback_session.is_playing {
+            Duration::from_micros(350)
+        } else {
+            Duration::from_millis(3)
+        };
 
         loop {
             if start.elapsed() >= budget {

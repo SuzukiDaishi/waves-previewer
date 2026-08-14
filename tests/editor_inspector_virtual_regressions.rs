@@ -75,11 +75,23 @@ mod editor_inspector_virtual_regressions {
                 .and_then(|idx| harness.state().tabs.get(idx))
                 .map(|tab| tab.samples_len > 0 && !tab.loading)
                 .unwrap_or(false);
-            if ready && harness.state().test_audio_buffer_len() > 0 {
+            if ready && harness.state().test_active_editor_exact_audio_ready() {
                 break;
             }
             if start.elapsed() > Duration::from_secs(15) {
-                panic!("tab ready timeout");
+                let tab = harness
+                    .state()
+                    .active_tab
+                    .and_then(|idx| harness.state().tabs.get(idx));
+                panic!(
+                    "tab ready timeout: active_tab={:?} loading={:?} samples_len={:?} audio_len={} decode_progress={:?} decode_message={:?}",
+                    harness.state().active_tab,
+                    tab.map(|tab| tab.loading),
+                    tab.map(|tab| tab.samples_len),
+                    harness.state().test_audio_buffer_len(),
+                    harness.state().test_editor_decode_progress(),
+                    harness.state().test_editor_decode_message(),
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -105,7 +117,7 @@ mod editor_inspector_virtual_regressions {
             harness.run_steps(1);
             let active_ok = harness.state().test_active_tab_path().as_deref() == Some(path);
             let playing_ok = harness.state().test_playing_path().map(|p| p.as_path()) == Some(path);
-            if active_ok && playing_ok && harness.state().test_audio_buffer_len() > 0 {
+            if active_ok && playing_ok && harness.state().test_active_editor_exact_audio_ready() {
                 break;
             }
             if start.elapsed() > Duration::from_secs(12) {
@@ -301,7 +313,7 @@ mod editor_inspector_virtual_regressions {
         wait_for_tab_ready(&mut harness);
 
         let tab_len_before = harness.state().test_tab_samples_len();
-        let audio_len_before = harness.state().test_audio_buffer_len();
+        let audio_len_before = harness.state().test_audio_source_len();
         assert!(tab_len_before > 0);
         assert!(audio_len_before > 0);
 
@@ -310,7 +322,7 @@ mod editor_inspector_virtual_regressions {
         harness.run_steps(2);
 
         let tab_len_after = harness.state().test_tab_samples_len();
-        let audio_len_after = harness.state().test_audio_buffer_len();
+        let audio_len_after = harness.state().test_audio_source_len();
         assert!(harness.state().test_tab_dirty());
         assert!(tab_len_after < tab_len_before);
         assert!(audio_len_after < audio_len_before);

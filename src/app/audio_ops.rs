@@ -277,7 +277,7 @@ impl WavesPreviewer {
         false
     }
 
-    fn sync_after_audio_engine_replaced(&mut self) {
+    pub(super) fn sync_after_audio_engine_replaced(&mut self) {
         self.audio.stop();
         self.playing_path = None;
         self.list_play_pending = false;

@@ -10,7 +10,9 @@ impl crate::app::WavesPreviewer {
         let mut open = true;
         let mut select_path: Option<std::path::PathBuf> = None;
         let mut save_csv = false;
-        egui::Window::new("Duplicate Files")
+        let scroll_target = self.begin_floating_scroll_surface("duplicates_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Duplicate Files")
             .open(&mut open)
             .default_width(560.0)
             .default_height(440.0)
@@ -103,6 +105,10 @@ impl crate::app::WavesPreviewer {
                         }
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if let Some(path) = select_path {
             if let Some(row) = self.row_for_path(&path) {
                 self.select_and_load(row, true);

@@ -531,16 +531,16 @@ fn run_transcribe_path(
             Err(err) => {
                 return super::TranscriptAiItemResult {
                     path: run_path.clone(),
-                    srt_path: None,
+                    transcript: None,
                     detected_language: None,
                     error: Some(format!("Transcriber init failed: {err}")),
                 };
             }
         };
-        match transcriber.transcribe_to_srt(&run_path) {
+        match transcriber.transcribe_document(&run_path) {
             Ok(result) => super::TranscriptAiItemResult {
                 path: run_path.clone(),
-                srt_path: Some(result.srt_path),
+                transcript: Some(result.transcript),
                 detected_language: result.detected_language,
                 error: None,
             },
@@ -551,11 +551,11 @@ fn run_transcribe_path(
                     if let Ok(mut cpu_transcriber) =
                         load_transcriber_with_retry(model_dir, &cpu_cfg)
                     {
-                        match cpu_transcriber.transcribe_to_srt(&run_path) {
+                        match cpu_transcriber.transcribe_document(&run_path) {
                             Ok(result) => {
                                 return super::TranscriptAiItemResult {
                                     path: run_path.clone(),
-                                    srt_path: Some(result.srt_path),
+                                    transcript: Some(result.transcript),
                                     detected_language: result.detected_language,
                                     error: None,
                                 };
@@ -563,7 +563,7 @@ fn run_transcribe_path(
                             Err(cpu_err) => {
                                 return super::TranscriptAiItemResult {
                                     path: run_path.clone(),
-                                    srt_path: None,
+                                    transcript: None,
                                     detected_language: None,
                                     error: Some(format!(
                                         "{first_err}; CPU retry failed: {cpu_err}"
@@ -575,7 +575,7 @@ fn run_transcribe_path(
                 }
                 super::TranscriptAiItemResult {
                     path: run_path.clone(),
-                    srt_path: None,
+                    transcript: None,
                     detected_language: None,
                     error: Some(first_err),
                 }
@@ -585,7 +585,7 @@ fn run_transcribe_path(
         Ok(item) => item,
         Err(payload) => super::TranscriptAiItemResult {
             path,
-            srt_path: None,
+            transcript: None,
             detected_language: None,
             error: Some(format!(
                 "Transcript worker panic: {}",
@@ -794,8 +794,19 @@ impl super::WavesPreviewer {
             ));
             return;
         }
-        let targets = transcribable_paths(paths);
+        self.transcript_ai_source_aliases.clear();
+        let mut resolved_paths = Vec::with_capacity(paths.len());
+        for logical_path in paths {
+            let source_path = self
+                .resolved_audio_file_path(&logical_path)
+                .unwrap_or_else(|| logical_path.clone());
+            self.transcript_ai_source_aliases
+                .insert(source_path.clone(), logical_path);
+            resolved_paths.push(source_path);
+        }
+        let targets = transcribable_paths(resolved_paths);
         if targets.is_empty() {
+            self.transcript_ai_source_aliases.clear();
             self.transcript_ai_last_error =
                 Some("No transcribable audio files were selected.".to_string());
             return;
@@ -806,24 +817,32 @@ impl super::WavesPreviewer {
         let mut pre_done = 0usize;
         let mut had_preloaded_success = false;
         for path in targets {
+            let logical_path = self
+                .transcript_ai_source_aliases
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| path.clone());
+            let has_memory_document = self.transcript_for_path(&logical_path).is_some();
+            let adjacent_srt = super::transcript::srt_path_for_audio(&path);
             let should_skip_existing = !transcript_cfg.overwrite_existing_srt
-                && super::transcript::srt_path_for_audio(&path)
-                    .map(|p| p.is_file())
-                    .unwrap_or(false);
+                && (has_memory_document
+                    || adjacent_srt.as_ref().map(|p| p.is_file()).unwrap_or(false));
             if should_skip_existing {
-                if let Some(srt_path) = super::transcript::srt_path_for_audio(&path) {
-                    if let Some(t) = super::transcript::load_srt(&srt_path) {
-                        if self.set_transcript_for_path(&path, Some(t)) {
-                            if !self.transcript_ai_cfg.language.eq_ignore_ascii_case("auto") {
-                                self.set_transcript_language_for_path(
-                                    &path,
-                                    Some(self.transcript_ai_cfg.language.clone()),
-                                );
+                if !has_memory_document {
+                    if let Some(srt_path) = adjacent_srt {
+                        if let Some(t) = super::transcript::load_srt(&srt_path) {
+                            if self.set_transcript_for_path(&logical_path, Some(t)) {
+                                if !self.transcript_ai_cfg.language.eq_ignore_ascii_case("auto") {
+                                    self.set_transcript_language_for_path(
+                                        &logical_path,
+                                        Some(self.transcript_ai_cfg.language.clone()),
+                                    );
+                                }
+                                had_preloaded_success = true;
                             }
-                            had_preloaded_success = true;
+                        } else {
+                            self.queue_transcript_for_path(&logical_path, true);
                         }
-                    } else {
-                        self.queue_transcript_for_path(&path, true);
                     }
                 }
                 pre_done = pre_done.saturating_add(1);
@@ -835,6 +854,7 @@ impl super::WavesPreviewer {
             self.request_sort();
         }
         if processing_targets.is_empty() {
+            self.transcript_ai_source_aliases.clear();
             self.transcript_ai_last_error = None;
             return;
         }
@@ -876,7 +896,7 @@ impl super::WavesPreviewer {
                             let _ = tx.send(super::TranscriptAiRunResult::Item(
                                 super::TranscriptAiItemResult {
                                     path: path.clone(),
-                                    srt_path: None,
+                                    transcript: None,
                                     detected_language: None,
                                     error: Some(format!("Transcriber init failed: {init_err}")),
                                 },
@@ -892,7 +912,7 @@ impl super::WavesPreviewer {
                         let _ = tx.send(super::TranscriptAiRunResult::Item(
                             super::TranscriptAiItemResult {
                                 path,
-                                srt_path: None,
+                                transcript: None,
                                 detected_language: None,
                                 error: None,
                             },
@@ -901,7 +921,7 @@ impl super::WavesPreviewer {
                             let _ = tx.send(super::TranscriptAiRunResult::Item(
                                 super::TranscriptAiItemResult {
                                     path: skipped,
-                                    srt_path: None,
+                                    transcript: None,
                                     detected_language: None,
                                     error: None,
                                 },
@@ -911,7 +931,7 @@ impl super::WavesPreviewer {
                     }
                     let _ = tx.send(super::TranscriptAiRunResult::Started(path.clone()));
                     let first = match catch_unwind(AssertUnwindSafe(|| {
-                        transcriber.transcribe_to_srt(&path)
+                        transcriber.transcribe_document(&path)
                     })) {
                         Ok(v) => v,
                         Err(payload) => Err(format!(
@@ -922,7 +942,7 @@ impl super::WavesPreviewer {
                     let item = match first {
                         Ok(result) => super::TranscriptAiItemResult {
                             path,
-                            srt_path: Some(result.srt_path),
+                            transcript: Some(result.transcript),
                             detected_language: result.detected_language,
                             error: None,
                         },
@@ -934,7 +954,7 @@ impl super::WavesPreviewer {
                                     Ok(mut cpu_transcriber) => {
                                         let cpu_attempt =
                                             match catch_unwind(AssertUnwindSafe(|| {
-                                                cpu_transcriber.transcribe_to_srt(&path)
+                                                cpu_transcriber.transcribe_document(&path)
                                             })) {
                                                 Ok(v) => v,
                                                 Err(payload) => Err(format!(
@@ -945,13 +965,13 @@ impl super::WavesPreviewer {
                                         match cpu_attempt {
                                             Ok(result) => super::TranscriptAiItemResult {
                                                 path,
-                                                srt_path: Some(result.srt_path),
+                                                transcript: Some(result.transcript),
                                                 detected_language: result.detected_language,
                                                 error: None,
                                             },
                                             Err(cpu_err) => super::TranscriptAiItemResult {
                                                 path,
-                                                srt_path: None,
+                                                transcript: None,
                                                 detected_language: None,
                                                 error: Some(format!(
                                                     "{first_err}; CPU retry failed: {cpu_err}"
@@ -961,7 +981,7 @@ impl super::WavesPreviewer {
                                     }
                                     Err(cpu_init_err) => super::TranscriptAiItemResult {
                                         path,
-                                        srt_path: None,
+                                        transcript: None,
                                         detected_language: None,
                                         error: Some(format!(
                                             "{first_err}; CPU fallback init failed: {cpu_init_err}"
@@ -971,7 +991,7 @@ impl super::WavesPreviewer {
                             } else {
                                 super::TranscriptAiItemResult {
                                     path,
-                                    srt_path: None,
+                                    transcript: None,
                                     detected_language: None,
                                     error: Some(first_err),
                                 }
@@ -1004,7 +1024,7 @@ impl super::WavesPreviewer {
                         let item = if per_file_cancel.load(Ordering::Relaxed) {
                             super::TranscriptAiItemResult {
                                 path,
-                                srt_path: None,
+                                transcript: None,
                                 detected_language: None,
                                 error: None,
                             }
@@ -1019,7 +1039,7 @@ impl super::WavesPreviewer {
                                 Ok(v) => v,
                                 Err(payload) => super::TranscriptAiItemResult {
                                     path,
-                                    srt_path: None,
+                                    transcript: None,
                                     detected_language: None,
                                     error: Some(format!(
                                         "Transcript worker panic: {}",
@@ -1052,7 +1072,7 @@ impl super::WavesPreviewer {
                                 let _ = tx.send(super::TranscriptAiRunResult::Item(
                                     super::TranscriptAiItemResult {
                                         path: skipped,
-                                        srt_path: None,
+                                        transcript: None,
                                         detected_language: None,
                                         error: None,
                                     },
@@ -1140,13 +1160,23 @@ impl super::WavesPreviewer {
             if let Some(state) = self.transcript_ai_state.as_mut() {
                 state.pending.remove(&path);
             }
-            self.transcript_ai_inflight.insert(path);
+            let logical_path = self
+                .transcript_ai_source_aliases
+                .get(&path)
+                .cloned()
+                .unwrap_or(path);
+            self.transcript_ai_inflight.insert(logical_path);
         }
         let had_items = !items.is_empty();
         let mut had_success = false;
         for item in items {
             let detected_language = item.detected_language.clone();
-            self.transcript_ai_inflight.remove(&item.path);
+            let logical_path = self
+                .transcript_ai_source_aliases
+                .get(&item.path)
+                .cloned()
+                .unwrap_or_else(|| item.path.clone());
+            self.transcript_ai_inflight.remove(&logical_path);
             if let Some(state) = self.transcript_ai_state.as_mut() {
                 state.pending.remove(&item.path);
             }
@@ -1161,28 +1191,10 @@ impl super::WavesPreviewer {
                 ));
                 continue;
             }
-            if let Some(srt_path) = item.srt_path {
-                if srt_path.is_file() {
-                    if let Some(t) = super::transcript::load_srt(&srt_path) {
-                        if self.set_transcript_for_path(&item.path, Some(t)) {
-                            self.set_transcript_language_for_path(
-                                &item.path,
-                                detected_language.clone(),
-                            );
-                            had_success = true;
-                        }
-                    } else {
-                        self.transcript_ai_last_error = Some(format!(
-                            "Transcript file could not be parsed: {}",
-                            srt_path.display()
-                        ));
-                        self.queue_transcript_for_path(&item.path, true);
-                        had_success = true;
-                    }
-                } else {
-                    let msg = format!("transcript ai missing output: {}", srt_path.display());
-                    self.transcript_ai_last_error = Some(msg.clone());
-                    self.debug_log(msg);
+            if let Some(transcript) = item.transcript {
+                if self.set_transcript_for_path(&logical_path, Some(transcript)) {
+                    self.set_transcript_language_for_path(&logical_path, detected_language.clone());
+                    had_success = true;
                 }
             }
         }
@@ -1197,6 +1209,7 @@ impl super::WavesPreviewer {
                 self.transcript_ai_last_error = Some("Transcription canceled.".to_string());
             }
             self.transcript_ai_inflight.clear();
+            self.transcript_ai_source_aliases.clear();
             self.transcript_ai_state = None;
             if had_success && self.sort_key_uses_transcript() {
                 self.request_sort();

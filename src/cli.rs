@@ -439,6 +439,8 @@ pub struct SessionInspectArgs {
 pub enum ItemCommand {
     Inspect(ItemInspectArgs),
     Meta(ItemMetaArgs),
+    #[command(subcommand)]
+    Metadata(ItemMetadataCommand),
     Artwork(ItemArtworkArgs),
 }
 
@@ -452,6 +454,90 @@ pub struct ItemInspectArgs {
 pub struct ItemMetaArgs {
     #[arg(long, value_name = "AUDIO")]
     pub input: PathBuf,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ItemMetadataCommand {
+    Inspect(ItemMetadataInspectArgs),
+    Summary(ItemMetadataSummaryArgs),
+    #[command(subcommand)]
+    Payload(ItemMetadataPayloadCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct ItemMetadataInspectArgs {
+    #[arg(long, value_name = "AUDIO")]
+    pub input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemMetadataSummaryArgs {
+    #[arg(long, value_name = "AUDIO")]
+    pub input: PathBuf,
+    #[arg(long = "field", value_name = "KEY")]
+    pub fields: Vec<String>,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_raw: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ItemMetadataPayloadCommand {
+    Read(ItemMetadataPayloadReadArgs),
+    Search(ItemMetadataPayloadSearchArgs),
+    Hash(ItemMetadataPayloadHashArgs),
+    Extract(ItemMetadataPayloadExtractArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct ItemMetadataPayloadSelectorArgs {
+    #[arg(long, value_name = "AUDIO")]
+    pub input: PathBuf,
+    #[arg(long = "node-path", value_name = "PATH")]
+    pub node_path: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    pub occurrence: usize,
+    #[arg(long, value_name = "BYTE")]
+    pub offset: Option<u64>,
+    #[arg(long, value_name = "BYTES")]
+    pub length: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemMetadataPayloadReadArgs {
+    #[command(flatten)]
+    pub selector: ItemMetadataPayloadSelectorArgs,
+    #[arg(long = "format", default_value = "hex", value_name = "hex|base64|text")]
+    pub format: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemMetadataPayloadSearchArgs {
+    #[command(flatten)]
+    pub selector: ItemMetadataPayloadSelectorArgs,
+    #[arg(long, default_value = "ascii", value_name = "ascii|utf8|hex|fourcc")]
+    pub kind: String,
+    #[arg(long)]
+    pub query: String,
+    #[arg(long, default_value_t = 10_000)]
+    pub limit: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemMetadataPayloadHashArgs {
+    #[command(flatten)]
+    pub selector: ItemMetadataPayloadSelectorArgs,
+    #[arg(long, default_value = "sha256", value_name = "md5|sha256")]
+    pub algorithm: String,
+}
+
+#[derive(Debug, Args)]
+pub struct ItemMetadataPayloadExtractArgs {
+    #[command(flatten)]
+    pub selector: ItemMetadataPayloadSelectorArgs,
+    #[arg(long, value_name = "FILE")]
+    pub output: PathBuf,
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1081,6 +1167,79 @@ pub enum PluginSessionCommand {
     Preview(PluginSessionPreviewArgs),
     Apply(PluginSessionApplyArgs),
     Clear(PluginSessionClearArgs),
+    #[command(subcommand)]
+    Chain(PluginSessionChainCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginSessionChainCommand {
+    List(PluginSessionChainListArgs),
+    Add(PluginSessionChainAddArgs),
+    Remove(PluginSessionChainRemoveArgs),
+    Move(PluginSessionChainMoveArgs),
+    Set(PluginSessionChainSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainListArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainAddArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "plugin")]
+    pub plugin: String,
+    #[arg(long)]
+    pub index: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainRemoveArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "slot-id")]
+    pub slot_id: u64,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainMoveArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "slot-id")]
+    pub slot_id: u64,
+    #[arg(long)]
+    pub index: usize,
+}
+
+#[derive(Debug, Args)]
+pub struct PluginSessionChainSetArgs {
+    #[arg(long, value_name = "SESSION")]
+    pub session: PathBuf,
+    #[arg(long, value_name = "AUDIO")]
+    pub path: Option<PathBuf>,
+    #[arg(long = "slot-id")]
+    pub slot_id: u64,
+    #[arg(long = "plugin")]
+    pub plugin: Option<String>,
+    #[arg(long)]
+    pub enabled: Option<CliToggle>,
+    #[arg(long)]
+    pub bypass: Option<CliToggle>,
+    #[arg(long = "param")]
+    pub params: Vec<String>,
+    #[arg(long = "state-blob-b64")]
+    pub state_blob_b64: Option<String>,
 }
 
 #[derive(Debug, Args)]

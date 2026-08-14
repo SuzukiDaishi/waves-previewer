@@ -9,7 +9,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use neowaves::kittest::harness_default;
+use neowaves::kittest::{harness_default, harness_with_startup};
+use neowaves::StartupConfig;
 
 fn rss_mb() -> f64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -40,6 +41,62 @@ fn generate_seed_flac() {
         .map(|i| (i as f32 / sr as f32 * 440.0 * std::f32::consts::TAU).sin() * 0.25)
         .collect();
     neowaves::wave::export_channels_audio(&[mono], sr, &dir.join("seed.flac")).unwrap();
+}
+
+/// Environment-independent 500k-row UI benchmark. This isolates List storage,
+/// virtualization, sorting, selection, and frame cost from filesystem speed.
+#[test]
+#[ignore]
+fn bench_virtualized_500k_rows() {
+    let cfg = StartupConfig {
+        dummy_list_count: Some(500_000),
+        ..StartupConfig::default()
+    };
+    let startup = Instant::now();
+    let mut harness = harness_with_startup(cfg);
+    let startup_ms = startup.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(harness.state().test_files_len(), 500_000);
+
+    let mut total = 0.0f64;
+    let mut worst = 0.0f64;
+    const STEADY_FRAMES: usize = 120;
+    for _ in 0..STEADY_FRAMES {
+        let t0 = Instant::now();
+        harness.step();
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        total += ms;
+        worst = worst.max(ms);
+    }
+
+    let sort_started = Instant::now();
+    harness.state_mut().test_request_sort_file_asc();
+    let sort_click_ms = sort_started.elapsed().as_secs_f64() * 1000.0;
+    let mut sort_worst = 0.0f64;
+    let mut sort_frames = 0usize;
+    while harness.state().test_sort_job_active() {
+        let t0 = Instant::now();
+        harness.step();
+        sort_worst = sort_worst.max(t0.elapsed().as_secs_f64() * 1000.0);
+        sort_frames += 1;
+        assert!(sort_frames < 100_000, "500k-row sort never settled");
+    }
+
+    let last = harness.state().test_files_len() - 1;
+    assert!(harness.state_mut().test_select_row_with_autoscroll(last));
+    harness.step();
+    harness.step();
+    let scroll = harness.state().test_list_scroll_row();
+    assert!(
+        scroll <= last && last < scroll + 200,
+        "last row must be in the virtualized viewport: scroll={scroll}"
+    );
+
+    eprintln!(
+        "[bench] virtual 500k: populate={startup_ms:.1}ms steady_avg={:.2}ms steady_worst={worst:.2}ms sort_click={sort_click_ms:.2}ms sort_settle={:.1}ms sort_worst={sort_worst:.2}ms rss={:.0}MB",
+        total / STEADY_FRAMES as f64,
+        sort_started.elapsed().as_secs_f64() * 1000.0,
+        rss_mb()
+    );
 }
 
 #[test]
@@ -188,5 +245,50 @@ fn bench_load_large_folder() {
         "scroll back to top failed: {}",
         harness.state().test_list_scroll_row()
     );
+
+    // Phase 6: editor playback while the 500k-row List still has pending work.
+    // The application must protect the audio path by pausing List metadata
+    // workers and sharply reducing UI-thread scan/sort/drain budgets.
+    let source = harness
+        .state()
+        .test_row_path(0)
+        .expect("large-list fixture must expose a first row");
+    assert!(harness.state_mut().test_open_tab_for_path(&source));
+    let decode_started = Instant::now();
+    while !harness.state().test_active_editor_exact_audio_ready() {
+        harness.step();
+        if decode_started.elapsed() > Duration::from_secs(30) {
+            panic!("editor audio did not become ready for {source:?}");
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    harness.state_mut().test_request_workspace_play_toggle();
+    harness.step();
+    assert!(
+        harness.state().test_audio_is_playing(),
+        "editor playback must start before the contention measurement"
+    );
+    harness.state_mut().test_request_sort_sample_rate_asc();
+    let mut playback_total = 0.0f64;
+    let mut playback_worst = 0.0f64;
+    const PLAYBACK_FRAMES: usize = 240;
+    for _ in 0..PLAYBACK_FRAMES {
+        let t0 = Instant::now();
+        harness.step();
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        playback_total += ms;
+        playback_worst = playback_worst.max(ms);
+        assert!(
+            harness.state().test_audio_is_playing(),
+            "background List work must not stop editor playback"
+        );
+    }
+    eprintln!(
+        "[bench] editor playback + pending List work: avg={:.2}ms worst={:.2}ms rss={:.0}MB",
+        playback_total / PLAYBACK_FRAMES as f64,
+        playback_worst,
+        rss_mb()
+    );
+    harness.state_mut().test_request_workspace_play_toggle();
     eprintln!("[bench] final rss={:.0}MB", rss_mb());
 }

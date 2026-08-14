@@ -1,6 +1,7 @@
 pub(super) mod ai_review;
 pub(super) mod ai_settings;
 pub(super) mod assistant;
+pub(super) mod channel_routing;
 pub(super) mod debug;
 pub(super) mod dsp_widgets;
 pub(super) mod duplicates;
@@ -12,6 +13,8 @@ pub(super) mod harmonics;
 pub(super) mod inspection;
 pub(super) mod keymap_settings;
 pub(super) mod list;
+pub(super) mod list_columns;
+pub(super) mod metadata_inspector;
 pub(super) mod plugin_manager;
 pub(super) mod recording;
 pub(super) mod regions;

@@ -20,6 +20,7 @@ use super::project::{
     project_spec_sub_view_string, project_tool_state_to_tool_state, serialize_project, ProjectApp,
     ProjectChannelView, ProjectExportPolicy, ProjectFile, ProjectList, ProjectListColumns,
     ProjectListItem, ProjectMarker, ProjectPluginFxDraft, ProjectTab, ProjectToolState,
+    SessionPathMode,
 };
 use super::render::spectrogram;
 use super::types::{
@@ -57,13 +58,18 @@ use crate::cli::{
     ExternalRenderArgs, ExternalRowsArgs, ExternalSourceAddArgs, ExternalSourceClearArgs,
     ExternalSourceCommand, ExternalSourceListArgs, ExternalSourceReloadArgs,
     ExternalSourceRemoveArgs, ItemArtworkArgs, ItemCommand, ItemInspectArgs, ItemMetaArgs,
+    ItemMetadataCommand, ItemMetadataInspectArgs, ItemMetadataPayloadCommand,
+    ItemMetadataPayloadExtractArgs, ItemMetadataPayloadHashArgs, ItemMetadataPayloadReadArgs,
+    ItemMetadataPayloadSearchArgs, ItemMetadataPayloadSelectorArgs, ItemMetadataSummaryArgs,
     ListColumnsArgs, ListCommand, ListQueryArgs, ListRenderArgs, ListSaveQueryArgs, ListSearchArgs,
     ListSelectArgs, ListSortArgs, ListSourceArgs, MusicAiAnalyzeArgs, MusicAiApplyMarkersArgs,
     MusicAiCommand, MusicAiExportStemsArgs, MusicAiInspectArgs, MusicAiModelCommand,
     MusicAiModelDownloadArgs, MusicAiModelStatusArgs, MusicAiModelUninstallArgs, PluginCommand,
     PluginListArgs, PluginProbeArgs, PluginScanArgs, PluginSearchPathAddArgs,
     PluginSearchPathCommand, PluginSearchPathListArgs, PluginSearchPathRemoveArgs,
-    PluginSearchPathResetArgs, PluginSessionApplyArgs, PluginSessionClearArgs,
+    PluginSearchPathResetArgs, PluginSessionApplyArgs, PluginSessionChainAddArgs,
+    PluginSessionChainCommand, PluginSessionChainListArgs, PluginSessionChainMoveArgs,
+    PluginSessionChainRemoveArgs, PluginSessionChainSetArgs, PluginSessionClearArgs,
     PluginSessionCommand, PluginSessionInspectArgs, PluginSessionPreviewArgs, PluginSessionSetArgs,
     RenderCommand, RenderEditorArgs, RenderListArgs, RenderSpectrumArgs, RenderWaveformArgs,
     SessionCommand, SessionInspectArgs, SessionNewArgs, TranscriptBatchCommand,
@@ -107,6 +113,7 @@ struct CliCommandOutput {
 struct LoadedSession {
     path: PathBuf,
     base_dir: PathBuf,
+    path_mode: SessionPathMode,
     project: ProjectFile,
 }
 
@@ -248,6 +255,24 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         CliCommand::Session(SessionCommand::Inspect(_)) => "session.inspect",
         CliCommand::Item(ItemCommand::Inspect(_)) => "item.inspect",
         CliCommand::Item(ItemCommand::Meta(_)) => "item.meta",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Inspect(_))) => {
+            "item.metadata.inspect"
+        }
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Summary(_))) => {
+            "item.metadata.summary"
+        }
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Read(_),
+        ))) => "item.metadata.payload.read",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Search(_),
+        ))) => "item.metadata.payload.search",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Hash(_),
+        ))) => "item.metadata.payload.hash",
+        CliCommand::Item(ItemCommand::Metadata(ItemMetadataCommand::Payload(
+            ItemMetadataPayloadCommand::Extract(_),
+        ))) => "item.metadata.payload.extract",
         CliCommand::Item(ItemCommand::Artwork(_)) => "item.artwork",
         CliCommand::List(ListCommand::Columns(_)) => "list.columns",
         CliCommand::List(ListCommand::Query(_)) => "list.query",
@@ -413,6 +438,15 @@ fn cli_command_name(command: &CliCommand) -> &'static str {
         CliCommand::Plugin(PluginCommand::Session(PluginSessionCommand::Clear(_))) => {
             "plugin.session.clear"
         }
+        CliCommand::Plugin(PluginCommand::Session(PluginSessionCommand::Chain(command))) => {
+            match command {
+                PluginSessionChainCommand::List(_) => "plugin.session.chain.list",
+                PluginSessionChainCommand::Add(_) => "plugin.session.chain.add",
+                PluginSessionChainCommand::Remove(_) => "plugin.session.chain.remove",
+                PluginSessionChainCommand::Move(_) => "plugin.session.chain.move",
+                PluginSessionChainCommand::Set(_) => "plugin.session.chain.set",
+            }
+        }
         CliCommand::Render(RenderCommand::Waveform(_)) => "render.waveform",
         CliCommand::Render(RenderCommand::Spectrum(_)) => "render.spectrum",
         CliCommand::Render(RenderCommand::Editor(_)) => "render.editor",
@@ -480,7 +514,27 @@ fn dispatch_item(command: ItemCommand) -> Result<CliCommandOutput> {
     match command {
         ItemCommand::Inspect(args) => item_inspect(args),
         ItemCommand::Meta(args) => item_meta(args),
+        ItemCommand::Metadata(command) => dispatch_item_metadata(command),
         ItemCommand::Artwork(args) => item_artwork(args),
+    }
+}
+
+fn dispatch_item_metadata(command: ItemMetadataCommand) -> Result<CliCommandOutput> {
+    match command {
+        ItemMetadataCommand::Inspect(args) => item_metadata_inspect(args),
+        ItemMetadataCommand::Summary(args) => item_metadata_summary(args),
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Read(args)) => {
+            item_metadata_payload_read(args)
+        }
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Search(args)) => {
+            item_metadata_payload_search(args)
+        }
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Hash(args)) => {
+            item_metadata_payload_hash(args)
+        }
+        ItemMetadataCommand::Payload(ItemMetadataPayloadCommand::Extract(args)) => {
+            item_metadata_payload_extract(args)
+        }
     }
 }
 
@@ -1141,6 +1195,13 @@ fn dispatch_plugin(command: PluginCommand) -> Result<CliCommandOutput> {
         PluginCommand::Session(PluginSessionCommand::Preview(args)) => plugin_session_preview(args),
         PluginCommand::Session(PluginSessionCommand::Apply(args)) => plugin_session_apply(args),
         PluginCommand::Session(PluginSessionCommand::Clear(args)) => plugin_session_clear(args),
+        PluginCommand::Session(PluginSessionCommand::Chain(command)) => match command {
+            PluginSessionChainCommand::List(args) => plugin_session_chain_list(args),
+            PluginSessionChainCommand::Add(args) => plugin_session_chain_add(args),
+            PluginSessionChainCommand::Remove(args) => plugin_session_chain_remove(args),
+            PluginSessionChainCommand::Move(args) => plugin_session_chain_move(args),
+            PluginSessionChainCommand::Set(args) => plugin_session_chain_set(args),
+        },
     }
 }
 
@@ -1227,6 +1288,8 @@ fn session_inspect(args: SessionInspectArgs) -> Result<CliCommandOutput> {
         result: json!({
             "session_path": absolute_string(&session.path)?,
             "project_version": session.project.version,
+            "path_mode": session.path_mode.as_str(),
+            "path_root": pathbuf_to_string(&session.base_dir),
             "file_count": entries.len(),
             "files": entries.iter().map(|entry| pathbuf_to_string(&entry.path)).collect::<Vec<_>>(),
             "tab_count": session.project.tabs.len(),
@@ -1269,6 +1332,274 @@ fn item_meta(args: ItemMetaArgs) -> Result<CliCommandOutput> {
             "meta": audio_info_json(&info),
         }),
         warnings: Vec::new(),
+    })
+}
+
+fn item_metadata_inspect(args: ItemMetadataInspectArgs) -> Result<CliCommandOutput> {
+    let path = absolute_existing_path(&args.input)?;
+    let document =
+        crate::metadata::inspect_path(&path, crate::metadata::InspectOptions::default())?;
+    let warnings = document
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level != crate::metadata::DiagnosticLevel::Info)
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    Ok(CliCommandOutput {
+        result: metadata_document_json(&document),
+        warnings,
+    })
+}
+
+fn item_metadata_summary(args: ItemMetadataSummaryArgs) -> Result<CliCommandOutput> {
+    let path = absolute_existing_path(&args.input)?;
+    let summary = crate::metadata::summarize_path(
+        &path,
+        crate::metadata::SummaryRequest {
+            fields: args.fields,
+            include_raw: args.include_raw,
+        },
+        crate::metadata::ScanBudget::selected(),
+        None,
+    )?;
+    let warnings = summary
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level != crate::metadata::DiagnosticLevel::Info)
+        .map(|diagnostic| diagnostic.message.clone())
+        .collect();
+    Ok(CliCommandOutput {
+        result: metadata_summary_json(&summary),
+        warnings,
+    })
+}
+
+fn resolve_metadata_payload(
+    selector: &ItemMetadataPayloadSelectorArgs,
+) -> Result<(PathBuf, crate::metadata::PayloadRef)> {
+    let path = absolute_existing_path(&selector.input)?;
+    let document = crate::metadata::inspect_path(
+        &path,
+        crate::metadata::InspectOptions {
+            decode_xml: false,
+            decode_values: false,
+            ..Default::default()
+        },
+    )?;
+    let payload = crate::metadata::payload_for_selector(
+        &document,
+        selector.node_path.as_deref(),
+        selector.occurrence,
+        selector.offset,
+        selector.length,
+    )?;
+    Ok((path, payload))
+}
+
+fn item_metadata_payload_read(args: ItemMetadataPayloadReadArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let bytes = crate::metadata::read_payload(&path, payload, crate::metadata::PAYLOAD_COPY_LIMIT)?;
+    let encoding = args.format.trim().to_ascii_lowercase();
+    let data = match encoding.as_str() {
+        "hex" => bytes
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        "base64" => base64::engine::general_purpose::STANDARD.encode(&bytes),
+        "text" | "utf8" => String::from_utf8_lossy(&bytes).to_string(),
+        _ => bail!("payload read format must be hex, base64, or text"),
+    };
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "offset": payload.file_offset.to_string(),
+            "offset_hex": format!("0x{:X}", payload.file_offset),
+            "length": payload.length.to_string(),
+            "length_hex": format!("0x{:X}", payload.length),
+            "format": encoding,
+            "data": data,
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn item_metadata_payload_search(args: ItemMetadataPayloadSearchArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let kind = match args.kind.trim().to_ascii_lowercase().as_str() {
+        "ascii" => crate::metadata::SearchKind::Ascii,
+        "utf8" | "utf-8" => crate::metadata::SearchKind::Utf8,
+        "hex" => crate::metadata::SearchKind::Hex,
+        "fourcc" => crate::metadata::SearchKind::FourCc,
+        _ => bail!("payload search kind must be ascii, utf8, hex, or fourcc"),
+    };
+    let pattern = crate::metadata::parse_search_pattern(kind, &args.query)?;
+    let limit = args
+        .limit
+        .clamp(1, crate::metadata::PAYLOAD_SEARCH_RESULT_LIMIT);
+    let hits = crate::metadata::search_payload(&path, payload, &pattern, limit, None)?;
+    let truncated = hits.len() >= limit;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "payload_offset": payload.file_offset.to_string(),
+            "payload_length": payload.length.to_string(),
+            "kind": args.kind,
+            "query": args.query,
+            "matches": hits.iter().map(|offset| json!({
+                "offset": offset.to_string(),
+                "offset_hex": format!("0x{offset:X}"),
+            })).collect::<Vec<_>>(),
+            "truncated": truncated,
+        }),
+        warnings: if truncated {
+            vec![format!("search results reached the limit of {limit}")]
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn item_metadata_payload_hash(args: ItemMetadataPayloadHashArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let algorithm = match args.algorithm.trim().to_ascii_lowercase().as_str() {
+        "md5" => crate::metadata::HashAlgorithm::Md5,
+        "sha256" | "sha-256" => crate::metadata::HashAlgorithm::Sha256,
+        _ => bail!("payload hash algorithm must be md5 or sha256"),
+    };
+    let digest = crate::metadata::hash_payload(&path, payload, algorithm, None)?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "offset": payload.file_offset.to_string(),
+            "length": payload.length.to_string(),
+            "algorithm": match algorithm {
+                crate::metadata::HashAlgorithm::Md5 => "md5",
+                crate::metadata::HashAlgorithm::Sha256 => "sha256",
+            },
+            "digest": digest,
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn item_metadata_payload_extract(args: ItemMetadataPayloadExtractArgs) -> Result<CliCommandOutput> {
+    let (path, payload) = resolve_metadata_payload(&args.selector)?;
+    let output = absolute_output_path(&args.output)?;
+    crate::metadata::extract_payload(&path, payload, &output, args.overwrite, None)?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&path),
+            "offset": payload.file_offset.to_string(),
+            "length": payload.length.to_string(),
+            "output": pathbuf_to_string(&output),
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn metadata_document_json(document: &crate::metadata::MetadataDocument) -> Value {
+    json!({
+        "schema_version": document.schema_version,
+        "path": pathbuf_to_string(&document.source),
+        "container": document.container.key(),
+        "file_length": document.file_len.to_string(),
+        "file_length_hex": format!("0x{:X}", document.file_len),
+        "completion": format!("{:?}", document.completion).to_ascii_lowercase(),
+        "roots": document.roots,
+        "nodes": document.nodes.iter().map(|node| json!({
+            "id": node.id,
+            "parent": node.parent,
+            "children": node.children,
+            "name": node.name,
+            "path": node.path,
+            "offset": node.offset.to_string(),
+            "offset_hex": format!("0x{:X}", node.offset),
+            "header_size": node.header_size.to_string(),
+            "declared_size": node.declared_size.to_string(),
+            "readable_size": node.readable_size.to_string(),
+            "payload": {
+                "offset": node.payload.file_offset.to_string(),
+                "offset_hex": format!("0x{:X}", node.payload.file_offset),
+                "length": node.payload.length.to_string(),
+                "length_hex": format!("0x{:X}", node.payload.length),
+            },
+            "content": format!("{:?}", node.content).to_ascii_lowercase(),
+            "known": node.known,
+            "status": format!("{:?}", node.status).to_ascii_lowercase(),
+            "summary": node.summary,
+        })).collect::<Vec<_>>(),
+        "normalized": document.normalized.iter().map(metadata_normalized_json).collect::<Vec<_>>(),
+        "diagnostics": document.diagnostics.iter().map(metadata_diagnostic_json).collect::<Vec<_>>(),
+        "audio_mapping": document.audio_mapping.as_ref().map(|mapping| json!({
+            "node_id": mapping.node_id,
+            "data_offset": mapping.data_offset.to_string(),
+            "data_offset_hex": format!("0x{:X}", mapping.data_offset),
+            "data_length": mapping.data_length.to_string(),
+            "sample_rate": mapping.sample_rate,
+            "channels": mapping.channels,
+            "block_align": mapping.block_align,
+            "container_bits": mapping.container_bits,
+            "valid_bits": mapping.valid_bits,
+            "format_tag": mapping.format_tag,
+            "format_subtype": mapping.format_subtype,
+            "format_name": mapping.format_name,
+            "frame_count": mapping.frame_count().to_string(),
+        })),
+    })
+}
+
+fn metadata_summary_json(summary: &crate::metadata::MetadataSummary) -> Value {
+    json!({
+        "schema_version": summary.schema_version,
+        "path": pathbuf_to_string(&summary.source),
+        "container": summary.container.key(),
+        "completion": format!("{:?}", summary.completion).to_ascii_lowercase(),
+        "fields": summary.fields.iter().map(|field| json!({
+            "key": field.key,
+            "values": field.values.iter().map(metadata_sourced_value_json).collect::<Vec<_>>(),
+            "resolved": field.resolved,
+            "conflict": field.conflict,
+        })).collect::<Vec<_>>(),
+        "raw_fields": summary.raw_fields,
+        "unknown_nodes": summary.unknown_nodes,
+        "coverage": summary.coverage,
+        "diagnostics": summary.diagnostics.iter().map(metadata_diagnostic_json).collect::<Vec<_>>(),
+    })
+}
+
+fn metadata_normalized_json(field: &crate::metadata::NormalizedField) -> Value {
+    json!({
+        "key": field.key,
+        "values": field.values.iter().map(metadata_sourced_value_json).collect::<Vec<_>>(),
+        "resolved_index": field.resolved_index,
+        "conflict": field.conflict,
+    })
+}
+
+fn metadata_sourced_value_json(value: &crate::metadata::SourcedValue) -> Value {
+    json!({
+        "value": value.value,
+        "source_path": value.source_path,
+        "source_node": value.source_node,
+        "source_range": {
+            "offset": value.source_range.offset.to_string(),
+            "offset_hex": format!("0x{:X}", value.source_range.offset),
+            "length": value.source_range.length.to_string(),
+        },
+        "encoding": value.encoding,
+        "guessed_encoding": value.guessed_encoding,
+    })
+}
+
+fn metadata_diagnostic_json(value: &crate::metadata::MetadataDiagnostic) -> Value {
+    json!({
+        "level": format!("{:?}", value.level).to_ascii_lowercase(),
+        "code": value.code,
+        "message": value.message,
+        "offset": value.offset.map(|offset| offset.to_string()),
+        "offset_hex": value.offset.map(|offset| format!("0x{offset:X}")),
+        "node": value.node,
     })
 }
 
@@ -1378,6 +1709,46 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
             enabled_by_default: true,
         },
         ColumnDescriptor {
+            key: "dbtp",
+            description: "True peak dBTP",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "lufs_s",
+            description: "Max short-term LUFS",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "lufs_m",
+            description: "Max momentary LUFS",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "silence_lead",
+            description: "Leading silence in ms (-60 dBFS)",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "silence_tail",
+            description: "Trailing silence in ms (-60 dBFS)",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "edge_zero",
+            description: "NG when the first or last sample is not near zero",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "over_peak",
+            description: "NG when the sample peak exceeds 0 dBFS",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
+            key: "blank_pad",
+            description: "NG when leading or trailing blank exceeds the configured limits",
+            enabled_by_default: false,
+        },
+        ColumnDescriptor {
             key: "bpm",
             description: "BPM",
             enabled_by_default: false,
@@ -1407,6 +1778,10 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
         result: json!({
             "columns": columns,
             "default": DEFAULT_LIST_COLUMNS.split(',').collect::<Vec<_>>(),
+            "dynamic_column_syntax": {
+                "normalized": "normalized:<normalized-field-key>",
+                "raw": "raw:<format>:<percent-escaped-logical-path>",
+            },
         }),
         warnings: Vec::new(),
     })
@@ -1418,6 +1793,7 @@ fn list_query(args: ListQueryArgs) -> Result<CliCommandOutput> {
     let source = load_list_source(&args.source)?;
     let mut warnings = Vec::new();
     let mut rows = list_rows_from_source(&source, args.include_overlays, &mut warnings)?;
+    populate_list_metadata_columns(&mut rows, &columns, &mut warnings);
     apply_list_query_filter_sort(
         &mut rows,
         filter.query.as_deref(),
@@ -1509,7 +1885,11 @@ fn list_select(args: ListSelectArgs) -> Result<CliCommandOutput> {
                 .context("selected row missing path")?,
         )
     };
-    session.project.app.selected_path = Some(project::rel_path(&selected, &session.base_dir));
+    session.project.app.selected_path = Some(project::session_path(
+        &selected,
+        &session.base_dir,
+        session.path_mode,
+    ));
     save_session(&session)?;
     Ok(CliCommandOutput {
         result: json!({
@@ -3088,8 +3468,18 @@ fn load_session(path: &Path) -> Result<LoadedSession> {
     let path = absolute_existing_path(path)?;
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("read session file: {}", path.display()))?;
-    let project = deserialize_project(&text)
+    let mut project = deserialize_project(&text)
         .with_context(|| format!("parse session file: {}", path.display()))?;
+    let path_mode = SessionPathMode::from_project(&project);
+    let repaired = project::repair_project_source_paths(&mut project, &path);
+    if repaired.relocated_references > 0 {
+        write_project_file(&path, &project).with_context(|| {
+            format!(
+                "update {} repaired session path reference(s)",
+                repaired.relocated_references
+            )
+        })?;
+    }
     let base_dir = path
         .parent()
         .map(Path::to_path_buf)
@@ -3097,6 +3487,7 @@ fn load_session(path: &Path) -> Result<LoadedSession> {
     Ok(LoadedSession {
         path,
         base_dir,
+        path_mode,
         project,
     })
 }
@@ -3161,8 +3552,11 @@ fn session_entries_from_sources(
 fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<ProjectFile> {
     let cols = parse_list_column_config(DEFAULT_LIST_COLUMNS)?;
     Ok(ProjectFile {
-        version: 1,
+        version: 2,
+        assets: Vec::new(),
+        transcripts: Vec::new(),
         name: None,
+        path_mode: Some(SessionPathMode::Absolute.as_str().to_string()),
         base_dir: None,
         list: ProjectList {
             root: None,
@@ -3198,7 +3592,7 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
                 conflict: "rename".to_string(),
                 backup_bak: true,
                 export_srt: false,
-                name_template: "{name} (gain{gain:+.1}dB)".to_string(),
+                name_template: "{name}{gain_suffix}".to_string(),
                 dest_folder: None,
             }),
             external_state: None,
@@ -3280,13 +3674,18 @@ fn resolve_session_target_path(
     bail!("session does not contain any target audio")
 }
 
-fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<ProjectTab> {
+fn default_project_tab_for_path(
+    path: &Path,
+    session_base: &Path,
+    path_mode: SessionPathMode,
+) -> Result<ProjectTab> {
     let info = read_audio_info(path)?;
     Ok(ProjectTab {
-        path: project::rel_path(path, session_base),
+        path: project::session_path(path, session_base, path_mode),
         primary_view: Some("wave".to_string()),
         spec_sub_view: Some("spec".to_string()),
         other_sub_view: Some("tempogram".to_string()),
+        metadata_sub_view: Some("structure".to_string()),
         view_mode: "Waveform".to_string(),
         show_waveform_overlay: false,
         channel_view: ProjectChannelView {
@@ -3354,6 +3753,7 @@ fn default_project_tab_for_path(path: &Path, session_base: &Path) -> Result<Proj
         buffer_sample_rate: Some(info.sample_rate.max(1)),
         edited_audio: None,
         plugin_fx_draft: ProjectPluginFxDraft::default(),
+        plugin_fx_chain: super::project::ProjectPluginFxChainDraft::default(),
         music_analysis: None,
     })
 }
@@ -3363,7 +3763,7 @@ fn ensure_project_tab_for_path(session: &mut LoadedSession, target: &Path) -> Re
         session.project.active_tab = Some(idx);
         return Ok(idx);
     }
-    let tab = default_project_tab_for_path(target, &session.base_dir)?;
+    let tab = default_project_tab_for_path(target, &session.base_dir, session.path_mode)?;
     session.project.tabs.push(tab);
     let idx = session.project.tabs.len().saturating_sub(1);
     session.project.active_tab = Some(idx);
@@ -3490,12 +3890,14 @@ fn project_for_list_render(
             let entries = slice_entries(session_list_entries(&session), offset, limit);
             session.project.list.files = entries
                 .iter()
-                .map(|entry| project::rel_path(&entry.path, &session.base_dir))
+                .map(|entry| {
+                    project::session_path(&entry.path, &session.base_dir, session.path_mode)
+                })
                 .collect();
             session.project.list.items = entries
                 .iter()
                 .map(|entry| ProjectListItem {
-                    path: project::rel_path(&entry.path, &session.base_dir),
+                    path: project::session_path(&entry.path, &session.base_dir, session.path_mode),
                     pending_gain_db: entry.pending_gain_db,
                 })
                 .collect();
@@ -3542,6 +3944,7 @@ fn resolve_editor_state(source: &EditorSourceArgs) -> Result<EditorTargetState> 
         EditorPrimaryView::Wave => ViewMode::Waveform,
         EditorPrimaryView::Spec => spec.to_mode(),
         EditorPrimaryView::Other => other.to_mode(),
+        EditorPrimaryView::Metadata => ViewMode::Waveform,
     };
     let markers = if tab.markers.is_empty() {
         markers_from_file
@@ -3730,15 +4133,15 @@ fn apply_list_query_filter_sort(
     if let Some(query) = query.map(str::trim).filter(|q| !q.is_empty()) {
         let query = query.to_ascii_lowercase();
         rows.retain(|row| {
-            row.get("file")
-                .and_then(Value::as_str)
-                .map(|value| value.to_ascii_lowercase().contains(&query))
-                .unwrap_or(false)
-                || row
-                    .get("folder")
-                    .and_then(Value::as_str)
+            row.values().any(|value| {
+                value
+                    .as_str()
                     .map(|value| value.to_ascii_lowercase().contains(&query))
-                    .unwrap_or(false)
+                    .unwrap_or_else(|| {
+                        matches!(value, Value::Number(_) | Value::Bool(_))
+                            && value.to_string().to_ascii_lowercase().contains(&query)
+                    })
+            })
         });
     }
     if let Some(sort_key) = sort_key {
@@ -3861,7 +4264,7 @@ fn set_pending_gain_for_session_path(session: &mut LoadedSession, path: &Path, g
         }
     }
     session.project.list.items.push(ProjectListItem {
-        path: project::rel_path(path, &session.base_dir),
+        path: project::session_path(path, &session.base_dir, session.path_mode),
         pending_gain_db: gain_db,
     });
 }
@@ -4587,40 +4990,109 @@ fn opt_f32_csv(value: Option<f32>) -> String {
 }
 
 fn parse_list_column_keys(raw: &str) -> Result<Vec<String>> {
-    let cfg = parse_list_column_config(raw)?;
     let mut out = Vec::new();
-    for (key, enabled) in [
-        ("edited", cfg.edited),
-        ("cover_art", cfg.cover_art),
-        ("type_badge", cfg.type_badge),
-        ("file", cfg.file),
-        ("folder", cfg.folder),
-        ("transcript", cfg.transcript),
-        ("transcript_language", cfg.transcript_language),
-        ("external", cfg.external),
-        ("length", cfg.length),
-        ("channels", cfg.channels),
-        ("sample_rate", cfg.sample_rate),
-        ("bits", cfg.bits),
-        ("bit_rate", cfg.bit_rate),
-        ("peak", cfg.peak),
-        ("lufs", cfg.lufs),
-        ("dbtp", cfg.dbtp),
-        ("lufs_s", cfg.lufs_s),
-        ("lufs_m", cfg.lufs_m),
-        ("bpm", cfg.bpm),
-        ("silence_lead", cfg.silence_lead),
-        ("silence_tail", cfg.silence_tail),
-        ("created_at", cfg.created_at),
-        ("modified_at", cfg.modified_at),
-        ("gain", cfg.gain),
-        ("wave", cfg.wave),
-    ] {
-        if enabled {
+    for key in raw.split(',').map(str::trim).filter(|key| !key.is_empty()) {
+        if crate::app::types::ColumnKey::parse(key).is_none() {
+            bail!("unknown list column key: {key}");
+        }
+        if !out.iter().any(|existing| existing == key) {
             out.push(key.to_string());
         }
     }
     Ok(out)
+}
+
+fn populate_list_metadata_columns(
+    rows: &mut [Map<String, Value>],
+    columns: &[String],
+    warnings: &mut Vec<String>,
+) {
+    let mut request = crate::metadata::SummaryRequest::default();
+    let metadata_columns = columns
+        .iter()
+        .filter_map(|key| {
+            crate::app::types::ColumnKey::parse(key)
+                .filter(|column| !matches!(column, crate::app::types::ColumnKey::Builtin(_)))
+                .map(|column| (key.clone(), column))
+        })
+        .collect::<Vec<_>>();
+    if metadata_columns.is_empty() {
+        return;
+    }
+    for (_, column) in &metadata_columns {
+        match column {
+            crate::app::types::ColumnKey::Normalized(key) => {
+                if !request.fields.contains(key) {
+                    request.fields.push(key.clone());
+                }
+            }
+            crate::app::types::ColumnKey::Raw(_) => request.include_raw = true,
+            crate::app::types::ColumnKey::Builtin(_) => {}
+        }
+    }
+    let mut cache = crate::metadata::cache::default_cache_path()
+        .as_deref()
+        .and_then(|path| crate::metadata::cache::MetadataCache::open(path).ok());
+    for row in rows {
+        let Some(path) = row.get("path").and_then(Value::as_str).map(PathBuf::from) else {
+            continue;
+        };
+        let result = if let Some(cache) = cache.as_mut() {
+            cache
+                .get_or_scan(
+                    &path,
+                    request.clone(),
+                    crate::metadata::ScanBudget::selected(),
+                    None,
+                )
+                .map(|lookup| lookup.summary)
+        } else {
+            crate::metadata::summarize_path(
+                &path,
+                request.clone(),
+                crate::metadata::ScanBudget::selected(),
+                None,
+            )
+        };
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                warnings.push(format!(
+                    "{}: metadata summary failed: {error:#}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        for (serialized, column) in &metadata_columns {
+            let value = match column {
+                crate::app::types::ColumnKey::Normalized(key) => summary
+                    .fields
+                    .iter()
+                    .find(|field| &field.key == key)
+                    .and_then(|field| field.resolved.as_ref())
+                    .map(metadata_value_json),
+                crate::app::types::ColumnKey::Raw(key) => summary
+                    .raw_fields
+                    .get(key)
+                    .map(|values| Value::Array(values.iter().map(metadata_value_json).collect())),
+                crate::app::types::ColumnKey::Builtin(_) => None,
+            }
+            .unwrap_or(Value::Null);
+            row.insert(serialized.clone(), value);
+        }
+    }
+}
+
+fn metadata_value_json(value: &crate::metadata::MetadataValue) -> Value {
+    match value {
+        crate::metadata::MetadataValue::Text(value)
+        | crate::metadata::MetadataValue::BinarySummary(value) => Value::String(value.clone()),
+        crate::metadata::MetadataValue::Signed(value) => json!(value),
+        crate::metadata::MetadataValue::Unsigned(value) => Value::String(value.to_string()),
+        crate::metadata::MetadataValue::Float(value) => json!(value),
+        crate::metadata::MetadataValue::Bool(value) => json!(value),
+    }
 }
 
 fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
@@ -4650,6 +5122,9 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
         wave: false,
         silence_lead: false,
         silence_tail: false,
+        edge_zero: false,
+        over_peak: false,
+        blank_pad: false,
     };
     for key in raw.split(',').map(str::trim).filter(|key| !key.is_empty()) {
         match key {
@@ -4674,6 +5149,9 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
             "bpm" => cfg.bpm = true,
             "silence_lead" => cfg.silence_lead = true,
             "silence_tail" => cfg.silence_tail = true,
+            "edge_zero" => cfg.edge_zero = true,
+            "over_peak" => cfg.over_peak = true,
+            "blank_pad" => cfg.blank_pad = true,
             "created_at" => cfg.created_at = true,
             "modified_at" => cfg.modified_at = true,
             "gain" => cfg.gain = true,
@@ -4711,8 +5189,12 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         wave: cfg.wave,
         silence_lead: cfg.silence_lead,
         silence_tail: cfg.silence_tail,
+        edge_zero: cfg.edge_zero,
+        over_peak: cfg.over_peak,
+        blank_pad: cfg.blank_pad,
         order: Vec::new(),
         widths: Vec::new(),
+        metadata: Vec::new(),
     }
 }
 
@@ -5182,6 +5664,7 @@ fn build_editor_render_session(args: &RenderEditorArgs) -> Result<PathBuf> {
             .map(|item| Path::new(&item.path))
             .context("missing render editor source")?,
         &cli_render_dir()?.join("sessions"),
+        SessionPathMode::Absolute,
     )?;
     if let Some(mode) = args.view_mode {
         let mode: ViewMode = mode.into();
@@ -5236,6 +5719,7 @@ fn debug_session_target(source: &EditorSourceArgs) -> Result<(PathBuf, bool)> {
             .map(|item| Path::new(&item.path))
             .context("missing debug source")?,
         &cli_render_dir()?.join("sessions"),
+        SessionPathMode::Absolute,
     )?;
     if let Ok(info) = read_audio_info(&input_path) {
         if let Ok(markers) = read_markers_in_file_space(&input_path, &info) {
@@ -5755,15 +6239,29 @@ fn external_config_set(args: ExternalConfigSetArgs) -> Result<CliCommandOutput> 
 
 fn transcript_inspect(args: TranscriptInspectArgs) -> Result<CliCommandOutput> {
     let (audio_path, language) = resolve_transcript_target_and_language(&args)?;
-    let srt_path = super::transcript::srt_path_for_audio(&audio_path)
-        .context("transcript inspect requires an audio file path")?;
-    let transcript = super::transcript::load_srt(&srt_path);
+    let mut freshness = None;
+    let transcript = if let Some(session) = args.session.as_deref() {
+        let workspace = CliWorkspace::load(session)?;
+        if let Some(item) = workspace.app.item_for_path(&audio_path) {
+            freshness = item
+                .transcript_document
+                .as_ref()
+                .map(|document| format!("{:?}", document.freshness).to_ascii_lowercase());
+        }
+        workspace.app.transcript_for_path(&audio_path).cloned()
+    } else {
+        super::transcript::srt_path_for_audio(&audio_path)
+            .and_then(|srt_path| super::transcript::load_srt(&srt_path))
+    };
+    let imported_srt_path =
+        super::transcript::srt_path_for_audio(&audio_path).filter(|path| path.is_file());
     Ok(CliCommandOutput {
         result: json!({
             "audio_path": pathbuf_to_string(&audio_path),
-            "srt_path": pathbuf_to_string(&srt_path),
+            "srt_path": imported_srt_path.as_ref().map(|path| pathbuf_to_string(path)),
             "exists": transcript.is_some(),
             "language": language,
+            "freshness": freshness,
             "segments": transcript.as_ref().map(|value| value.segments.iter().map(transcript_segment_json).collect::<Vec<_>>()).unwrap_or_default(),
             "full_text": transcript.as_ref().map(|value| value.full_text.clone()).unwrap_or_default(),
         }),
@@ -5900,12 +6398,8 @@ fn transcript_config_set(args: TranscriptConfigSetArgs) -> Result<CliCommandOutp
 fn transcript_generate(args: TranscriptGenerateArgs) -> Result<CliCommandOutput> {
     let mut workspace = CliWorkspace::load(&args.session)?;
     let path = workspace.resolve_target_path(args.path.as_deref())?;
-    let srt_path = super::transcript::srt_path_for_audio(&path)
-        .context("transcript generate requires an audio file path")?;
-    let existed_before = srt_path.is_file();
-    if args.overwrite_existing {
-        workspace.app.transcript_ai_cfg.overwrite_existing_srt = true;
-    }
+    let existed_before = workspace.app.transcript_for_path(&path).is_some();
+    workspace.app.transcript_ai_cfg.overwrite_existing_srt = args.overwrite_existing;
     workspace
         .app
         .run_transcript_ai_for_selected(vec![path.clone()]);
@@ -5914,15 +6408,28 @@ fn transcript_generate(args: TranscriptGenerateArgs) -> Result<CliCommandOutput>
     } else if let Some(err) = workspace.app.transcript_ai_last_error.clone() {
         bail!(err);
     }
+    let transcript = workspace.app.transcript_for_path(&path).cloned();
+    let mut output_srt_paths = Vec::new();
+    if args.write_srt {
+        let transcript = transcript
+            .as_ref()
+            .context("transcript generation did not produce an in-memory document")?;
+        let srt_path = super::transcript::srt_path_for_audio(&path)
+            .context("transcript --write-srt requires an audio-like target path")?;
+        ensure_parent_dir(&srt_path)?;
+        super::transcript::write_srt(&srt_path, transcript)
+            .with_context(|| format!("write srt: {}", srt_path.display()))?;
+        output_srt_paths.push(pathbuf_to_string(&srt_path));
+    }
     workspace.save()?;
-    let completed = srt_path.is_file() && (args.overwrite_existing || !existed_before);
-    let skipped = srt_path.is_file() && existed_before && !args.overwrite_existing;
+    let completed = transcript.is_some() && (args.overwrite_existing || !existed_before);
+    let skipped = transcript.is_some() && existed_before && !args.overwrite_existing;
     Ok(CliCommandOutput {
         result: json!({
             "completed_paths": if completed { vec![pathbuf_to_string(&path)] } else { Vec::<String>::new() },
             "skipped_paths": if skipped { vec![pathbuf_to_string(&path)] } else { Vec::<String>::new() },
-            "failed_paths": if !srt_path.is_file() { vec![json!({"path": pathbuf_to_string(&path), "error": "SRT was not produced"})] } else { Vec::<Value>::new() },
-            "output_srt_paths": if srt_path.is_file() { vec![pathbuf_to_string(&srt_path)] } else { Vec::<String>::new() },
+            "failed_paths": if transcript.is_none() { vec![json!({"path": pathbuf_to_string(&path), "error": "Transcript document was not produced"})] } else { Vec::<Value>::new() },
+            "output_srt_paths": output_srt_paths,
         }),
         warnings: Vec::new(),
     })
@@ -5946,45 +6453,44 @@ fn transcript_batch_generate(args: TranscriptBatchGenerateArgs) -> Result<CliCom
             warnings: Vec::new(),
         });
     }
+    let mut workspace = CliWorkspace::load(&args.session)?;
     let existed_before: HashSet<String> = paths
         .iter()
-        .filter_map(|path| super::transcript::srt_path_for_audio(path))
-        .filter(|path| path.is_file())
-        .map(|path| path_key(&path))
+        .filter(|path| workspace.app.transcript_for_path(path).is_some())
+        .map(|path| path_key(path))
         .collect();
-    let mut workspace = CliWorkspace::load(&args.session)?;
-    if args.overwrite_existing {
-        workspace.app.transcript_ai_cfg.overwrite_existing_srt = true;
-    }
+    workspace.app.transcript_ai_cfg.overwrite_existing_srt = args.overwrite_existing;
     workspace.app.run_transcript_ai_for_selected(paths.clone());
     if workspace.app.transcript_ai_state.is_some() {
         workspace.wait_for_transcript_ai()?;
     } else if let Some(err) = workspace.app.transcript_ai_last_error.clone() {
         bail!(err);
     }
-    workspace.save()?;
     let mut completed_paths = Vec::new();
     let mut skipped_paths = Vec::new();
     let mut failed_paths = Vec::new();
     let mut output_srt_paths = Vec::new();
     for path in paths {
-        let Some(srt_path) = super::transcript::srt_path_for_audio(&path) else {
-            failed_paths
-                .push(json!({"path": pathbuf_to_string(&path), "error": "not an audio path"}));
-            continue;
-        };
-        if srt_path.is_file() {
-            output_srt_paths.push(pathbuf_to_string(&srt_path));
-            if !args.overwrite_existing && existed_before.contains(&path_key(&srt_path)) {
+        if let Some(transcript) = workspace.app.transcript_for_path(&path) {
+            if args.write_srt {
+                if let Some(srt_path) = super::transcript::srt_path_for_audio(&path) {
+                    ensure_parent_dir(&srt_path)?;
+                    super::transcript::write_srt(&srt_path, transcript)
+                        .with_context(|| format!("write srt: {}", srt_path.display()))?;
+                    output_srt_paths.push(pathbuf_to_string(&srt_path));
+                }
+            }
+            if !args.overwrite_existing && existed_before.contains(&path_key(&path)) {
                 skipped_paths.push(pathbuf_to_string(&path));
             } else {
                 completed_paths.push(pathbuf_to_string(&path));
             }
         } else {
             failed_paths
-                .push(json!({"path": pathbuf_to_string(&path), "error": "SRT was not produced"}));
+                .push(json!({"path": pathbuf_to_string(&path), "error": "Transcript document was not produced"}));
         }
     }
+    workspace.save()?;
     Ok(CliCommandOutput {
         result: json!({
             "completed_paths": completed_paths,
@@ -5998,10 +6504,14 @@ fn transcript_batch_generate(args: TranscriptBatchGenerateArgs) -> Result<CliCom
 
 fn transcript_export_srt(args: TranscriptExportSrtArgs) -> Result<CliCommandOutput> {
     let (audio_path, _) = resolve_transcript_export_target(&args)?;
-    let srt_path = super::transcript::srt_path_for_audio(&audio_path)
-        .context("transcript export requires an audio file path")?;
-    let transcript = super::transcript::load_srt(&srt_path)
-        .with_context(|| format!("transcript not found: {}", srt_path.display()))?;
+    let transcript = if let Some(session) = args.session.as_deref() {
+        let workspace = CliWorkspace::load(session)?;
+        workspace.app.transcript_for_path(&audio_path).cloned()
+    } else {
+        super::transcript::srt_path_for_audio(&audio_path)
+            .and_then(|srt_path| super::transcript::load_srt(&srt_path))
+    }
+    .with_context(|| format!("transcript not found for: {}", audio_path.display()))?;
     let output = absolute_output_path(&args.output)?;
     ensure_parent_dir(&output)?;
     super::transcript::write_srt(&output, &transcript)
@@ -6009,7 +6519,6 @@ fn transcript_export_srt(args: TranscriptExportSrtArgs) -> Result<CliCommandOutp
     Ok(CliCommandOutput {
         result: json!({
             "audio_path": pathbuf_to_string(&audio_path),
-            "source_srt_path": pathbuf_to_string(&srt_path),
             "output_srt_path": absolute_string(&output)?,
             "segment_count": transcript.segments.len(),
         }),
@@ -6822,6 +7331,24 @@ fn plugin_draft_json(draft: &super::types::PluginFxDraft) -> Value {
     })
 }
 
+fn plugin_chain_json(chain: &super::types::PluginFxChainDraft) -> Value {
+    json!({
+        "bypass": chain.bypass,
+        "preview_engine": format!("{:?}", chain.preview_engine).to_ascii_lowercase(),
+        "render_ahead_ms": chain.render_ahead_ms,
+        "latency_samples": chain.latency_samples,
+        "underruns": chain.underrun_count,
+        "selected_slot_id": chain.selected_slot_id,
+        "slots": chain.slots.iter().enumerate().map(|(index, slot)| json!({
+            "index": index,
+            "slot_id": slot.id,
+            "latency_samples": slot.latency_samples,
+            "failure_reason": slot.failure_reason,
+            "draft": plugin_draft_json(&slot.draft),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn resolve_plugin_probe_path(app: &mut WavesPreviewer, plugin: &str) -> Result<PathBuf> {
     let plugin_path = Path::new(plugin);
     if plugin_path.components().count() > 1 || plugin_path.is_absolute() {
@@ -7130,6 +7657,7 @@ fn plugin_session_inspect(args: PluginSessionInspectArgs) -> Result<CliCommandOu
         result: json!({
             "path": pathbuf_to_string(&tab.path),
             "draft": plugin_draft_json(&tab.plugin_fx_draft),
+            "chain": plugin_chain_json(&tab.plugin_fx_chain),
         }),
         warnings: Vec::new(),
     })
@@ -7189,6 +7717,8 @@ fn plugin_session_set(args: PluginSessionSetArgs) -> Result<CliCommandOutput> {
                     .with_context(|| "decode plugin state blob")?,
             );
         }
+        tab.plugin_fx_chain
+            .replace_slot_zero_from_legacy(&tab.plugin_fx_draft);
     }
     workspace.save()?;
     let tab = workspace
@@ -7309,6 +7839,7 @@ fn plugin_session_clear(args: PluginSessionClearArgs) -> Result<CliCommandOutput
         .get_mut(tab_idx)
         .context("missing target tab")?;
     tab.plugin_fx_draft = super::types::PluginFxDraft::default();
+    tab.plugin_fx_chain = super::types::PluginFxChainDraft::default();
     tab.preview_audio_tool = None;
     tab.preview_overlay = None;
     workspace.save()?;
@@ -7323,6 +7854,205 @@ fn plugin_session_clear(args: PluginSessionClearArgs) -> Result<CliCommandOutput
             "after": plugin_draft_json(&tab.plugin_fx_draft),
             "mutated_paths": [pathbuf_to_string(&tab.path)],
         }),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_list(args: PluginSessionChainListArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&tab.path),
+            "chain": plugin_chain_json(&tab.plugin_fx_chain),
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_draft_from_probe(
+    probe: (
+        String,
+        String,
+        Vec<super::types::PluginParamUiState>,
+        Option<Vec<u8>>,
+        crate::plugin::PluginHostBackend,
+        crate::plugin::GuiCapabilities,
+        Option<String>,
+    ),
+) -> super::types::PluginFxDraft {
+    let (key, name, params, state_blob, backend, capabilities, backend_note) = probe;
+    let mut draft = super::types::PluginFxDraft::default();
+    draft.plugin_key = Some(key);
+    draft.plugin_name = name;
+    draft.params = params;
+    draft.state_blob = state_blob;
+    draft.backend = Some(backend);
+    draft.gui_capabilities = capabilities;
+    draft.enabled = true;
+    draft.bypass = false;
+    draft.last_backend_note = backend_note;
+    draft
+}
+
+fn sync_legacy_plugin_from_chain(tab: &mut super::types::EditorTab) {
+    tab.plugin_fx_draft = tab
+        .plugin_fx_chain
+        .slots
+        .first()
+        .map(|slot| slot.draft.clone())
+        .unwrap_or_default();
+}
+
+fn plugin_session_chain_add(args: PluginSessionChainAddArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let plugin_path = resolve_plugin_probe_path(&mut workspace.app, &args.plugin)?;
+    let draft = plugin_draft_from_probe(probe_plugin_path(&plugin_path)?);
+    let slot = super::types::PluginFxSlot::new(draft);
+    let slot_id = slot.id;
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let index = args
+        .index
+        .unwrap_or(tab.plugin_fx_chain.slots.len())
+        .min(tab.plugin_fx_chain.slots.len());
+    tab.plugin_fx_chain.slots.insert(index, slot);
+    tab.plugin_fx_chain.selected_slot_id = Some(slot_id);
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({
+            "path": pathbuf_to_string(&tab.path),
+            "added_slot_id": slot_id,
+            "chain": plugin_chain_json(&tab.plugin_fx_chain),
+        }),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_remove(args: PluginSessionChainRemoveArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let before = tab.plugin_fx_chain.slots.len();
+    tab.plugin_fx_chain
+        .slots
+        .retain(|slot| slot.id != args.slot_id);
+    if before == tab.plugin_fx_chain.slots.len() {
+        bail!("plugin chain slot not found: {}", args.slot_id);
+    }
+    if tab.plugin_fx_chain.selected_slot_id == Some(args.slot_id) {
+        tab.plugin_fx_chain.selected_slot_id =
+            tab.plugin_fx_chain.slots.first().map(|slot| slot.id);
+    }
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_move(args: PluginSessionChainMoveArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let from = tab
+        .plugin_fx_chain
+        .slots
+        .iter()
+        .position(|slot| slot.id == args.slot_id)
+        .with_context(|| format!("plugin chain slot not found: {}", args.slot_id))?;
+    let slot = tab.plugin_fx_chain.slots.remove(from);
+    let index = args.index.min(tab.plugin_fx_chain.slots.len());
+    tab.plugin_fx_chain.slots.insert(index, slot);
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
+        warnings: Vec::new(),
+    })
+}
+
+fn plugin_session_chain_set(args: PluginSessionChainSetArgs) -> Result<CliCommandOutput> {
+    let mut workspace = CliWorkspace::load(&args.session)?;
+    let tab_idx = workspace.ensure_target_tab_loaded(args.path.as_deref())?;
+    let replacement = if let Some(plugin) = args.plugin.as_deref() {
+        let path = resolve_plugin_probe_path(&mut workspace.app, plugin)?;
+        Some(plugin_draft_from_probe(probe_plugin_path(&path)?))
+    } else {
+        None
+    };
+    let tab = workspace
+        .app
+        .tabs
+        .get_mut(tab_idx)
+        .context("missing target tab")?;
+    let slot = tab
+        .plugin_fx_chain
+        .slots
+        .iter_mut()
+        .find(|slot| slot.id == args.slot_id)
+        .with_context(|| format!("plugin chain slot not found: {}", args.slot_id))?;
+    if let Some(draft) = replacement {
+        slot.draft = draft;
+    }
+    if let Some(enabled) = args.enabled {
+        slot.draft.enabled = enabled.into_bool();
+    }
+    if let Some(bypass) = args.bypass {
+        slot.draft.bypass = bypass.into_bool();
+    }
+    apply_plugin_param_overrides(&mut slot.draft, &args.params)?;
+    if let Some(raw) = args.state_blob_b64.as_deref() {
+        slot.draft.state_blob = Some(
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(raw.as_bytes())
+                .context("decode plugin state blob")?,
+        );
+    }
+    tab.plugin_fx_chain.selected_slot_id = Some(args.slot_id);
+    sync_legacy_plugin_from_chain(tab);
+    workspace.save()?;
+    let tab = workspace
+        .app
+        .tabs
+        .get(tab_idx)
+        .context("missing target tab")?;
+    Ok(CliCommandOutput {
+        result: json!({"path": pathbuf_to_string(&tab.path), "chain": plugin_chain_json(&tab.plugin_fx_chain)}),
         warnings: Vec::new(),
     })
 }

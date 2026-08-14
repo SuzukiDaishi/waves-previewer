@@ -574,7 +574,20 @@ mod small_fix_regressions {
         assert_eq!(last_asc, bad_mp3);
 
         harness.state_mut().test_sort_sample_rate_desc();
-        harness.run_steps(2);
+        let sort_wait_started = Instant::now();
+        loop {
+            harness.run_steps(1);
+            let sorted = harness.state().test_row_path(0).as_deref() == Some(wav_hi.as_path())
+                && harness.state().test_row_path(files_len - 1).as_deref()
+                    == Some(bad_mp3.as_path());
+            if sorted {
+                break;
+            }
+            if sort_wait_started.elapsed() > Duration::from_secs(10) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let first_desc = harness.state().test_row_path(0).expect("first row desc");
         let last_desc = harness
             .state()
@@ -1315,6 +1328,17 @@ mod small_fix_regressions {
         harness.state_mut().test_set_playback_rate(1.20);
         assert!(harness.state_mut().test_select_path(&src));
         wait_for_audio_samples(&mut harness);
+        let full_buffer_wait_started = Instant::now();
+        loop {
+            harness.run_steps(1);
+            if harness.state().test_audio_buffer_len().abs_diff(96_000) <= 4 {
+                break;
+            }
+            if full_buffer_wait_started.elapsed() > Duration::from_secs(10) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
 
         let rate_before = harness.state().test_audio_rate();
         assert_eq!(
@@ -1814,12 +1838,20 @@ mod small_fix_regressions {
         assert!(harness.state_mut().test_select_path(&src));
         harness.run_steps(2);
         harness.state_mut().test_open_effect_graph_workspace();
-        harness.run_steps(2);
-
-        let summary_before = harness
-            .state_mut()
-            .test_effect_graph_predicted_output_summary()
-            .expect("predicted summary before");
+        let summary_wait_started = Instant::now();
+        let summary_before = loop {
+            harness.run_steps(1);
+            if let Some(summary) = harness
+                .state_mut()
+                .test_effect_graph_predicted_output_summary()
+            {
+                break summary;
+            }
+            if summary_wait_started.elapsed() > Duration::from_secs(10) {
+                panic!("predicted summary before");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
 
         harness.state_mut().test_set_mode_speed();
         harness.state_mut().test_set_playback_rate(0.5);

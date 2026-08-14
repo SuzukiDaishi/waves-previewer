@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
+use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::models::AudioEmbedding;
@@ -304,6 +305,7 @@ impl AiStore {
         duration_ms: u64,
         format: &str,
     ) -> Result<(), AiError> {
+        let duration_ms = sqlite_u64(duration_ms, "content duration")?;
         self.connection
             .execute(
                 "INSERT INTO content_objects(hash, duration_ms, format)
@@ -341,6 +343,9 @@ impl AiStore {
         embedding: &AudioEmbedding,
     ) -> Result<(), AiError> {
         embedding.validate().map_err(AiError::SchemaValidation)?;
+        let dimensions = sqlite_usize(embedding.dimensions, "embedding dimensions")?;
+        let segment_start_ms = sqlite_u64(embedding.segment_start_ms, "segment start")?;
+        let segment_end_ms = sqlite_u64(embedding.segment_end_ms, "segment end")?;
         self.connection
             .execute(
                 "INSERT INTO embedding_segments(
@@ -357,9 +362,9 @@ impl AiStore {
                 params![
                     content_hash,
                     embedding.model,
-                    embedding.dimensions,
-                    embedding.segment_start_ms,
-                    embedding.segment_end_ms,
+                    dimensions,
+                    segment_start_ms,
+                    segment_end_ms,
                     embedding_to_bytes(&embedding.values)
                 ],
             )
@@ -379,6 +384,7 @@ impl AiStore {
         model: &str,
         dimensions: usize,
     ) -> Result<bool, AiError> {
+        let dimensions = sqlite_usize(dimensions, "embedding dimensions")?;
         self.connection
             .query_row(
                 "SELECT 1 FROM embedding_segments
@@ -397,14 +403,14 @@ impl AiStore {
         model: &str,
         dimensions: usize,
     ) -> Result<usize, AiError> {
+        let dimensions = sqlite_usize(dimensions, "embedding dimensions")?;
         self.connection
             .query_row(
                 "SELECT COUNT(*) FROM embedding_segments
                  WHERE content_hash=?1 AND model=?2 AND dimensions=?3",
                 params![content_hash, model, dimensions],
-                |row| row.get::<_, u64>(0),
+                |row| sqlite_usize_from_row(row.get(0)?, 0),
             )
-            .map(|count| count.min(usize::MAX as u64) as usize)
             .map_err(|error| AiError::Storage(error.to_string()))
     }
 
@@ -414,6 +420,7 @@ impl AiStore {
         model: &str,
         dimensions: usize,
     ) -> Result<Vec<AudioEmbedding>, AiError> {
+        let stored_dimensions = sqlite_usize(dimensions, "embedding dimensions")?;
         let mut statement = self
             .connection
             .prepare(
@@ -424,10 +431,10 @@ impl AiStore {
             )
             .map_err(|error| AiError::Storage(error.to_string()))?;
         let rows = statement
-            .query_map(params![content_hash, model, dimensions], |row| {
+            .query_map(params![content_hash, model, stored_dimensions], |row| {
                 Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, u64>(1)?,
+                    sqlite_u64_from_row(row.get(0)?, 0)?,
+                    sqlite_u64_from_row(row.get(1)?, 1)?,
                     row.get::<_, Vec<u8>>(2)?,
                 ))
             })
@@ -451,14 +458,14 @@ impl AiStore {
     }
 
     pub fn model_embedding_count(&self, model: &str, dimensions: usize) -> Result<usize, AiError> {
+        let dimensions = sqlite_usize(dimensions, "embedding dimensions")?;
         self.connection
             .query_row(
                 "SELECT COUNT(*) FROM embedding_segments
                  WHERE model=?1 AND dimensions=?2 AND normalized=1",
                 params![model, dimensions],
-                |row| row.get::<_, u64>(0),
+                |row| sqlite_usize_from_row(row.get(0)?, 0),
             )
-            .map(|count| count.min(usize::MAX as u64) as usize)
             .map_err(|error| AiError::Storage(error.to_string()))
     }
 
@@ -495,12 +502,13 @@ impl AiStore {
                  WHERE model=?1 AND dimensions=?2 AND normalized=1",
             )
             .map_err(|error| AiError::Storage(error.to_string()))?;
+        let dimensions = sqlite_usize(query.len(), "query dimensions")?;
         let rows = statement
-            .query_map(params![model, query.len()], |row| {
+            .query_map(params![model, dimensions], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, u64>(2)?,
+                    sqlite_u64_from_row(row.get(1)?, 1)?,
+                    sqlite_u64_from_row(row.get(2)?, 2)?,
                     row.get::<_, Vec<u8>>(3)?,
                 ))
             })
@@ -578,7 +586,7 @@ impl AiStore {
             .query_row(
                 "SELECT value FROM ai_meta WHERE key='embedding_revision'",
                 [],
-                |row| row.get(0),
+                |row| sqlite_u64_from_row(row.get(0)?, 0),
             )
             .map_err(|error| AiError::Storage(error.to_string()))
     }
@@ -612,6 +620,7 @@ impl AiStore {
         dimensions: usize,
         expected_count: usize,
     ) -> Result<HnswSearchIndex, AiError> {
+        let stored_dimensions = sqlite_usize(dimensions, "embedding dimensions")?;
         let mut statement = self
             .connection
             .prepare(
@@ -622,11 +631,11 @@ impl AiStore {
             )
             .map_err(|error| AiError::Storage(error.to_string()))?;
         let rows = statement
-            .query_map(params![model, dimensions], |row| {
+            .query_map(params![model, stored_dimensions], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, u64>(2)?,
+                    sqlite_u64_from_row(row.get(1)?, 1)?,
+                    sqlite_u64_from_row(row.get(2)?, 2)?,
                     row.get::<_, Vec<u8>>(3)?,
                 ))
             })
@@ -696,19 +705,20 @@ impl AiStore {
             .connection
             .transaction()
             .map_err(|error| AiError::Storage(error.to_string()))?;
+        let total = sqlite_usize(paths.len(), "batch item count")?;
         transaction
             .execute(
                 "INSERT OR IGNORE INTO ai_batch_jobs(
                     manifest_hash, operation, status, total
                  ) VALUES (?1, 'index_audio', 'pending', ?2)",
-                params![manifest_hash, paths.len()],
+                params![manifest_hash, total],
             )
             .map_err(|error| AiError::Storage(error.to_string()))?;
-        let stored_total: usize = transaction
+        let stored_total = transaction
             .query_row(
                 "SELECT total FROM ai_batch_jobs WHERE manifest_hash=?1",
                 params![manifest_hash],
-                |row| row.get(0),
+                |row| sqlite_usize_from_row(row.get(0)?, 0),
             )
             .map_err(|error| AiError::Storage(error.to_string()))?;
         if stored_total != paths.len() {
@@ -717,19 +727,20 @@ impl AiStore {
             ));
         }
         for (ordinal, path) in paths.iter().enumerate() {
+            let stored_ordinal = sqlite_usize(ordinal, "batch item ordinal")?;
             transaction
                 .execute(
                     "INSERT OR IGNORE INTO ai_batch_items(
                         manifest_hash, ordinal, path_key, status
                      ) VALUES (?1, ?2, ?3, 'pending')",
-                    params![manifest_hash, ordinal, path],
+                    params![manifest_hash, stored_ordinal, path],
                 )
                 .map_err(|error| AiError::Storage(error.to_string()))?;
             let stored_path: String = transaction
                 .query_row(
                     "SELECT path_key FROM ai_batch_items
                      WHERE manifest_hash=?1 AND ordinal=?2",
-                    params![manifest_hash, ordinal],
+                    params![manifest_hash, stored_ordinal],
                     |row| row.get(0),
                 )
                 .map_err(|error| AiError::Storage(error.to_string()))?;
@@ -786,21 +797,22 @@ impl AiStore {
                 params![manifest_hash],
                 |row| {
                     Ok(AiBatchItem {
-                        ordinal: row.get(0)?,
+                        ordinal: sqlite_usize_from_row(row.get(0)?, 0)?,
                         path_key: row.get(1)?,
-                        attempts: row.get(2)?,
+                        attempts: sqlite_usize_from_row(row.get(2)?, 2)?,
                     })
                 },
             )
             .optional()
             .map_err(|error| AiError::Storage(error.to_string()))?;
         if let Some(item) = &item {
+            let ordinal = sqlite_usize(item.ordinal, "batch item ordinal")?;
             transaction
                 .execute(
                     "UPDATE ai_batch_items
                      SET status='running', attempts=attempts+1
                      WHERE manifest_hash=?1 AND ordinal=?2 AND status='pending'",
-                    params![manifest_hash, item.ordinal],
+                    params![manifest_hash, ordinal],
                 )
                 .map_err(|error| AiError::Storage(error.to_string()))?;
         }
@@ -820,6 +832,7 @@ impl AiStore {
         content_hash: Option<&str>,
         error_code: Option<&str>,
     ) -> Result<(), AiError> {
+        let ordinal = sqlite_usize(ordinal, "batch item ordinal")?;
         let (status, error_code) = if content_hash.is_some() {
             ("completed", None)
         } else {
@@ -858,9 +871,9 @@ impl AiStore {
                     Ok(AiBatchProgress {
                         manifest_hash: manifest_hash.to_owned(),
                         status: row.get(0)?,
-                        total: row.get(1)?,
-                        completed: row.get(2)?,
-                        failed: row.get(3)?,
+                        total: sqlite_usize_from_row(row.get(1)?, 1)?,
+                        completed: sqlite_usize_from_row(row.get(2)?, 2)?,
+                        failed: sqlite_usize_from_row(row.get(3)?, 3)?,
                     })
                 },
             )
@@ -868,7 +881,7 @@ impl AiStore {
     }
 
     fn refresh_batch_progress(&self, manifest_hash: &str) -> Result<(), AiError> {
-        let (completed, failed, pending): (usize, usize, usize) = self
+        let (completed, failed, pending) = self
             .connection
             .query_row(
                 "SELECT
@@ -877,7 +890,13 @@ impl AiStore {
                     SUM(CASE WHEN status IN ('pending','running') THEN 1 ELSE 0 END)
                  FROM ai_batch_items WHERE manifest_hash=?1",
                 params![manifest_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        sqlite_usize_from_row(row.get(0)?, 0)?,
+                        sqlite_usize_from_row(row.get(1)?, 1)?,
+                        sqlite_usize_from_row(row.get(2)?, 2)?,
+                    ))
+                },
             )
             .map_err(|error| AiError::Storage(error.to_string()))?;
         let status = if pending > 0 {
@@ -887,6 +906,8 @@ impl AiStore {
         } else {
             "completed"
         };
+        let completed = sqlite_usize(completed, "completed batch item count")?;
+        let failed = sqlite_usize(failed, "failed batch item count")?;
         self.connection
             .execute(
                 "UPDATE ai_batch_jobs
@@ -906,8 +927,7 @@ impl AiStore {
         let count = |table: &str, predicate: &str| -> Result<usize, AiError> {
             let sql = format!("SELECT COUNT(*) FROM {table} {predicate}");
             self.connection
-                .query_row(&sql, [], |row| row.get::<_, u64>(0))
-                .map(|value| value.min(usize::MAX as u64) as usize)
+                .query_row(&sql, [], |row| sqlite_usize_from_row(row.get(0)?, 0))
                 .map_err(|error| AiError::Storage(error.to_string()))
         };
         Ok(AiStoreDiagnostics {
@@ -934,6 +954,28 @@ impl AiStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| AiError::Storage(error.to_string()))
     }
+}
+
+fn sqlite_u64(value: u64, label: &str) -> Result<i64, AiError> {
+    i64::try_from(value)
+        .map_err(|_| AiError::Storage(format!("{label} exceeds SQLite INTEGER range")))
+}
+
+fn sqlite_usize(value: usize, label: &str) -> Result<i64, AiError> {
+    i64::try_from(value)
+        .map_err(|_| AiError::Storage(format!("{label} exceeds SQLite INTEGER range")))
+}
+
+fn sqlite_u64_from_row(value: i64, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error))
+    })
+}
+
+fn sqlite_usize_from_row(value: i64, column: usize) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(column, Type::Integer, Box::new(error))
+    })
 }
 
 fn hnsw_cache() -> &'static Mutex<HashMap<HnswCacheKey, Arc<HnswSearchIndex>>> {

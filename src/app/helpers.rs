@@ -130,6 +130,34 @@ pub fn format_duration(secs: f32) -> String {
     format!("{}:{:02}", m, s)
 }
 
+/// `h:mm:ss`, used list-wide once any loaded file reaches an hour so a 2 h
+/// file reads "2:00:11" instead of `format_duration`'s "120:11".
+pub fn format_duration_hms(secs: f32) -> String {
+    let s = if secs.is_finite() && secs >= 0.0 {
+        secs
+    } else {
+        0.0
+    };
+    // Same rounding as format_duration, and as the >= 1 h test that picks
+    // between them, so 3599.7 s can't render as "60:00" in one and
+    // "1:00:00" in the other.
+    let total = s.round() as u64;
+    format!(
+        "{}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
+}
+
+pub fn format_duration_scaled(secs: f32, use_hours: bool) -> String {
+    if use_hours {
+        format_duration_hms(secs)
+    } else {
+        format_duration(secs)
+    }
+}
+
 // Compact time string with tenths when useful, e.g. 0:01.2, 1:23.4, 12:34.5
 pub fn format_time_s(secs: f32) -> String {
     if !secs.is_finite() || secs < 0.0 {
@@ -310,6 +338,40 @@ pub fn sanitize_filename_component(name: &str) -> String {
         s.push('_');
     }
     s
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::{format_duration, format_duration_hms, format_duration_scaled};
+
+    #[test]
+    fn hms_splits_hours_out_of_the_minute_field() {
+        assert_eq!(format_duration_hms(0.0), "0:00:00");
+        assert_eq!(format_duration_hms(3.4), "0:00:03");
+        assert_eq!(format_duration_hms(67.5), "0:01:08");
+        // The case that motivated the format: format_duration says "120:11".
+        assert_eq!(format_duration(7211.0), "120:11");
+        assert_eq!(format_duration_hms(7211.0), "2:00:11");
+    }
+
+    #[test]
+    fn hms_rounds_the_same_way_the_one_hour_test_does() {
+        // 3599.7 rounds to 3600, so the latch (>= 3600 after rounding) and the
+        // formatter must agree — "1:00:00", never "60:00".
+        assert_eq!(format_duration_hms(3599.7), "1:00:00");
+    }
+
+    #[test]
+    fn hms_clamps_non_finite_and_negative() {
+        assert_eq!(format_duration_hms(f32::NAN), "0:00:00");
+        assert_eq!(format_duration_hms(-5.0), "0:00:00");
+    }
+
+    #[test]
+    fn scaled_picks_the_format() {
+        assert_eq!(format_duration_scaled(67.5, false), "1:08");
+        assert_eq!(format_duration_scaled(67.5, true), "0:01:08");
+    }
 }
 
 #[cfg(test)]

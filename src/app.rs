@@ -32,6 +32,7 @@ mod auto_trim;
 mod auto_trim_ops;
 mod bwf_ops;
 mod capture;
+pub mod channel_routing_ops;
 mod cli_ops;
 mod cli_workspace;
 mod clipboard_ops;
@@ -58,6 +59,7 @@ mod frame_ops;
 mod gain_ops;
 mod helpers;
 mod hf_cache;
+mod input_focus;
 mod input_ops;
 mod inspect_ops;
 pub mod inspection;
@@ -76,6 +78,7 @@ mod loudnorm_batch_ops;
 mod loudnorm_ops;
 mod meta;
 mod meta_ops;
+mod metadata_list_ops;
 mod music_ai_ops;
 mod music_onnx;
 mod native_drag;
@@ -99,7 +102,7 @@ mod startup;
 mod tab_ops;
 mod temp_audio_ops;
 mod theme_ops;
-mod threading;
+pub(crate) mod threading;
 mod toast_ops;
 mod tool_ops;
 mod tooling;
@@ -116,13 +119,16 @@ mod zoo_ops;
 pub use self::cli_ops::run_cli;
 #[cfg(feature = "kittest")]
 use self::dialogs::TestDialogQueue;
+use self::input_focus::UiScrollFocusState;
 use self::render::waveform_pyramid::WaveformScratch;
 use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
     ColumnId, ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode,
-    RateMode, StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptModelVariant,
+    PlaybackTimelineMap, PluginCatalogEntry, PluginFxChainDraft, PluginFxSlot, PluginPreviewEngine,
+    PluginProbeCapabilities, RateMode, SortDir, SortKey, StartupConfig, ToolKind,
+    TranscriptComputeTarget, TranscriptDocument, TranscriptFreshness, TranscriptModelVariant,
     TranscriptPerfMode, ViewMode, WorkspaceView,
 };
 
@@ -227,7 +233,7 @@ struct ZooFrameTexture {
 
 struct TranscriptAiItemResult {
     path: PathBuf,
-    srt_path: Option<PathBuf>,
+    transcript: Option<crate::app::types::Transcript>,
     detected_language: Option<String>,
     error: Option<String>,
 }
@@ -358,6 +364,7 @@ struct PlaybackSessionState {
     last_play_start_display_sample: Option<usize>,
     applied_mode: RateMode,
     applied_playback_rate: f32,
+    timeline_map: crate::app::types::PlaybackTimelineMap,
     dry_audio: Option<Arc<AudioBuffer>>,
     last_applied_master_gain_db: f32,
     last_applied_file_gain_db: f32,
@@ -374,6 +381,7 @@ impl Default for PlaybackSessionState {
             last_play_start_display_sample: None,
             applied_mode: RateMode::Speed,
             applied_playback_rate: 1.0,
+            timeline_map: crate::app::types::PlaybackTimelineMap::default(),
             dry_audio: None,
             last_applied_master_gain_db: f32::NAN,
             last_applied_file_gain_db: f32::NAN,
@@ -416,6 +424,8 @@ struct CrashReportState {
     status: Option<String>,
 }
 
+type AudioBootstrapMessage = Result<(AudioEngine, Option<String>, Option<String>), String>;
+
 pub struct WavesPreviewer {
     pub audio: AudioEngine,
     pub root: Option<PathBuf>,
@@ -434,6 +444,12 @@ pub struct WavesPreviewer {
     audio_output_devices: Vec<String>,
     audio_output_error: Option<String>,
     audio_device_watch: AudioDeviceWatchState,
+    /// Real CPAL initialization runs after the native window can be shown.
+    /// Until it arrives, the lock-free test engine keeps every call site valid.
+    audio_bootstrap_rx: Option<std::sync::mpsc::Receiver<AudioBootstrapMessage>>,
+    startup_paths_applied: bool,
+    startup_maintenance_step: u8,
+    startup_maintenance_next_at: std::time::Instant,
     pub playback_rate: f32,
     playback_session: PlaybackSessionState,
     playback_fx_state: Option<PlaybackFxRenderState>,
@@ -501,6 +517,8 @@ pub struct WavesPreviewer {
     list_meta_prefetch_cursor: usize,
     pub transcript_inflight: HashSet<PathBuf>,
     transcript_ai_inflight: HashSet<PathBuf>,
+    /// Physical backing path -> stable list/tab identity for virtual and draft assets.
+    transcript_ai_source_aliases: HashMap<PathBuf, PathBuf>,
     pub show_transcript_window: bool,
     pub pending_transcript_seek: Option<(PathBuf, u64)>,
     transcript_ai_opt_in: bool,
@@ -614,12 +632,31 @@ pub struct WavesPreviewer {
     // Display order of list columns (always a sanitized permutation of
     // ColumnId::ALL; visibility stays in `list_columns`).
     pub list_column_order: Vec<types::ColumnId>,
+    /// User-selected metadata columns. Their keys are stable strings shared
+    /// with the metadata CLI and session format.
+    metadata_list_columns: Vec<types::MetadataListColumn>,
+    metadata_summary_pool: Option<crate::metadata::cache::MetadataSummaryPool>,
+    metadata_summary_rx: Option<std::sync::mpsc::Receiver<crate::metadata::cache::SummaryUpdate>>,
+    metadata_summary_cache: crate::metadata::cache::SummaryMemoryCache,
+    metadata_summary_inflight: rustc_hash::FxHashMap<PathBuf, u64>,
+    metadata_summary_generation: u64,
+    metadata_summary_prefetch_cursor: usize,
+    metadata_summary_errors: rustc_hash::FxHashMap<PathBuf, String>,
+    metadata_cache_hits: u64,
     // persisted per-column widths (prefs.txt); key = column id in table.rs
     list_col_widths: std::collections::BTreeMap<String, f32>,
     // widths observed while rendering the current frame's header
-    list_col_widths_seen: Vec<(&'static str, f32)>,
+    list_col_widths_seen: Vec<(String, f32)>,
     list_table_ui_id: Option<egui::Id>,
     list_table_col_count: usize,
+    /// Longest duration seen since the list was last loaded, which decides
+    /// whether Length renders `h:mm:ss` for every row. A monotonic latch on
+    /// purpose: an exact maximum would need decrement hooks on every removal
+    /// path (delete, undo, watch folder), and recomputing it is an O(n) walk
+    /// that would land in the middle of scan streaming. Worst case is
+    /// cosmetic — deleting the only long file keeps the wider format until
+    /// the list is reloaded.
+    list_max_duration_secs: f32,
     list_art_textures: HashMap<PathBuf, egui::TextureHandle>,
     /// TTL cache for `Path::is_file()` checks in the list view. Probing the
     /// filesystem for every visible row on every frame stalls the UI thread,
@@ -700,6 +737,8 @@ pub struct WavesPreviewer {
     suppress_list_enter: bool,
     list_has_focus: bool,
     search_has_focus: bool,
+    /// Runtime-only click focus for wheel/trackpad input routing.
+    ui_scroll_focus: UiScrollFocusState,
     // original order snapshot for tri-state sort
     original_files: Vec<MediaId>,
     // search
@@ -710,6 +749,12 @@ pub struct WavesPreviewer {
     // list filtering
     skip_dotfiles: bool,
     zero_cross_epsilon: f32,
+    /// Blank Pad column: level a frame must stay under to count as blank.
+    blank_threshold_dbfs: f32,
+    /// Blank Pad column: how much blank has to accumulate before it is flagged.
+    /// Without a floor here, a file that correctly starts on a zero sample
+    /// would always report NG.
+    blank_min_ms: f32,
     // Spectral selection edit (RX-style): edge fade lengths for mute/play.
     spectral_edit_time_fade_ms: f32,
     spectral_edit_freq_fade_hz: f32,
@@ -768,6 +813,7 @@ pub struct WavesPreviewer {
     plugin_probe_state: Option<PluginProbeState>,
     plugin_process_state: Option<PluginProcessState>,
     plugin_gui_state: Option<PluginGuiSessionState>,
+    plugin_rack_worker: Arc<std::sync::Mutex<Option<crate::plugin::client::RackWorkerClient>>>,
     plugin_job_id: u64,
     plugin_temp_seq: u64,
     zoo_enabled: bool,
@@ -815,6 +861,7 @@ pub struct WavesPreviewer {
     assistant_state: assistant_ops::AssistantState,
     #[cfg(feature = "gemini")]
     assistant_runtime: Option<crate::ai::coordinator::AiCoordinator>,
+    show_list_columns_window: bool,
     show_shortcuts_window: bool,
     show_keymap_window: bool,
     show_undo_history_window: bool,
@@ -835,6 +882,9 @@ pub struct WavesPreviewer {
     show_transcription_settings: bool,
     show_first_save_prompt: bool,
     project_path: Option<PathBuf>,
+    /// One source-path policy applies to every user file in the current
+    /// `.nwsess`; session-owned sidecars remain session-relative.
+    session_path_mode: project::SessionPathMode,
     recent_sessions: Vec<PathBuf>,
     project_open_pending: Option<PathBuf>,
     project_open_state: Option<ProjectOpenState>,
@@ -954,6 +1004,22 @@ impl WavesPreviewer {
     fn playback_set_applied_mapping(&mut self, mode: RateMode, playback_rate: f32) {
         self.playback_session.applied_mode = mode;
         self.playback_session.applied_playback_rate = playback_rate.max(0.25);
+    }
+
+    fn playback_rebuild_timeline_map(
+        &mut self,
+        source_frames: u64,
+        transport_frames: u64,
+        source_sample_rate: u32,
+        transport_sample_rate: u32,
+    ) {
+        self.playback_session.timeline_map = crate::app::types::PlaybackTimelineMap::new(
+            source_frames,
+            transport_frames,
+            source_sample_rate,
+            transport_sample_rate,
+            self.playback_source_generation,
+        );
     }
 
     fn next_playback_fx_job_id(&mut self) -> u64 {
@@ -1077,8 +1143,8 @@ impl WavesPreviewer {
 
     fn playback_current_source_time_sec_with(
         &self,
-        mode: RateMode,
-        playback_rate: f32,
+        _mode: RateMode,
+        _playback_rate: f32,
     ) -> Option<f64> {
         if matches!(self.playback_session.source, PlaybackSourceKind::None) {
             return None;
@@ -1088,14 +1154,11 @@ impl WavesPreviewer {
             .shared
             .play_pos_f
             .load(std::sync::atomic::Ordering::Relaxed);
-        Some(Self::playback_source_time_for_output_pos(
-            mode,
-            self.playback_session.transport,
-            pos_f as f64,
-            self.playback_session.transport_sr.max(1),
-            self.audio.shared.out_sample_rate.max(1),
-            playback_rate,
-        ))
+        Some(
+            self.playback_session
+                .timeline_map
+                .source_time_for_transport_frame(pos_f as f64),
+        )
     }
 
     pub(super) fn playback_current_source_time_sec(&self) -> Option<f64> {
@@ -1107,23 +1170,23 @@ impl WavesPreviewer {
 
     pub(super) fn playback_seek_to_source_time_with(
         &self,
-        mode: RateMode,
-        playback_rate: f32,
+        _mode: RateMode,
+        _playback_rate: f32,
         source_time_sec: f64,
     ) {
-        let pos = Self::playback_output_pos_for_source_time(
-            mode,
-            self.playback_session.transport,
-            source_time_sec,
-            self.playback_session.transport_sr.max(1),
-            self.audio.shared.out_sample_rate.max(1),
-            playback_rate,
-        );
+        let pos = self
+            .playback_session
+            .timeline_map
+            .transport_frame_for_source_time(source_time_sec);
         self.audio.seek_to_sample(pos);
     }
 
     pub(super) fn playback_seek_to_source_time(&self, mode: RateMode, source_time_sec: f64) {
-        self.playback_seek_to_source_time_with(mode, self.playback_rate, source_time_sec);
+        self.playback_seek_to_source_time_with(
+            mode,
+            self.playback_session.applied_playback_rate,
+            source_time_sec,
+        );
     }
 
     pub(super) fn playback_mark_source(
@@ -1152,6 +1215,13 @@ impl WavesPreviewer {
         };
         self.playback_base_audio = self.playback_session.dry_audio.clone();
         self.playback_source_generation = self.playback_source_generation.wrapping_add(1).max(1);
+        let transport_frames = self.audio.current_source_len() as u64;
+        self.playback_rebuild_timeline_map(
+            transport_frames,
+            transport_frames,
+            transport_sr.max(1),
+            transport_sr.max(1),
+        );
         self.clear_playback_fx_state();
         self.playback_session.last_applied_master_gain_db = f32::NAN;
         self.playback_session.last_applied_file_gain_db = f32::NAN;
@@ -1189,6 +1259,13 @@ impl WavesPreviewer {
         self.playback_session.dry_audio = None;
         self.playback_base_audio = None;
         self.playback_source_generation = self.playback_source_generation.wrapping_add(1).max(1);
+        let transport_frames = self.audio.current_source_len() as u64;
+        self.playback_rebuild_timeline_map(
+            transport_frames,
+            transport_frames,
+            transport_sr.max(1),
+            transport_sr.max(1),
+        );
         self.clear_playback_fx_state();
         self.playback_session.last_applied_master_gain_db = f32::NAN;
         self.playback_session.last_applied_file_gain_db = f32::NAN;
@@ -1693,8 +1770,10 @@ impl WavesPreviewer {
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let display_name = Self::display_name_for_path(&path);
         let display_folder = self.interned_display_folder(&path);
+        let audio_asset = crate::audio_asset::AudioAssetDescriptor::external(path.clone());
         let mut item = MediaItem {
             id,
+            audio_asset,
             path,
             display_name,
             display_folder,
@@ -1703,6 +1782,7 @@ impl WavesPreviewer {
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
+            transcript_document: None,
             transcript_language: None,
             ai_metadata: None,
             external: None,
@@ -1713,10 +1793,15 @@ impl WavesPreviewer {
         item
     }
 
+    /// `blank_threshold_dbfs` must be the live setting rather than the default:
+    /// `meta_for_path` prefers `edited_cache[..].display_meta` while the row
+    /// loop's re-queue check inspects `item.meta`, so anything left `None` here
+    /// shows as unresolved on an edited row forever.
     fn build_meta_from_audio(
         channels: &[Vec<f32>],
         sample_rate: u32,
         bits_per_sample: u16,
+        blank_threshold_dbfs: f32,
     ) -> FileMeta {
         let frames = channels.first().map(|c| c.len()).unwrap_or(0);
         let mut mono = Vec::with_capacity(frames);
@@ -1791,6 +1876,19 @@ impl WavesPreviewer {
             bpm,
             silence_lead_ms: None,
             silence_tail_ms: None,
+            // Always resolved (see decode_full_meta): an unresolved value on an
+            // edited row can never self-heal.
+            edge_abs: Some(
+                crate::app::inspection::scan_edge_samples(channels).unwrap_or(EdgeSamples {
+                    first_abs: 0.0,
+                    last_abs: 0.0,
+                }),
+            ),
+            blank_pad: Some(crate::app::inspection::scan_blank_pad(
+                channels,
+                sample_rate,
+                blank_threshold_dbfs,
+            )),
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -1813,6 +1911,7 @@ impl WavesPreviewer {
             &audio.channels,
             sample_rate,
             bits_per_sample,
+            self.blank_threshold_dbfs,
         ));
         self.make_virtual_item_with_meta(display_name, audio, meta, virtual_state)
     }
@@ -1824,12 +1923,39 @@ impl WavesPreviewer {
         meta: Option<FileMeta>,
         virtual_state: Option<VirtualState>,
     ) -> MediaItem {
+        let audio_asset = crate::audio_asset::AudioAssetDescriptor::resident(
+            audio.clone(),
+            meta.as_ref()
+                .map(|value| value.sample_rate)
+                .unwrap_or(48_000),
+            meta.as_ref()
+                .map(|value| value.bits_per_sample)
+                .unwrap_or(32),
+        );
+        self.make_virtual_item_with_asset(
+            display_name,
+            audio_asset,
+            Some(audio),
+            meta,
+            virtual_state,
+        )
+    }
+
+    fn make_virtual_item_with_asset(
+        &mut self,
+        display_name: String,
+        audio_asset: crate::audio_asset::AudioAssetDescriptor,
+        resident_cache: Option<std::sync::Arc<crate::audio::AudioBuffer>>,
+        meta: Option<FileMeta>,
+        virtual_state: Option<VirtualState>,
+    ) -> MediaItem {
         let id = self.next_media_id;
         self.next_media_id = self.next_media_id.wrapping_add(1);
         let safe = crate::app::helpers::sanitize_filename_component(&display_name);
         let path = PathBuf::from("__virtual__").join(format!("{id}_{safe}"));
         let item = MediaItem {
             id,
+            audio_asset,
             path,
             display_name,
             display_folder: std::sync::Arc::from("(virtual)"),
@@ -1838,10 +1964,11 @@ impl WavesPreviewer {
             pending_gain_db: 0.0,
             status: MediaStatus::Ok,
             transcript: None,
+            transcript_document: None,
             transcript_language: None,
             ai_metadata: None,
             external: None,
-            virtual_audio: Some(audio),
+            virtual_audio: resident_cache,
             virtual_state,
         };
         item
@@ -1973,6 +2100,17 @@ impl WavesPreviewer {
     }
 
     fn map_audio_to_display_sample(&self, tab: &EditorTab, audio_pos: usize) -> usize {
+        if Self::editor_uses_source_time_mapping(&self.playback_session.source, tab) {
+            let source_time = self
+                .playback_session
+                .timeline_map
+                .source_time_for_transport_frame(audio_pos as f64);
+            return (source_time
+                * Self::editor_display_sample_rate(tab, self.audio.shared.out_sample_rate.max(1))
+                    as f64)
+                .round()
+                .max(0.0) as usize;
+        }
         Self::map_audio_to_display_sample_with(
             tab,
             audio_pos,
@@ -1987,6 +2125,16 @@ impl WavesPreviewer {
     }
 
     fn map_display_to_audio_sample(&self, tab: &EditorTab, display_pos: usize) -> usize {
+        if Self::editor_uses_source_time_mapping(&self.playback_session.source, tab) {
+            let display_sr =
+                Self::editor_display_sample_rate(tab, self.audio.shared.out_sample_rate.max(1))
+                    .max(1) as f64;
+            return self
+                .playback_session
+                .timeline_map
+                .transport_frame_for_source_time(display_pos as f64 / display_sr)
+                .min(self.audio.current_source_len().max(1));
+        }
         Self::map_display_to_audio_sample_with(
             tab,
             display_pos,
@@ -2017,6 +2165,7 @@ impl WavesPreviewer {
             .has_headers(false)
             .from_path(path)
             .map_err(|e| format!("csv export open failed: {e}"))?;
+        let uses_hours = self.list_length_uses_hours();
         let mut header: Vec<String> = Vec::new();
         if cols.edited {
             header.push("Edited".to_string());
@@ -2117,9 +2266,11 @@ impl WavesPreviewer {
                 }
             }
             if cols.length {
+                // Same rule as the list cell, so a folder with an hour-plus
+                // file doesn't export "120:11".
                 let text = meta
                     .and_then(|m| m.duration_secs)
-                    .map(crate::app::helpers::format_duration)
+                    .map(|secs| crate::app::helpers::format_duration_scaled(secs, uses_hours))
                     .unwrap_or_default();
                 row.push(text);
             }
@@ -2463,6 +2614,7 @@ impl WavesPreviewer {
         self.path_index.clear();
         self.meta_inflight.clear();
         self.transcript_inflight.clear();
+        self.list_max_duration_secs = 0.0;
         self.reset_meta_pool();
         self.spectro_cache.clear();
         self.spectro_inflight.clear();
@@ -2790,22 +2942,29 @@ impl WavesPreviewer {
 
     pub fn new(cc: &eframe::CreationContext<'_>, startup: StartupConfig) -> Result<Self> {
         Self::init_egui_style(&cc.egui_ctx);
-        let audio = AudioEngine::new()?;
-        let app = Self::build_app(startup, audio);
+        // Native audio/device discovery can block for hundreds of milliseconds
+        // on drivers and Bluetooth stacks. Show the window with a valid silent
+        // engine first, then swap in the real engine from a worker.
+        let audio = AudioEngine::new_for_test();
+        let mut app = Self::build_app(startup, audio);
+        app.begin_native_audio_bootstrap();
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
     }
 
     pub fn new_headless(startup: StartupConfig) -> Result<Self> {
         let audio = AudioEngine::new_for_test();
-        Ok(Self::build_app(startup, audio))
+        let mut app = Self::build_app(startup, audio);
+        app.finish_test_startup();
+        Ok(app)
     }
 
     #[cfg(any(test, feature = "kittest"))]
     pub fn new_for_test(cc: &eframe::CreationContext<'_>, startup: StartupConfig) -> Result<Self> {
         Self::init_egui_style(&cc.egui_ctx);
         let audio = AudioEngine::new_for_test();
-        let app = Self::build_app(startup, audio);
+        let mut app = Self::build_app(startup, audio);
+        app.finish_test_startup();
         Self::apply_theme_visuals(&cc.egui_ctx, app.theme_mode);
         Ok(app)
     }

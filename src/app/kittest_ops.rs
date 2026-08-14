@@ -172,7 +172,7 @@ impl super::WavesPreviewer {
     }
 
     pub fn test_push_seen_col_width(&mut self, key: &'static str, width: f32) {
-        self.list_col_widths_seen.push((key, width));
+        self.list_col_widths_seen.push((key.to_string(), width));
     }
 
     pub fn test_apply_seen_col_widths(&mut self) {
@@ -356,6 +356,10 @@ impl super::WavesPreviewer {
         self.show_export_settings
     }
 
+    pub fn test_show_list_columns_window(&self) -> bool {
+        self.show_list_columns_window
+    }
+
     /// Shift the active tab's WORLD F0 draft by `semitones` and kick the
     /// resynthesis job. Returns true when the job was spawned.
     pub fn test_world_shift_and_resynth(&mut self, semitones: f32) -> bool {
@@ -451,6 +455,10 @@ impl super::WavesPreviewer {
 
     pub fn test_set_show_export_settings(&mut self, show: bool) {
         self.show_export_settings = show;
+    }
+
+    pub fn test_set_show_list_columns_window(&mut self, show: bool) {
+        self.show_list_columns_window = show;
     }
 
     pub fn test_set_show_transcription_settings(&mut self, show: bool) {
@@ -579,6 +587,24 @@ impl super::WavesPreviewer {
         self.list_scroll_row
     }
 
+    pub fn test_ui_scroll_focus_name(&self) -> &'static str {
+        match self.ui_scroll_focus.active() {
+            Some(super::input_focus::UiScrollTarget::List) => "list",
+            Some(super::input_focus::UiScrollTarget::Editor) => "editor",
+            Some(super::input_focus::UiScrollTarget::EffectGraph) => "effect_graph",
+            Some(super::input_focus::UiScrollTarget::Recording) => "recording",
+            Some(super::input_focus::UiScrollTarget::Floating(_)) => "floating",
+            None => "none",
+        }
+    }
+
+    pub fn test_ui_scroll_focus_is_floating(&self, id: &str) -> bool {
+        self.ui_scroll_focus.active()
+            == Some(super::input_focus::UiScrollTarget::Floating(egui::Id::new(
+                id,
+            )))
+    }
+
     pub fn test_sort_job_active(&self) -> bool {
         self.sort_job_active() || self.filter_job_active()
     }
@@ -658,6 +684,17 @@ impl super::WavesPreviewer {
 
     pub fn test_set_list_gain_column_visible(&mut self, visible: bool) {
         self.list_columns.gain = visible;
+    }
+
+    pub fn test_move_list_gain_column_first(&mut self) {
+        if let Some(index) = self
+            .list_column_order
+            .iter()
+            .position(|column| *column == crate::app::types::ColumnId::Gain)
+        {
+            let column = self.list_column_order.remove(index);
+            self.list_column_order.insert(0, column);
+        }
     }
 
     pub fn test_select_and_load_row(&mut self, row: usize) -> bool {
@@ -1148,10 +1185,14 @@ impl super::WavesPreviewer {
             SortKey::LufsMomentary => "LufsMomentary",
             SortKey::SilenceLead => "SilenceLead",
             SortKey::SilenceTail => "SilenceTail",
+            SortKey::EdgeZero => "EdgeZero",
+            SortKey::OverPeak => "OverPeak",
+            SortKey::BlankPad => "BlankPad",
             SortKey::Bpm => "Bpm",
             SortKey::CreatedAt => "CreatedAt",
             SortKey::ModifiedAt => "ModifiedAt",
             SortKey::External(_) => "External",
+            SortKey::Metadata(_) => "Metadata",
         }
     }
 
@@ -1791,6 +1832,108 @@ impl super::WavesPreviewer {
         self.list_columns.silence_tail = enabled;
     }
 
+    pub fn test_set_qa_columns(&mut self, enabled: bool) {
+        self.list_columns.edge_zero = enabled;
+        self.list_columns.over_peak = enabled;
+        self.list_columns.blank_pad = enabled;
+    }
+
+    pub fn test_meta_edge_abs(&self, path: &std::path::Path) -> Option<(f32, f32)> {
+        let edge = self.meta_for_path(path)?.edge_abs?;
+        Some((edge.first_abs, edge.last_abs))
+    }
+
+    /// `(lead_ms, tail_ms, threshold_dbfs)` as actually measured — the
+    /// threshold is what proves whether a re-decode happened.
+    pub fn test_meta_blank_pad(&self, path: &std::path::Path) -> Option<(f32, f32, f32)> {
+        let scan = self.meta_for_path(path)?.blank_pad?;
+        Some((scan.lead_ms, scan.tail_ms, scan.threshold_dbfs))
+    }
+
+    pub fn test_set_blank_threshold_dbfs(&mut self, dbfs: f32) {
+        self.blank_threshold_dbfs = dbfs;
+        self.push_blank_threshold_to_meta_pool();
+    }
+
+    pub fn test_set_blank_min_ms(&mut self, ms: f32) {
+        self.blank_min_ms = ms;
+    }
+
+    /// `None` = not resolved yet, `Some(true)` = NG.
+    pub fn test_qa_column_is_ng(&self, column: &str, path: &std::path::Path) -> Option<bool> {
+        let col = crate::app::types::ColumnId::from_name(column)?;
+        match self.qa_status_for_column(col, path) {
+            crate::app::list_state_ops::QaStatus::Unknown => None,
+            crate::app::list_state_ops::QaStatus::Pass => Some(false),
+            crate::app::list_state_ops::QaStatus::Fail(_) => Some(true),
+        }
+    }
+
+    pub fn test_list_length_uses_hours(&self) -> bool {
+        self.list_length_uses_hours()
+    }
+
+    pub fn test_list_max_duration_secs(&self) -> f32 {
+        self.list_max_duration_secs
+    }
+
+    /// Pin positions the routing patchbay drew last frame, as
+    /// `(inputs, outputs)`. Lets tests aim real pointer events at them.
+    pub fn test_channel_routing_pins(
+        ctx: &egui::Context,
+    ) -> Option<(Vec<egui::Pos2>, Vec<egui::Pos2>)> {
+        ctx.data(|d| d.get_temp(crate::app::ui::channel_routing::pin_geometry_id()))
+    }
+
+    pub fn test_channel_routing_connecting_from(&self) -> Option<usize> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .and_then(|t| t.channel_routing_draft.connecting_from)
+    }
+
+    pub fn test_channel_routing_sources(&self) -> Option<Vec<Vec<usize>>> {
+        let tab_idx = self.active_tab?;
+        self.tabs
+            .get(tab_idx)
+            .map(|t| t.channel_routing_draft.sources.clone())
+    }
+
+    /// Wire the active tab's routing matrix: `sources[out]` = input channels.
+    pub fn test_set_channel_routing(&mut self, sources: &[Vec<usize>]) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        let in_count = tab.ch_samples.len().max(1);
+        tab.channel_routing_draft = crate::app::types::ChannelRoutingDraft {
+            in_count,
+            out_count: sources.len().max(1),
+            sources: sources.to_vec(),
+            connecting_from: None,
+        };
+        true
+    }
+
+    pub fn test_apply_channel_routing(&mut self) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        self.editor_apply_channel_routing(tab_idx);
+        true
+    }
+
+    pub fn test_tab_channel_samples(&self) -> Option<Vec<Vec<f32>>> {
+        let tab_idx = self.active_tab?;
+        self.tabs.get(tab_idx).map(|tab| tab.ch_samples.clone())
+    }
+
+    pub fn test_set_pending_gain_db_for_path(&mut self, path: &std::path::Path, db: f32) {
+        self.set_pending_gain_db_for_path(path, db);
+    }
+
     pub fn test_keymap_assign(&mut self, action: &str, chord: &str) -> Result<(), String> {
         let action = crate::app::keymap::Action::from_name(action)
             .ok_or_else(|| format!("unknown action: {action}"))?;
@@ -2406,6 +2549,8 @@ impl super::WavesPreviewer {
             bpm: None,
             silence_lead_ms: None,
             silence_tail_ms: None,
+            edge_abs: None,
+            blank_pad: None,
             created_at: None,
             modified_at: None,
             cover_art: None,
@@ -2652,6 +2797,7 @@ impl super::WavesPreviewer {
             self.clear_preview_if_any(active);
         }
         self.active_tab = None;
+        self.workspace_view = crate::app::types::WorkspaceView::List;
         self.audio.stop();
         self.audio.set_loop_enabled(false);
     }
@@ -2682,6 +2828,10 @@ impl super::WavesPreviewer {
             .as_ref()
             .map(|b| b.len())
             .unwrap_or(0)
+    }
+
+    pub fn test_audio_source_len(&self) -> usize {
+        self.audio.current_source_len()
     }
 
     pub fn test_audio_play_pos(&self) -> usize {
@@ -3110,6 +3260,10 @@ impl super::WavesPreviewer {
         self.open_effect_graph_workspace();
     }
 
+    pub fn test_effect_graph_canvas_zoom(&self) -> f32 {
+        self.effect_graph.canvas.zoom
+    }
+
     pub fn test_effect_graph_predicted_output_summary(&mut self) -> Option<String> {
         self.effect_graph_predicted_output_summary()
     }
@@ -3419,5 +3573,89 @@ impl super::WavesPreviewer {
     /// the "List" tab-strip click without depending on label-text queries.
     pub fn test_switch_to_list_workspace(&mut self) {
         self.workspace_view = crate::app::types::WorkspaceView::List;
+    }
+
+    /// Test-only: switch the active editor tab to the read-only Metadata
+    /// primary view without depending on combo-box hit testing.
+    pub fn test_set_metadata_view(&mut self, hex: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.primary_view = crate::app::types::EditorPrimaryView::Metadata;
+        tab.metadata_sub_view = if hex {
+            crate::app::types::MetadataSubView::Hex
+        } else {
+            crate::app::types::MetadataSubView::Structure
+        };
+        true
+    }
+
+    pub fn test_metadata_document_ready(&self) -> bool {
+        self.active_tab
+            .and_then(|tab_idx| self.tabs.get(tab_idx))
+            .is_some_and(|tab| tab.metadata_document.is_some() && !tab.metadata_loading)
+    }
+
+    pub fn test_metadata_node_count(&self) -> usize {
+        self.active_tab
+            .and_then(|tab_idx| self.tabs.get(tab_idx))
+            .and_then(|tab| tab.metadata_document.as_ref())
+            .map(|document| document.nodes.len())
+            .unwrap_or(0)
+    }
+
+    pub fn test_metadata_hex_offset(&self) -> Option<u64> {
+        self.active_tab
+            .and_then(|tab_idx| self.tabs.get(tab_idx))
+            .map(|tab| tab.metadata_hex_offset)
+    }
+
+    pub fn test_set_metadata_follow_playback(&mut self, enabled: bool) -> bool {
+        let Some(tab_idx) = self.active_tab else {
+            return false;
+        };
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
+            return false;
+        };
+        tab.metadata_follow_playback = enabled;
+        true
+    }
+
+    pub fn test_metadata_hex_selection(&self) -> Option<crate::metadata::SourceRange> {
+        self.active_tab
+            .and_then(|tab_idx| self.tabs.get(tab_idx))
+            .and_then(|tab| tab.metadata_hex_selection)
+    }
+
+    pub fn test_metadata_hex_seek_fraction(&self) -> Option<f64> {
+        self.active_tab
+            .and_then(|tab_idx| self.tabs.get(tab_idx))
+            .and_then(|tab| tab.metadata_hex_seek_fraction)
+    }
+
+    pub fn test_metadata_live_mapping_diagnostic(&self) -> String {
+        let Some(tab_idx) = self.active_tab else {
+            return "no active tab".to_string();
+        };
+        let Some(tab) = self.tabs.get(tab_idx) else {
+            return "active tab is missing".to_string();
+        };
+        let Some(document) = tab.metadata_document.as_ref() else {
+            return "metadata document is missing".to_string();
+        };
+        format!(
+            "mapping={} dirty={} preview={} virtual={} document_source={} tab_path={} playback_source={:?} source_time={:?}",
+            document.audio_mapping.is_some(),
+            tab.dirty,
+            tab.preview_audio_tool.is_some(),
+            self.is_virtual_path(&tab.path),
+            document.source.display(),
+            tab.path.display(),
+            self.playback_session.source,
+            self.playback_current_source_time_sec(),
+        )
     }
 }

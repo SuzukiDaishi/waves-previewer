@@ -25,7 +25,9 @@ impl crate::app::WavesPreviewer {
         let mut open = true;
         let mut clicked_path: Option<std::path::PathBuf> = None;
         let mut save_csv = false;
-        egui::Window::new("Inspection Results")
+        let scroll_target = self.begin_floating_scroll_surface("inspection_results_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Inspection Results")
             .open(&mut open)
             .default_width(760.0)
             .default_height(420.0)
@@ -131,6 +133,10 @@ impl crate::app::WavesPreviewer {
                         }
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if let Some(path) = clicked_path {
             if let Some(row_idx) = self.row_for_path(&path) {
                 self.update_selection_on_click(row_idx, egui::Modifiers::NONE);

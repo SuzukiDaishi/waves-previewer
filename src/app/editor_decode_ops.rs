@@ -16,10 +16,19 @@ impl super::WavesPreviewer {
             .get(&path)
             .copied()
             .filter(|v| *v > 0);
+        let decode_path = self
+            .item_for_path(&path)
+            .and_then(|item| item.audio_asset.backing.file_path().map(PathBuf::from))
+            .unwrap_or_else(|| path.clone());
         let source_sr_hint = self
             .meta_for_path(&path)
             .map(|meta| meta.sample_rate)
             .filter(|v| *v > 0);
+        let source_sr_hint = source_sr_hint.or_else(|| {
+            self.item_for_path(&path)
+                .map(|item| item.audio_asset.sample_rate)
+                .filter(|value| *value > 0)
+        });
         let preferred_out_sr = target_sr.or(source_sr_hint);
         let _ = self.ensure_output_sample_rate(preferred_out_sr);
 
@@ -30,7 +39,11 @@ impl super::WavesPreviewer {
         let bit_depth = self.bit_depth_override.get(&path).copied();
         let estimated_total_frames = self.estimate_editor_total_frames_cached(&path, out_sr);
         let total_source_frames_hint = self.estimate_editor_total_source_frames_cached(&path);
-        let strategy = Self::editor_decode_strategy(&path);
+        let paged_asset = self
+            .item_for_path(&path)
+            .map(|item| !item.audio_asset.may_reside_in_memory())
+            .unwrap_or(false);
+        let strategy = Self::editor_decode_strategy(&decode_path);
         self.debug_log(format!(
         "editor decode spawn: {} strategy={} out_sr={} preferred_out_sr={:?} target_sr={:?} bits={:?} est_frames={:?}",
         path.display(),
@@ -47,12 +60,13 @@ impl super::WavesPreviewer {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_thread = cancel.clone();
         let path_for_thread = path.clone();
+        let decode_path_for_thread = decode_path;
         let (tx, rx) = mpsc::channel::<EditorDecodeResult>();
         std::thread::spawn(move || match strategy {
             EditorDecodeStrategy::CompressedProgressiveFull => {
                 let mut partial_emitted = false;
                 let progressive = crate::audio_io::decode_audio_multi_progressive(
-                    &path_for_thread,
+                    &decode_path_for_thread,
                     EDITOR_PREVIEW_PREFIX_SECS_COMPRESSED,
                     EDITOR_PROGRESSIVE_EMIT_SECS_COMPRESSED,
                     || cancel_thread.load(Ordering::Relaxed),
@@ -192,7 +206,7 @@ impl super::WavesPreviewer {
                 let mut full_source_channels: Vec<Vec<f32>> = Vec::new();
                 let mut last_progress_emit_at: Option<std::time::Instant> = None;
                 if let Ok(Some(overview_proxy)) = crate::audio_io::build_wav_proxy_preview(
-                    &path_for_thread,
+                    &decode_path_for_thread,
                     crate::audio_io::EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES,
                 ) {
                     source_sr = source_sr.max(overview_proxy.source_sample_rate.max(1));
@@ -224,7 +238,7 @@ impl super::WavesPreviewer {
                             channels_arc: None,
                             waveform_minmax: Vec::new(),
                             waveform_pyramid: None,
-                            loading_waveform_minmax,
+                            loading_waveform_minmax: loading_waveform_minmax.clone(),
                             buffer_sample_rate: out_sr.max(1),
                             job_id,
                             error: None,
@@ -241,9 +255,32 @@ impl super::WavesPreviewer {
                     {
                         return;
                     }
+                    if paged_asset {
+                        let _ = tx.send(EditorDecodeResult {
+                            path: path_for_thread,
+                            event: EditorDecodeEvent::PagedReady,
+                            channels: Vec::new(),
+                            channels_arc: None,
+                            waveform_minmax: loading_waveform_minmax.clone(),
+                            waveform_pyramid: None,
+                            loading_waveform_minmax,
+                            buffer_sample_rate: out_sr.max(1),
+                            job_id,
+                            error: None,
+                            stage: EditorDecodeStage::Preview,
+                            decoded_frames: visual_total_frames.unwrap_or(0),
+                            decoded_source_frames: 0,
+                            total_source_frames,
+                            visual_total_frames,
+                            progress_emit_gap_ms: None,
+                            finalize_audio_ms: None,
+                            finalize_waveform_ms: None,
+                        });
+                        return;
+                    }
                 }
                 let stream = crate::audio_io::decode_audio_multi_streaming_chunks(
-                    &path_for_thread,
+                    &decode_path_for_thread,
                     EDITOR_STREAMING_PROGRESS_EMIT_SECS,
                     || cancel_thread.load(Ordering::Relaxed),
                     |chunk, in_sr, decoded_source_frames, is_final| {
@@ -657,6 +694,7 @@ impl super::WavesPreviewer {
         let mut decode_finalize_audio_ms: Vec<f32> = Vec::new();
         let mut decode_finalize_waveform_ms: Vec<f32> = Vec::new();
         let mut decode_done_loading_stats: Option<(u64, f32)> = None;
+        let mut paged_ready_tab: Option<usize> = None;
         if let Some(state) = &mut self.editor_decode_state {
             while let Ok(res) = state.rx.try_recv() {
                 if res.job_id != state.job_id {
@@ -709,6 +747,7 @@ impl super::WavesPreviewer {
                             tab.preview_audio_tool.is_some() || tab.preview_overlay.is_some();
                         match res.event {
                             EditorDecodeEvent::FinalReady => {
+                                tab.paged_asset = false;
                                 tab.preview_audio_tool = None;
                                 tab.preview_overlay = None;
                                 let old_audio_len = tab.samples_len;
@@ -747,7 +786,15 @@ impl super::WavesPreviewer {
                                 Self::editor_clamp_ranges(tab);
                                 Self::invalidate_editor_viewport_cache(tab);
                                 decode_update_tab = Some(idx);
-                                decode_refresh_preview = Some(idx);
+                                // A session may restore the active tool and its
+                                // parameters without persisting a lightweight
+                                // overview-only preview. Do not implicitly
+                                // recreate that transient preview when decode
+                                // finishes. Existing/full previews (or previews
+                                // requested while loading) are rebuilt below.
+                                if had_preview {
+                                    decode_refresh_preview = Some(idx);
+                                }
                                 if had_preview && self.active_tab == Some(idx) {
                                     decode_cancel_preview = true;
                                 }
@@ -780,12 +827,39 @@ impl super::WavesPreviewer {
                                 );
                                 Self::invalidate_editor_viewport_cache(tab);
                             }
+                            EditorDecodeEvent::PagedReady => {
+                                tab.preview_audio_tool = None;
+                                tab.preview_overlay = None;
+                                tab.ch_samples.clear();
+                                tab.ch_samples_arc = std::sync::Arc::new(Vec::new());
+                                tab.buffer_sample_rate = res.buffer_sample_rate.max(1);
+                                if !res.waveform_minmax.is_empty() {
+                                    tab.waveform_minmax = res.waveform_minmax;
+                                }
+                                if !res.loading_waveform_minmax.is_empty() {
+                                    tab.loading_waveform_minmax = res.loading_waveform_minmax;
+                                }
+                                if let Some(visual_total_frames) = res.visual_total_frames {
+                                    tab.samples_len_visual = visual_total_frames;
+                                }
+                                tab.samples_len = 0;
+                                tab.loading = false;
+                                tab.paged_asset = true;
+                                Self::invalidate_editor_viewport_cache(tab);
+                                paged_ready_tab = Some(idx);
+                            }
                             EditorDecodeEvent::Failed => {}
                         }
                     }
                 }
                 match res.event {
                     EditorDecodeEvent::FinalReady => {
+                        decode_final_events.push((res.path.clone(), res.decoded_frames));
+                        decode_done = true;
+                        decode_done_loading_stats =
+                            Some((state.loading_waveform_updates, state.max_progress_gap_ms));
+                    }
+                    EditorDecodeEvent::PagedReady => {
                         decode_final_events.push((res.path.clone(), res.decoded_frames));
                         decode_done = true;
                         decode_done_loading_stats =
@@ -859,7 +933,13 @@ impl super::WavesPreviewer {
                     if tab.loop_region.is_none() && tab.loop_markers_saved.is_none() {
                         Self::set_loop_region_from_file_markers(tab, &path, file_sr, out_sr);
                     }
-                    Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+                    // A reopened cached edit already carries the user's
+                    // unsaved markers. Do not replace those with the source
+                    // file's marker set when the ready-channel decode
+                    // finalizes.
+                    if !tab.markers_dirty {
+                        Self::load_markers_for_tab(tab, &path, out_sr, file_sr);
+                    }
                 }
             }
         }
@@ -896,6 +976,9 @@ impl super::WavesPreviewer {
                     }
                 }
             }
+        }
+        if let Some(idx) = paged_ready_tab {
+            let _ = self.try_activate_editor_stream_transport_for_tab(idx);
         }
         if let Some(idx) = decode_refresh_preview {
             if self.active_tab == Some(idx) {

@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::types::{BlankPadScan, EdgeSamples};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct InspectionConfig {
     pub check_true_peak: bool,
@@ -152,6 +154,62 @@ pub fn scan_silence_ms(
     let lead_ms = first as f32 * 1000.0 / sr;
     let trail_ms = (frames - 1 - last) as f32 * 1000.0 / sr;
     (lead_ms, trail_ms)
+}
+
+/// Default Blank Pad threshold. Deliberately higher than
+/// [`DEFAULT_SILENCE_THRESHOLD_DBFS`]: the Sil.Head/Sil.Tail columns report a
+/// measurement, while this one answers "does this file need trimming?", where
+/// low-level room tone should still count as blank.
+pub const DEFAULT_BLANK_THRESHOLD_DBFS: f32 = -45.0;
+
+/// Blank shorter than this is not worth flagging — notably, a file that
+/// correctly starts and ends on a zero sample would otherwise always be NG.
+pub const DEFAULT_BLANK_MIN_MS: f32 = 10.0;
+
+/// [`scan_silence_ms`] wrapped for the Blank Pad column: carries the threshold
+/// it used and flags the fully-silent case, where the underlying scan reports
+/// the whole duration on both ends.
+pub fn scan_blank_pad(
+    ch_samples: &[Vec<f32>],
+    sample_rate: u32,
+    threshold_dbfs: f32,
+) -> BlankPadScan {
+    let (lead_ms, tail_ms) = scan_silence_ms(ch_samples, sample_rate, threshold_dbfs);
+    let frames = ch_samples.iter().map(|c| c.len()).max().unwrap_or(0);
+    let full_ms = frames as f32 * 1000.0 / sample_rate.max(1) as f32;
+    // Only the silent branch of `scan_silence_ms` can return the full
+    // duration as the lead; a file with any loud frame caps out one frame
+    // short of it.
+    let all_silent = frames > 0 && lead_ms >= full_ms;
+    BlankPadScan {
+        lead_ms,
+        tail_ms,
+        threshold_dbfs,
+        all_silent,
+    }
+}
+
+/// Amplitude of the very first and very last frame, maxed across channels.
+/// `None` for an empty buffer. The epsilon comparison is left to the caller so
+/// changing `zero_cross_epsilon` never forces a re-decode.
+pub fn scan_edge_samples(ch_samples: &[Vec<f32>]) -> Option<EdgeSamples> {
+    let mut first_abs = 0.0f32;
+    let mut last_abs = 0.0f32;
+    let mut any = false;
+    for ch in ch_samples {
+        // Channel lengths can differ on a truncated decode; use each one's own
+        // last frame rather than a shared index.
+        let (Some(&first), Some(&last)) = (ch.first(), ch.last()) else {
+            continue;
+        };
+        any = true;
+        first_abs = first_abs.max(first.abs());
+        last_abs = last_abs.max(last.abs());
+    }
+    any.then_some(EdgeSamples {
+        first_abs,
+        last_abs,
+    })
 }
 
 /// Structural loop validation missing from the readers: bounds against the
@@ -571,6 +629,45 @@ mod tests {
         let (l, t) = scan_silence_ms(&[silent], sr, -60.0);
         assert!((l - 1000.0).abs() < 1.0);
         assert!((t - 1000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn blank_pad_carries_its_threshold_and_flags_all_silent() {
+        let sr = 48_000u32;
+        let lead = (sr as usize) / 10;
+        let mut ch = vec![0.0f32; lead];
+        ch.extend(tone(sr as usize, 0.5));
+        let scan = scan_blank_pad(&[ch], sr, -45.0);
+        assert_eq!(scan.threshold_dbfs, -45.0);
+        assert!((scan.lead_ms - 100.0).abs() < 2.0, "lead {}", scan.lead_ms);
+        assert!(!scan.all_silent);
+
+        // Without the flag this reads as 1000 ms of blank on both ends of a
+        // 1000 ms file.
+        let silent = scan_blank_pad(&[vec![0.0f32; sr as usize]], sr, -45.0);
+        assert!(silent.all_silent);
+
+        // A -50 dBFS tone is blank at -45 but not at -60: the threshold has to
+        // actually reach the scan.
+        let quiet = tone(sr as usize, 10.0f32.powf(-50.0 / 20.0));
+        assert!(scan_blank_pad(&[quiet.clone()], sr, -45.0).all_silent);
+        assert!(!scan_blank_pad(&[quiet], sr, -60.0).all_silent);
+    }
+
+    #[test]
+    fn edge_samples_max_across_channels() {
+        assert_eq!(scan_edge_samples(&[]), None);
+        assert_eq!(scan_edge_samples(&[Vec::new()]), None);
+        let a = vec![0.0f32, 0.5, 0.25];
+        let b = vec![-0.75f32, 0.1, -0.5];
+        let edge = scan_edge_samples(&[a, b]).expect("edge");
+        assert!((edge.first_abs - 0.75).abs() < 1e-6, "{edge:?}");
+        assert!((edge.last_abs - 0.5).abs() < 1e-6, "{edge:?}");
+
+        // Ragged channels use each one's own last frame rather than a shared
+        // index, so a short channel can't read past its end.
+        let edge = scan_edge_samples(&[vec![0.0f32; 8], vec![0.0, 0.9]]).expect("edge");
+        assert!((edge.last_abs - 0.9).abs() < 1e-6, "{edge:?}");
     }
 
     #[test]

@@ -1,9 +1,32 @@
 use std::path::{Path, PathBuf};
 
 use super::types::{
-    FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SortDir, SortKey, Transcript,
+    ColumnId, FileMeta, MediaId, MediaItem, MediaSource, SampleValueKind, SortDir, SortKey,
+    Transcript, TranscriptDocument,
 };
 use super::WavesPreviewer;
+
+/// Verdict for the QA list columns. `Pass` renders an empty cell — only
+/// problems are worth the reader's attention.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum QaStatus {
+    /// Full-decode metadata hasn't landed yet, or was measured with a setting
+    /// that has since changed.
+    Unknown,
+    Pass,
+    Fail(String),
+}
+
+impl QaStatus {
+    /// Sort weight: NG above OK above not-yet-known.
+    pub(super) fn sort_rank(&self) -> Option<f64> {
+        match self {
+            QaStatus::Unknown => None,
+            QaStatus::Pass => Some(0.0),
+            QaStatus::Fail(_) => Some(1.0),
+        }
+    }
+}
 
 impl WavesPreviewer {
     pub(super) fn is_dotfile_path(path: &Path) -> bool {
@@ -101,6 +124,111 @@ impl WavesPreviewer {
         self.effective_display_meta_for_path(path)
     }
 
+    /// Whether the Length column renders `h:mm:ss` for every row. See
+    /// `list_max_duration_secs` for why this only ever latches on.
+    pub(super) fn list_length_uses_hours(&self) -> bool {
+        self.list_max_duration_secs.round() >= 3600.0
+    }
+
+    /// Edge Zero: does the file start and end on (near) silence? The epsilon
+    /// is applied here rather than at decode time so changing it in Settings
+    /// re-evaluates every row without a re-decode.
+    pub(super) fn qa_edge_zero_for_path(&self, path: &Path) -> QaStatus {
+        let Some(edge) = self.meta_for_path(path).and_then(|m| m.edge_abs) else {
+            return QaStatus::Unknown;
+        };
+        let eps = self.zero_cross_epsilon.max(0.0);
+        let head_bad = edge.first_abs > eps;
+        let tail_bad = edge.last_abs > eps;
+        if !head_bad && !tail_bad {
+            return QaStatus::Pass;
+        }
+        let mut parts = Vec::new();
+        if head_bad {
+            parts.push(format!("first sample {:.5}", edge.first_abs));
+        }
+        if tail_bad {
+            parts.push(format!("last sample {:.5}", edge.last_abs));
+        }
+        QaStatus::Fail(format!(
+            "{} (tolerance {:.5}) — may click on playback",
+            parts.join(", "),
+            eps
+        ))
+    }
+
+    /// Over 0 dBFS. Includes the pending gain so this agrees with the Peak
+    /// column right next to it, and reports unknown rather than guessing off
+    /// the header pass's short-prefix estimate.
+    pub(super) fn qa_over_peak_for_path(&self, path: &Path) -> QaStatus {
+        let Some((peak_db, estimate)) = self
+            .meta_for_path(path)
+            .map(|m| (m.peak_db, m.peak_db_estimate))
+        else {
+            return QaStatus::Unknown;
+        };
+        let Some(peak_db) = peak_db.filter(|v| !v.is_nan()) else {
+            return QaStatus::Unknown;
+        };
+        if estimate {
+            return QaStatus::Unknown;
+        }
+        let gain_db = self.pending_gain_db_for_path(path);
+        let adjusted = peak_db + gain_db;
+        if !(adjusted > 0.0) {
+            return QaStatus::Pass;
+        }
+        let mut msg = format!("Peak {adjusted:+.2} dBFS exceeds 0 dBFS");
+        if gain_db.abs() > 0.0001 {
+            msg.push_str(&format!(" (includes pending gain {gain_db:+.1} dB)"));
+        }
+        QaStatus::Fail(msg)
+    }
+
+    /// Blank Pad. A measurement taken at a threshold other than the current
+    /// setting counts as unknown, which is what makes the row re-queue itself.
+    pub(super) fn qa_blank_pad_for_path(&self, path: &Path) -> QaStatus {
+        let Some(scan) = self
+            .meta_for_path(path)
+            .and_then(|m| m.blank_pad)
+            .filter(|s| s.threshold_dbfs == self.blank_threshold_dbfs)
+        else {
+            return QaStatus::Unknown;
+        };
+        let threshold = scan.threshold_dbfs;
+        if scan.all_silent {
+            return QaStatus::Fail(format!("Entire file is below {threshold:.1} dBFS"));
+        }
+        let min_ms = self.blank_min_ms.max(0.0);
+        let head_bad = scan.lead_ms >= min_ms && scan.lead_ms > 0.0;
+        let tail_bad = scan.tail_ms >= min_ms && scan.tail_ms > 0.0;
+        if !head_bad && !tail_bad {
+            return QaStatus::Pass;
+        }
+        let mut parts = Vec::new();
+        if head_bad {
+            parts.push(format!("leading {:.0} ms", scan.lead_ms));
+        }
+        if tail_bad {
+            parts.push(format!("trailing {:.0} ms", scan.tail_ms));
+        }
+        QaStatus::Fail(format!(
+            "{} below {:.1} dBFS (limit {:.0} ms)",
+            parts.join(", "),
+            threshold,
+            min_ms
+        ))
+    }
+
+    pub(super) fn qa_status_for_column(&self, col: ColumnId, path: &Path) -> QaStatus {
+        match col {
+            ColumnId::EdgeZero => self.qa_edge_zero_for_path(path),
+            ColumnId::OverPeak => self.qa_over_peak_for_path(path),
+            ColumnId::BlankPad => self.qa_blank_pad_for_path(path),
+            _ => QaStatus::Unknown,
+        }
+    }
+
     pub(super) fn effective_sample_rate_for_path(&self, path: &Path) -> Option<u32> {
         self.sample_rate_override
             .get(path)
@@ -184,6 +312,11 @@ impl WavesPreviewer {
     pub(super) fn set_meta_for_path(&mut self, path: &Path, meta: FileMeta) -> bool {
         let bpm_hint = meta.bpm.filter(|v| v.is_finite() && *v > 0.0);
         let sr_hint = (meta.sample_rate > 0).then_some(meta.sample_rate);
+        // Single choke point for both the header and full metadata stages, so
+        // the Length format latch updates in O(1) instead of a per-frame scan.
+        if let Some(d) = meta.duration_secs.filter(|v| v.is_finite() && *v > 0.0) {
+            self.list_max_duration_secs = self.list_max_duration_secs.max(d);
+        }
         let updated = if let Some(item) = self.item_for_path_mut(path) {
             item.meta = Some(Box::new(meta));
             if let Some(sr) = sr_hint {
@@ -225,8 +358,19 @@ impl WavesPreviewer {
         transcript: Option<Transcript>,
     ) -> bool {
         let has_transcript = transcript.is_some();
+        let document = self.item_for_path(path).and_then(|item| {
+            transcript.as_ref().map(|value| {
+                std::sync::Arc::new(crate::app::types::TranscriptDocument::from_transcript(
+                    value,
+                    item.transcript_language.clone(),
+                    item.audio_asset.id,
+                    item.audio_asset.revision,
+                ))
+            })
+        });
         if let Some(item) = self.item_for_path_mut(path) {
             item.transcript = transcript.map(std::sync::Arc::new);
+            item.transcript_document = document;
             if item.transcript.is_none() {
                 item.transcript_language = None;
             }
@@ -255,7 +399,10 @@ impl WavesPreviewer {
             .filter(|v| !v.is_empty());
         let has_language = normalized.is_some();
         if let Some(item) = self.item_for_path_mut(path) {
-            item.transcript_language = normalized;
+            item.transcript_language = normalized.clone();
+            if let Some(document) = item.transcript_document.as_mut() {
+                std::sync::Arc::make_mut(document).language = normalized;
+            }
         } else {
             return false;
         }
@@ -265,9 +412,33 @@ impl WavesPreviewer {
         true
     }
 
+    pub(super) fn advance_asset_revision_for_path(&mut self, path: &Path) {
+        if let Some(item) = self.item_for_path_mut(path) {
+            item.audio_asset.revision = item.audio_asset.revision.next();
+            if let Some(document) = item.transcript_document.as_mut() {
+                std::sync::Arc::make_mut(document).asset_revision = item.audio_asset.revision;
+            }
+        }
+    }
+
+    pub(super) fn mutate_transcript_document_for_path<F>(&mut self, path: &Path, mutate: F)
+    where
+        F: FnOnce(&mut TranscriptDocument),
+    {
+        if let Some(item) = self.item_for_path_mut(path) {
+            if let Some(document) = item.transcript_document.as_mut() {
+                let document = std::sync::Arc::make_mut(document);
+                mutate(document);
+                item.transcript = Some(std::sync::Arc::new(document.transcript()));
+                item.transcript_language = document.language.clone();
+            }
+        }
+    }
+
     pub(super) fn clear_transcript_for_path(&mut self, path: &Path) {
         if let Some(item) = self.item_for_path_mut(path) {
             item.transcript = None;
+            item.transcript_document = None;
             item.transcript_language = None;
         }
     }
@@ -398,9 +569,16 @@ impl WavesPreviewer {
             SortKey::Bpm => cols.bpm,
             SortKey::SilenceLead => cols.silence_lead,
             SortKey::SilenceTail => cols.silence_tail,
+            SortKey::EdgeZero => cols.edge_zero,
+            SortKey::OverPeak => cols.over_peak,
+            SortKey::BlankPad => cols.blank_pad,
             SortKey::CreatedAt => cols.created_at,
             SortKey::ModifiedAt => cols.modified_at,
             SortKey::External(idx) => external_visible && idx < self.external_visible_columns.len(),
+            SortKey::Metadata(index) => self
+                .metadata_list_columns
+                .get(index)
+                .is_some_and(|column| column.visible),
         };
         if key_visible {
             return;
@@ -441,6 +619,12 @@ impl WavesPreviewer {
             SortKey::CreatedAt
         } else if cols.modified_at {
             SortKey::ModifiedAt
+        } else if cols.edge_zero {
+            SortKey::EdgeZero
+        } else if cols.over_peak {
+            SortKey::OverPeak
+        } else if cols.blank_pad {
+            SortKey::BlankPad
         } else {
             SortKey::File
         };

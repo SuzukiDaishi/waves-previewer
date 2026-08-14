@@ -12,6 +12,12 @@ const ITUNES_MEAN: &str = "com.apple.iTunes";
 
 pub fn read_loop_markers(path: &Path) -> Option<(u64, u64)> {
     match ext_lower(path)?.as_str() {
+        "wav"
+            if loop_sidecar_path(path).is_file()
+                || crate::wav_stream::wave_metadata_requires_sidecar(path) =>
+        {
+            read_sidecar_loop_markers(path)
+        }
         "wav" => crate::wave::read_wav_loop_markers(path).map(|(s, e)| (s as u64, e as u64)),
         "aiff" | "aif" => {
             crate::wave::read_aiff_loop_markers(path).map(|(s, e)| (s as u64, e as u64))
@@ -28,9 +34,22 @@ pub fn read_loop_markers(path: &Path) -> Option<(u64, u64)> {
 
 pub fn write_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<()> {
     match ext_lower(path).as_deref() {
+        Some("wav")
+            if crate::wav_stream::wave_metadata_requires_sidecar(path)
+                || loop_opt
+                    .map(|(s, e)| s > u32::MAX as u64 || e > u32::MAX as u64)
+                    .unwrap_or(false) =>
+        {
+            write_sidecar_loop_markers(path, loop_opt)
+        }
         Some("wav") => {
             let loop_opt = loop_opt.and_then(|(s, e)| u64_to_u32_pair(s, e));
-            crate::wave::write_wav_loop_markers(path, loop_opt)
+            crate::wave::write_wav_loop_markers(path, loop_opt)?;
+            let stale_sidecar = loop_sidecar_path(path);
+            if stale_sidecar.is_file() {
+                let _ = std::fs::remove_file(stale_sidecar);
+            }
+            Ok(())
         }
         Some("aiff") | Some("aif") => {
             let loop_opt = loop_opt.and_then(|(s, e)| u64_to_u32_pair(s, e));
@@ -182,4 +201,29 @@ fn write_m4a_loop_markers(path: &Path, loop_opt: Option<(u64, u64)>) -> Result<(
     tag.write_to_path(path)
         .with_context(|| format!("write m4a tags: {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rf64_loop_sidecar_preserves_64_bit_positions() {
+        let dir = std::env::temp_dir().join(format!(
+            "neowaves_rf64_loop_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.wav");
+        std::fs::write(&path, b"RF64\xff\xff\xff\xffWAVE").unwrap();
+        let expected = (u32::MAX as u64 + 100, u32::MAX as u64 + 10_000);
+        write_loop_markers(&path, Some(expected)).unwrap();
+        assert_eq!(read_loop_markers(&path), Some(expected));
+        assert_eq!(std::fs::read(&path).unwrap(), b"RF64\xff\xff\xff\xffWAVE");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

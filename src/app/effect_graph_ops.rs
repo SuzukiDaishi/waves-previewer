@@ -52,7 +52,10 @@ struct EffectGraphClipboardPayload {
 
 #[derive(Clone)]
 struct EffectGraphWorkerInput {
+    /// Stable list/tab identity used in progress and commit events.
     path: PathBuf,
+    /// Physical current-revision backing used only by decoders.
+    decode_path: PathBuf,
     input_bus: Option<EffectGraphAudioBus>,
     bit_depth: Option<crate::wave::WavBitDepth>,
     monitor_sr: u32,
@@ -4415,12 +4418,18 @@ impl WavesPreviewer {
         paths
             .iter()
             .cloned()
-            .map(|path| EffectGraphWorkerInput {
-                bit_depth: self.bit_depth_override.get(&path).copied(),
-                input_bus: self.resident_effect_graph_audio_bus_for_path(&path),
-                monitor_sr,
-                path,
-                resample_quality,
+            .map(|path| {
+                let decode_path = self
+                    .resolved_audio_file_path(&path)
+                    .unwrap_or_else(|| path.clone());
+                EffectGraphWorkerInput {
+                    bit_depth: self.bit_depth_override.get(&path).copied(),
+                    input_bus: self.resident_effect_graph_audio_bus_for_path(&path),
+                    monitor_sr,
+                    path,
+                    decode_path,
+                    resample_quality,
+                }
             })
             .collect()
     }
@@ -4479,6 +4488,7 @@ impl WavesPreviewer {
                     &job.channels,
                     job.final_sample_rate.max(1),
                     job.bits_per_sample,
+                    job.blank_threshold_dbfs,
                 );
                 if result_tx
                     .send(EffectGraphApplyPostprocessResult {
@@ -4507,6 +4517,7 @@ impl WavesPreviewer {
     ) {
         self.ensure_effect_graph_postprocess_worker();
         let bits_per_sample = self.effective_bits_for_path(path).unwrap_or(32);
+        let blank_threshold_dbfs = self.blank_threshold_dbfs;
         self.effect_graph
             .pending_effect_graph_commits
             .insert(path.to_path_buf(), generation);
@@ -4518,6 +4529,7 @@ impl WavesPreviewer {
                     channels: channels.to_vec(),
                     final_sample_rate,
                     bits_per_sample,
+                    blank_threshold_dbfs,
                 })
                 .is_err()
             {
@@ -4608,7 +4620,7 @@ impl WavesPreviewer {
                 let input_bus = if let Some(input_bus) = input.input_bus.clone() {
                     input_bus
                 } else {
-                    let decoded = crate::wave::decode_wav_multi(&input.path);
+                    let decoded = crate::wave::decode_wav_multi(&input.decode_path);
                     let (mut channels, in_sr) = match decoded {
                         Ok(v) => v,
                         Err(err) => {
@@ -4846,7 +4858,10 @@ impl WavesPreviewer {
     ) -> Result<(Option<EffectGraphAudioBus>, Option<PathBuf>, PathBuf), String> {
         if let Some(target_path) = self.effect_graph_test_target_candidate() {
             let input_bus = self.resident_effect_graph_audio_bus_for_path(&target_path);
-            Ok((input_bus, Some(target_path.clone()), target_path))
+            let worker_path = self
+                .resolved_audio_file_path(&target_path)
+                .unwrap_or_else(|| target_path.clone());
+            Ok((input_bus, Some(target_path), worker_path))
         } else {
             Ok((
                 Some(self.effect_graph_embedded_sample_bus()?),
@@ -4898,10 +4913,13 @@ impl WavesPreviewer {
             .autoplay_requested = autoplay;
         self.effect_graph.input_preview_worker_state.rx = Some(rx);
         let bit_depth = self.bit_depth_override.get(&target_path).copied();
+        let decode_path = self
+            .resolved_audio_file_path(&target_path)
+            .unwrap_or_else(|| target_path.clone());
         let monitor_sr = self.audio.shared.out_sample_rate.max(1);
         let resample_quality = Self::to_wave_resample_quality(self.src_quality);
         std::thread::spawn(move || {
-            let result = match crate::wave::decode_wav_multi(&target_path) {
+            let result = match crate::wave::decode_wav_multi(&decode_path) {
                 Ok((mut channels, sample_rate)) => {
                     if let Some(depth) = bit_depth {
                         crate::wave::quantize_channels_in_place(&mut channels, depth);
@@ -4989,7 +5007,8 @@ impl WavesPreviewer {
             clone_sanitized_document(&self.effect_graph.draft),
             stamp,
             vec![EffectGraphWorkerInput {
-                path: worker_path,
+                path: worker_path.clone(),
+                decode_path: worker_path,
                 input_bus,
                 bit_depth: None,
                 monitor_sr,
@@ -5121,6 +5140,7 @@ impl WavesPreviewer {
                 tool_state: tab.tool_state,
                 active_tool: tab.active_tool,
                 plugin_fx_draft: tab.plugin_fx_draft.clone(),
+                plugin_fx_chain: tab.plugin_fx_chain.clone(),
                 show_waveform_overlay: tab.show_waveform_overlay,
                 applied_effect_graph: template_stamp.clone(),
             }
@@ -5168,6 +5188,7 @@ impl WavesPreviewer {
                 tool_state: existing.tool_state,
                 active_tool: existing.active_tool,
                 plugin_fx_draft: existing.plugin_fx_draft.clone(),
+                plugin_fx_chain: existing.plugin_fx_chain.clone(),
                 show_waveform_overlay: existing.show_waveform_overlay,
                 applied_effect_graph: template_stamp.clone(),
             }
@@ -5214,6 +5235,7 @@ impl WavesPreviewer {
                 tool_state: default_tool_state(),
                 active_tool: ToolKind::LoopEdit,
                 plugin_fx_draft: super::types::PluginFxDraft::default(),
+                plugin_fx_chain: super::types::PluginFxChainDraft::default(),
                 show_waveform_overlay: false,
                 applied_effect_graph: template_stamp.clone(),
             }
@@ -6390,29 +6412,19 @@ mod tests {
     }
 
     #[test]
-    fn effect_graph_plugin_fx_runtime_supports_generic_vst3_and_clap_fallbacks() {
+    fn effect_graph_plugin_fx_runtime_rejects_invalid_native_plugins_without_generic_success() {
         for ext in ["vst3", "clap"] {
             let stub = temp_plugin_stub(ext);
             let doc = plugin_fx_doc_with_path(&stub);
-            let mut logs = Vec::new();
-            let out = run_effect_graph_document(
+            let err = run_effect_graph_document(
                 &doc,
                 test_bus(vec![vec![0.1, -0.2, 0.3], vec![0.4, -0.5, 0.6]], 48_000),
                 EffectGraphRunMode::TestPreview,
                 crate::wave::ResampleQuality::Good,
-                |event| {
-                    if let EffectGraphRuntimeEvent::NodeLog { message, .. } = event {
-                        logs.push(message);
-                    }
-                },
+                |_| {},
             )
-            .expect("plugin runtime ok");
-            assert_eq!(out.channels.len(), 2);
-            assert_eq!(out.channels[0], vec![0.1, -0.2, 0.3]);
-            assert_eq!(out.channels[1], vec![0.4, -0.5, 0.6]);
-            assert!(logs
-                .iter()
-                .any(|message| message.contains("Plugin FX backend:")));
+            .expect_err("invalid native plugin must fail");
+            assert!(err.contains("native") || err.contains("process failed"));
             let _ = std::fs::remove_file(stub);
         }
     }

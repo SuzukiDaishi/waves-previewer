@@ -116,7 +116,9 @@ impl crate::app::WavesPreviewer {
         let mut start_capture: Option<Action> = None;
         let mut reset_action: Option<Action> = None;
         let mut reset_all = false;
-        egui::Window::new("Customize Shortcuts")
+        let scroll_target = self.begin_floating_scroll_surface("keymap_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Customize Shortcuts")
             .open(&mut open)
             .default_width(520.0)
             .default_height(480.0)
@@ -194,6 +196,10 @@ impl crate::app::WavesPreviewer {
                 ui.separator();
                 ui.label("Gray rows have fixed keys; their chords are not checked for conflicts.");
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if let Some(action) = start_capture {
             self.keymap_capture = Some(action);
         }

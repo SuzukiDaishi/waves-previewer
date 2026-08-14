@@ -7,7 +7,9 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let mut open = self.show_tool_palette;
-        egui::Window::new("Command Palette")
+        let scroll_target = self.begin_floating_scroll_surface("tool_palette_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Command Palette")
             .open(&mut open)
             .resizable(true)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -196,6 +198,10 @@ impl crate::app::WavesPreviewer {
                         }
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         self.show_tool_palette = open;
     }
 
@@ -204,7 +210,9 @@ impl crate::app::WavesPreviewer {
             return;
         };
         let mut open = true;
-        egui::Window::new("Confirm Tool Command")
+        let scroll_target = self.begin_floating_scroll_surface("tool_confirm_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Confirm Tool Command")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -231,6 +239,10 @@ impl crate::app::WavesPreviewer {
                     }
                 });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if !open {
             self.pending_tool_confirm = None;
         }

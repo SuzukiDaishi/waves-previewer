@@ -7,7 +7,9 @@ impl crate::app::WavesPreviewer {
             return;
         }
         let mut open = self.show_transcription_settings;
-        egui::Window::new("AI > Transcription")
+        let scroll_target = self.begin_floating_scroll_surface("transcription_settings_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("AI > Transcription")
             .open(&mut open)
             .resizable(true)
             .default_size(egui::vec2(760.0, 620.0))
@@ -405,6 +407,10 @@ impl crate::app::WavesPreviewer {
                         }
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         self.show_transcription_settings = open;
     }
 }

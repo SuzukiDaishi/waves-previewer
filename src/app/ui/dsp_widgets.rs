@@ -103,6 +103,7 @@ pub(crate) fn eq_response_plot(
     id: egui::Id,
     params: &mut ThreeBandEqParams,
     sample_rate: u32,
+    allow_wheel: bool,
 ) -> bool {
     let (resp, painter, rect) = plot_frame(ui, 150.0);
     let inner = rect.shrink(6.0);
@@ -213,16 +214,18 @@ pub(crate) fn eq_response_plot(
         dragging = None;
     }
     // Scroll over the mid handle adjusts Q.
-    if let Some(pos) = hover {
-        let mid_pos = Pos2::new(
-            freq_to_x(inner, params.mid_freq_hz),
-            db_to_y(inner, params.mid_gain_db, EQ_DB_RANGE),
-        );
-        if mid_pos.distance(pos) <= HANDLE_HIT_RADIUS * 1.5 {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.0 {
-                params.mid_q = (params.mid_q * (1.0 + scroll.signum() * 0.1)).clamp(0.1, 10.0);
-                changed = true;
+    if allow_wheel {
+        if let Some(pos) = hover {
+            let mid_pos = Pos2::new(
+                freq_to_x(inner, params.mid_freq_hz),
+                db_to_y(inner, params.mid_gain_db, EQ_DB_RANGE),
+            );
+            if mid_pos.distance(pos) <= HANDLE_HIT_RADIUS * 1.5 {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll.abs() > 0.0 {
+                    params.mid_q = (params.mid_q * (1.0 + scroll.signum() * 0.1)).clamp(0.1, 10.0);
+                    changed = true;
+                }
             }
         }
     }

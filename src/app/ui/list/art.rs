@@ -93,7 +93,9 @@ impl WavesPreviewer {
         );
         let mut open = self.show_list_art_window;
         let mut close_clicked = false;
-        egui::Window::new("Artwork")
+        let scroll_target = self.begin_floating_scroll_surface("artwork_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Artwork")
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -135,6 +137,10 @@ impl WavesPreviewer {
                     close_clicked = true;
                 }
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if close_clicked {
             open = false;
         }

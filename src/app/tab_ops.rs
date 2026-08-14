@@ -84,6 +84,7 @@ impl super::WavesPreviewer {
                 tab.tool_state = cached.tool_state;
                 tab.loop_mode = cached.loop_mode;
                 tab.plugin_fx_draft = cached.plugin_fx_draft;
+                tab.plugin_fx_chain = cached.plugin_fx_chain;
                 self.tabs.push(tab);
                 self.workspace_view = crate::app::types::WorkspaceView::Editor;
                 self.active_tab = Some(self.tabs.len() - 1);
@@ -105,10 +106,46 @@ impl super::WavesPreviewer {
             let Some(item) = self.item_for_path(path) else {
                 return;
             };
-            let Some(audio) = item.virtual_audio.clone() else {
-                return;
-            };
             let name = item.display_name.clone();
+            let asset = item.audio_asset.clone();
+            if item.virtual_audio.is_none() {
+                let Some(source_path) = asset.backing.file_path().map(Path::to_path_buf) else {
+                    return;
+                };
+                let out_sr = self.audio.shared.out_sample_rate.max(1);
+                let visual_len = asset
+                    .frame_count
+                    .map(|frames| {
+                        Self::convert_source_frames_to_output_frames(
+                            usize::try_from(frames).unwrap_or(usize::MAX),
+                            asset.sample_rate.max(1),
+                            out_sr,
+                        )
+                    })
+                    .unwrap_or(0);
+                let initial_tool = self.tool_for_new_editor_tab();
+                let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+                tab.loading = true;
+                tab.buffer_sample_rate = out_sr;
+                tab.samples_len_visual = visual_len;
+                tab.loading_waveform_minmax = self.initial_editor_loading_overview(&source_path);
+                tab.active_tool = initial_tool;
+                tab.tool_state = crate::app::types::ToolState::default_values();
+                self.tabs.push(tab);
+                self.workspace_view = crate::app::types::WorkspaceView::Editor;
+                self.active_tab = Some(self.tabs.len() - 1);
+                self.playing_path = Some(path.to_path_buf());
+                self.audio.stop();
+                self.audio.set_samples_channels(Vec::new());
+                self.playback_mark_buffer_source(
+                    super::PlaybackSourceKind::EditorTab(path.to_path_buf()),
+                    out_sr,
+                );
+                self.apply_effective_volume();
+                self.spawn_editor_decode(path.to_path_buf());
+                return;
+            }
+            let audio = item.virtual_audio.clone().expect("checked resident asset");
             let virtual_in_sr = item
                 .virtual_state
                 .as_ref()
@@ -216,6 +253,7 @@ impl super::WavesPreviewer {
             tab.tool_state = cached.tool_state;
             tab.loop_mode = cached.loop_mode;
             tab.plugin_fx_draft = cached.plugin_fx_draft;
+            tab.plugin_fx_chain = cached.plugin_fx_chain;
             self.tabs.push(tab);
             self.workspace_view = crate::app::types::WorkspaceView::Editor;
             self.active_tab = Some(self.tabs.len() - 1);

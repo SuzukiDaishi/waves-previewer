@@ -15,7 +15,9 @@ impl crate::app::WavesPreviewer {
         let mut select_range: Option<(usize, usize)> = None;
         let mut save_sidecar = false;
         let mut export_csv = false;
-        egui::Window::new("Regions")
+        let scroll_target = self.begin_floating_scroll_surface("regions_window");
+        let scroll_guard = self.pointer_scroll_input_guard(scroll_target, ctx);
+        let shown = egui::Window::new("Regions")
             .open(&mut open)
             .default_width(380.0)
             .default_height(420.0)
@@ -96,6 +98,10 @@ impl crate::app::WavesPreviewer {
                         }
                     });
             });
+        drop(scroll_guard);
+        if let Some(shown) = shown.as_ref() {
+            self.register_scroll_surface(scroll_target, &shown.response);
+        }
         if add_from_selection {
             self.editor_add_region_from_selection();
         }

@@ -2,7 +2,41 @@
 
 All notable changes in this repository (hand-written).
 
-## Unreleased (current)
+## 0.20260802.0 - 2026-08-02
+
+### Metadata inspection and scalable sessions
+- **Metadata Inspector**: added a dedicated GUI and CLI workflow for inspecting normalized and raw metadata, summarizing fields, searching payloads, hashing or extracting embedded data, and reviewing UCS-backed metadata at scale.
+- **Portable session restore**: strengthened relative/absolute path handling, virtual-audio persistence, list-column state, and editor-tab restoration so large sessions reopen more predictably across locations.
+
+### Large audio and editor reliability
+- **File-backed audio assets**: introduced stable asset/revision descriptors plus streaming WAV readers and writers, allowing long recordings and edits to stay file-backed instead of requiring every workflow to materialize the full clip in memory.
+- **Long-running workflows**: hardened recording, export, clipboard, preview/decode, native drag-and-drop, markers, loop metadata, and effect-graph handoff paths for large or virtual audio.
+- **Input focus routing**: centralized keyboard and scroll ownership across list, editor, dialogs, and tool surfaces, with expanded regression coverage for focus-sensitive shortcuts.
+- **Editor workflow polish**: improved edge-fade authoring, scalable waveform/editor behavior, list metadata integration, and recovery of in-progress or restored audio state.
+
+### Plugins
+- **Plugin catalog and worker sessions**: added a persistent plugin catalog, richer worker protocol/session state, chain metrics, and more reliable native VST3/CLAP probing, processing, timeout, and failure reporting.
+
+## 0.20260729.0 - 2026-07-29
+
+### List QA columns
+- **Edge0 / Over0 / Blank**: three optional list columns that answer "is this file safe to ship?". Only problems draw attention — a passing file renders an empty cell, a failing one an `NG` on a red background with the measured values in its tooltip, and an unresolved row `...`. All three are sortable (first click is descending, so the NG rows come to the top) and, like the other full-decode columns, session/CLI aware. Default off.
+  - **Edge0**: the first or last frame of any channel is louder than the zero-cross epsilon. The raw edge amplitudes are stored, so changing the epsilon in Settings re-evaluates every row with no re-decode.
+  - **Over0**: the sample peak exceeds 0 dBFS. Includes the pending gain so it agrees with the adjacent Peak column, and reports "unresolved" rather than guessing from the header pass's 0.25 s estimate.
+  - **Blank**: leading or trailing blank reaches the configured limits. New Settings > Blank Pad column: threshold (default -45 dBFS, deliberately higher than the Sil.Head/Sil.Tail columns' fixed -60) and minimum length (default 10 ms, so a file that correctly starts on a zero sample isn't flagged). Each measurement records the threshold it was taken at, so a settings change is detected per-row instead of by walking every item — which also means a decode already in flight when the setting changed is recognised as stale when it lands. Minimum-length changes are display-side and cost no re-decode.
+- **Length column hours**: when any loaded file reaches an hour, every row switches to `h:mm:ss`. Previously the field was total minutes, so a two-hour file read `120:11`. CSV export follows the same rule.
+
+### Editor
+- **Channel Routing tool**: a patchbay for rewiring, duplicating and dropping channels — the file's channels on the left, the routed result on the right. Drag from an input pin to an output pin to connect (or click one, then the other); click a cable to cut it; right-click a pin to clear its cables. Output count is settable 1-8 with `Swap L/R` / `Mono -> Stereo` / `-> Mono` / `Identity` presets. Outputs fed by several inputs are averaged, so folding L+R to mono cannot clip; an unconnected output is silence. Grab radii are much larger than the drawn pins (18 px pins, 11 px cables, pins winning ties) with a hover disc showing the active range.
+  - This is the only editor tool that changes a tab's channel count, so applying it resets the mute/solo flags and channel view, both of which are sized from that count.
+
+### Fixes
+- **Top-bar meter overflow**: the right-hand meter group reserved a hard-coded 440 px for roughly 636 px of content, pushing the `-inf dBFS` readout past the panel's right margin where the window clipped it, and hiding the realtime loudness readout entirely. The reservation is now derived from the parts' own widths, and both readouts are drawn inside their budgets.
+
+## 0.20260726.0 - 2026-07-26
+
+<!-- Shipped under the v0.20260726.0 tag; the section was left titled
+     "Unreleased" at the time. -->
 
 ### List & Pipeline (P7)
 - **Folder watch**: the open folder is polled every ~3 s (low-priority thread, scan filters shared); files added/removed/changed on disk merge into, leave, or refresh the list automatically with a summary toast. Files open in an editor tab are never touched, the app's own writes are suppressed via a 5 s registry, and bulk operations pause polling. Settings toggle, default on.

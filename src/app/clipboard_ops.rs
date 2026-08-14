@@ -97,18 +97,36 @@ impl super::WavesPreviewer {
                 continue;
             };
             let display_name = item.display_name.clone();
-            let source_path = if item.source == MediaSource::File {
-                Some(item.path.clone())
-            } else {
-                None
-            };
+            let source_path = item
+                .audio_asset
+                .backing
+                .file_path()
+                .map(PathBuf::from)
+                .or_else(|| (item.source == MediaSource::File).then(|| item.path.clone()));
             let meta_sr = item.meta.as_ref().map(|m| m.sample_rate).unwrap_or(0);
             let meta_bits = item.meta.as_ref().map(|m| m.bits_per_sample).unwrap_or(0);
-            let audio = if let Some(audio) = self.edited_audio_for_path(&item.path) {
+            let gain_db = self.pending_gain_db_for_path(&item.path);
+            let target_sample_rate = self
+                .sample_rate_override
+                .get(&item.path)
+                .copied()
+                .filter(|sr| *sr > 0);
+            let edited_audio = self.edited_audio_for_path(&item.path);
+            let can_keep_file_backed = item.source == MediaSource::Virtual
+                && edited_audio.is_none()
+                && !item.audio_asset.may_reside_in_memory()
+                && gain_db.abs() <= 0.0001
+                && target_sample_rate.is_none();
+            let audio = if let Some(audio) = edited_audio {
                 crate::app::types::ClipboardPrepAudio::Ready {
                     audio,
                     sample_rate: out_sr,
                     bits_per_sample: 32,
+                }
+            } else if can_keep_file_backed {
+                crate::app::types::ClipboardPrepAudio::AssetReference {
+                    sample_rate: item.audio_asset.sample_rate.max(meta_sr),
+                    bits_per_sample: item.audio_asset.bits_per_sample.max(meta_bits),
                 }
             } else {
                 crate::app::types::ClipboardPrepAudio::DecodeFromFile {
@@ -119,16 +137,11 @@ impl super::WavesPreviewer {
             // Pending gain/sample-rate overrides are list-level and independent
             // of any in-memory edited audio above; apply them the same way
             // native_drag does so copy and drag-export never diverge.
-            let gain_db = self.pending_gain_db_for_path(&item.path);
-            let target_sample_rate = self
-                .sample_rate_override
-                .get(&item.path)
-                .copied()
-                .filter(|sr| *sr > 0);
             let resample_quality = Self::to_wave_resample_quality(self.src_quality);
             prep_items.push(crate::app::types::ClipboardPrepItem {
                 display_name,
                 source_path,
+                audio_asset: Some(item.audio_asset.clone()),
                 audio,
                 gain_db,
                 target_sample_rate,
@@ -168,6 +181,8 @@ impl super::WavesPreviewer {
             let target_sample_rate = item.target_sample_rate;
             let resample_quality = item.resample_quality;
             let was_ready = matches!(item.audio, ClipboardPrepAudio::Ready { .. });
+            let was_asset_reference =
+                matches!(item.audio, ClipboardPrepAudio::AssetReference { .. });
             let (mut audio, mut sample_rate, bits_per_sample) = match item.audio {
                 ClipboardPrepAudio::Ready {
                     audio,
@@ -195,6 +210,10 @@ impl super::WavesPreviewer {
                     }
                     (audio, sr, bits)
                 }
+                ClipboardPrepAudio::AssetReference {
+                    sample_rate,
+                    bits_per_sample,
+                } => (None, sample_rate.max(1), bits_per_sample),
             };
 
             let target_sr = target_sample_rate.unwrap_or(sample_rate);
@@ -219,7 +238,16 @@ impl super::WavesPreviewer {
             // original file bytes (edited/virtual audio, or an override was
             // applied); otherwise reference the original file, same as before.
             let needs_temp_export = was_ready || has_override;
-            if needs_temp_export {
+            if was_asset_reference {
+                if let Some(asset) = item.audio_asset.as_ref() {
+                    if let Some(tmp) = readable_clipboard_wav_path(&item.display_name) {
+                        if asset.access().materialize_current_revision(&tmp).is_ok() {
+                            os_paths.push(tmp.clone());
+                            temp_files.push(tmp);
+                        }
+                    }
+                }
+            } else if needs_temp_export {
                 if let Some(audio_ref) = audio.as_ref().filter(|a| a.len() > 0) {
                     if let Some(tmp) = crate::app::temp_audio_ops::allocate_neowaves_temp_cache_path(
                         "clipboard",
@@ -248,6 +276,7 @@ impl super::WavesPreviewer {
             payload_items.push(ClipboardItem {
                 display_name: item.display_name,
                 source_path: item.source_path,
+                audio_asset: item.audio_asset,
                 audio,
                 sample_rate,
                 bits_per_sample,
@@ -349,6 +378,53 @@ impl super::WavesPreviewer {
                 let mut audio = item.audio.clone();
                 let mut sample_rate = item.sample_rate;
                 let mut bits_per_sample = item.bits_per_sample;
+                if audio.is_none() {
+                    if let Some(asset) = item.audio_asset.as_ref() {
+                        if !asset.may_reside_in_memory() {
+                            if let Some(managed_path) =
+                                super::temp_audio_ops::allocate_neowaves_temp_cache_path(
+                                    "virtual_clipboard",
+                                    "wav",
+                                )
+                            {
+                                if asset
+                                    .access()
+                                    .materialize_current_revision(&managed_path)
+                                    .is_ok()
+                                {
+                                    let mut managed_asset =
+                                        crate::audio_asset::AudioAssetDescriptor::managed(
+                                            managed_path.clone(),
+                                        );
+                                    managed_asset.revision = asset.revision;
+                                    let name = self.unique_virtual_display_name(&item.display_name);
+                                    let virtual_state = Some(VirtualState {
+                                        source: VirtualSourceRef::Sidecar("clipboard".to_string()),
+                                        op_chain: Vec::new(),
+                                        sample_rate: managed_asset.sample_rate.max(sample_rate),
+                                        channels: managed_asset.channels.max(1),
+                                        bits_per_sample: managed_asset
+                                            .bits_per_sample
+                                            .max(bits_per_sample),
+                                    });
+                                    let vitem = self.make_virtual_item_with_asset(
+                                        name,
+                                        managed_asset,
+                                        None,
+                                        None,
+                                        virtual_state,
+                                    );
+                                    added_paths.push(vitem.path.clone());
+                                    self.add_virtual_item(vitem, Some(insert_idx));
+                                    self.recording_temp_files.push(managed_path);
+                                    insert_idx = insert_idx.saturating_add(1);
+                                    added_any = true;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
                 if audio.is_none() {
                     if let Some(path) = item.source_path.as_ref() {
                         if let Some((decoded, sr, bits)) = self.decode_audio_for_virtual(path) {
@@ -784,6 +860,28 @@ impl super::WavesPreviewer {
     }
 }
 
+fn readable_clipboard_wav_path(display_name: &str) -> Option<PathBuf> {
+    let dir = super::temp_audio_ops::neowaves_temp_cache_dir("clipboard");
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = std::path::Path::new(display_name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("NeoWaves Audio");
+    let stem = crate::app::helpers::sanitize_filename_component(stem);
+    for suffix in 0..1000u32 {
+        let name = if suffix == 0 {
+            format!("{stem}.wav")
+        } else {
+            format!("{stem} ({suffix}).wav")
+        };
+        let path = dir.join(name);
+        if !path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod prep_tests {
     use super::super::types::{ClipboardPrepAudio, ClipboardPrepItem};
@@ -813,6 +911,7 @@ mod prep_tests {
         let item = ClipboardPrepItem {
             display_name: "source.wav".to_string(),
             source_path: Some(wav.clone()),
+            audio_asset: None,
             audio: ClipboardPrepAudio::DecodeFromFile {
                 sample_rate: 48_000,
                 bits_per_sample: 32,
@@ -854,6 +953,7 @@ mod prep_tests {
         let item = ClipboardPrepItem {
             display_name: "source.wav".to_string(),
             source_path: Some(wav.clone()),
+            audio_asset: None,
             audio: ClipboardPrepAudio::DecodeFromFile {
                 sample_rate: 48_000,
                 bits_per_sample: 32,
