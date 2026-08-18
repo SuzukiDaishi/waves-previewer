@@ -284,6 +284,16 @@ impl crate::app::WavesPreviewer {
                             if let Some(next) = pending_output_change {
                                 let _ = self.apply_audio_output_device_selection(next, true);
                             }
+                            let mut direct_map = self.audio_channel_map_direct;
+                            if ui
+                                .checkbox(&mut direct_map, "Direct channel mapping")
+                                .on_hover_text(
+                                    "Send source channel N straight to output channel N. Off (the                                      default), channels are matched by speaker position: a stereo                                      clip reaches only the front pair of a 5.1 / 7.1.4 device, and                                      a surround clip folds down to stereo with -3 dB centre and                                      surround coefficients. On, extra outputs stay silent and                                      source channels past the device's count are dropped.",
+                                )
+                                .changed()
+                            {
+                                self.set_audio_channel_map_direct(direct_map);
+                            }
                             if let Some(err) = self.audio_output_error.as_ref() {
                                 ui.label(
                                     RichText::new(err).small().color(egui::Color32::LIGHT_RED),

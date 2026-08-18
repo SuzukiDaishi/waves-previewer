@@ -12,6 +12,7 @@ GUI の詳細は [app](app/README.md)、plugin worker の詳細は [plugin](plug
 | `src/cli.rs` | CLI 引数定義、GUI legacy flags、headless command tree | CLI 仕様、`--dummy-list`、render/export コマンドを追う |
 | `src/app.rs` | `WavesPreviewer` state、app module 宣言、`eframe::App` 実装 | app 全体 state と frame entrypoint を確認する |
 | `src/audio.rs` | 再生エンジン、出力デバイス、playback buffer 操作 | 音が鳴らない、停止しない、音量・rate がおかしい |
+| `src/audio_channels.rs` | ソース ch → 出力 ch のスピーカー位置マッピング (up/downmix 行列) | サラウンド機で定位がおかしい、無音の ch がある |
 | `src/audio_io.rs` | WAV/MP3/M4A/OGG などの decode/export、progressive decode | 圧縮音源、長尺 decode、export を追う |
 | `src/wave.rs` | WAV 系ユーティリティ、min/max 波形、sample 変換 | 波形表示、WAV 読み込み、ピーク計算を見る |
 | `src/markers.rs` / `src/loop_markers.rs` | marker / loop marker の読み書き | loop tag、marker 保存互換を確認する |

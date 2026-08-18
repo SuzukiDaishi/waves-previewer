@@ -2339,7 +2339,7 @@ mod small_fix_regressions {
     }
 
     #[test]
-    fn default_audio_output_follow_policy_is_idle_only() {
+    fn default_audio_output_follow_policy_tracks_the_os_default_during_playback() {
         let mut harness = harness_default();
 
         assert_eq!(
@@ -2374,9 +2374,11 @@ mod small_fix_regressions {
         assert_eq!(
             harness
                 .state()
-                .test_audio_output_default_follow_target(Some("New Default")),
-            None,
-            "output default follow should be deferred while playback is active"
+                .test_audio_output_default_follow_target(Some("New Default"))
+                .as_deref(),
+            Some("New Default"),
+            "playback must follow the OS default too: staying on the old device \
+             would play to an endpoint the user just switched away from"
         );
 
         harness.state_mut().test_set_audio_playing_flag(false);
@@ -2390,13 +2392,45 @@ mod small_fix_regressions {
         );
 
         harness.state_mut().test_discard_recording();
+        harness.state_mut().test_finish_recording_discard();
         assert_eq!(
             harness
                 .state()
                 .test_audio_output_default_follow_target(Some("New Default"))
                 .as_deref(),
-            Some("New Default")
+            Some("New Default"),
+            "follow resumes once the recording tab is idle again"
         );
+    }
+
+    #[test]
+    fn audio_channel_map_pref_roundtrips_and_reaches_the_engine() {
+        let mut harness = harness_default();
+        let dir = make_temp_dir("audio_channel_map_prefs");
+        let prefs = dir.join("prefs_test.txt");
+
+        assert!(
+            !harness.state().test_audio_channel_map_direct(),
+            "speaker-position mapping is the default"
+        );
+        assert!(!harness
+            .state()
+            .test_audio_engine_channel_map_mode_is_direct());
+
+        harness.state_mut().test_set_audio_channel_map_direct(true);
+        assert!(
+            harness
+                .state()
+                .test_audio_engine_channel_map_mode_is_direct(),
+            "toggling the preference must reach the running engine"
+        );
+
+        harness.state().test_save_prefs_to_path(&prefs);
+        harness.state_mut().test_set_audio_channel_map_direct(false);
+        harness.state_mut().test_load_prefs_from_path(&prefs);
+        assert!(harness.state().test_audio_channel_map_direct());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

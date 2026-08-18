@@ -2,6 +2,7 @@ pub mod app;
 pub mod audio;
 pub mod audio_asset;
 pub mod audio_capture;
+pub mod audio_channels;
 pub mod audio_io;
 pub mod cli;
 pub mod crash_report;

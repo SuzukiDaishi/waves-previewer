@@ -34,6 +34,7 @@ impl WavesPreviewer {
             audio_output_device_name: None,
             audio_output_devices: Vec::new(),
             audio_output_error: None,
+            audio_channel_map_direct: false,
             audio_device_watch: AudioDeviceWatchState::default(),
             audio_bootstrap_rx: None,
             startup_paths_applied: false,
@@ -455,6 +456,7 @@ impl WavesPreviewer {
             recording_tab: RecordingTabState::default(),
         };
         app.load_prefs();
+        app.apply_audio_channel_map_mode();
         app.load_metadata_column_registry();
         app
     }
