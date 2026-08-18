@@ -188,6 +188,11 @@ impl WavesPreviewer {
             wave_row_h: 26.0,
             list_columns: ListColumnConfig::default(),
             list_column_order: crate::app::types::ColumnId::ALL.to_vec(),
+            list_column_layout: crate::app::types::ColumnId::ALL
+                .iter()
+                .copied()
+                .map(crate::app::types::ColumnKey::Builtin)
+                .collect(),
             metadata_list_columns: Vec::new(),
             metadata_summary_pool: Some(metadata_summary_pool),
             metadata_summary_rx: Some(metadata_summary_rx),
@@ -458,6 +463,7 @@ impl WavesPreviewer {
         app.load_prefs();
         app.apply_audio_channel_map_mode();
         app.load_metadata_column_registry();
+        app.sanitize_list_column_layout();
         app
     }
 

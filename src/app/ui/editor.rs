@@ -197,6 +197,221 @@ fn zc_snap_nearest(ch_samples: &[Vec<f32>], eps: f32, cur: usize) -> usize {
 }
 
 impl crate::app::WavesPreviewer {
+    fn ui_editor_note_panel(
+        ui: &mut egui::Ui,
+        tab: &mut EditorTab,
+        playhead_sample: usize,
+        sample_rate: f32,
+        request_seek: &mut Option<usize>,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Position");
+            ui.selectable_value(
+                &mut tab.editor_note_position_mode,
+                EditorNotePositionMode::Time,
+                "Time",
+            );
+            let beats = ui.add_enabled(
+                tab.bpm_enabled && tab.bpm_value.is_finite() && tab.bpm_value > 0.0,
+                egui::Button::selectable(
+                    tab.editor_note_position_mode == EditorNotePositionMode::Beats,
+                    "Beats",
+                ),
+            );
+            if beats.clicked() {
+                tab.editor_note_position_mode = EditorNotePositionMode::Beats;
+            }
+            beats.on_disabled_hover_text("Enable a valid BPM grid to show bars and beats");
+        });
+
+        let scope = if let Some((start, end)) = tab.selection {
+            if let Some((low, high)) = tab.freq_selection {
+                format!(
+                    "Time + frequency: {}..{} / {:.0}..{:.0} Hz",
+                    start.min(end),
+                    start.max(end),
+                    low.min(high),
+                    low.max(high)
+                )
+            } else {
+                format!("Time range: {}..{}", start.min(end), start.max(end))
+            }
+        } else {
+            format!("Cursor: {playhead_sample}")
+        };
+        ui.label(RichText::new(scope).small().weak());
+        ui.add(
+            egui::TextEdit::multiline(&mut tab.editor_note_draft)
+                .desired_rows(3)
+                .hint_text("Write a comment for this position or selection..."),
+        );
+        let can_add = !tab.editor_note_draft.trim().is_empty();
+        if ui
+            .add_enabled(can_add, egui::Button::new("Add Editor Note"))
+            .clicked()
+        {
+            let id = tab
+                .editor_notes
+                .iter()
+                .map(|note| note.id)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            let normalized_selection = tab
+                .selection
+                .and_then(|(a, b)| (a != b).then_some((a.min(b), a.max(b))));
+            let (start_sample, end_sample) = normalized_selection
+                .map(|(a, b)| (a, Some(b)))
+                .unwrap_or((playhead_sample, None));
+            let freq_range_hz = normalized_selection
+                .and(tab.freq_selection)
+                .map(|(a, b)| (a.min(b), a.max(b)));
+            tab.editor_notes.push(EditorNote {
+                id,
+                comment: tab.editor_note_draft.trim().to_string(),
+                start_sample,
+                end_sample,
+                freq_range_hz,
+                view: freq_range_hz.map(|_| format!("{:?}", tab.leaf_view_mode())),
+            });
+            tab.editor_notes
+                .sort_by_key(|note| (note.start_sample, note.id));
+            tab.editor_note_draft.clear();
+            changed = true;
+        }
+
+        ui.separator();
+        ui.label(RichText::new(format!("Notes ({})", tab.editor_notes.len())).strong());
+        if tab.editor_notes.is_empty() {
+            ui.label(RichText::new("No editor notes yet.").weak());
+        }
+        let position_mode = tab.editor_note_position_mode;
+        let bpm_enabled = tab.bpm_enabled;
+        let bpm = tab.bpm_value;
+        let bpm_offset = tab.bpm_offset_sec;
+        let beats_per_bar = tab.time_sig_numerator.max(1) as f64;
+        let beat_unit = tab.time_sig_denominator.max(1) as f64 / 4.0;
+        let format_position = |sample: usize| -> String {
+            if position_mode == EditorNotePositionMode::Beats
+                && bpm_enabled
+                && bpm.is_finite()
+                && bpm > 0.0
+            {
+                let seconds = sample as f64 / sample_rate.max(1.0) as f64;
+                let absolute_beat =
+                    ((seconds - bpm_offset as f64) * bpm as f64 / 60.0 * beat_unit).max(0.0);
+                let bar = (absolute_beat / beats_per_bar).floor() as u64 + 1;
+                let beat = absolute_beat % beats_per_bar + 1.0;
+                format!("{bar}:{beat:.2}")
+            } else {
+                crate::app::helpers::format_time_s(sample as f32 / sample_rate.max(1.0))
+            }
+        };
+
+        let mut delete_id = None;
+        for note in tab.editor_notes.clone() {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let location = if let Some((start, end)) = note.normalized_range() {
+                    format!("{} – {}", format_position(start), format_position(end))
+                } else {
+                    format_position(note.start_sample)
+                };
+                let location_response = ui
+                    .add(
+                        egui::Button::new(RichText::new(location).monospace().strong())
+                            .frame(false),
+                    )
+                    .on_hover_text("Double-click to restore this cursor or selection");
+                let click_time = std::time::Instant::now();
+                let repeated_click = location_response.clicked()
+                    && tab.editor_note_last_click.is_some_and(|(id, time)| {
+                        id == note.id
+                            && click_time.saturating_duration_since(time)
+                                <= std::time::Duration::from_millis(400)
+                    });
+                if location_response.clicked() {
+                    tab.editor_note_last_click = Some((note.id, click_time));
+                }
+                if location_response.double_clicked() || repeated_click {
+                    *request_seek = Some(note.start_sample);
+                    tab.preview_offset_samples = Some(note.start_sample);
+                    if let Some((start, end)) = note.normalized_range() {
+                        tab.selection = Some((start, end));
+                        tab.selection_anchor_sample = Some(start);
+                        tab.freq_selection = note.freq_range_hz;
+                    } else {
+                        tab.selection = None;
+                        tab.selection_anchor_sample = None;
+                        tab.freq_selection = None;
+                    }
+                }
+                if let Some((low, high)) = note.freq_range_hz {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {:.0}–{:.0} Hz",
+                            note.view.as_deref().unwrap_or("Spectral"),
+                            low,
+                            high
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
+                if tab.editor_note_editing_id == Some(note.id) {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut tab.editor_note_edit_draft).desired_rows(2),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !tab.editor_note_edit_draft.trim().is_empty(),
+                                egui::Button::new("Save"),
+                            )
+                            .clicked()
+                        {
+                            if let Some(target) = tab
+                                .editor_notes
+                                .iter_mut()
+                                .find(|target| target.id == note.id)
+                            {
+                                target.comment = tab.editor_note_edit_draft.trim().to_string();
+                            }
+                            tab.editor_note_editing_id = None;
+                            tab.editor_note_edit_draft.clear();
+                            changed = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            tab.editor_note_editing_id = None;
+                            tab.editor_note_edit_draft.clear();
+                        }
+                    });
+                } else {
+                    ui.label(&note.comment);
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Edit").clicked() {
+                            tab.editor_note_editing_id = Some(note.id);
+                            tab.editor_note_edit_draft = note.comment.clone();
+                        }
+                        if ui.small_button("Delete").clicked() {
+                            delete_id = Some(note.id);
+                        }
+                    });
+                }
+            });
+        }
+        if let Some(id) = delete_id {
+            tab.editor_notes.retain(|note| note.id != id);
+            if tab.editor_note_editing_id == Some(id) {
+                tab.editor_note_editing_id = None;
+                tab.editor_note_edit_draft.clear();
+            }
+            changed = true;
+        }
+        changed
+    }
+
     pub(crate) fn normalized_loop_range(range: Option<(usize, usize)>) -> Option<(usize, usize)> {
         range.map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
     }
@@ -2447,6 +2662,7 @@ impl crate::app::WavesPreviewer {
         };
         let playhead_display_now = map_audio_to_display(&self.tabs[tab_idx], pos_audio_now);
         let mut request_seek: Option<usize> = None;
+        let mut editor_notes_changed = false;
         let spec_path = self.tabs[tab_idx].path.clone();
         let current_view = self.tabs[tab_idx].leaf_view_mode();
         let spec_cache = self.spectro_cache.get(&spec_path).cloned();
@@ -7935,6 +8151,7 @@ impl crate::app::WavesPreviewer {
                             let tool_label = |tool: ToolKind| match tool {
                                 ToolKind::LoopEdit => "Loop Edit",
                                 ToolKind::Markers => "Markers",
+                                ToolKind::EditorNote => "Editor Note",
                                 ToolKind::Trim => "Trim",
                                 ToolKind::Fade => "Edge Fade",
                                 ToolKind::Gain => "Gain",
@@ -7970,6 +8187,7 @@ impl crate::app::WavesPreviewer {
                             let tool_icon = |tool: ToolKind| match tool {
                                 ToolKind::LoopEdit => "🔁",
                                 ToolKind::Markers => "📍",
+                                ToolKind::EditorNote => "📝",
                                 ToolKind::Trim => "✂",
                                 ToolKind::Fade => "◢",
                                 ToolKind::Gain => "🔊",
@@ -8001,6 +8219,7 @@ impl crate::app::WavesPreviewer {
                                 &[
                                     ToolKind::LoopEdit,
                                     ToolKind::Markers,
+                                    ToolKind::EditorNote,
                                     ToolKind::Trim,
                                     ToolKind::Fade,
                                     ToolKind::Gain,
@@ -8183,6 +8402,232 @@ impl crate::app::WavesPreviewer {
                                 // view's inspector; never active here.
                                 ToolKind::SpectralWarp | ToolKind::SpectralBrush => {}
                                 // Seek/Select removed: seeking is always available on the canvas
+                                ToolKind::EditorNote => {
+                                    use crate::app::types::EditorNotePositionMode;
+
+                                    ui.horizontal(|ui| {
+                                        ui.label("Position");
+                                        ui.selectable_value(
+                                            &mut tab.editor_note_position_mode,
+                                            EditorNotePositionMode::Time,
+                                            "Time",
+                                        );
+                                        let beats = ui.add_enabled(
+                                            tab.bpm_enabled && tab.bpm_value.is_finite() && tab.bpm_value > 0.0,
+                                            egui::Button::selectable(
+                                                tab.editor_note_position_mode == EditorNotePositionMode::Beats,
+                                                "Beats",
+                                            ),
+                                        );
+                                        if beats.clicked() {
+                                            tab.editor_note_position_mode = EditorNotePositionMode::Beats;
+                                        }
+                                        beats.on_disabled_hover_text("Enable a valid BPM grid to show bars and beats");
+                                    });
+
+                                    let scope = if let Some((start, end)) = tab.selection {
+                                        if let Some((low, high)) = tab.freq_selection {
+                                            format!(
+                                                "Time + frequency: {}..{} / {:.0}..{:.0} Hz",
+                                                start.min(end),
+                                                start.max(end),
+                                                low.min(high),
+                                                low.max(high)
+                                            )
+                                        } else {
+                                            format!("Time range: {}..{}", start.min(end), start.max(end))
+                                        }
+                                    } else {
+                                        format!("Cursor: {}", playhead_display_now)
+                                    };
+                                    ui.label(RichText::new(scope).small().weak());
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut tab.editor_note_draft)
+                                            .desired_rows(3)
+                                            .hint_text("Write a comment for this position or selection..."),
+                                    );
+                                    let can_add = !tab.editor_note_draft.trim().is_empty();
+                                    if ui.add_enabled(can_add, egui::Button::new("Add Editor Note")).clicked() {
+                                        let id = tab
+                                            .editor_notes
+                                            .iter()
+                                            .map(|note| note.id)
+                                            .max()
+                                            .unwrap_or(0)
+                                            .saturating_add(1);
+                                        let normalized_selection = tab.selection.and_then(|(a, b)| {
+                                            (a != b).then_some((a.min(b), a.max(b)))
+                                        });
+                                        let (start_sample, end_sample) = normalized_selection
+                                            .map(|(a, b)| (a, Some(b)))
+                                            .unwrap_or((playhead_display_now, None));
+                                        let freq_range_hz = normalized_selection
+                                            .and(tab.freq_selection)
+                                            .map(|(a, b)| (a.min(b), a.max(b)));
+                                        tab.editor_notes.push(crate::app::types::EditorNote {
+                                            id,
+                                            comment: tab.editor_note_draft.trim().to_string(),
+                                            start_sample,
+                                            end_sample,
+                                            freq_range_hz,
+                                            view: freq_range_hz
+                                                .map(|_| format!("{:?}", tab.leaf_view_mode())),
+                                        });
+                                        tab.editor_notes.sort_by_key(|note| (note.start_sample, note.id));
+                                        tab.editor_note_draft.clear();
+                                        editor_notes_changed = true;
+                                    }
+
+                                    ui.separator();
+                                    ui.label(RichText::new(format!("Notes ({})", tab.editor_notes.len())).strong());
+                                    if tab.editor_notes.is_empty() {
+                                        ui.label(RichText::new("No editor notes yet.").weak());
+                                    }
+
+                                    let position_mode = tab.editor_note_position_mode;
+                                    let bpm_enabled = tab.bpm_enabled;
+                                    let bpm = tab.bpm_value;
+                                    let bpm_offset = tab.bpm_offset_sec;
+                                    let beats_per_bar = tab.time_sig_numerator.max(1) as f64;
+                                    let beat_unit =
+                                        tab.time_sig_denominator.max(1) as f64 / 4.0;
+                                    let format_position = |sample: usize| -> String {
+                                        if position_mode == EditorNotePositionMode::Beats
+                                            && bpm_enabled
+                                            && bpm.is_finite()
+                                            && bpm > 0.0
+                                        {
+                                            let seconds = sample as f64 / sr_ctx.max(1.0) as f64;
+                                            let absolute_beat = ((seconds - bpm_offset as f64)
+                                                * bpm as f64
+                                                / 60.0
+                                                * beat_unit)
+                                                .max(0.0);
+                                            let bar = (absolute_beat / beats_per_bar).floor() as u64 + 1;
+                                            let beat = absolute_beat % beats_per_bar + 1.0;
+                                            format!("{bar}:{beat:.2}")
+                                        } else {
+                                            crate::app::helpers::format_time_s(
+                                                sample as f32 / sr_ctx.max(1.0),
+                                            )
+                                        }
+                                    };
+
+                                    let mut delete_id = None;
+                                    for note in tab.editor_notes.clone() {
+                                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            let location = if let Some((start, end)) = note.normalized_range() {
+                                                format!("{} – {}", format_position(start), format_position(end))
+                                            } else {
+                                                format_position(note.start_sample)
+                                            };
+                                            let location_response = ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new(location).monospace().strong(),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text("Double-click to restore this cursor or selection");
+                                            let click_time = std::time::Instant::now();
+                                            let repeated_click = location_response.clicked()
+                                                && tab.editor_note_last_click.is_some_and(
+                                                    |(id, time)| {
+                                                        id == note.id
+                                                            && click_time
+                                                                .saturating_duration_since(time)
+                                                                <= std::time::Duration::from_millis(
+                                                                    400,
+                                                                )
+                                                    },
+                                                );
+                                            if location_response.clicked() {
+                                                tab.editor_note_last_click =
+                                                    Some((note.id, click_time));
+                                            }
+                                            if location_response.double_clicked() || repeated_click {
+                                                request_seek = Some(note.start_sample);
+                                                tab.preview_offset_samples = Some(note.start_sample);
+                                                if let Some((start, end)) = note.normalized_range() {
+                                                    tab.selection = Some((start, end));
+                                                    tab.selection_anchor_sample = Some(start);
+                                                    tab.freq_selection = note.freq_range_hz;
+                                                } else {
+                                                    tab.selection = None;
+                                                    tab.selection_anchor_sample = None;
+                                                    tab.freq_selection = None;
+                                                }
+                                            }
+                                            if let Some((low, high)) = note.freq_range_hz {
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} · {:.0}–{:.0} Hz",
+                                                        note.view.as_deref().unwrap_or("Spectral"),
+                                                        low,
+                                                        high
+                                                    ))
+                                                    .small()
+                                                    .weak(),
+                                                );
+                                            }
+                                            if tab.editor_note_editing_id == Some(note.id) {
+                                                ui.add(
+                                                    egui::TextEdit::multiline(
+                                                        &mut tab.editor_note_edit_draft,
+                                                    )
+                                                    .desired_rows(2),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    if ui
+                                                        .add_enabled(
+                                                            !tab.editor_note_edit_draft.trim().is_empty(),
+                                                            egui::Button::new("Save"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        if let Some(target) = tab
+                                                            .editor_notes
+                                                            .iter_mut()
+                                                            .find(|target| target.id == note.id)
+                                                        {
+                                                            target.comment = tab
+                                                                .editor_note_edit_draft
+                                                                .trim()
+                                                                .to_string();
+                                                        }
+                                                        tab.editor_note_editing_id = None;
+                                                        tab.editor_note_edit_draft.clear();
+                                                        editor_notes_changed = true;
+                                                    }
+                                                    if ui.button("Cancel").clicked() {
+                                                        tab.editor_note_editing_id = None;
+                                                        tab.editor_note_edit_draft.clear();
+                                                    }
+                                                });
+                                            } else {
+                                                ui.label(&note.comment);
+                                                ui.horizontal(|ui| {
+                                                    if ui.small_button("Edit").clicked() {
+                                                        tab.editor_note_editing_id = Some(note.id);
+                                                        tab.editor_note_edit_draft = note.comment.clone();
+                                                    }
+                                                    if ui.small_button("Delete").clicked() {
+                                                        delete_id = Some(note.id);
+                                                    }
+                                                });
+                                            }
+                                        });
+                                    }
+                                    if let Some(id) = delete_id {
+                                        tab.editor_notes.retain(|note| note.id != id);
+                                        if tab.editor_note_editing_id == Some(id) {
+                                            tab.editor_note_editing_id = None;
+                                            tab.editor_note_edit_draft.clear();
+                                        }
+                                        editor_notes_changed = true;
+                                    }
+                                }
                                 ToolKind::LoopEdit => {
                                     // compact spacing for inspector controls
                                     ui.scope(|ui| {
@@ -12015,6 +12460,33 @@ impl crate::app::WavesPreviewer {
                                     tab.preview_overlay = None;
                                 }
                             }
+                            ui.separator();
+                            let editor_note_active = tab.active_tool == ToolKind::EditorNote;
+                            if ui
+                                .selectable_label(editor_note_active, "📝 Editor Note")
+                                .on_hover_text(
+                                    "Attach comments to the current cursor, time range, or time-frequency selection",
+                                )
+                                .clicked()
+                            {
+                                tab.active_tool = if editor_note_active {
+                                    ToolKind::SpectralWarp
+                                } else {
+                                    ToolKind::EditorNote
+                                };
+                                tab.spectral_warp_edit = false;
+                                tab.spectral_brush_edit = false;
+                            }
+                            if tab.active_tool == ToolKind::EditorNote {
+                                Self::inspector_section(ui, "Editor Note");
+                                editor_notes_changed |= Self::ui_editor_note_panel(
+                                    ui,
+                                    tab,
+                                    playhead_display_now,
+                                    sr_ctx,
+                                    &mut request_seek,
+                                );
+                            }
                             // Spectral Warp: image-like frequency warp. Only on
                             // views that resynthesize back to the waveform
                             // (linear / log spectrogram) — Mel stays view-only.
@@ -12650,6 +13122,17 @@ impl crate::app::WavesPreviewer {
                 });
                 },
                 ); // end inspector
+                if editor_notes_changed {
+                    if let Some((path, notes)) = self
+                        .tabs
+                        .get(tab_idx)
+                        .map(|tab| (tab.path.clone(), tab.editor_notes.clone()))
+                    {
+                        if let Some(item) = self.item_for_path_mut(&path) {
+                            item.editor_notes = notes;
+                        }
+                    }
+                }
                 if need_restore_preview {
                     pending_preview = None;
                     pending_heavy_preview = None;

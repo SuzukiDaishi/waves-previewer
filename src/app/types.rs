@@ -234,6 +234,37 @@ pub enum VirtualOp {
     Trim { start: usize, end: usize },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorNotePositionMode {
+    #[default]
+    Time,
+    Beats,
+}
+
+/// A session annotation anchored to one point or range on an item's timeline.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EditorNote {
+    pub id: u64,
+    #[serde(default)]
+    pub comment: String,
+    pub start_sample: usize,
+    #[serde(default)]
+    pub end_sample: Option<usize>,
+    #[serde(default)]
+    pub freq_range_hz: Option<(f32, f32)>,
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
+impl EditorNote {
+    pub fn normalized_range(&self) -> Option<(usize, usize)> {
+        let end = self.end_sample?;
+        (end != self.start_sample)
+            .then_some((self.start_sample.min(end), self.start_sample.max(end)))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VirtualState {
     pub source: VirtualSourceRef,
@@ -258,6 +289,10 @@ pub struct MediaItem {
     /// 1M-file list have no metadata yet; inline storage wasted ~200MB.
     pub meta: Option<Box<FileMeta>>,
     pub pending_gain_db: f32,
+    /// Free-form, single-line note edited directly in the list.
+    pub note: String,
+    /// Timeline annotations authored from the Editor Note inspector tool.
+    pub editor_notes: Vec<EditorNote>,
     pub status: MediaStatus,
     /// Arc so cloning a `MediaItem` (the list view clones one per visible row)
     /// does not deep-copy the full transcript text and segments.
@@ -531,6 +566,7 @@ pub enum ColumnId {
     ModifiedAt,
     Gain,
     Wave,
+    Note,
 }
 
 /// Unified, stable identity for built-in and metadata-derived list columns.
@@ -613,6 +649,7 @@ impl ColumnId {
         ColumnId::ModifiedAt,
         ColumnId::Gain,
         ColumnId::Wave,
+        ColumnId::Note,
     ];
 
     /// Stable identifier used by prefs/session files.
@@ -646,6 +683,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => "modified_at",
             ColumnId::Gain => "gain",
             ColumnId::Wave => "wave",
+            ColumnId::Note => "note",
         }
     }
 
@@ -684,6 +722,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => "Modified",
             ColumnId::Gain => "Gain",
             ColumnId::Wave => "Wave",
+            ColumnId::Note => "Note",
         }
     }
 
@@ -720,6 +759,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => cols.modified_at,
             ColumnId::Gain => cols.gain,
             ColumnId::Wave => cols.wave,
+            ColumnId::Note => cols.note,
         }
     }
 
@@ -754,6 +794,7 @@ impl ColumnId {
             ColumnId::ModifiedAt => cols.modified_at = enabled,
             ColumnId::Gain => cols.gain = enabled,
             ColumnId::Wave => cols.wave = enabled,
+            ColumnId::Note => cols.note = enabled,
         }
     }
 }
@@ -796,6 +837,7 @@ pub struct ListColumnConfig {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    pub note: bool,
     // Leading/trailing silence columns (full-decode metadata; default off).
     pub silence_lead: bool,
     pub silence_tail: bool,
@@ -832,6 +874,7 @@ impl Default for ListColumnConfig {
             modified_at: false,
             gain: true,
             wave: true,
+            note: true,
             silence_lead: false,
             silence_tail: false,
             edge_zero: false,
@@ -1100,6 +1143,7 @@ impl Default for SpectrogramConfig {
 pub enum ToolKind {
     LoopEdit,
     Markers,
+    EditorNote,
     Trim,
     Fade,
     PitchShift,
@@ -1133,6 +1177,7 @@ impl ToolKind {
         match self {
             ToolKind::LoopEdit => "Loop Edit",
             ToolKind::Markers => "Markers",
+            ToolKind::EditorNote => "Editor Note",
             ToolKind::Trim => "Trim",
             ToolKind::Fade => "Edge Fade",
             ToolKind::Gain => "Gain",
@@ -2157,6 +2202,12 @@ pub struct EditorTab {
     /// Labeled [start, end) ranges (buffer sample space). Undo-snapshotted
     /// and remapped by destructive edits alongside the markers.
     pub regions: Vec<crate::markers::RegionEntry>,
+    pub editor_notes: Vec<EditorNote>,
+    pub editor_note_draft: String,
+    pub editor_note_position_mode: EditorNotePositionMode,
+    pub editor_note_editing_id: Option<u64>,
+    pub editor_note_edit_draft: String,
+    pub editor_note_last_click: Option<(u64, std::time::Instant)>,
     pub markers_saved: Vec<MarkerEntry>,     // last saved markers
     pub markers_committed: Vec<MarkerEntry>, // New field
     pub markers_applied: Vec<MarkerEntry>,   // last applied markers
@@ -2424,6 +2475,12 @@ impl EditorTab {
             freq_selection_drag: None,
             markers: Vec::new(),
             regions: Vec::new(),
+            editor_notes: Vec::new(),
+            editor_note_draft: String::new(),
+            editor_note_position_mode: EditorNotePositionMode::Time,
+            editor_note_editing_id: None,
+            editor_note_edit_draft: String::new(),
+            editor_note_last_click: None,
             markers_committed: Vec::new(),
             markers_saved: Vec::new(),
             markers_applied: Vec::new(),
@@ -3057,6 +3114,9 @@ pub struct EditorDecodeState {
     pub path: PathBuf,
     pub started_at: Instant,
     pub rx: std::sync::mpsc::Receiver<EditorDecodeResult>,
+    /// Test/status simulations can retain a sender so an intentionally idle
+    /// channel is not mistaken for a crashed production worker.
+    pub _keepalive_tx: Option<std::sync::mpsc::Sender<EditorDecodeResult>>,
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub job_id: u64,
     pub partial_ready: bool,
@@ -3115,6 +3175,7 @@ pub struct EditorUndoState {
     pub approx_bytes: usize,
     pub markers: Vec<MarkerEntry>,
     pub regions: Vec<crate::markers::RegionEntry>,
+    pub editor_notes: Vec<EditorNote>,
     pub markers_committed: Vec<MarkerEntry>,
     pub markers_applied: Vec<MarkerEntry>,
     pub loop_region_applied: Option<(usize, usize)>,

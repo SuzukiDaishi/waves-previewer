@@ -22,6 +22,8 @@ use symphonia::default::{get_codecs, get_probe};
 
 pub const SUPPORTED_EXTS: &[&str] = &["wav", "aiff", "aif", "flac", "mp3", "m4a", "ogg"];
 pub const EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES: usize = 16_384;
+const REMOTE_WAV_PROXY_MAX_WINDOWS: usize = 256;
+const REMOTE_WAV_PROXY_WINDOW_BYTES: usize = 64 * 1024;
 
 fn io_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -395,6 +397,125 @@ fn read_wav_frame_channel_sample(
     }
 }
 
+fn looks_like_unc_path(value: &str) -> bool {
+    let normalized = value.replace('/', "\\");
+    let lower = normalized.to_ascii_lowercase();
+    lower.starts_with("\\\\?\\unc\\")
+        || (lower.starts_with("\\\\") && !lower.starts_with("\\\\?\\"))
+}
+
+fn is_remote_file_path(path: &Path) -> bool {
+    let value = path.to_string_lossy();
+    if looks_like_unc_path(&value) {
+        return true;
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+        const DRIVE_REMOTE_TYPE: u32 = 4;
+
+        let without_verbatim = value.strip_prefix(r"\\?\").unwrap_or(&value);
+        let bytes = without_verbatim.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            let root = format!("{}:\\", bytes[0] as char);
+            let mut wide = root.encode_utf16().collect::<Vec<_>>();
+            wide.push(0);
+            return unsafe { GetDriveTypeW(wide.as_ptr()) } == DRIVE_REMOTE_TYPE;
+        }
+    }
+
+    false
+}
+
+/// Network shares make thousands of sparse single-frame reads pathologically
+/// slow because each seek/read can become an SMB round trip. Sample a bounded
+/// number of 64 KiB windows instead and retain their min/max envelope.
+fn build_remote_wav_proxy_preview(
+    path: &Path,
+    header: WavProxyHeader,
+    max_total_samples: usize,
+) -> Result<Option<AudioProxyPreview>> {
+    let frame_bytes = header.block_align.max(1) as usize;
+    let total_source_frames = (header.data_len / frame_bytes as u64) as usize;
+    if total_source_frames == 0 {
+        return Ok(None);
+    }
+    let source_channels = header.channels.max(1) as usize;
+    let keep_channels = proxy_keep_channel_count(source_channels);
+    let points_per_channel = (max_total_samples / keep_channels.max(1)).max(2);
+    let window_count = points_per_channel
+        .div_ceil(2)
+        .min(REMOTE_WAV_PROXY_MAX_WINDOWS)
+        .min(total_source_frames)
+        .max(1);
+    let max_window_frames = (REMOTE_WAV_PROXY_WINDOW_BYTES / frame_bytes).max(1);
+    let mut out: Vec<Vec<f32>> = (0..keep_channels)
+        .map(|_| Vec::with_capacity(window_count.saturating_mul(2)))
+        .collect();
+    let mut file =
+        File::open(path).with_context(|| format!("open remote wav proxy: {}", path.display()))?;
+
+    for window_index in 0..window_count {
+        let region_start =
+            ((total_source_frames as u128 * window_index as u128) / window_count as u128) as usize;
+        let region_end = ((total_source_frames as u128 * (window_index + 1) as u128)
+            / window_count as u128) as usize;
+        let region_frames = region_end.saturating_sub(region_start).max(1);
+        let window_frames = region_frames.min(max_window_frames);
+        let window_start =
+            region_start.saturating_add(region_frames.saturating_sub(window_frames) / 2);
+        let byte_offset = header
+            .data_offset
+            .saturating_add((window_start as u64).saturating_mul(frame_bytes as u64));
+        file.seek(SeekFrom::Start(byte_offset))?;
+        let mut bytes = vec![0u8; window_frames.saturating_mul(frame_bytes)];
+        file.read_exact(&mut bytes)
+            .with_context(|| format!("read remote wav proxy window: {}", path.display()))?;
+
+        let mut mins = vec![f32::INFINITY; keep_channels];
+        let mut maxs = vec![f32::NEG_INFINITY; keep_channels];
+        for frame in bytes.chunks_exact(frame_bytes) {
+            if keep_channels == 1 {
+                let mut sum = 0.0f32;
+                let mut count = 0usize;
+                for channel_index in 0..source_channels {
+                    if let Some(sample) =
+                        read_wav_frame_channel_sample(frame, header, channel_index)
+                    {
+                        sum += sample;
+                        count += 1;
+                    }
+                }
+                let sample = if count > 0 { sum / count as f32 } else { 0.0 };
+                mins[0] = mins[0].min(sample);
+                maxs[0] = maxs[0].max(sample);
+            } else {
+                for channel_index in 0..keep_channels {
+                    let sample =
+                        read_wav_frame_channel_sample(frame, header, channel_index).unwrap_or(0.0);
+                    mins[channel_index] = mins[channel_index].min(sample);
+                    maxs[channel_index] = maxs[channel_index].max(sample);
+                }
+            }
+        }
+        for channel_index in 0..keep_channels {
+            let min = mins[channel_index];
+            let max = maxs[channel_index];
+            out[channel_index].push(if min.is_finite() { min } else { 0.0 });
+            out[channel_index].push(if max.is_finite() { max } else { 0.0 });
+        }
+    }
+
+    Ok(Some(AudioProxyPreview {
+        channels: out,
+        sample_rate: header.sample_rate.max(1),
+        source_sample_rate: header.sample_rate.max(1),
+        total_source_frames,
+        is_full_resolution: false,
+    }))
+}
+
 fn build_wav_proxy_preview_sparse(
     path: &Path,
     max_total_samples: usize,
@@ -415,6 +536,9 @@ fn build_wav_proxy_preview_sparse(
     let total_source_frames = (header.data_len / frame_bytes as u64) as usize;
     if total_source_frames == 0 {
         return Ok(None);
+    }
+    if is_remote_file_path(path) {
+        return build_remote_wav_proxy_preview(path, header, max_total_samples);
     }
     let source_channels = header.channels.max(1) as usize;
     let keep_channels = proxy_keep_channel_count(source_channels);
@@ -2553,6 +2677,18 @@ mod tests {
     use std::io::Cursor;
     use std::path::Path;
 
+    fn temp_audio_path(tag: &str, extension: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "neowaves_audio_io_{tag}_{}_{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos(),
+            extension
+        ))
+    }
+
     #[test]
     fn proxy_output_sample_rate_keeps_source_rate_for_integrity() {
         assert_eq!(proxy_output_sample_rate(44_100, 100_000, 10_000), 44_100);
@@ -2578,6 +2714,56 @@ mod tests {
         assert_eq!(super::proxy_keep_channel_count(1), 1);
         assert_eq!(super::proxy_keep_channel_count(2), 2);
         assert_eq!(super::proxy_keep_channel_count(6), 1);
+    }
+
+    #[test]
+    fn unc_path_detection_covers_plain_and_verbatim_network_paths() {
+        assert!(super::looks_like_unc_path(r"\\server\share\audio.wav"));
+        assert!(super::looks_like_unc_path(
+            r"\\?\UNC\server\share\audio.wav"
+        ));
+        assert!(!super::looks_like_unc_path(r"C:\audio\local.wav"));
+        assert!(!super::looks_like_unc_path(r"\\?\C:\audio\local.wav"));
+    }
+
+    #[test]
+    fn remote_wav_proxy_uses_bounded_window_envelope() {
+        let path = temp_audio_path("remote_proxy", "wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("create wav");
+        for frame in 0..100_000usize {
+            let left = if frame % 997 == 0 { i16::MAX } else { -1_000 };
+            let right = if frame % 991 == 0 { i16::MIN } else { 2_000 };
+            writer.write_sample(left).expect("write left");
+            writer.write_sample(right).expect("write right");
+        }
+        writer.finalize().expect("finalize wav");
+
+        let header = super::read_wav_proxy_header(&path)
+            .expect("read header")
+            .expect("pcm header");
+        let proxy = super::build_remote_wav_proxy_preview(
+            &path,
+            header,
+            super::EDITOR_PROXY_OVERVIEW_MAX_TOTAL_SAMPLES,
+        )
+        .expect("build remote proxy")
+        .expect("remote proxy");
+
+        assert_eq!(proxy.channels.len(), 2);
+        assert_eq!(proxy.channels[0].len(), 512);
+        assert_eq!(proxy.channels[1].len(), 512);
+        assert_eq!(proxy.total_source_frames, 100_000);
+        assert!(!proxy.is_full_resolution);
+        assert!(proxy.channels[0].iter().any(|sample| *sample > 0.9));
+        assert!(proxy.channels[1].iter().any(|sample| *sample < -0.9));
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

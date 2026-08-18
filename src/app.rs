@@ -122,11 +122,11 @@ use self::session_ops::ProjectOpenState;
 use self::tooling::{ToolDef, ToolJob, ToolLogEntry, ToolRunResult};
 use self::types::*;
 pub use self::types::{
-    ColumnId, ExternalKeyRule, ExternalRegexInput, FadeShape, LoopMode, LoopXfadeShape, PasteMode,
-    PlaybackTimelineMap, PluginCatalogEntry, PluginFxChainDraft, PluginFxSlot, PluginPreviewEngine,
-    PluginProbeCapabilities, RateMode, SortDir, SortKey, StartupConfig, ToolKind,
-    TranscriptComputeTarget, TranscriptDocument, TranscriptFreshness, TranscriptModelVariant,
-    TranscriptPerfMode, ViewMode, WorkspaceView,
+    ColumnId, ColumnKey, EditorNote, EditorNotePositionMode, ExternalKeyRule, ExternalRegexInput,
+    FadeShape, LoopMode, LoopXfadeShape, PasteMode, PlaybackTimelineMap, PluginCatalogEntry,
+    PluginFxChainDraft, PluginFxSlot, PluginPreviewEngine, PluginProbeCapabilities, RateMode,
+    SortDir, SortKey, StartupConfig, ToolKind, TranscriptComputeTarget, TranscriptDocument,
+    TranscriptFreshness, TranscriptModelVariant, TranscriptPerfMode, ViewMode, WorkspaceView,
 };
 
 const LIVE_PREVIEW_SAMPLE_LIMIT: usize = 2_000_000;
@@ -210,6 +210,9 @@ struct AudioDeviceWatchState {
     /// Earliest time a stream error may trigger another reopen. Without it a
     /// device that fails on every callback would be reopened every frame.
     next_stream_error_retry_at: std::time::Instant,
+    /// A broken stream can report only one error and then go permanently
+    /// silent. Keep retrying until an output device is available again.
+    output_recovery_pending: bool,
 }
 
 impl Default for AudioDeviceWatchState {
@@ -221,6 +224,7 @@ impl Default for AudioDeviceWatchState {
             last_default_input_id: None,
             last_stream_error_seq: 0,
             next_stream_error_retry_at: std::time::Instant::now(),
+            output_recovery_pending: false,
         }
     }
 }
@@ -641,6 +645,8 @@ pub struct WavesPreviewer {
     // Display order of list columns (always a sanitized permutation of
     // ColumnId::ALL; visibility stays in `list_columns`).
     pub list_column_order: Vec<types::ColumnId>,
+    /// Unified display order for built-in and registered metadata columns.
+    pub list_column_layout: Vec<types::ColumnKey>,
     /// User-selected metadata columns. Their keys are stable strings shared
     /// with the metadata CLI and session format.
     metadata_list_columns: Vec<types::MetadataListColumn>,
@@ -1089,13 +1095,15 @@ impl WavesPreviewer {
         transport_sr: u32,
         out_sr: u32,
     ) -> f32 {
+        let src = transport_sr.max(1) as f32;
+        let out = out_sr.max(1) as f32;
+        let sample_rate_ratio = (src / out).clamp(0.25, 4.0);
         match transport {
-            PlaybackTransportKind::Buffer => user_speed.clamp(0.25, 4.0),
-            PlaybackTransportKind::ExactStreamWav => {
-                let src = transport_sr.max(1) as f32;
-                let out = out_sr.max(1) as f32;
-                let ratio = (src / out).clamp(0.25, 4.0);
-                (user_speed.clamp(0.25, 4.0) * ratio).clamp(0.25, 4.0)
+            // Buffers are normally rendered at the active output rate, making
+            // this ratio 1.0. After a hot-plug the retained buffer still uses
+            // the previous device rate, so the ratio preserves pitch/time.
+            PlaybackTransportKind::Buffer | PlaybackTransportKind::ExactStreamWav => {
+                (user_speed.clamp(0.25, 4.0) * sample_rate_ratio).clamp(0.25, 4.0)
             }
         }
     }
@@ -1786,6 +1794,8 @@ impl WavesPreviewer {
             source: MediaSource::File,
             meta: None,
             pending_gain_db: 0.0,
+            note: String::new(),
+            editor_notes: Vec::new(),
             status: MediaStatus::Ok,
             transcript: None,
             transcript_document: None,
@@ -1967,6 +1977,8 @@ impl WavesPreviewer {
             source: MediaSource::Virtual,
             meta: meta.map(Box::new),
             pending_gain_db: 0.0,
+            note: String::new(),
+            editor_notes: Vec::new(),
             status: MediaStatus::Ok,
             transcript: None,
             transcript_document: None,
@@ -2757,6 +2769,7 @@ impl WavesPreviewer {
             approx_bytes,
             markers: tab.markers.clone(),
             regions: tab.regions.clone(),
+            editor_notes: tab.editor_notes.clone(),
             markers_committed: tab.markers_committed.clone(),
             markers_applied: tab.markers_applied.clone(),
             loop_region_applied: tab.loop_region_applied,
@@ -2863,6 +2876,7 @@ impl WavesPreviewer {
             tab.show_waveform_overlay = state.show_waveform_overlay;
             tab.markers = state.markers;
             tab.regions = state.regions;
+            tab.editor_notes = state.editor_notes;
             tab.markers_committed = state.markers_committed;
             tab.markers_applied = state.markers_applied;
             tab.loop_region_applied = state.loop_region_applied;
@@ -2889,6 +2903,11 @@ impl WavesPreviewer {
         }) else {
             return false;
         };
+        if let Some(notes) = self.tabs.get(tab_idx).map(|tab| tab.editor_notes.clone()) {
+            if let Some(item) = self.item_for_path_mut(&path) {
+                item.editor_notes = notes;
+            }
+        }
         self.audio.stop();
         self.audio.set_samples_channels(channels);
         self.playback_mark_buffer_source(

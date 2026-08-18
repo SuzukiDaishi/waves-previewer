@@ -624,10 +624,15 @@ impl super::WavesPreviewer {
         let list_files: Vec<PathBuf> = self.items.iter().map(|i| i.path.clone()).collect();
         let mut list_items = Vec::new();
         for item in &self.items {
-            if item.pending_gain_db.abs() > 0.0001 {
+            if item.pending_gain_db.abs() > 0.0001
+                || !item.note.is_empty()
+                || !item.editor_notes.is_empty()
+            {
                 list_items.push(ProjectListItem {
                     path: session_path(&item.path, base_dir, path_mode),
                     pending_gain_db: item.pending_gain_db,
+                    note: item.note.clone(),
+                    editor_notes: item.editor_notes.clone(),
                 });
             }
         }
@@ -941,15 +946,16 @@ impl super::WavesPreviewer {
                 modified_at: self.list_columns.modified_at,
                 gain: self.list_columns.gain,
                 wave: self.list_columns.wave,
+                note: self.list_columns.note,
                 silence_lead: self.list_columns.silence_lead,
                 silence_tail: self.list_columns.silence_tail,
                 edge_zero: self.list_columns.edge_zero,
                 over_peak: self.list_columns.over_peak,
                 blank_pad: self.list_columns.blank_pad,
                 order: self
-                    .list_column_order
+                    .list_column_layout
                     .iter()
-                    .map(|c| c.name().to_string())
+                    .map(|key| key.serialized_name())
                     .collect(),
                 widths: {
                     let mut widths: Vec<(String, f32)> = self
@@ -1391,6 +1397,7 @@ impl super::WavesPreviewer {
             modified_at: project.app.list_columns.modified_at,
             gain: project.app.list_columns.gain,
             wave: project.app.list_columns.wave,
+            note: project.app.list_columns.note,
             silence_lead: project.app.list_columns.silence_lead,
             silence_tail: project.app.list_columns.silence_tail,
             edge_zero: project.app.list_columns.edge_zero,
@@ -1398,14 +1405,14 @@ impl super::WavesPreviewer {
             blank_pad: project.app.list_columns.blank_pad,
         };
         if !project.app.list_columns.order.is_empty() {
-            let parsed: Vec<super::types::ColumnId> = project
+            let parsed: Vec<super::types::ColumnKey> = project
                 .app
                 .list_columns
                 .order
                 .iter()
-                .filter_map(|name| super::types::ColumnId::from_name(name))
+                .filter_map(|name| super::types::ColumnKey::parse(name))
                 .collect();
-            self.list_column_order = super::types::sanitize_column_order(&parsed);
+            self.list_column_layout = parsed;
         }
         for (key, w) in &project.app.list_columns.widths {
             if w.is_finite() && *w > 4.0 {
@@ -1451,6 +1458,7 @@ impl super::WavesPreviewer {
         }
         ordered_metadata.extend(available_metadata);
         self.metadata_list_columns = ordered_metadata;
+        self.sanitize_list_column_layout();
         self.sort_key = match project.app.sort_key.as_str() {
             "Folder" => super::types::SortKey::Folder,
             "Transcript" => super::types::SortKey::Transcript,
@@ -1854,6 +1862,8 @@ impl super::WavesPreviewer {
             let path = resolve_path(&item.path, &base_dir);
             if let Some(list_item) = self.item_for_path_mut(&path) {
                 list_item.pending_gain_db = item.pending_gain_db;
+                list_item.note = item.note.clone();
+                list_item.editor_notes = item.editor_notes.clone();
             }
         }
         for item in project.list.transcript_languages.iter() {
@@ -2193,6 +2203,11 @@ impl super::WavesPreviewer {
                     t.loop_xfade_shape = loop_shape_from_str(&tab.loop_xfade_shape);
                     t.trim_range = tab.trim_range.map(|v| (v[0], v[1]));
                     t.selection = tab.selection.map(|v| (v[0], v[1]));
+                    t.editor_note_position_mode = if tab.editor_note_position_mode == "beats" {
+                        super::types::EditorNotePositionMode::Beats
+                    } else {
+                        super::types::EditorNotePositionMode::Time
+                    };
                     t.markers = tab.markers.iter().map(project_marker_to_entry).collect();
                     t.markers_saved = t.markers.clone();
                     t.markers_dirty = tab.markers_dirty;

@@ -5,11 +5,11 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ChannelView, ChannelViewMode, EditorOtherSubView, EditorPrimaryView, EditorSpecSubView,
-    FadeShape, FileMeta, LoopMode, LoopXfadeShape, MetadataSubView, MusicAnalysisDraft,
-    MusicAnalysisResult, MusicAnalysisSourceKind, PluginFxChainDraft, PluginFxDraft, PluginFxSlot,
-    PluginParamUiState, PluginPreviewEngine, SpectrogramConfig, SpectrogramScale, ToolKind,
-    ToolState, TranscriptAiConfig, ViewMode,
+    ChannelView, ChannelViewMode, EditorNote, EditorOtherSubView, EditorPrimaryView,
+    EditorSpecSubView, FadeShape, FileMeta, LoopMode, LoopXfadeShape, MetadataSubView,
+    MusicAnalysisDraft, MusicAnalysisResult, MusicAnalysisSourceKind, PluginFxChainDraft,
+    PluginFxDraft, PluginFxSlot, PluginParamUiState, PluginPreviewEngine, SpectrogramConfig,
+    SpectrogramScale, ToolKind, ToolState, TranscriptAiConfig, ViewMode,
 };
 use crate::markers::MarkerEntry;
 
@@ -131,7 +131,12 @@ pub struct ProjectTranscriptLanguage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectListItem {
     pub path: String,
+    #[serde(default)]
     pub pending_gain_db: f32,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub editor_notes: Vec<EditorNote>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -370,6 +375,8 @@ pub struct ProjectListColumns {
     pub modified_at: bool,
     pub gain: bool,
     pub wave: bool,
+    #[serde(default = "default_note_column_visible")]
+    pub note: bool,
     #[serde(default)]
     pub silence_lead: bool,
     #[serde(default)]
@@ -386,8 +393,8 @@ pub struct ProjectListColumns {
     /// Per-project column widths by name; empty = keep the global widths.
     #[serde(default)]
     pub widths: Vec<(String, f32)>,
-    /// Session-local visibility/order for globally registered metadata
-    /// columns. Built-ins continue to use the legacy fields above.
+    /// Session-local visibility and labels for globally registered metadata
+    /// columns. Their unified order is stored in `order` with the built-ins.
     #[serde(default)]
     pub metadata: Vec<ProjectMetadataColumn>,
 }
@@ -463,6 +470,8 @@ pub struct ProjectTab {
     pub selection: Option<[usize; 2]>,
     #[serde(default)]
     pub cursor_sample: Option<usize>,
+    #[serde(default)]
+    pub editor_note_position_mode: String,
     pub markers: Vec<ProjectMarker>,
     #[serde(default)]
     pub regions: Vec<ProjectRegion>,
@@ -576,6 +585,10 @@ fn default_vertical_view_center() -> f32 {
 }
 
 fn default_music_analysis_visible() -> bool {
+    true
+}
+
+fn default_note_column_visible() -> bool {
     true
 }
 
@@ -1358,6 +1371,11 @@ pub fn project_tab_from_tab(
         trim_range: tab.trim_range.map(|(a, b)| [a, b]),
         selection: tab.selection.map(|(a, b)| [a, b]),
         cursor_sample: tab.preview_offset_samples,
+        editor_note_position_mode: match tab.editor_note_position_mode {
+            super::types::EditorNotePositionMode::Time => "time",
+            super::types::EditorNotePositionMode::Beats => "beats",
+        }
+        .to_string(),
         markers: tab
             .markers
             .iter()
@@ -1660,6 +1678,7 @@ pub fn project_channel_view_to_channel_view(p: &ProjectChannelView) -> ChannelVi
 pub fn tool_kind_from_str(s: &str) -> ToolKind {
     match s {
         "Markers" => ToolKind::Markers,
+        "EditorNote" => ToolKind::EditorNote,
         "Trim" => ToolKind::Trim,
         "Fade" => ToolKind::Fade,
         "PitchShift" => ToolKind::PitchShift,
@@ -2314,6 +2333,63 @@ show_note_labels = false
         assert_eq!(column.label, "CatID");
         assert!(column.visible);
         assert_eq!(column.width, 184.0);
+    }
+
+    #[test]
+    fn list_and_editor_notes_roundtrip_with_unified_column_order() {
+        let mut project = deserialize_project(MINIMAL_TOML).unwrap();
+        project.list.items.push(ProjectListItem {
+            path: "a.wav".to_string(),
+            pending_gain_db: 0.0,
+            note: "List memo".to_string(),
+            editor_notes: vec![
+                EditorNote {
+                    id: 1,
+                    comment: "Cursor".to_string(),
+                    start_sample: 480,
+                    end_sample: None,
+                    freq_range_hz: None,
+                    view: None,
+                },
+                EditorNote {
+                    id: 2,
+                    comment: "Spectral range".to_string(),
+                    start_sample: 960,
+                    end_sample: Some(1_920),
+                    freq_range_hz: Some((220.0, 880.0)),
+                    view: Some("Spec".to_string()),
+                },
+            ],
+        });
+        project.app.list_columns.order = vec![
+            "file".to_string(),
+            "normalized:ucs.cat_id".to_string(),
+            "note".to_string(),
+        ];
+        let encoded = serialize_project(&project).unwrap();
+        let restored = deserialize_project(&encoded).unwrap();
+        let item = &restored.list.items[0];
+        assert_eq!(item.note, "List memo");
+        assert_eq!(item.editor_notes.len(), 2);
+        assert_eq!(item.editor_notes[0].start_sample, 480);
+        assert_eq!(item.editor_notes[1].end_sample, Some(1_920));
+        assert_eq!(item.editor_notes[1].freq_range_hz, Some((220.0, 880.0)));
+        assert_eq!(item.editor_notes[1].view.as_deref(), Some("Spec"));
+        assert_eq!(
+            restored.app.list_columns.order,
+            project.app.list_columns.order
+        );
+    }
+
+    #[test]
+    fn legacy_list_item_defaults_notes_to_empty() {
+        let raw = r#"
+path = "a.wav"
+pending_gain_db = 1.5
+"#;
+        let item: ProjectListItem = toml::from_str(raw).expect("legacy list item");
+        assert!(item.note.is_empty());
+        assert!(item.editor_notes.is_empty());
     }
 
     #[test]

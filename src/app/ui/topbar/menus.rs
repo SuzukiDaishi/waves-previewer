@@ -200,10 +200,6 @@ impl WavesPreviewer {
                 self.open_first_in_list();
                 ui.close();
             }
-            if ui.button("Columns...").clicked() {
-                self.show_list_columns_window = true;
-                ui.close();
-            }
             ui.separator();
             let selected = self.selected_paths();
             let real_selected = self.selected_real_paths();
@@ -360,6 +356,10 @@ impl WavesPreviewer {
             }
             if ui.button("Plugin Manager...").clicked() {
                 self.show_plugin_manager = true;
+                ui.close();
+            }
+            if ui.button("List Columns...").clicked() {
+                self.show_list_columns_window = true;
                 ui.close();
             }
             ui.separator();

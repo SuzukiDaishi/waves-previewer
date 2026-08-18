@@ -11,9 +11,8 @@ mod kittest_suite {
         kittest::{NodeT, Queryable},
         Harness,
     };
-    #[cfg(feature = "kittest_render")]
-    use neowaves::app::ColumnId;
-    use neowaves::app::ToolKind;
+    use neowaves::app::{ColumnId, ColumnKey};
+    use neowaves::app::{EditorNote, EditorNotePositionMode, ToolKind};
     use neowaves::kittest::{harness_default, harness_with_startup};
     use neowaves::{StartupConfig, WavesPreviewer};
     use walkdir::WalkDir;
@@ -1432,13 +1431,28 @@ mod kittest_suite {
         let mut harness = harness_with_wavs(false);
         harness.set_size(egui::vec2(1600.0, 900.0));
         wait_for_scan(&mut harness);
+        harness
+            .state_mut()
+            .test_add_metadata_list_column("ucs.cat_id", "UCS Category");
         harness.run_steps(3);
 
-        top_menu_button(&harness, "List").click();
+        top_menu_button(&harness, "Tools").click();
         harness.run_steps(1);
-        harness.get_by_label("Columns...").click();
+        harness.get_by_label("List Columns...").click();
         harness.run_steps(5);
         assert!(harness.state().test_show_list_columns_window());
+        harness
+            .query_all_by_label("Reset")
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("List Columns Reset button")
+            .click();
+        harness.run_steps(2);
         assert_eq!(
             harness.state().list_column_order[0],
             ColumnId::Edited,
@@ -1461,6 +1475,18 @@ mod kittest_suite {
             .expect("save List Columns before screenshot");
 
         let window_rect = first_label_rect(&harness, "List Columns");
+        assert_eq!(
+            harness.state().list_column_layout.last(),
+            Some(&ColumnKey::Builtin(ColumnId::Note)),
+            "Note should begin at the far-right end of the unified order"
+        );
+        assert!(
+            harness
+                .query_all_by_label("Show Note column")
+                .next()
+                .is_some(),
+            "Note visibility must be controlled in the unified list"
+        );
         let file_drag = harness.get_by_label("Drag File column").rect().center();
         let edited_drop = harness
             .query_all_by_label("Edited")
@@ -1481,29 +1507,96 @@ mod kittest_suite {
             ColumnId::File,
             "dragging File onto Edited should move File to the left edge"
         );
-        harness.get_by_label("Reset order").click();
+        harness
+            .query_all_by_label("Reset")
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("List Columns Reset button")
+            .click();
         harness.run_steps(2);
         assert_eq!(harness.state().list_column_order[0], ColumnId::Edited);
 
+        let list_hover = first_label_rect(&harness, "Bitrate").center();
+        harness.hover_at(list_hover);
+        for _ in 0..22 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -5.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        let metadata_drag = harness
+            .get_by_label("Drag UCS Category column")
+            .rect()
+            .center();
+        let note_drop = harness.get_by_label("Drag Note column").rect().center();
+        editor_pointer_drag(&mut harness, metadata_drag, note_drop);
+        assert_eq!(
+            harness.state().list_column_layout.last(),
+            Some(&ColumnKey::Normalized("ucs.cat_id".to_string())),
+            "metadata and built-in columns should share the same D&D order"
+        );
         harness
-            .query_all_by_label("Art")
-            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::CheckBox)
-            .expect("Art visibility checkbox")
+            .query_all_by_label("Reset")
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("List Columns Reset button")
             .click();
+        harness.run_steps(2);
+        harness.hover_at(egui::pos2(760.0, 430.0));
+        for _ in 0..22 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 5.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+
+        harness.get_by_label("Show Art column").click();
         harness.run_steps(2);
         assert!(
             harness.state().list_columns.cover_art,
             "Art checkbox should update the List immediately"
         );
 
-        harness.get_by_label("Move Art earlier").click();
-        harness.run_steps(3);
+        let art_drag = harness.get_by_label("Drag Art column").rect().center();
+        let edited_drop = harness
+            .query_all_by_label("Edited")
+            .filter(|node| node.rect().intersects(window_rect))
+            .max_by(|a, b| {
+                a.rect()
+                    .center()
+                    .x
+                    .partial_cmp(&b.rect().center().x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("Edited drop row after reset")
+            .rect()
+            .center();
+        editor_pointer_drag(&mut harness, art_drag, edited_drop);
         assert_eq!(
-            harness.state().list_column_order[0],
-            ColumnId::CoverArt,
+            harness.state().list_column_layout[0],
+            ColumnKey::Builtin(ColumnId::CoverArt),
             "moving Art earlier should place it at the left edge"
         );
-        assert_eq!(harness.state().list_column_order[1], ColumnId::Edited);
+        assert_eq!(
+            harness.state().list_column_layout[1],
+            ColumnKey::Builtin(ColumnId::Edited)
+        );
         harness
             .render()
             .expect("render List Columns after changes")
@@ -1511,6 +1604,27 @@ mod kittest_suite {
             .expect("save List Columns changed screenshot");
 
         harness.state_mut().test_set_show_list_columns_window(false);
+        for column in ColumnId::ALL {
+            column.set_enabled(&mut harness.state_mut().list_columns, false);
+        }
+        ColumnId::File.set_enabled(&mut harness.state_mut().list_columns, true);
+        ColumnId::Note.set_enabled(&mut harness.state_mut().list_columns, true);
+        harness.state_mut().items[0].note = "Editable list note saved in the session".to_string();
+        harness.run_steps(3);
+        harness
+            .render()
+            .expect("render editable Note column")
+            .save(out_dir.join("03_note_column.png"))
+            .expect("save Note column screenshot");
+        assert_eq!(
+            harness.state().items[0].note,
+            "Editable list note saved in the session"
+        );
+        assert!(
+            harness.query_all_by_label("Note").next().is_some(),
+            "the editable Note column should be visible in the List"
+        );
+
         harness.state_mut().test_set_show_export_settings(true);
         harness.run_steps(3);
         assert!(
@@ -1521,6 +1635,157 @@ mod kittest_suite {
             harness.query_all_by_label("Column Order").next().is_none(),
             "the old Settings order editor must be removed"
         );
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
+    fn kittest_render_editor_notes_restore_time_and_frequency_selection() {
+        let mut harness = harness_with_editor_fixture();
+        harness.set_size(egui::vec2(1600.0, 900.0));
+        ensure_editor_ready(&mut harness);
+        assert!(harness
+            .state_mut()
+            .test_set_view_mode(neowaves::ViewMode::Spectrogram));
+        assert!(harness
+            .state_mut()
+            .test_set_active_tool(ToolKind::EditorNote));
+        let tab_idx = harness.state().active_tab.expect("active editor tab");
+        let sr = harness.state().tabs[tab_idx].buffer_sample_rate.max(1) as usize;
+        {
+            let tab = &mut harness.state_mut().tabs[tab_idx];
+            tab.bpm_enabled = true;
+            tab.bpm_value = 120.0;
+            tab.bpm_offset_sec = 0.0;
+            tab.time_sig_numerator = 4;
+            tab.time_sig_denominator = 4;
+            tab.editor_note_position_mode = EditorNotePositionMode::Time;
+            tab.selection = None;
+            tab.freq_selection = None;
+            tab.editor_notes = vec![
+                EditorNote {
+                    id: 1,
+                    comment: "Transient begins here".to_string(),
+                    start_sample: sr / 2,
+                    end_sample: None,
+                    freq_range_hz: None,
+                    view: None,
+                },
+                EditorNote {
+                    id: 2,
+                    comment: "Spectral chorus band".to_string(),
+                    start_sample: sr,
+                    end_sample: Some(sr * 2),
+                    freq_range_hz: Some((220.0, 2_400.0)),
+                    view: Some("Spectrogram".to_string()),
+                },
+            ];
+        }
+        harness.run_steps(4);
+        let inspector_hover = first_label_rect(&harness, "Transient begins here").center();
+        harness.hover_at(inspector_hover);
+        for _ in 0..5 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -4.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("debug")
+            .join("screenshot_verify")
+            .join("editor_notes");
+        std::fs::create_dir_all(&out_dir).expect("create Editor Note screenshot dir");
+        harness
+            .render()
+            .expect("render Editor Note list")
+            .save(out_dir.join("01_editor_note_list.png"))
+            .expect("save Editor Note list screenshot");
+        assert!(
+            harness
+                .query_all_by_label("Spectral chorus band")
+                .next()
+                .is_some(),
+            "Editor Note comment should be listed"
+        );
+        assert!(
+            harness
+                .query_all_by_label("Spectrogram · 220–2400 Hz")
+                .next()
+                .is_some(),
+            "spectral notes should display view and frequency range"
+        );
+
+        let view_before = format!("{:?}", harness.state().tabs[tab_idx].leaf_view_mode());
+        harness.get_by_label("0:01.0 – 0:02.0").click();
+        harness.run_steps(1);
+        assert_eq!(
+            harness.state().tabs[tab_idx]
+                .editor_note_last_click
+                .map(|v| v.0),
+            Some(2),
+            "first location click should reach the Editor Note button"
+        );
+        harness.get_by_label("0:01.0 – 0:02.0").click();
+        harness.run_steps(1);
+        harness.run_steps(3);
+        assert_eq!(harness.state().tabs[tab_idx].selection, Some((sr, sr * 2)));
+        assert_eq!(
+            harness.state().tabs[tab_idx].freq_selection,
+            Some((220.0, 2_400.0))
+        );
+        assert_eq!(
+            format!("{:?}", harness.state().tabs[tab_idx].leaf_view_mode()),
+            view_before,
+            "restoring a spectral Editor Note must keep the current editor view"
+        );
+        harness
+            .render()
+            .expect("render restored Editor Note selection")
+            .save(out_dir.join("02_double_click_restored_selection.png"))
+            .expect("save restored selection screenshot");
+
+        let inspector_hover = first_label_rect(&harness, "Spectral chorus band").center();
+        harness.hover_at(inspector_hover);
+        for _ in 0..5 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, 4.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness.get_by_label("Beats").click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().tabs[tab_idx].editor_note_position_mode,
+            EditorNotePositionMode::Beats
+        );
+        assert!(
+            harness
+                .query_all_by_label("1:3.00 – 2:1.00")
+                .next()
+                .is_some(),
+            "beat mode should display bar:beat positions"
+        );
+        harness.hover_at(egui::pos2(1420.0, 500.0));
+        for _ in 0..5 {
+            harness.event(egui::Event::MouseWheel {
+                unit: MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -4.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            harness.run_steps(1);
+        }
+        harness
+            .render()
+            .expect("render Editor Note beat positions")
+            .save(out_dir.join("03_editor_note_beats.png"))
+            .expect("save beat-position screenshot");
     }
 
     #[test]
@@ -2286,6 +2551,28 @@ mod kittest_suite {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn disconnected_editor_decode_worker_cannot_leave_tab_loading_forever() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+
+        assert!(harness
+            .state_mut()
+            .test_set_mock_editor_decode_progress(0.60));
+        assert!(harness.state_mut().test_disconnect_mock_editor_decode());
+        harness.run_steps(2);
+
+        assert!(
+            !harness.state().test_tab_loading(),
+            "a disconnected waveform worker must clear the loading state"
+        );
+        assert!(
+            harness.state().test_editor_decode_progress().is_none(),
+            "the disconnected worker state must be retired"
+        );
     }
 
     #[test]
@@ -5055,6 +5342,93 @@ mod kittest_suite {
         assert!(
             (center - 0.35).abs() < 0.02,
             "vertical center should roundtrip via session: {center}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_note_editor_notes_and_position_mode_roundtrip_in_session() {
+        let mut harness = harness_with_editor_fixture();
+        wait_for_scan(&mut harness);
+        ensure_editor_ready(&mut harness);
+        let dir = make_temp_dir("editor_notes_session");
+        let sess = dir.join("editor_notes.nwsess");
+        let tab_idx = harness.state().active_tab.expect("active tab");
+        let path = harness.state().tabs[tab_idx].path.clone();
+        let notes = vec![
+            EditorNote {
+                id: 10,
+                comment: "Session cursor".to_string(),
+                start_sample: 12_000,
+                end_sample: None,
+                freq_range_hz: None,
+                view: None,
+            },
+            EditorNote {
+                id: 11,
+                comment: "Session spectrum".to_string(),
+                start_sample: 24_000,
+                end_sample: Some(48_000),
+                freq_range_hz: Some((330.0, 3_300.0)),
+                view: Some("Spectrogram".to_string()),
+            },
+        ];
+        {
+            let state = harness.state_mut();
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item.path == path)
+                .expect("session item");
+            item.note = "Persisted list note".to_string();
+            item.editor_notes = notes.clone();
+            state.tabs[tab_idx].editor_notes = notes.clone();
+            state.tabs[tab_idx].editor_note_position_mode = EditorNotePositionMode::Beats;
+            let note_pos = state
+                .list_column_layout
+                .iter()
+                .position(|key| *key == ColumnKey::Builtin(ColumnId::Note))
+                .expect("Note column");
+            let note_key = state.list_column_layout.remove(note_pos);
+            state.list_column_layout.insert(0, note_key);
+        }
+        assert!(harness.state_mut().test_save_session_to(&sess));
+        {
+            let state = harness.state_mut();
+            state.items.iter_mut().for_each(|item| {
+                item.note.clear();
+                item.editor_notes.clear();
+            });
+            state.tabs[tab_idx].editor_notes.clear();
+            state.tabs[tab_idx].editor_note_position_mode = EditorNotePositionMode::Time;
+            state.list_column_layout = ColumnId::ALL
+                .iter()
+                .copied()
+                .map(ColumnKey::Builtin)
+                .collect();
+        }
+        assert!(harness.state_mut().test_open_session_from(&sess));
+        harness.run_steps(3);
+        let restored_item = harness
+            .state()
+            .items
+            .iter()
+            .find(|item| item.path == path)
+            .expect("restored item");
+        assert_eq!(restored_item.note, "Persisted list note");
+        assert_eq!(restored_item.editor_notes.len(), 2);
+        assert_eq!(
+            restored_item.editor_notes[1].freq_range_hz,
+            Some((330.0, 3_300.0))
+        );
+        let restored_tab = harness.state().active_tab.expect("restored active tab");
+        assert_eq!(
+            harness.state().tabs[restored_tab].editor_note_position_mode,
+            EditorNotePositionMode::Beats
+        );
+        assert_eq!(
+            harness.state().list_column_layout.first(),
+            Some(&ColumnKey::Builtin(ColumnId::Note))
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

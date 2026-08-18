@@ -495,6 +495,86 @@ impl AudioEngine {
         shared
     }
 
+    /// Build shared state for a replacement device without resetting the
+    /// transport. This includes memory-mapped WAV playback and loop/channel
+    /// state, so every source type can continue at the last published frame.
+    fn clone_shared_for_output(
+        previous: &SharedAudio,
+        out_channels: usize,
+        out_sample_rate: u32,
+    ) -> Arc<SharedAudio> {
+        use std::sync::atomic::Ordering;
+
+        let shared = Self::new_shared(out_channels, out_sample_rate);
+        shared.samples.store(previous.samples.load_full());
+        shared.streamed_wav.store(previous.streamed_wav.load_full());
+        shared
+            .vol
+            .store(previous.vol.load(Ordering::Relaxed), Ordering::Relaxed);
+        shared
+            .play_pos
+            .store(previous.play_pos.load(Ordering::Relaxed), Ordering::Relaxed);
+        shared.play_pos_f.store(
+            previous.play_pos_f.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.chan_mute_mask.store(
+            previous.chan_mute_mask.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.chan_solo_mask.store(
+            previous.chan_solo_mask.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.channel_map_mode.store(
+            previous.channel_map_mode.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.loop_enabled.store(
+            previous.loop_enabled.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.loop_start.store(
+            previous.loop_start.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared
+            .loop_end
+            .store(previous.loop_end.load(Ordering::Relaxed), Ordering::Relaxed);
+        shared.loop_xfade_samples.store(
+            previous.loop_xfade_samples.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.loop_xfade_shape.store(
+            previous.loop_xfade_shape.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared
+            .rate
+            .store(previous.rate.load(Ordering::Relaxed), Ordering::Relaxed);
+        shared.ramp_gain.store(
+            previous.ramp_gain.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.ramp_target.store(
+            previous.ramp_target.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.ramp_step.store(
+            previous.ramp_step.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        shared.ramp_events.store(
+            previous.ramp_events.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        // Publish playing last in case the new callback starts immediately.
+        shared
+            .playing
+            .store(previous.playing.load(Ordering::Relaxed), Ordering::Release);
+        shared
+    }
+
     pub fn new() -> Result<Self> {
         Self::new_with_output_device_name(None)
     }
@@ -717,6 +797,72 @@ impl AudioEngine {
         })
     }
 
+    /// Rebuild only the hardware stream while retaining the live transport.
+    /// `self` remains untouched if the replacement cannot be opened.
+    pub fn reopen_with_output_device_name_and_sample_rate(
+        &mut self,
+        name: Option<&str>,
+        preferred_sample_rate: Option<u32>,
+    ) -> Result<()> {
+        let host = cpal::default_host();
+        let requested = name.map(str::trim).filter(|value| !value.is_empty());
+        let device = if let Some(requested_name) = requested {
+            let mut alias_matches = Vec::new();
+            for candidate in host
+                .output_devices()
+                .context("failed to enumerate output devices")?
+            {
+                let Some(candidate_name) = Self::device_display_name(&candidate) else {
+                    continue;
+                };
+                if candidate_name == requested_name {
+                    alias_matches.clear();
+                    alias_matches.push(candidate);
+                    break;
+                }
+                if Self::legacy_output_device_alias(&candidate_name).as_deref()
+                    == Some(requested_name)
+                {
+                    alias_matches.push(candidate);
+                }
+            }
+            match alias_matches.len() {
+                1 => alias_matches
+                    .pop()
+                    .with_context(|| format!("output device not found: {requested_name}"))?,
+                0 => anyhow::bail!("output device not found: {requested_name}"),
+                _ => anyhow::bail!(
+                    "output device name is ambiguous: {requested_name}. Select the full device name."
+                ),
+            }
+        } else {
+            host.default_output_device()
+                .context("No default output device")?
+        };
+        let device_name = Self::device_display_name(&device);
+        let cfg = Self::choose_output_config(&device, preferred_sample_rate)?;
+        let shared =
+            Self::clone_shared_for_output(&self.shared, cfg.channels() as usize, cfg.sample_rate());
+        let stream_cfg: cpal::StreamConfig = cfg.clone().into();
+        let stream = match cfg.sample_format() {
+            cpal::SampleFormat::F32 => {
+                Self::build_stream::<f32>(&device, &stream_cfg, shared.clone())?
+            }
+            cpal::SampleFormat::I16 => {
+                Self::build_stream::<i16>(&device, &stream_cfg, shared.clone())?
+            }
+            cpal::SampleFormat::U16 => {
+                Self::build_stream::<u16>(&device, &stream_cfg, shared.clone())?
+            }
+            _ => anyhow::bail!("Unsupported sample format"),
+        };
+
+        self._stream = Some(stream);
+        self.shared = shared;
+        self.output_device_name = device_name;
+        Ok(())
+    }
+
     pub fn new_for_test() -> Self {
         let shared = Self::new_shared(2, 48_000);
         Self {
@@ -747,10 +893,26 @@ impl AudioEngine {
         // gets its own handle to flag a dead device for the app to act on.
         let err_shared = shared.clone();
         let err_fn = move |e| {
-            eprintln!("cpal stream error: {e}");
-            err_shared
-                .stream_error_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match e {
+                // Normal during hot-plug/default-device changes. The app
+                // reconnects from this signal, so avoid duplicate scary logs.
+                cpal::StreamError::DeviceNotAvailable | cpal::StreamError::StreamInvalidated => {
+                    err_shared
+                        .stream_error_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
+                }
+                // An underrun is transient and does not require rebuilding the
+                // device. Backend errors may invalidate a stream, so recover.
+                cpal::StreamError::BufferUnderrun => {
+                    eprintln!("cpal stream warning: {e}");
+                }
+                cpal::StreamError::BackendSpecific { .. } => {
+                    eprintln!("cpal stream error: {e}");
+                    err_shared
+                        .stream_error_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
+                }
+            }
         };
         let stream = device.build_output_stream(
             cfg,
@@ -1395,7 +1557,7 @@ impl AudioEngine {
     pub fn stream_error_seq(&self) -> u32 {
         self.shared
             .stream_error_seq
-            .load(std::sync::atomic::Ordering::Relaxed)
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Park every per-output-channel meter slot.
@@ -1799,6 +1961,52 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "offline-only transport should not schedule output ramps"
+        );
+    }
+
+    #[test]
+    fn replacement_output_shared_state_preserves_live_transport() {
+        use std::sync::atomic::Ordering;
+
+        let audio = AudioEngine::new_for_test();
+        audio.set_samples_channels(vec![vec![0.0; 2_000], vec![0.25; 2_000]]);
+        audio.set_volume(0.42);
+        audio.set_channel_masks(0b10, 0b01);
+        audio.set_channel_map_mode(ChannelMapMode::Direct);
+        audio.set_loop_region(100, 1_500);
+        audio.set_loop_crossfade(64, 1);
+        audio.set_loop_enabled(true);
+        audio.set_rate(0.75);
+        audio.seek_to_sample(777);
+        audio.play();
+        audio.shared.stream_error_seq.store(9, Ordering::Relaxed);
+
+        let original_source = audio.shared.samples.load_full().expect("source buffer");
+        let replacement = AudioEngine::clone_shared_for_output(&audio.shared, 6, 44_100);
+        let replacement_source = replacement.samples.load_full().expect("copied source");
+
+        assert!(Arc::ptr_eq(&original_source, &replacement_source));
+        assert!(replacement.playing.load(Ordering::Acquire));
+        assert_eq!(replacement.play_pos.load(Ordering::Relaxed), 777);
+        assert_eq!(replacement.play_pos_f.load(Ordering::Relaxed), 777.0);
+        assert_eq!(replacement.vol.load(Ordering::Relaxed), 0.42);
+        assert_eq!(replacement.chan_mute_mask.load(Ordering::Relaxed), 0b10);
+        assert_eq!(replacement.chan_solo_mask.load(Ordering::Relaxed), 0b01);
+        assert_eq!(
+            ChannelMapMode::from_u8(replacement.channel_map_mode.load(Ordering::Relaxed)),
+            ChannelMapMode::Direct
+        );
+        assert!(replacement.loop_enabled.load(Ordering::Relaxed));
+        assert_eq!(replacement.loop_start.load(Ordering::Relaxed), 100);
+        assert_eq!(replacement.loop_end.load(Ordering::Relaxed), 1_500);
+        assert_eq!(replacement.loop_xfade_samples.load(Ordering::Relaxed), 64);
+        assert_eq!(replacement.loop_xfade_shape.load(Ordering::Relaxed), 1);
+        assert_eq!(replacement.rate.load(Ordering::Relaxed), 0.75);
+        assert_eq!(replacement.out_sample_rate, 44_100);
+        assert_eq!(
+            replacement.stream_error_seq.load(Ordering::Relaxed),
+            0,
+            "a replacement stream must start with a fresh error sequence"
         );
     }
 

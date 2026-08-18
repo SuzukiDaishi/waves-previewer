@@ -177,8 +177,22 @@ impl WavesPreviewer {
             .vscroll(false)
             .sense(egui::Sense::click_and_drag())
             .cell_layout(egui::Layout::left_to_right(Align::Center));
-        for sorted_col in self.list_column_order.clone() {
-            use crate::app::types::ColumnId as C;
+        for key in self.list_column_layout.clone() {
+            use crate::app::types::{ColumnId as C, ColumnKey};
+            let ColumnKey::Builtin(sorted_col) = key else {
+                if let Some((_, column)) = self.metadata_list_column_for_key(&key) {
+                    if column.visible {
+                        table = table.column(
+                            egui_extras::Column::initial(
+                                self.list_col_w(&column.key.serialized_name(), column.width),
+                            )
+                            .resizable(true),
+                        );
+                        filler_cols += 1;
+                    }
+                }
+                continue;
+            };
             if !sorted_col.enabled(&cols) {
                 continue;
             }
@@ -210,15 +224,6 @@ impl WavesPreviewer {
                     filler_cols += 1;
                 }
             }
-        }
-        for (_, column) in self.visible_metadata_columns() {
-            table = table.column(
-                egui_extras::Column::initial(
-                    self.list_col_w(&column.key.serialized_name(), column.width),
-                )
-                .resizable(true),
-            );
-            filler_cols += 1;
         }
 
         table = table
@@ -310,6 +315,7 @@ impl WavesPreviewer {
             "created_at" | "modified_at" => 120.0,
             "gain" => 80.0,
             "wave" => 150.0,
+            "note" => 220.0,
             _ => 100.0,
         }
     }
@@ -330,8 +336,28 @@ impl WavesPreviewer {
                     .push((($key).to_string(), rect.width()));
             }};
         }
-        for sorted_col in self.list_column_order.clone() {
-            use crate::app::types::ColumnId as C;
+        for column_key in self.list_column_layout.clone() {
+            use crate::app::types::{ColumnId as C, ColumnKey};
+            let ColumnKey::Builtin(sorted_col) = column_key else {
+                if let Some((index, column)) = self.metadata_list_column_for_key(&column_key) {
+                    if column.visible {
+                        let width_key = column.key.serialized_name();
+                        let label = column.label.clone();
+                        let (rect, _response) = header.col(|ui| {
+                            *sort_changed |= sortable_header(
+                                ui,
+                                &label,
+                                &mut self.sort_key,
+                                &mut self.sort_dir,
+                                SortKey::Metadata(index),
+                                true,
+                            );
+                        });
+                        self.list_col_widths_seen.push((width_key, rect.width()));
+                    }
+                }
+                continue;
+            };
             if !sorted_col.enabled(&cols) {
                 continue;
             }
@@ -422,25 +448,13 @@ impl WavesPreviewer {
                         ui.label(RichText::new("Wave").strong());
                     });
                 }
+                C::Note => {
+                    sized_col!("note", |ui| {
+                        ui.label(RichText::new("Note").strong());
+                    });
+                }
                 _ => unreachable!("sortable columns handled above"),
             }
-        }
-        let metadata_headers = self
-            .visible_metadata_columns()
-            .map(|(index, column)| (index, column.key.serialized_name(), column.label.clone()))
-            .collect::<Vec<_>>();
-        for (index, width_key, label) in metadata_headers {
-            let (rect, _response) = header.col(|ui| {
-                *sort_changed |= sortable_header(
-                    ui,
-                    &label,
-                    &mut self.sort_key,
-                    &mut self.sort_dir,
-                    SortKey::Metadata(index),
-                    true,
-                );
-            });
-            self.list_col_widths_seen.push((width_key, rect.width()));
         }
 
         header.col(|_ui| {});

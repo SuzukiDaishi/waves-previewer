@@ -2,7 +2,15 @@
 
 All notable changes in this repository (hand-written).
 
-## Unreleased
+## 0.20260819.0 - 2026-08-19
+
+### List columns and notes
+- **Unified list-column manager**: moved column management to `Tools > List Columns...` and replaced the split, arrow-driven interface with one ordered checklist. Built-in, Note, and metadata columns can be shown or hidden and reordered together with vertical drag and drop; layouts remain global- and session-aware.
+- **Editable Note column**: added an inline-editable Note field to list items, with Enter/focus commit and Escape cancel behavior. Notes survive path changes, list undo, session round trips, and CLI session inspection.
+
+### Editor notes
+- **Position-aware Editor Note tool**: added an Inspector tool for comments attached to the playhead, a time selection, or a time-frequency selection. Notes can be edited or deleted, displayed in time or musical bars/beats, and double-clicked to restore their seek position and selection without changing the active Wave/Spec/Mel view.
+- **Edit and session integration**: Editor Notes are stored in `.nwsess`, included in editor undo/redo, and remapped alongside markers and regions by trim, cut/paste, time-stretch, speed, and sample-rate edits while retaining frequency ranges.
 
 ### Surround output
 - **Speaker-aware channel mapping**: playback used to map source channels onto the device by index, and any output beyond the source's channel count repeated the source's *last* channel. On a 5.1 device a stereo clip put the right channel into the centre, the LFE and both surrounds; on 7.1.4 the right channel came out of eleven speakers at once, so the clip appeared to be playing from behind the listener. Source and device channels are now labelled with the standard WAVE layout for their channel count and routed by speaker position:

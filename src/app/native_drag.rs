@@ -653,6 +653,8 @@ mod tests {
             source,
             meta: None,
             pending_gain_db: 0.0,
+            note: String::new(),
+            editor_notes: Vec::new(),
             status: MediaStatus::Ok,
             transcript: None,
             transcript_document: None,

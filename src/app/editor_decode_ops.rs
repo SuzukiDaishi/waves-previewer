@@ -497,6 +497,7 @@ impl super::WavesPreviewer {
             path,
             started_at: std::time::Instant::now(),
             rx,
+            _keepalive_tx: None,
             cancel,
             job_id,
             partial_ready: false,
@@ -577,6 +578,7 @@ impl super::WavesPreviewer {
             path,
             started_at: std::time::Instant::now(),
             rx,
+            _keepalive_tx: None,
             cancel: Arc::new(AtomicBool::new(false)),
             job_id,
             partial_ready: false,
@@ -637,6 +639,7 @@ impl super::WavesPreviewer {
             path,
             started_at: std::time::Instant::now(),
             rx,
+            _keepalive_tx: None,
             cancel: Arc::new(AtomicBool::new(false)),
             job_id,
             partial_ready: false,
@@ -695,8 +698,19 @@ impl super::WavesPreviewer {
         let mut decode_finalize_waveform_ms: Vec<f32> = Vec::new();
         let mut decode_done_loading_stats: Option<(u64, f32)> = None;
         let mut paged_ready_tab: Option<usize> = None;
+        let mut decode_worker_disconnected: Option<PathBuf> = None;
         if let Some(state) = &mut self.editor_decode_state {
-            while let Ok(res) = state.rx.try_recv() {
+            loop {
+                let res = match state.rx.try_recv() {
+                    Ok(res) => res,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if !decode_done {
+                            decode_worker_disconnected = Some(state.path.clone());
+                        }
+                        break;
+                    }
+                };
                 if res.job_id != state.job_id {
                     continue;
                 }
@@ -878,6 +892,20 @@ impl super::WavesPreviewer {
                     EditorDecodeEvent::Failed => {}
                 }
             }
+        }
+        if let Some(path) = decode_worker_disconnected {
+            if let Some(idx) = self.tabs.iter().position(|tab| tab.path == path) {
+                if let Some(tab) = self.tabs.get_mut(idx) {
+                    tab.loading = false;
+                    tab.paged_asset = tab.ch_samples.is_empty() && tab.samples_len_visual > 0;
+                    Self::invalidate_editor_viewport_cache(tab);
+                }
+            }
+            decode_error = Some((
+                path,
+                "waveform worker ended before publishing a final result".to_string(),
+            ));
+            decode_done = true;
         }
         for (path, decoded_frames, stage) in decode_partial_events {
             self.debug_mark_editor_open_partial(&path, decoded_frames, stage);

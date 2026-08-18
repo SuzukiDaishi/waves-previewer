@@ -81,7 +81,7 @@ use crate::plugin::{WorkerRequest, WorkerResponse};
 use crate::wave;
 
 const DEFAULT_LIST_COLUMNS: &str =
-    "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave";
+    "file,folder,length,channels,sample_rate,bits,peak,lufs,gain,wave,note";
 const DEFAULT_WAVEFORM_BG: [u8; 4] = [14, 18, 24, 255];
 const DEFAULT_WAVEFORM_LINE: [u8; 4] = [98, 208, 181, 255];
 const DEFAULT_WAVEFORM_LINE_B: [u8; 4] = [120, 170, 240, 220];
@@ -118,6 +118,7 @@ struct LoadedSession {
 struct SessionListEntry {
     path: PathBuf,
     pending_gain_db: f32,
+    note: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1271,6 +1272,11 @@ fn list_columns(_args: ListColumnsArgs) -> Result<CliCommandOutput> {
         ColumnDescriptor {
             key: "wave",
             description: "Wave thumbnail column",
+            enabled_by_default: true,
+        },
+        ColumnDescriptor {
+            key: "note",
+            description: "Session item note",
             enabled_by_default: true,
         },
     ];
@@ -3023,6 +3029,7 @@ fn session_entries_from_sources(
                 out.push(SessionListEntry {
                     path,
                     pending_gain_db: 0.0,
+                    note: String::new(),
                 });
             }
         }
@@ -3035,6 +3042,7 @@ fn session_entries_from_sources(
                     out.push(SessionListEntry {
                         path: nested,
                         pending_gain_db: 0.0,
+                        note: String::new(),
                     });
                 }
             }
@@ -3042,6 +3050,7 @@ fn session_entries_from_sources(
             out.push(SessionListEntry {
                 path,
                 pending_gain_db: 0.0,
+                note: String::new(),
             });
         }
     }
@@ -3069,6 +3078,8 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
                 .map(|entry| ProjectListItem {
                     path: entry.path.to_string_lossy().to_string(),
                     pending_gain_db: entry.pending_gain_db,
+                    note: entry.note.clone(),
+                    editor_notes: Vec::new(),
                 })
                 .collect(),
             sample_rate_overrides: Vec::new(),
@@ -3107,11 +3118,11 @@ fn build_project_file_from_entries(entries: &[SessionListEntry]) -> Result<Proje
 
 fn session_list_entries(session: &LoadedSession) -> Vec<SessionListEntry> {
     let mut gains = HashMap::new();
+    let mut notes = HashMap::new();
     for item in &session.project.list.items {
-        gains.insert(
-            path_key(&project::resolve_path(&item.path, &session.base_dir)),
-            item.pending_gain_db,
-        );
+        let key = path_key(&project::resolve_path(&item.path, &session.base_dir));
+        gains.insert(key.clone(), item.pending_gain_db);
+        notes.insert(key, item.note.clone());
     }
     let raws: Vec<String> = if !session.project.list.items.is_empty() {
         session
@@ -3128,9 +3139,11 @@ fn session_list_entries(session: &LoadedSession) -> Vec<SessionListEntry> {
         .map(|raw| {
             let path = project::resolve_path(&raw, &session.base_dir);
             let pending_gain_db = gains.get(&path_key(&path)).copied().unwrap_or(0.0);
+            let note = notes.get(&path_key(&path)).cloned().unwrap_or_default();
             SessionListEntry {
                 path,
                 pending_gain_db,
+                note,
             }
         })
         .collect()
@@ -3234,6 +3247,7 @@ fn default_project_tab_for_path(
         trim_range: None,
         selection: None,
         cursor_sample: None,
+        editor_note_position_mode: "time".to_string(),
         markers: Vec::new(),
         regions: Vec::new(),
         markers_dirty: false,
@@ -3345,6 +3359,7 @@ fn list_row_for_entry(
         ),
     );
     row.insert("gain".to_string(), json!(entry.pending_gain_db));
+    row.insert("note".to_string(), json!(entry.note));
     if let Some(info) = info.as_ref() {
         row.insert("length".to_string(), json!(info.duration_secs));
         row.insert("channels".to_string(), json!(info.channels));
@@ -3397,6 +3412,8 @@ fn project_for_list_render(
                 .map(|entry| ProjectListItem {
                     path: project::session_path(&entry.path, &session.base_dir, session.path_mode),
                     pending_gain_db: entry.pending_gain_db,
+                    note: entry.note.clone(),
+                    editor_notes: Vec::new(),
                 })
                 .collect();
             session.project.app.list_columns = project_list_columns_from_config(column_config);
@@ -3764,6 +3781,8 @@ fn set_pending_gain_for_session_path(session: &mut LoadedSession, path: &Path, g
     session.project.list.items.push(ProjectListItem {
         path: project::session_path(path, &session.base_dir, session.path_mode),
         pending_gain_db: gain_db,
+        note: String::new(),
+        editor_notes: Vec::new(),
     });
 }
 
@@ -4618,6 +4637,7 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
         modified_at: false,
         gain: false,
         wave: false,
+        note: false,
         silence_lead: false,
         silence_tail: false,
         edge_zero: false,
@@ -4654,6 +4674,7 @@ fn parse_list_column_config(raw: &str) -> Result<ListColumnConfig> {
             "modified_at" => cfg.modified_at = true,
             "gain" => cfg.gain = true,
             "wave" => cfg.wave = true,
+            "note" => cfg.note = true,
             other => bail!("unknown list column key: {other}"),
         }
     }
@@ -4685,6 +4706,7 @@ fn project_list_columns_from_config(cfg: ListColumnConfig) -> ProjectListColumns
         modified_at: cfg.modified_at,
         gain: cfg.gain,
         wave: cfg.wave,
+        note: cfg.note,
         silence_lead: cfg.silence_lead,
         silence_tail: cfg.silence_tail,
         edge_zero: cfg.edge_zero,
@@ -5147,6 +5169,7 @@ fn build_editor_render_session(args: &RenderEditorArgs) -> Result<PathBuf> {
     let mut project = build_project_file_from_entries(&[SessionListEntry {
         path: absolute_existing_path(input)?,
         pending_gain_db: 0.0,
+        note: String::new(),
     }])?;
     let input_path = project
         .list
@@ -5202,6 +5225,7 @@ fn debug_session_target(source: &EditorSourceArgs) -> Result<(PathBuf, bool)> {
     let mut project = build_project_file_from_entries(&[SessionListEntry {
         path: absolute_existing_path(input)?,
         pending_gain_db: 0.0,
+        note: String::new(),
     }])?;
     let input_path = project
         .list

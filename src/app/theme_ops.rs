@@ -348,11 +348,21 @@ impl WavesPreviewer {
             } else if let Some(rest) = line.strip_prefix("watch_folder=") {
                 self.watch_folder_enabled = matches!(rest.trim(), "1" | "true" | "yes" | "on");
             } else if let Some(rest) = line.strip_prefix("list_col_order=") {
-                let parsed: Vec<crate::app::types::ColumnId> = rest
+                let parsed: Vec<crate::app::types::ColumnKey> = rest
                     .split(',')
-                    .filter_map(|name| crate::app::types::ColumnId::from_name(name.trim()))
+                    .filter_map(|name| crate::app::types::ColumnKey::parse(name.trim()))
                     .collect();
-                self.list_column_order = crate::app::types::sanitize_column_order(&parsed);
+                self.list_column_layout = parsed;
+                self.list_column_order = crate::app::types::sanitize_column_order(
+                    &self
+                        .list_column_layout
+                        .iter()
+                        .filter_map(|key| match key {
+                            crate::app::types::ColumnKey::Builtin(column) => Some(*column),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                );
             } else if let Some(rest) = line.strip_prefix("keymap=") {
                 if let Some((name, chord)) = rest.trim().split_once(':') {
                     if let (Some(action), Some(parsed)) = (
@@ -1032,7 +1042,11 @@ zoo_flip_manual={}\n",
         }
         {
             out.push_str("list_col_order=");
-            let names: Vec<&str> = self.list_column_order.iter().map(|c| c.name()).collect();
+            let names: Vec<String> = self
+                .list_column_layout
+                .iter()
+                .map(|key| key.serialized_name())
+                .collect();
             out.push_str(&names.join(","));
             out.push('\n');
         }
@@ -1339,11 +1353,20 @@ mod tests {
         let prefs = dir.join("prefs.txt");
         let mut app =
             WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");
-        // Move Wave to the front.
+        // Move Wave to the front in the unified persisted layout.
         let mut order = ColumnId::ALL.to_vec();
-        let wave = order.pop().unwrap();
+        let wave_idx = order
+            .iter()
+            .position(|column| *column == ColumnId::Wave)
+            .expect("Wave column");
+        let wave = order.remove(wave_idx);
         order.insert(0, wave);
         app.list_column_order = order.clone();
+        app.list_column_layout = order
+            .iter()
+            .copied()
+            .map(crate::app::types::ColumnKey::Builtin)
+            .collect();
         app.save_prefs_to_path(&prefs);
         let mut loaded =
             WavesPreviewer::new_headless(crate::StartupConfig::default()).expect("headless app");

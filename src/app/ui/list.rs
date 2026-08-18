@@ -304,7 +304,7 @@ impl crate::app::WavesPreviewer {
         let (table, filler_cols, header_dirty) = self.build_list_table(ui, &metrics);
         // One copy per frame; the per-row closure below borrows self mutably,
         // and the order cannot change mid-frame.
-        let column_order = self.list_column_order.clone();
+        let column_layout = self.list_column_layout.clone();
         let metadata_columns = self
             .visible_metadata_columns()
             .map(|(index, column)| (index, column.clone()))
@@ -498,8 +498,46 @@ impl crate::app::WavesPreviewer {
                         let mut control_focus_id = None;
                         let mut clicked_to_select = false;
                         let is_dirty = self.has_edits_for_path(&path_owned);
-                        for sorted_col in column_order.iter().copied() {
-                        use crate::app::types::ColumnId as C;
+                        for column_key in &column_layout {
+                        use crate::app::types::{ColumnId as C, ColumnKey};
+                        let ColumnKey::Builtin(sorted_col) = column_key else {
+                            if let Some((_, column)) = metadata_columns
+                                .iter()
+                                .find(|(_, column)| &column.key == column_key)
+                            {
+                                let cell = self.metadata_cell_for_path(&path_owned, &column.key);
+                                let error = self.metadata_summary_errors.get(&path_owned).cloned();
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let text = cell.as_ref().map(|cell| cell.text.as_str()).unwrap_or_else(|| if error.is_some() { "!" } else { "..." });
+                                    let mut rich = RichText::new(text).monospace();
+                                    if cell.as_ref().is_some_and(|cell| cell.conflict) {
+                                        rich = rich.color(self.palette().warning_text);
+                                    } else if cell.as_ref().is_some_and(|cell| cell.partial) {
+                                        rich = rich.weak();
+                                    }
+                                    let response = ui
+                                        .add(egui::Label::new(rich).sense(Sense::click()).truncate())
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                    let response = if let Some(cell) = &cell {
+                                        if cell.tooltip.is_empty() { response } else { response.on_hover_text(&cell.tooltip) }
+                                    } else if let Some(error) = &error {
+                                        response.on_hover_text(error)
+                                    } else {
+                                        response
+                                    };
+                                    let response = self.attach_row_context_menu(response, row_idx, ctx);
+                                    if response.clicked_by(egui::PointerButton::Primary) {
+                                        clicked_to_load = true;
+                                    }
+                                });
+                            }
+                            continue;
+                        };
+                        let sorted_col = *sorted_col;
                         if !sorted_col.enabled(&cols) {
                             continue;
                         }
@@ -1416,6 +1454,54 @@ impl crate::app::WavesPreviewer {
                                     }
                                 });
                             }
+                            C::Note => {
+                                row.col(|ui| {
+                                    if let Some(bg) = row_bg {
+                                        ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
+                                    }
+                                    ui.visuals_mut().override_text_color = row_fg;
+                                    let original = self
+                                        .item_for_id(id)
+                                        .map(|item| item.note.clone())
+                                        .unwrap_or_default();
+                                    let mut note = original.clone();
+                                    let response = ui
+                                        .push_id(("list_note", &path_owned), |ui| {
+                                            ui.add_sized(
+                                                [ui.available_width(), row_h * 0.8],
+                                                egui::TextEdit::singleline(&mut note)
+                                                    .hint_text("Add note..."),
+                                            )
+                                        })
+                                        .inner;
+                                    let original_id = response.id.with("original");
+                                    if response.gained_focus() {
+                                        ui.ctx().data_mut(|data| {
+                                            data.insert_temp(original_id, original.clone())
+                                        });
+                                    }
+                                    let cancel = response.has_focus()
+                                        && ui.input(|input| input.key_pressed(egui::Key::Escape));
+                                    if cancel {
+                                        note = ui
+                                            .ctx()
+                                            .data(|data| data.get_temp::<String>(original_id))
+                                            .unwrap_or(original);
+                                        response.surrender_focus();
+                                    }
+                                    if response.clicked() || response.has_focus() {
+                                        interacted_with_control = true;
+                                    }
+                                    if response.clicked() {
+                                        control_focus_id = Some(response.id);
+                                    }
+                                    if (response.changed() || cancel) && note != self.item_for_id(id).map(|item| item.note.as_str()).unwrap_or("") {
+                                        if let Some(item) = self.item_for_id_mut(id) {
+                                            item.note = note;
+                                        }
+                                    }
+                                });
+                            }
                             C::Wave => {
                                 row.col(|ui| {
                                     if let Some(bg) = row_bg {
@@ -1499,61 +1585,6 @@ impl crate::app::WavesPreviewer {
                                 });
                             }
                         }
-                        }
-
-                        for (_, column) in &metadata_columns {
-                            let cell =
-                                self.metadata_cell_for_path(&path_owned, &column.key);
-                            let error = self
-                                .metadata_summary_errors
-                                .get(&path_owned)
-                                .cloned();
-                            row.col(|ui| {
-                                if let Some(bg) = row_bg {
-                                    ui.painter().rect_filled(ui.max_rect(), 0.0, bg);
-                                }
-                                ui.visuals_mut().override_text_color = row_fg;
-                                let text = cell
-                                    .as_ref()
-                                    .map(|cell| cell.text.as_str())
-                                    .unwrap_or_else(|| {
-                                        if error.is_some() {
-                                            "!"
-                                        } else {
-                                            "..."
-                                        }
-                                    });
-                                let mut rich = RichText::new(text).monospace();
-                                if cell.as_ref().is_some_and(|cell| cell.conflict) {
-                                    rich = rich.color(self.palette().warning_text);
-                                } else if cell.as_ref().is_some_and(|cell| cell.partial) {
-                                    rich = rich.weak();
-                                }
-                                let response = ui
-                                    .add(
-                                        egui::Label::new(rich)
-                                            .sense(Sense::click())
-                                            .truncate()
-                                            .show_tooltip_when_elided(false),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                let response = if let Some(cell) = &cell {
-                                    if cell.tooltip.is_empty() {
-                                        response
-                                    } else {
-                                        response.on_hover_text(&cell.tooltip)
-                                    }
-                                } else if let Some(error) = &error {
-                                    response.on_hover_text(error)
-                                } else {
-                                    response
-                                };
-                                let response =
-                                    self.attach_row_context_menu(response, row_idx, ctx);
-                                if response.clicked_by(egui::PointerButton::Primary) {
-                                    clicked_to_load = true;
-                                }
-                            });
                         }
 
                         row.col(|ui| {

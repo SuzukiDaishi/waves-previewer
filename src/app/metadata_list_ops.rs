@@ -16,6 +16,64 @@ pub(super) struct MetadataCell {
 }
 
 impl WavesPreviewer {
+    pub(super) fn sanitize_list_column_layout(&mut self) {
+        use crate::app::types::ColumnId;
+        let known_metadata = self
+            .metadata_list_columns
+            .iter()
+            .map(|column| column.key.clone())
+            .collect::<Vec<_>>();
+        let mut seen = std::collections::HashSet::new();
+        let mut layout = self
+            .list_column_layout
+            .iter()
+            .filter(|key| match key {
+                ColumnKey::Builtin(column) => ColumnId::ALL.contains(column),
+                _ => known_metadata.contains(key),
+            })
+            .filter(|key| seen.insert((*key).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for column in ColumnId::ALL
+            .iter()
+            .copied()
+            .filter(|column| *column != ColumnId::Note)
+        {
+            let key = ColumnKey::Builtin(column);
+            if seen.insert(key.clone()) {
+                layout.push(key);
+            }
+        }
+        for key in known_metadata {
+            if seen.insert(key.clone()) {
+                layout.push(key);
+            }
+        }
+        let note = ColumnKey::Builtin(ColumnId::Note);
+        if seen.insert(note.clone()) {
+            layout.push(note);
+        }
+        self.list_column_layout = layout;
+        self.list_column_order = self
+            .list_column_layout
+            .iter()
+            .filter_map(|key| match key {
+                ColumnKey::Builtin(column) => Some(*column),
+                _ => None,
+            })
+            .collect();
+    }
+
+    pub(super) fn metadata_list_column_for_key(
+        &self,
+        key: &ColumnKey,
+    ) -> Option<(usize, &MetadataListColumn)> {
+        self.metadata_list_columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| &column.key == key)
+    }
+
     fn metadata_column_registry_path() -> Option<PathBuf> {
         let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("LOCALAPPDATA"))?;
         Some(
@@ -48,12 +106,22 @@ impl WavesPreviewer {
             {
                 continue;
             }
+            let layout_key = key.clone();
             self.metadata_list_columns.push(MetadataListColumn {
                 key,
                 label: definition.label,
                 visible: false,
                 width: 150.0,
             });
+            if !self.list_column_layout.contains(&layout_key) {
+                let note = ColumnKey::Builtin(crate::app::types::ColumnId::Note);
+                let insert_at = self
+                    .list_column_layout
+                    .iter()
+                    .position(|entry| *entry == note)
+                    .unwrap_or(self.list_column_layout.len());
+                self.list_column_layout.insert(insert_at, layout_key);
+            }
         }
     }
 
@@ -95,13 +163,22 @@ impl WavesPreviewer {
         {
             column.visible = true;
         } else {
+            let layout_key = key.clone();
             self.metadata_list_columns.push(MetadataListColumn {
                 key,
                 label: label.into(),
                 visible: true,
                 width: 150.0,
             });
+            let note_key = ColumnKey::Builtin(crate::app::types::ColumnId::Note);
+            let insert_at = self
+                .list_column_layout
+                .iter()
+                .position(|key| *key == note_key)
+                .unwrap_or(self.list_column_layout.len());
+            self.list_column_layout.insert(insert_at, layout_key);
         }
+        self.sanitize_list_column_layout();
         self.save_metadata_column_registry();
         self.metadata_summary_generation = self.metadata_summary_generation.wrapping_add(1);
     }

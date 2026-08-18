@@ -9,6 +9,52 @@ const VIRTUAL_TRIM_COPY_CHUNK_FRAMES: usize = 262_144;
 const VIRTUAL_TRIM_COPY_FRAME_BUDGET_MS: u64 = 4;
 
 impl crate::app::WavesPreviewer {
+    pub(super) fn remap_editor_notes_for_replacement(
+        notes: &mut [crate::app::types::EditorNote],
+        start: usize,
+        end: usize,
+        replacement_len: usize,
+    ) {
+        let (start, end) = (start.min(end), start.max(end));
+        let source_len = end.saturating_sub(start);
+        let map = |sample: usize| -> usize {
+            if sample < start {
+                sample
+            } else if sample >= end {
+                start
+                    .saturating_add(replacement_len)
+                    .saturating_add(sample.saturating_sub(end))
+            } else if source_len == 0 || replacement_len == 0 {
+                start
+            } else {
+                start.saturating_add(
+                    ((sample - start) as f64 * replacement_len as f64 / source_len as f64).round()
+                        as usize,
+                )
+            }
+        };
+        for note in notes {
+            note.start_sample = map(note.start_sample);
+            if let Some(end_sample) = note.end_sample {
+                let mapped_end = map(end_sample);
+                note.end_sample = (mapped_end != note.start_sample).then_some(mapped_end);
+            }
+        }
+    }
+
+    pub(super) fn sync_editor_notes_from_tab(&mut self, tab_idx: usize) {
+        let Some((path, notes)) = self
+            .tabs
+            .get(tab_idx)
+            .map(|tab| (tab.path.clone(), tab.editor_notes.clone()))
+        else {
+            return;
+        };
+        if let Some(item) = self.item_for_path_mut(&path) {
+            item.editor_notes = notes;
+        }
+    }
+
     pub(super) fn editor_sync_view_offset_exact(tab: &mut crate::app::types::EditorTab) {
         tab.view_offset_exact = tab.view_offset as f64;
     }
@@ -611,11 +657,13 @@ impl crate::app::WavesPreviewer {
                     *b += ins_len;
                 }
             }
+            Self::remap_editor_notes_for_replacement(&mut tab.editor_notes, pos, pos, ins_len);
             tab.dirty = true;
             Self::editor_clamp_ranges(tab);
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.sync_editor_notes_from_tab(tab_idx);
         true
     }
 
@@ -2073,6 +2121,15 @@ impl crate::app::WavesPreviewer {
                     })
                 })
                 .collect();
+            let new_len = e - s;
+            for note in &mut tab.editor_notes {
+                let map = |sample: usize| sample.clamp(s, e).saturating_sub(s).min(new_len);
+                note.start_sample = map(note.start_sample);
+                if let Some(end_sample) = note.end_sample {
+                    let mapped_end = map(end_sample);
+                    note.end_sample = (mapped_end != note.start_sample).then_some(mapped_end);
+                }
+            }
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
@@ -2090,6 +2147,7 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state, transcript_trim)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.sync_editor_notes_from_tab(tab_idx);
         if let Some((path, start_ms, end_ms)) = transcript_trim {
             self.mutate_transcript_document_for_path(&path, |document| {
                 document.trim(start_ms, end_ms)
@@ -2169,6 +2227,26 @@ impl crate::app::WavesPreviewer {
                 out.sort_by_key(|r| (r.start, r.end));
                 out
             };
+            let map_sample = |sample: usize| -> usize {
+                let mut offset = 0usize;
+                for &(s, e) in &ranges {
+                    if sample < s {
+                        return offset;
+                    }
+                    if sample <= e {
+                        return offset.saturating_add(sample.saturating_sub(s).min(e - s));
+                    }
+                    offset = offset.saturating_add(e - s);
+                }
+                offset
+            };
+            for note in &mut tab.editor_notes {
+                note.start_sample = map_sample(note.start_sample);
+                if let Some(end_sample) = note.end_sample {
+                    let mapped_end = map_sample(end_sample);
+                    note.end_sample = (mapped_end != note.start_sample).then_some(mapped_end);
+                }
+            }
             tab.view_offset = 0;
             Self::editor_sync_view_offset_exact(tab);
             tab.selection = None;
@@ -2186,6 +2264,7 @@ impl crate::app::WavesPreviewer {
             undo_state
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.sync_editor_notes_from_tab(tab_idx);
         if let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) {
             self.mutate_transcript_document_for_path(&path, |document| document.mark_stale());
         }
@@ -2223,6 +2302,26 @@ impl crate::app::WavesPreviewer {
                 *ch = new_ch;
             }
             tab.samples_len = tab.samples_len.saturating_sub(removed);
+            let map_sample = |sample: usize| -> usize {
+                let mut removed_before = 0usize;
+                for &(s, e) in &ranges {
+                    if sample < s {
+                        return sample.saturating_sub(removed_before);
+                    }
+                    if sample <= e {
+                        return s.saturating_sub(removed_before);
+                    }
+                    removed_before = removed_before.saturating_add(e - s);
+                }
+                sample.saturating_sub(removed_before)
+            };
+            for note in &mut tab.editor_notes {
+                note.start_sample = map_sample(note.start_sample);
+                if let Some(end_sample) = note.end_sample {
+                    let mapped_end = map_sample(end_sample);
+                    note.end_sample = (mapped_end != note.start_sample).then_some(mapped_end);
+                }
+            }
             tab.selection = None;
             tab.extra_selections.clear();
             tab.loop_region = None;
@@ -2231,6 +2330,7 @@ impl crate::app::WavesPreviewer {
             undo_state
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.sync_editor_notes_from_tab(tab_idx);
         if let Some(path) = self.tabs.get(tab_idx).map(|tab| tab.path.clone()) {
             self.mutate_transcript_document_for_path(&path, |document| document.mark_stale());
         }
@@ -3206,6 +3306,7 @@ impl crate::app::WavesPreviewer {
                 ch.drain(s..e);
             }
             tab.samples_len = tab.samples_len.saturating_sub(remove_len);
+            Self::remap_editor_notes_for_replacement(&mut tab.editor_notes, s, e, 0);
             tab.loop_region = None;
             tab.selection = None;
             tab.extra_selections.clear();
@@ -3214,6 +3315,7 @@ impl crate::app::WavesPreviewer {
             (tab.ch_samples.clone(), undo_state)
         };
         self.editor_finish_destructive_apply(tab_idx, undo_state, true);
+        self.sync_editor_notes_from_tab(tab_idx);
     }
 
     /// Run a Pitch/Stretch/Speed tool over `chan`, optionally restricted to
@@ -3640,6 +3742,14 @@ impl crate::app::WavesPreviewer {
                         let sr = source_sr.max(1) as u64;
                         if let Some((start, end)) = source_range {
                             let new_end = res.selection_after.map(|(_, end)| end).unwrap_or(end);
+                            if let Some(tab) = self.tabs.get_mut(cur_idx) {
+                                Self::remap_editor_notes_for_replacement(
+                                    &mut tab.editor_notes,
+                                    start,
+                                    end,
+                                    new_end.saturating_sub(start),
+                                );
+                            }
                             let source_span = end.saturating_sub(start).max(1);
                             let output_span = new_end.saturating_sub(start).max(1);
                             let multiplier = output_span as f64 / source_span as f64;
@@ -3649,11 +3759,20 @@ impl crate::app::WavesPreviewer {
                                 document.scale_range(start_ms, end_ms, multiplier)
                             });
                         } else {
+                            if let Some(tab) = self.tabs.get_mut(cur_idx) {
+                                Self::remap_editor_notes_for_replacement(
+                                    &mut tab.editor_notes,
+                                    0,
+                                    source_len,
+                                    new_len,
+                                );
+                            }
                             let multiplier = new_len as f64 / source_len.max(1) as f64;
                             self.mutate_transcript_document_for_path(path, |document| {
                                 document.scale_time(multiplier)
                             });
                         }
+                        self.sync_editor_notes_from_tab(cur_idx);
                     }
                 }
                 // "Active tab" alone is not enough: active_tab stays set while
@@ -3957,7 +4076,7 @@ impl crate::app::WavesPreviewer {
 
 #[cfg(test)]
 mod clear_edit_tests {
-    use crate::app::types::{ChannelView, ChannelViewMode, FadeShape};
+    use crate::app::types::{ChannelView, ChannelViewMode, EditorNote, FadeShape};
     use crate::app::WavesPreviewer;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -3990,6 +4109,44 @@ mod clear_edit_tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn note(id: u64, start: usize, end: Option<usize>) -> EditorNote {
+        EditorNote {
+            id,
+            comment: format!("note {id}"),
+            start_sample: start,
+            end_sample: end,
+            freq_range_hz: Some((100.0, 1_000.0)),
+            view: Some("Spec".to_string()),
+        }
+    }
+
+    #[test]
+    fn editor_notes_follow_insert_delete_and_collapse_removed_ranges() {
+        let mut notes = vec![note(1, 10, None), note(2, 20, Some(40)), note(3, 80, None)];
+
+        WavesPreviewer::remap_editor_notes_for_replacement(&mut notes, 20, 60, 0);
+        assert_eq!(notes[0].start_sample, 10);
+        assert_eq!(notes[1].start_sample, 20);
+        assert_eq!(notes[1].end_sample, None);
+        assert_eq!(notes[1].freq_range_hz, Some((100.0, 1_000.0)));
+        assert_eq!(notes[2].start_sample, 40);
+
+        WavesPreviewer::remap_editor_notes_for_replacement(&mut notes, 20, 20, 15);
+        assert_eq!(notes[1].start_sample, 35);
+        assert_eq!(notes[2].start_sample, 55);
+    }
+
+    #[test]
+    fn editor_note_ranges_scale_with_timeline_replacement() {
+        let mut notes = vec![note(1, 125, Some(175)), note(2, 250, None)];
+        WavesPreviewer::remap_editor_notes_for_replacement(&mut notes, 100, 200, 200);
+        assert_eq!(
+            (notes[0].start_sample, notes[0].end_sample),
+            (150, Some(250))
+        );
+        assert_eq!(notes[1].start_sample, 350);
     }
 
     #[test]

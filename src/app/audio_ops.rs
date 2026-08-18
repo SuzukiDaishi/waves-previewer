@@ -235,21 +235,31 @@ impl WavesPreviewer {
             return;
         }
         let seq = self.audio.stream_error_seq();
-        if seq == self.audio_device_watch.last_stream_error_seq {
+        if seq != self.audio_device_watch.last_stream_error_seq {
+            self.audio_device_watch.last_stream_error_seq = seq;
+            self.audio_device_watch.output_recovery_pending = true;
+        }
+        if !self.audio_device_watch.output_recovery_pending {
             return;
         }
-        self.audio_device_watch.last_stream_error_seq = seq;
-        // A device that fails on every callback must not be reopened on every
-        // frame; hold the same cadence as the device poll.
+        // A disconnected endpoint may report once and then go silent forever.
+        // Retry from persistent state at the device-poll cadence.
         if now < self.audio_device_watch.next_stream_error_retry_at {
             return;
         }
         self.audio_device_watch.next_stream_error_retry_at =
             now + Duration::from_millis(AUDIO_DEVICE_POLL_INTERVAL_MS);
         let requested = self.audio_output_device_name.clone();
-        self.reopen_output_device_keeping_playback(requested);
-        // The replacement engine starts its own error counter.
-        self.audio_device_watch.last_stream_error_seq = self.audio.stream_error_seq();
+        let reopened = self.reopen_output_device_keeping_playback(requested);
+        let replacement_seq = self.audio.stream_error_seq();
+        if reopened {
+            // A just-opened stream can fail before this frame ends (for
+            // example while the OS default endpoint is still changing). Do
+            // not consume that new signal when resetting the counter.
+            self.audio_device_watch.output_recovery_pending = replacement_seq != 0;
+        }
+        // A replacement engine starts its own error counter.
+        self.audio_device_watch.last_stream_error_seq = replacement_seq;
     }
 
     fn drain_audio_device_watch(&mut self) {
@@ -334,43 +344,31 @@ impl WavesPreviewer {
         self.reopen_output_device_keeping_playback(None)
     }
 
-    /// Swap the output engine and pick playback back up where it left off.
-    ///
-    /// The engine swap brings a fresh `SharedAudio`, so
-    /// `sync_after_audio_engine_replaced` tears the playback session down. The
-    /// source position is read before the swap (while the old timeline map is
-    /// still valid) and restored after the buffer has been rebuilt against the
-    /// new device — the same capture/rebuild/seek order the editor rebuild path
-    /// uses.
+    /// Swap only the output stream. `AudioEngine` carries the source, playhead,
+    /// loop, rate and channel state into the new callback.
     fn reopen_output_device_keeping_playback(&mut self, requested: Option<String>) -> bool {
-        let was_playing = self.playback_is_playing_now() || self.playback_session.is_playing;
-        let source_time_sec = self.playback_current_source_time_sec();
-        let playing_path = self.playing_path.clone();
+        let reopened = self.apply_audio_output_device_selection_inner(requested, false, false);
+        if reopened {
+            // Hot-plug fallback is an automatic recovery, not a user-facing
+            // failure. Manual device selection still reports fallback errors.
+            self.audio_output_error = None;
+        }
+        reopened
+    }
 
-        if !self.apply_audio_output_device_selection_inner(requested, false, false) {
-            return false;
-        }
-        if !was_playing {
-            return true;
-        }
-
-        // The same file is still the one playing, so restore it before the
-        // rebuild — its pending gain is looked up from here.
-        self.playing_path = playing_path;
-        self.rebuild_current_buffer_with_mode();
-        if let Some(source_time_sec) = source_time_sec {
-            self.playback_seek_to_source_time(self.mode, source_time_sec);
-        }
-        // `play` is a no-op when the rebuild has not produced a buffer yet
-        // (a heavy-processing path decodes in the background), so take the
-        // engine's word for it rather than asserting playback resumed.
-        self.audio.play();
-        self.playback_session.is_playing = self.playback_is_playing_now();
-        true
+    fn sync_after_audio_output_stream_reopened(&mut self) {
+        self.apply_audio_channel_map_mode();
+        self.playback_refresh_rate_for_current_source();
+        self.apply_effective_volume();
+        let seq = self.audio.stream_error_seq();
+        self.audio_device_watch.last_stream_error_seq = seq;
+        self.audio_device_watch.output_recovery_pending = seq != 0;
     }
 
     pub(super) fn sync_after_audio_engine_replaced(&mut self) {
         self.audio.stop();
+        self.audio_device_watch.last_stream_error_seq = self.audio.stream_error_seq();
+        self.audio_device_watch.output_recovery_pending = false;
         self.apply_audio_channel_map_mode();
         self.playing_path = None;
         self.list_play_pending = false;
@@ -433,15 +431,16 @@ impl WavesPreviewer {
             return true;
         }
 
-        self.audio.stop();
-        let try_engine =
-            crate::audio::AudioEngine::new_with_output_device_name(requested.as_deref());
-        match try_engine {
-            Ok(engine) => {
-                self.audio = engine;
+        let preferred_sr = self.audio.shared.out_sample_rate.max(1);
+        let reopen = self.audio.reopen_with_output_device_name_and_sample_rate(
+            requested.as_deref(),
+            Some(preferred_sr),
+        );
+        match reopen {
+            Ok(()) => {
                 self.audio_output_device_name = requested;
                 self.audio_output_error = None;
-                self.sync_after_audio_engine_replaced();
+                self.sync_after_audio_output_stream_reopened();
                 if refresh_devices {
                     self.refresh_audio_output_devices();
                 }
@@ -452,14 +451,16 @@ impl WavesPreviewer {
             }
             Err(err) => {
                 if requested.is_some() {
-                    match crate::audio::AudioEngine::new() {
-                        Ok(engine) => {
-                            self.audio = engine;
+                    match self
+                        .audio
+                        .reopen_with_output_device_name_and_sample_rate(None, Some(preferred_sr))
+                    {
+                        Ok(()) => {
                             self.audio_output_device_name = None;
                             self.audio_output_error = Some(format!(
                                 "Failed to switch output device: {err}. Fallback to default output."
                             ));
-                            self.sync_after_audio_engine_replaced();
+                            self.sync_after_audio_output_stream_reopened();
                             if refresh_devices {
                                 self.refresh_audio_output_devices();
                             }

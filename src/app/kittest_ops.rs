@@ -746,7 +746,7 @@ impl super::WavesPreviewer {
             return false;
         };
         let path = tab.path.clone();
-        let (_tx, rx) = std::sync::mpsc::channel::<EditorDecodeResult>();
+        let (tx, rx) = std::sync::mpsc::channel::<EditorDecodeResult>();
         let total_source_frames = 100_000usize;
         let streaming_progress = ((progress.clamp(0.15, 0.92) - 0.15) / 0.77).clamp(0.0, 1.0);
         let decoded_source_frames =
@@ -755,6 +755,7 @@ impl super::WavesPreviewer {
             path,
             started_at: std::time::Instant::now(),
             rx,
+            _keepalive_tx: Some(tx),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             job_id: 999_002,
             partial_ready: true,
@@ -772,6 +773,19 @@ impl super::WavesPreviewer {
 
     pub fn test_clear_mock_editor_decode_progress(&mut self) {
         self.editor_decode_state = None;
+    }
+
+    pub fn test_disconnect_mock_editor_decode(&mut self) -> bool {
+        let Some(state) = self.editor_decode_state.as_mut() else {
+            return false;
+        };
+        state._keepalive_tx = None;
+        if let Some(tab_idx) = self.active_tab {
+            if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                tab.loading = true;
+            }
+        }
+        true
     }
 
     pub fn test_set_mock_active_tab_processing(&mut self, msg: &str) -> bool {
@@ -1257,6 +1271,13 @@ impl super::WavesPreviewer {
         } else {
             false
         }
+    }
+
+    pub fn test_add_metadata_list_column(&mut self, key: &str, label: &str) {
+        self.add_metadata_list_column(
+            crate::app::types::ColumnKey::Normalized(key.to_string()),
+            label.to_string(),
+        );
     }
 
     pub fn test_active_tool(&self) -> Option<ToolKind> {

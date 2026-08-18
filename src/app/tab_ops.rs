@@ -3,6 +3,12 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 impl super::WavesPreviewer {
+    fn seed_editor_notes_for_tab(&self, tab: &mut EditorTab) {
+        if let Some(item) = self.item_for_path(&tab.path) {
+            tab.editor_notes = item.editor_notes.clone();
+        }
+    }
+
     fn tool_for_new_editor_tab(&self) -> crate::app::types::ToolKind {
         self.tabs
             .last()
@@ -50,6 +56,7 @@ impl super::WavesPreviewer {
                 let cached_channels = cached.ch_samples;
                 let cached_loading_overview = cached.waveform_minmax;
                 let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+                self.seed_editor_notes_for_tab(&mut tab);
                 tab.buffer_sample_rate = cached_sr;
                 tab.samples_len_visual = cached_samples_len;
                 tab.loading_waveform_minmax = cached_loading_overview;
@@ -125,6 +132,7 @@ impl super::WavesPreviewer {
                     .unwrap_or(0);
                 let initial_tool = self.tool_for_new_editor_tab();
                 let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+                self.seed_editor_notes_for_tab(&mut tab);
                 tab.loading = true;
                 tab.buffer_sample_rate = out_sr;
                 tab.samples_len_visual = visual_len;
@@ -161,6 +169,7 @@ impl super::WavesPreviewer {
             let visual_len = audio.len();
             let initial_tool = self.tool_for_new_editor_tab();
             let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+            self.seed_editor_notes_for_tab(&mut tab);
             tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
             tab.samples_len_visual = visual_len;
             tab.bpm_value = default_bpm;
@@ -219,6 +228,7 @@ impl super::WavesPreviewer {
             let cached_channels = cached.ch_samples;
             let cached_loading_overview = cached.waveform_minmax;
             let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+            self.seed_editor_notes_for_tab(&mut tab);
             tab.buffer_sample_rate = cached_sr;
             tab.samples_len_visual = cached_samples_len;
             tab.loading_waveform_minmax = cached_loading_overview;
@@ -293,6 +303,7 @@ impl super::WavesPreviewer {
         };
         let initial_tool = self.tool_for_new_editor_tab();
         let mut tab = EditorTab::new_base(path.to_path_buf(), name);
+        self.seed_editor_notes_for_tab(&mut tab);
         tab.loading = loading;
         tab.buffer_sample_rate = self.audio.shared.out_sample_rate.max(1);
         tab.samples_len_visual = estimated_visual_frames.unwrap_or(0);
