@@ -16,30 +16,6 @@ impl crate::app::WavesPreviewer {
             self.close_gemini_assistant();
         }
 
-        let mut open_overlay = false;
-        if self.assistant_state.display == AssistantDisplayMode::Rail {
-            egui::Area::new(Id::new("gemini_assistant_rail"))
-                .order(Order::Foreground)
-                .anchor(Align2::RIGHT_CENTER, egui::vec2(-7.0, 0.0))
-                .show(ctx, |ui| {
-                    let count = self.assistant_state.active_jobs.len();
-                    let label = if count == 0 {
-                        "✦".to_string()
-                    } else {
-                        format!("✦\n{count}")
-                    };
-                    if ui
-                        .add_sized([34.0, 44.0], egui::Button::new(label))
-                        .on_hover_text("Open Gemini Assistant")
-                        .clicked()
-                    {
-                        open_overlay = true;
-                    }
-                });
-        }
-        if open_overlay {
-            self.assistant_state.display = AssistantDisplayMode::Overlay;
-        }
         if !matches!(
             self.assistant_state.display,
             AssistantDisplayMode::Overlay | AssistantDisplayMode::Pinned

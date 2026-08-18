@@ -1735,6 +1735,24 @@ mod kittest_suite {
 
     #[cfg(feature = "kittest_render")]
     #[test]
+    fn kittest_render_gemini_uses_topbar_entry_only() {
+        let mut harness = harness_empty();
+        harness.state_mut().test_show_configured_gemini_entry();
+        harness.run_steps(2);
+
+        assert!(
+            harness.query_all_by_label("✦ Gemini").next().is_some(),
+            "configured Gemini must remain accessible from the top bar"
+        );
+        assert!(
+            harness.query_all_by_label("✦").next().is_none(),
+            "the duplicate floating Gemini rail button must not be rendered"
+        );
+        render_ui_stability_png(&mut harness, "gemini_topbar_entry_only.png");
+    }
+
+    #[cfg(feature = "kittest_render")]
+    #[test]
     fn kittest_render_gemini_composer_and_foreground_input_focus() {
         let mut harness = harness_with_wavs(false);
         wait_for_scan(&mut harness);

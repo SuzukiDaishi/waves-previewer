@@ -16,7 +16,6 @@ use zeroize::Zeroize;
 pub(super) enum AssistantDisplayMode {
     #[default]
     Hidden,
-    Rail,
     Overlay,
     Pinned,
 }
@@ -202,11 +201,7 @@ impl AssistantState {
         Self {
             enabled: true,
             configured,
-            display: if configured {
-                AssistantDisplayMode::Rail
-            } else {
-                AssistantDisplayMode::Hidden
-            },
+            display: AssistantDisplayMode::Hidden,
             show_settings: false,
             show_review: false,
             privacy_mode: true,
@@ -344,8 +339,8 @@ impl Drop for AssistantState {
 impl WavesPreviewer {
     /// Whether a foreground Gemini surface owns application input.
     ///
-    /// The compact rail stays non-modal. The expanded assistant, Settings,
-    /// and Review surfaces prevent input from leaking into the workspace.
+    /// The expanded assistant, Settings, and Review surfaces prevent input
+    /// from leaking into the workspace.
     pub(super) fn assistant_captures_app_input(&self) -> bool {
         matches!(
             self.assistant_state.display,
@@ -368,11 +363,7 @@ impl WavesPreviewer {
     }
 
     pub(super) fn close_gemini_assistant(&mut self) {
-        self.assistant_state.display = if self.assistant_is_ready() {
-            AssistantDisplayMode::Rail
-        } else {
-            AssistantDisplayMode::Hidden
-        };
+        self.assistant_state.display = AssistantDisplayMode::Hidden;
     }
 
     pub(super) fn refresh_gemini_credential_status(&mut self) {
@@ -391,8 +382,6 @@ impl WavesPreviewer {
             {
                 self.assistant_runtime = None;
             }
-        } else if self.assistant_state.display == AssistantDisplayMode::Hidden {
-            self.assistant_state.display = AssistantDisplayMode::Rail;
         }
     }
 

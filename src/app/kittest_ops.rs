@@ -48,6 +48,12 @@ impl super::WavesPreviewer {
         self.assistant_state.display = crate::app::assistant_ops::AssistantDisplayMode::Overlay;
     }
 
+    pub fn test_show_configured_gemini_entry(&mut self) {
+        self.assistant_state.enabled = true;
+        self.assistant_state.configured = true;
+        self.assistant_state.display = crate::app::assistant_ops::AssistantDisplayMode::Hidden;
+    }
+
     pub fn test_open_gemini_settings_only(&mut self) {
         self.assistant_state.display = crate::app::assistant_ops::AssistantDisplayMode::Hidden;
         self.assistant_state.show_review = false;
